@@ -141,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("job_id")
     p = sub.add_parser("cancel-job", help="stop expecting more of a batch; stored records stay stored")
     p.add_argument("job_id")
-    p = sub.add_parser("merge-space", help="move everything this space holds into another; --dry-run previews it")
+    p = sub.add_parser("merge-space", help="move episodes, claims and attachments; --dry-run previews it")
     p.add_argument("--into", required=True, help="the space to move it into")
     p.add_argument("--confirm", help="repeat the space being merged; a whole space does not move by accident")
     p.add_argument("--dry-run", action="store_true", help="say what would move and move nothing")
@@ -222,7 +222,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="counts and which stores are in use")
     sub.add_parser("tags", help="tag counts")
     sub.add_parser("profile", help="identity facts plus recent activity")
-    sub.add_parser("export", help="dump the space as JSON lines to stdout")
+    p = sub.add_parser("export", help="dump the space as JSON lines to stdout")
+    p.add_argument("--include-attachments", action="store_true",
+                   help="include verified linked evidence bytes using archive profile 2")
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
     p.add_argument("--resurrect", action="store_true", help="store content this space forgot on purpose; the tombstone stays")
@@ -1486,7 +1488,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             preview = await engine.merge_space(space, into=args.into, preview=True)
             emit(preview.record()) if args.json else print(
                 f"would move {preview.episodes} episode(s) and {preview.facts} claim(s) "
-                f"from {space} into {args.into}", file=out)
+                f"from {space} into {args.into}; {preview.attachments} attachment(s), "
+                f"{preview.attachment_bytes} bytes, {preview.unlinked_attachments} unlinked; "
+                f"{preview.tombstoned} forgotten source(s) skipped; "
+                f"{preview.forgotten_source_references} forgotten-source reference(s) omitted", file=out)
             return 0
         if args.confirm != space:
             print(f"refusing: --confirm must repeat the space being merged {space!r}; nothing moved", file=out)
@@ -1494,7 +1499,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         moved = await engine.merge_space(space, into=args.into, confirm=args.confirm)
         emit(moved.record()) if args.json else print(
             f"moved {moved.episodes} episode(s) and {moved.facts} claim(s) from {space} "
-            f"into {args.into}; {space} is closed", file=out)
+            f"into {args.into}; {moved.attachments} attachment(s), {moved.attachment_bytes} bytes, "
+            f"{moved.unlinked_attachments} unlinked; {moved.tombstoned} forgotten source(s) skipped; "
+            f"{moved.forgotten_source_references} forgotten-source reference(s) omitted; {space} is closed", file=out)
         return 0
 
     if args.command == "delete-space":
@@ -1747,7 +1754,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0 if report.error is None else 1
 
     if args.command == "export":
-        async for record in engine.export(space):
+        async for record in engine.export(space, include_attachments=args.include_attachments):
             emit(record)
         return 0
 
@@ -1755,9 +1762,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         raw = read_source(args.file, stdin)
         summary = await engine.import_records(space, [json.loads(line) for line in raw.splitlines() if line.strip()],
                                               resurrect=args.resurrect)
-        emit(summary.__dict__) if args.json else print(
+        emit(summary.record()) if args.json else print(
             f"imported {summary.episodes} episode(s), {summary.facts} fact(s); already known: "
             f"{summary.deduplicated} episode(s), {summary.facts_skipped} fact(s)"
+            + (f"; attachments: {summary.attachments}, episode links: {summary.attachment_links}"
+               if summary.profile == "scone.archive/2" else "")
             + (f"; forgotten here and left so: {summary.tombstoned}" if summary.tombstoned else ""), file=out
         )
         return 0

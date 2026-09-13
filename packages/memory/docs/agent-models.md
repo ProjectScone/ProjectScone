@@ -102,6 +102,33 @@ protocol supported by your configured model explicitly. Each factory must return
 a fresh model instance. The model identifiers and local endpoint below are
 examples; replace them with services and models you operate.
 
+Each `BoundAgent.run` owns the model returned by its factory. Models that own
+clients or other resources expose a nonblocking `async def aclose(self) -> None`.
+Scone awaits that method exactly once when the invocation completes, fails, is
+cancelled, or pauses for approval or scheduling. Models with no owned resources
+can continue to implement only `complete`. Factories must not return a shared
+client; wrap a shared transport in a fresh adapter with an appropriate lifecycle.
+Models passed directly to `EvidenceToolLoop` remain caller-owned.
+
+`TextConversation` applies the same ownership rules to its `tool_model_factory`.
+Cleanup and source revalidation finish before public text callbacks or assistant
+capture. The conversation's total turn deadline still applies when it is shorter
+than the tool loop's budget, including when blocking cleanup delays timer delivery.
+
+Repeated cancellation waits for the already-started cleanup to finish, then
+propagates cancellation. Adapters must cooperate and eventually finish cleanup;
+Scone does not abandon the close task or promise to terminate blocking host code.
+Cleanup is resource disposal outside the journal's persisted active-operation
+time accounting. A successful answer is rechecked against its original deadline
+and source evidence after cleanup, before publication.
+
+Cleanup failure after an otherwise successful turn raises the fixed diagnostic
+`agent_model_cleanup_failed`. If an error, pause, or cancellation is already in
+progress, it remains primary and receives that fixed exception note. Provider
+cleanup messages are not chained into these diagnostics or sent to the asyncio
+exception handler. A failed cleanup does not authorize replay of model requests
+or tool effects; saved workflows retain their existing unknown-outcome rules.
+
 ```python
 from scone_memory.agents.catalog import AgentCatalog, AgentDefinition, AgentModel
 from scone_memory.agents.evidence_loop import ToolLoopLimits
@@ -146,6 +173,10 @@ identifies retained source material; it does not establish answer correctness.
 The loop's deadline and cancellation contract remain in effect. Validate again
 before delayed publication using `await result.output.validate()`; this validator
 uses the original run deadline and is not a durable checkpoint validator.
+
+For live invocation metadata, pass an optional
+[`AgentEventStream`](agent-execution-events.md) to `selected.run`. It reports the
+chosen model, operation progress and terminal state without exposing payloads.
 
 ## Bind workflow checkpoints to the selected model
 
@@ -604,3 +635,11 @@ In the console, choose **Human input** as a task type, save a reply in the run
 view, then choose **Continue with selected replies**. Model tasks keep their
 individual model selectors. Human input does not grant arbitrary tool or write
 authority.
+
+## Inspect native token reports
+
+A completed native `AgentResult` retains per-call provider usage through
+`result.output.usage`, next to the chosen model ID. Missing reports remain
+unknown, and aggregate counts require complete coverage. See
+[token accounting](agent-token-usage.md) for custom adapters, validation, and the
+the [durable workflow and HTTP contract](workflow-token-usage.md).

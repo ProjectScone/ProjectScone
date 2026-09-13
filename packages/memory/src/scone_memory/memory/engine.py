@@ -300,6 +300,13 @@ class MemoryEngine:
         return {"query": hashlib.sha256(query.encode()).hexdigest()[:16], "query_hashed": True}
 
     async def open(self) -> "MemoryEngine":
+        from . import space_cleanup
+
+        # Identity settlement may rebuild vectors and call the embedder. Finish
+        # accepted space erasures before it can inspect their source content.
+        _, pending = await space_cleanup.recover(self._retention_runtime(), 100)
+        if pending:
+            raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
         await self.vectors.ensure(self.embedder.dim)
         if self.vocabulary is not None:
             # Read on this thread, which owns the store's connection, and
@@ -313,6 +320,8 @@ class MemoryEngine:
                 await resolve_vocabulary(self, space)
         self.vector_identity = await vector_identity.settle(self)
         report = await self.recover()
+        if report.space_deletions_pending:
+            raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
         if report.retirements_pending:
             raise InvalidInput("source cleanup remains; call recover() again before opening the engine")
         return self
@@ -376,11 +385,12 @@ class MemoryEngine:
         if first is not None:
             raise first
 
-    async def recover(self, *, retirement_limit: int = 100) -> RecoveryReport:
+    async def recover(self, *, retirement_limit: int = 100, space_deletion_limit: int = 100) -> RecoveryReport:
         """Finish interrupted deletions before repairing interrupted ingestion.
 
-        At most ``retirement_limit`` source cleanups (1..1000, default 100) run
-        per call. A remaining backlog is disclosed and ingestion repair waits
+        Whole-space cleanup runs first, bounded by ``space_deletion_limit``.
+        At most ``retirement_limit`` source cleanups follow. Both limits accept
+        1..1000 and default to 100. A remaining backlog is disclosed and ingestion repair waits
         for a later call. A failing store leaves its intent and raises; callers
         serialize this operation with source writes. A remember marks its
         episode identity in the document store before writing and clears
@@ -392,11 +402,20 @@ class MemoryEngine:
         the mark is dropped. Recorded as one "recover" event per open when
         there was anything to do, so the evidence shows it happened."""
 
+        from . import space_cleanup
+
+        space_cleanup.cleanup_limit(space_deletion_limit)
+        if type(retirement_limit) is not int or not 1 <= retirement_limit <= 1000:
+            raise InvalidInput("retirement_limit must be 1..1000")
+        spaces, spaces_pending = await space_cleanup.recover(self._retention_runtime(), space_deletion_limit)
+        if spaces_pending:
+            return RecoveryReport(spaces_deleted=spaces, space_deletions_pending=True)
         retired, pending = await retention.recover_forgets(self._retention_runtime(), retirement_limit)
         if pending:
-            return RecoveryReport(retired=retired, retirements_pending=True)
+            return RecoveryReport(retired=retired, retirements_pending=True, spaces_deleted=spaces)
         report = await ingestion_batch.recover(self._ingestion_runtime())
         report.retired = retired
+        report.spaces_deleted = spaces
         return report
 
     # -- episodes ---------------------------------------------------------
@@ -786,38 +805,31 @@ class MemoryEngine:
         return await retention.space_receipt(self._retention_runtime(), space)
 
     async def merge_space(self, space: str, *, into: str, confirm: Optional[str] = None,
-                          preview: bool = False) -> "archive.MergeReceipt":
-        """Move everything one space holds into another.
+                          preview: bool = False,
+                          _authorize: Callable[[], None] | None = None) -> "archive.MergeReceipt":
+        """Move episodes, claims and retained attachments, then close the source.
 
-        It is the archive read out of one and into the other, so
-        everything that makes an import honest holds: identity is
-        re-derived for the space it lands in, what was forgotten there
-        stays forgotten, and claims arrive with their history. With
-        ``preview`` nothing moves and the receipt says what would.
+        Target tombstones take precedence. Known forgotten-source references
+        are omitted and counted, preserving claims without inventing evidence.
+        Preview reports verified attachment counts and bytes without writes.
 
-        The space merged from is closed for good afterwards. Everything it
-        held is somewhere else now, and leaving the name open would invite
-        somebody to write into a space whose contents have moved and find
-        them missing."""
+        Quiesce source and destination writers throughout this operation: copy
+        and validation use separate storage observations, not an atomic cutover.
+        A copy failure leaves the source open for a retry; source deletion keeps
+        the existing backend-specific cleanup failure semantics.
+        """
         check_space(space)
         check_space(into)
         if space == into:
             raise InvalidInput(f"a space is not merged into itself ({space!r})")
         await self._living(space)
         await self._living(into)
-        counts = await self.documents.counts(space)
-        facts = len(await self.documents.list_facts(space, include_closed=True))
-        if preview:
-            return archive.MergeReceipt(space=space, into=into, episodes=counts.episodes, facts=facts)
-        if confirm != space:
+        if not preview and confirm != space:
             raise InvalidInput(
                 f"confirm must repeat the space being merged ({space!r}); a whole space does not move "
                 f"by accident")
-        records = [record async for record in self.export(space)]
-        await self.import_records(into, records)
-        await self.delete_space(space)
-        return archive.MergeReceipt(space=space, into=into, episodes=counts.episodes, facts=facts,
-                                    moved=True)
+        from .space_transfer import merge
+        return await merge(self, space, into, preview=preview, authorize=_authorize)
 
     async def space_impact(self, space: str) -> SpaceReceipt:
         """What deleting the space would take with it, with nothing removed."""
@@ -1339,16 +1351,25 @@ class MemoryEngine:
 
     # -- portability ------------------------------------------------------
 
-    async def export(self, space: str) -> AsyncIterator[dict]:
+    async def export(self, space: str, *, include_attachments: bool = False) -> AsyncIterator[dict]:
         """Every episode and every fact in a space as plain dicts, the
         shape `import_records` accepts. Chunks and vectors are derived
         and are rebuilt on import, so a dump moves between stores and
-        between embedders."""
+        between embedders. ``include_attachments=True`` selects archive/2:
+        verified linked bytes and episode links travel with the ledger.
+        Attachment transfer is bounded; neither profile is an atomic snapshot."""
         check_space(space)
         # What the space holds that an archive does not carry is counted
         # here, where the blob store is, and said in the header: a dump of
         # an illustrated space is not the whole of it, and nobody should
         # have to find that out by restoring one.
+        if include_attachments:
+            from .attachment_archive import export_records as export_attachments
+            records = archive.export_records(self.documents, space, wrote_at=self.clock())
+            for record in await export_attachments(records, self.blobs, self.documents, space,
+                                                    self.max_attachment_bytes, ATTACHMENT_TYPES):
+                yield record
+            return
         left_behind = {"attachments": len(await self.blobs.linked(space))}
         async for record in archive.export_records(self.documents, space, wrote_at=self.clock(),
                                                    left_behind=left_behind):
@@ -1369,7 +1390,8 @@ class MemoryEngine:
         deduplicating a same-space move and not a renamed one."""
         await self._living(space)
         check_space(space)
-        runtime = archive.ArchiveRuntime(self.documents, self.clock, self.remember_many)
+        runtime = archive.ArchiveRuntime(self.documents, self.clock, self.remember_many,
+                                         self.blobs, self.max_attachment_bytes, ATTACHMENT_TYPES)
         return await archive.import_records(runtime, space, records, resurrect=resurrect)
 
 

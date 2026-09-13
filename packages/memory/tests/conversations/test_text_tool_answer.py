@@ -80,7 +80,7 @@ async def test_native_tools_publish_only_final_and_preserve_scoped_receipt_histo
     result = await conversation.reply('What does Juniper use?', on_text=observe)
     assert observed == [result['text']] == ['Juniper uses Polaris.']
     receipt = result['memory_context']['tool_retrieval']
-    assert receipt['source_status'] == 'retained' and receipt['verified_accuracy'] is False
+    assert receipt['source_status'] == 'retained' and receipt['verified_accuracy'] is False, json.dumps(receipt, sort_keys=True)
     assert receipt['model_calls'] == 2 and receipt['tool_calls'] == 1
     assert receipt['packets'] and receipt['evidence_ids']
     assert result['memory_context']['references']

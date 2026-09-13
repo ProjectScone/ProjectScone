@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
+import re
 from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Union
 
+from .task_requirements import TaskAnswerRequirements
 from ._wire import boolean, digest, identifier, integer, invalid, items, names, record, text, timestamp
 
 
@@ -22,6 +25,7 @@ class ModelTask:
     model_id: str
     prompt: str
     depends_on: tuple[str, ...] = ()
+    answer_requirements: Optional[TaskAnswerRequirements] = None
 
     def __post_init__(self) -> None:
         for name in (self.task_id, self.agent_id, self.model_id):
@@ -30,10 +34,15 @@ class ModelTask:
         _dependencies(self.depends_on)
         if self.task_id in self.depends_on:
             raise invalid('self dependency')
+        if self.answer_requirements is not None and not isinstance(self.answer_requirements, TaskAnswerRequirements):
+            raise invalid('answer requirements')
 
     def to_json(self) -> Dict[str, object]:
-        return {'task_id': self.task_id, 'agent_id': self.agent_id, 'model_id': self.model_id,
-                'prompt': self.prompt, 'depends_on': list(self.depends_on)}
+        result: Dict[str, object] = {'task_id': self.task_id, 'agent_id': self.agent_id, 'model_id': self.model_id,
+                                    'prompt': self.prompt, 'depends_on': list(self.depends_on)}
+        if self.answer_requirements is not None:
+            result['answer_requirements'] = self.answer_requirements.to_json()
+        return result
 
 
 @dataclass(frozen=True)
@@ -110,11 +119,14 @@ class HandoffPlan:
     root_agent: str
     agents: tuple[HandoffAgent, ...]
     max_handoffs: int = 3
+    answer_requirements: Optional[TaskAnswerRequirements] = None
 
     def __post_init__(self) -> None:
         identifier(self.workflow_id)
         identifier(self.root_agent)
         integer(self.max_handoffs, 0, 31)
+        if self.answer_requirements is not None and not isinstance(self.answer_requirements, TaskAnswerRequirements):
+            raise invalid('answer requirements')
         if not isinstance(self.agents, tuple) or not 1 <= len(self.agents) <= 32:
             raise invalid('handoff agents')
         if any(not isinstance(agent, HandoffAgent) for agent in self.agents):
@@ -125,8 +137,11 @@ class HandoffPlan:
             raise invalid('handoff targets')
 
     def to_json(self) -> Dict[str, object]:
-        return {'workflow_id': self.workflow_id, 'root_agent': self.root_agent,
+        result: Dict[str, object] = {'workflow_id': self.workflow_id, 'root_agent': self.root_agent,
                 'agents': [agent.to_json() for agent in self.agents], 'max_handoffs': self.max_handoffs}
+        if self.answer_requirements is not None:
+            result['answer_requirements'] = self.answer_requirements.to_json()
+        return result
 
 
 Plan = Union[TaskPlan, HandoffPlan]
@@ -135,7 +150,7 @@ Plan = Union[TaskPlan, HandoffPlan]
 def parse_plan(value: object) -> Plan:
     row = record(value)
     if 'agents' in row:
-        if set(row) - {'workflow_id', 'root_agent', 'agents', 'max_handoffs'}:
+        if set(row) - {'workflow_id', 'root_agent', 'agents', 'max_handoffs', 'answer_requirements'}:
             raise invalid('handoff fields')
         agents = []
         for value in items(row.get('agents'), 32):
@@ -145,7 +160,8 @@ def parse_plan(value: object) -> Plan:
             agents.append(HandoffAgent(identifier(agent.get('agent_id')), identifier(agent.get('model_id')),
                                        names(agent.get('can_handoff_to'))))
         return HandoffPlan(identifier(row.get('workflow_id')), identifier(row.get('root_agent')),
-                           tuple(agents), integer(row.get('max_handoffs'), 0, 31))
+                           tuple(agents), integer(row.get('max_handoffs'), 0, 31),
+                           TaskAnswerRequirements.from_json(row['answer_requirements']) if row.get('answer_requirements') is not None else None)
     if set(row) - {'workflow_id', 'tasks', 'kind'} or ('kind' in row and row['kind'] != 'interactive'):
         raise invalid('task plan fields')
     tasks: list[Task] = []
@@ -158,9 +174,10 @@ def parse_plan(value: object) -> Plan:
                 raise invalid('input fields')
             tasks.append(HumanInput(task_id, prompt, dependencies, integer(task.get('max_response_bytes'), 1, 4000)))
         else:
-            if set(task) - {'task_id', 'agent_id', 'model_id', 'prompt', 'depends_on'}:
+            if set(task) - {'task_id', 'agent_id', 'model_id', 'prompt', 'depends_on', 'answer_requirements'}:
                 raise invalid('model task fields')
-            tasks.append(ModelTask(task_id, identifier(task.get('agent_id')), identifier(task.get('model_id')), prompt, dependencies))
+            tasks.append(ModelTask(task_id, identifier(task.get('agent_id')), identifier(task.get('model_id')), prompt, dependencies,
+                TaskAnswerRequirements.from_json(task['answer_requirements']) if task.get('answer_requirements') is not None else None))
     plan = TaskPlan(identifier(row.get('workflow_id')), tuple(tasks))
     if plan.interactive != (row.get('kind') == 'interactive'):
         raise invalid('interactive plan kind')
@@ -232,6 +249,7 @@ class RunStatus:
     max_parallel: int
     outcome_unknown: bool
     error_class: Optional[str]
+    paused_steps: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, value: object, *, expected_space: str, run_id: Optional[str] = None) -> RunStatus:
@@ -241,7 +259,7 @@ class RunStatus:
         state = text(row.get('status'), 64)
         if state not in {'created', 'deadline', 'outcome_unknown', 'retry_not_allowed', 'registered', 'running',
                          'completed', 'failed', 'cancelled', 'sources_invalid', 'verification_unavailable',
-                         'unavailable', 'awaiting_input'}:
+                         'unavailable', 'awaiting_input', 'paused'}:
             raise invalid('run status')
         inflight = identifier(row['inflight']) if row.get('inflight') is not None else None
         inflights = names(row.get('inflight_steps', [inflight] if inflight else []))
@@ -249,13 +267,17 @@ class RunStatus:
         if (inflights[0] if inflights else None) != inflight or len(inflights) > width:
             raise invalid('inflight tasks')
         completed, waiting = names(row.get('completed_steps')), names(row.get('waiting_steps', []))
-        if set(completed) & set(inflights) or set(waiting) & (set(completed) | set(inflights)):
+        paused = names(row.get('paused_steps', []))
+        unknown = boolean(row.get('outcome_unknown'))
+        if (set(completed) & set(inflights) or set(waiting) & (set(completed) | set(inflights))
+                or set(paused) & set(completed + waiting + inflights)):
             raise invalid('overlapping task states')
+        if (state == 'paused' and (not paused or unknown)) or (state == 'completed' and paused):
+            raise invalid('paused task state')
         return cls(expected_space, identifier(row.get('run_id')), identifier(row.get('workflow_id')),
                    integer(row.get('plan_revision'), 1), timestamp(row.get('created_at')), state,
                    boolean(row.get('active_local')), completed, inflights, waiting, width,
-                   boolean(row.get('outcome_unknown')),
-                   text(row['error_class'], 128) if row.get('error_class') is not None else None)
+                   unknown, text(row['error_class'], 128) if row.get('error_class') is not None else None, paused)
 
     def match(self, request: RunRequest) -> None:
         if (self.space != request.space or self.run_id != request.run_id
@@ -271,12 +293,17 @@ class RunStatus:
                 raise invalid('handoff progress')
             if self.inflight_steps and self.inflight_steps != ids[len(self.completed_steps):len(self.completed_steps) + 1]:
                 raise invalid('handoff inflight')
+            if self.paused_steps and self.paused_steps != ids[len(self.completed_steps):len(self.completed_steps) + 1]:
+                raise invalid('handoff pause')
             return
         ids = tuple(task.task_id for task in plan.tasks)
         human = {task.task_id for task in plan.tasks if isinstance(task, HumanInput)}
-        if (set(self.completed_steps + self.inflight_steps + self.waiting_steps) - set(ids)
-                or set(self.inflight_steps) & human or set(self.waiting_steps) - human):
+        if (set(self.completed_steps + self.inflight_steps + self.waiting_steps + self.paused_steps) - set(ids)
+                or set(self.inflight_steps + self.paused_steps) & human or set(self.waiting_steps) - human):
             raise invalid('task progress')
+        for task in plan.tasks:
+            if task.task_id in self.paused_steps and not set(task.depends_on) <= set(self.completed_steps):
+                raise invalid('paused task dependencies')
 
 
 @dataclass(frozen=True)
@@ -287,16 +314,76 @@ class ModelChoice:
 
 
 @dataclass(frozen=True)
+class ToolChoice:
+    name: str
+    description: str
+    revision: str
+
+    def __post_init__(self) -> None:
+        _tool_name(self.name)
+        text(self.description, 4000, 'tool description')
+        revision = text(self.revision, 128, 'tool revision')
+        if re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', revision) is None:
+            raise invalid('tool revision')
+
+
+def _tool_name(value: object) -> str:
+    name = text(value, 64, 'tool name')
+    if (re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name) is None
+            or name in {'search_memory', 'trace_memory', 'read_memory', 'compute_memory',
+                        'answer', 'unknown_tool', 'custom_tool'}):
+        raise invalid('tool name')
+    return name
+
+
+def _tool_table(value: object) -> Dict[str, ToolChoice]:
+    tools: Dict[str, ToolChoice] = {}
+    summaries: list[Dict[str, str]] = []
+    for entry in items(value, 32):
+        row = record(entry)
+        if set(row) != {'name', 'description', 'revision'}:
+            raise invalid('tool fields')
+        tool = ToolChoice(_tool_name(row['name']), text(row['description'], 4000, 'tool description'),
+                          text(row['revision'], 128, 'tool revision'))
+        if tool.name in tools:
+            raise invalid('duplicate tool names')
+        tools[tool.name] = tool
+        summaries.append({'name': tool.name, 'description': tool.description, 'revision': tool.revision})
+    if len(json.dumps(summaries, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > 128000:
+        raise invalid('tool metadata byte limit')
+    return tools
+
+
+@dataclass(frozen=True)
 class AgentChoice:
     agent_id: str
     default_model: str
     models: tuple[ModelChoice, ...]
+    tools: Optional[tuple[ToolChoice, ...]] = None
+
+    def __post_init__(self) -> None:
+        if self.tools is None:
+            return
+        if (not isinstance(self.tools, tuple) or len(self.tools) > 32
+                or any(not isinstance(tool, ToolChoice) for tool in self.tools)
+                or len({tool.name for tool in self.tools}) != len(self.tools)):
+            raise invalid('catalog tool choices')
 
 
 def parse_catalog(value: object) -> tuple[AgentChoice, ...]:
+    response = record(value)
+    tools = _tool_table(response['tools']) if 'tools' in response else None
     catalog = []
-    for value in items(record(value).get('agents'), 32):
+    for value in items(response.get('agents'), 32):
         row = record(value)
+        if ('tools' in row) != (tools is not None):
+            raise invalid('partial tool catalog')
+        selected: Optional[tuple[ToolChoice, ...]] = None
+        if tools is not None:
+            selected_names = tuple(_tool_name(name) for name in items(row['tools'], 32))
+            if len(set(selected_names)) != len(selected_names) or set(selected_names) - tools.keys():
+                raise invalid('catalog tool choices')
+            selected = tuple(tools[name] for name in selected_names)
         choices = []
         for model_value in items(row.get('models'), 64):
             model = record(model_value)
@@ -309,7 +396,7 @@ def parse_catalog(value: object) -> tuple[AgentChoice, ...]:
         default = identifier(row.get('default_model'))
         if len(ids) != len(choices) or default not in ids:
             raise invalid('catalog model choices')
-        catalog.append(AgentChoice(identifier(row.get('agent_id')), default, tuple(choices)))
+        catalog.append(AgentChoice(identifier(row.get('agent_id')), default, tuple(choices), selected))
     if len({agent.agent_id for agent in catalog}) != len(catalog):
         raise invalid('catalog agent choices')
     return tuple(catalog)

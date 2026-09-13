@@ -54,9 +54,9 @@ write. Ordinary empty notes and caller-supplied metadata cannot select this path
 
 Archive profile `scone.archive/1` omits attachment bytes. Import and space merge
 therefore refuse visual-only source records explicitly before mutations; they do
-not create an unverifiable empty source or delete its original space. Use storage
-backups that carry document and attachment stores together until attachment
-transfer is supported.
+not create an unverifiable empty source or delete its original space. Use [attachment archives](attachment-archives.md) with
+`export(..., include_attachments=True)` to transfer retained video evidence, or
+keep storage backups that carry document and attachment stores together.
 
 The default selection limit is 64 frames, configurable up to 256; input and
 execution obey `DocumentLimits`. Each OCR result is limited to 10,000 regions,
@@ -185,8 +185,9 @@ transaction; a change after its final observation is not guaranteed to be caught
 
 This implementation redecodes the sampled inventory for each request and does
 not retain a frame cache. The work remains bounded by the recorded sampling
-policy and the host document limits. Generated video interpretations and
-semantic retrieval over visual-only sources remain subsequent integration work.
+policy and the host document limits. Explicit sampled-frame interpretations are
+described below. Semantic retrieval over visual-only sources remains subsequent
+integration work.
 
 ## Browser frame catalogue
 
@@ -210,3 +211,44 @@ and recheck attachment bytes, links, the source row and access before returning.
 As with frame reads, this is observed-state validation rather than an atomic
 transaction across stores. A valid catalogue is evidence about retained frames;
 it does not guarantee that the current decoder can reproduce their pixels.
+
+
+## Explicit sampled-frame interpretation
+
+Hosts with a configured decoder and selected vision model advertise
+`documents.video.understand`. Request an unsaved model description with:
+
+```text
+POST /v1/episodes/{episode_id}/document/video/frames/{ordinal}/understand
+Authorization: Bearer <space-scoped-write-key>
+Content-Type: application/json
+
+{"prompt": "Describe the visible scene and state uncertainty."}
+```
+
+The host selects the current `vision` connection from Models for each request.
+Only the verified PNG of the selected retained frame is sent to that model.
+The response binds the original and manifest hashes, PNG hash, frame ordinal,
+integer presentation timestamp as decimal text, rational time base, dimensions,
+and actual model identifier. `understanding.origin` is `model_generated` and
+`persisted` is `false`. This performs no OCR, embedding, retrieval indexing or
+source mutation. Viewing a source never starts interpretation automatically.
+
+Prompts accept at most 16,000 Unicode codepoints within a 200,000-byte JSON body;
+model descriptions accept at most 64,000 codepoints. Inference shares bounded
+ingestion capacity (429 when full). Decoding, source checks and inference share
+a 120-second deadline (504); explicit clock checks also refuse late results when
+provider work blocked the event loop or swallowed cancellation. Invalid or
+mismatched model responses return 502 without exposing provider output.
+
+The host checks retained bytes, current source links and authorization before
+inference and again before returning. Observed source removal or access changes
+refuse the result. These remain separate storage observations, not an atomic
+transaction across stores. The browser independently checks the catalogue before
+and after the request and discards results on cancellation or changed source,
+frame or prompt. A browser cancellation stops display and transport; it cannot
+guarantee that a self-hosted provider stops work already received.
+
+This describes one sampled frame, not an entire video or activity between frames.
+Descriptions remain unsaved and do not make visual-only sources semantically
+retrievable. Archive transfer of retained video attachments remains separate work.

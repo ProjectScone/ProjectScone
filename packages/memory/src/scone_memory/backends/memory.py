@@ -23,6 +23,9 @@ from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from ..core.chunk_window import validate_chunk_window
 from ..core.graph_read import graph_fact_read_limit
+from ..core.space_deletion import (
+    SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
+)
 from ..core.retirement import (
     Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
 )
@@ -33,6 +36,8 @@ class InMemoryDocumentStore:
     name = "memory"
 
     def __init__(self) -> None:
+        self._space_deletions: dict[str, str] = {}
+        self._space_deletion_keys: list[str] = []
         self._retirements: dict[RetirementCursor, str] = {}
         self._retirement_keys: list[RetirementCursor] = []
         self._episodes: dict[int, Episode] = {}
@@ -385,6 +390,27 @@ class InMemoryDocumentStore:
     async def record_tombstone(self, new: NewTombstone) -> Tombstone:
         return self._tombstones.setdefault((new.space, new.episode_id), Tombstone(**new.__dict__))
 
+    async def record_space_deletion(self, record: SpaceDeletion) -> SpaceDeletion:
+        payload = encode_deletion(record)
+        if record.space not in self._space_deletions:
+            self._space_deletions[record.space] = payload
+            insort(self._space_deletion_keys, record.space)
+        return decode_deletion(self._space_deletions[record.space], record.space)
+
+    async def space_deletion(self, space: str) -> SpaceDeletion | None:
+        payload = self._space_deletions.get(deletion_key(space))
+        return decode_deletion(payload, space) if payload is not None else None
+
+    async def page_space_deletions(self, after: str | None, limit: int) -> list[SpaceDeletion]:
+        deletion_page(after, limit)
+        start = 0 if after is None else bisect_right(self._space_deletion_keys, after)
+        return [decode_deletion(self._space_deletions[key], key)
+                for key in self._space_deletion_keys[start:start + limit]]
+
+    async def clear_space_deletion(self, space: str) -> None:
+        if self._space_deletions.pop(deletion_key(space), None) is not None:
+            self._space_deletion_keys.pop(bisect_left(self._space_deletion_keys, space))
+
     async def record_retirement(self, record: Retirement) -> Retirement:
         payload = encode_retirement(record)
         key = record.space, record.episode_id
@@ -465,6 +491,10 @@ class InMemoryDocumentStore:
     async def get_fact_link(self, space: str, link_id: int) -> FactLink | None:
         link = self._links.get(link_id)
         return link if link is not None and link.space == space else None
+
+    async def space_fact_links(self, space: str) -> list[FactLink]:
+        deletion_key(space)
+        return sorted((link for link in self._links.values() if link.space == space), key=lambda link: link.link_id)
 
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         return [l for l in self._links.values() if l.space == space and fact_id in (l.from_fact, l.to_fact)]

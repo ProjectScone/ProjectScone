@@ -10,9 +10,13 @@ import asyncio
 import json
 import math
 import re
+import sqlite3
 import time
 from collections.abc import Mapping
-from typing import Self
+from typing import TYPE_CHECKING, Self
+
+if TYPE_CHECKING:
+    from ..agents.custom_tools import ToolContext
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -89,6 +93,50 @@ class ScopedMemoryTools:
             raise ValueError("max_result_bytes must be in 512..64000")
         self._memory, self._space, self._excluded = memory, space, exclude_session_id
         self._timeout, self._max_bytes = float(timeout_s), max_result_bytes
+
+    def invocation_context(self, deadline: float) -> ToolContext:
+        """A detached host scope for explicitly registered application tools."""
+        from ..agents.custom_tools import ToolContext
+        return ToolContext(self._space, self._scope, self._excluded, deadline)
+
+    def journal_binding(self) -> dict[str, object]:
+        """Host-owned recall policy and bounds, detached from mutable callers."""
+        return {'space': self._space, 'scope': self._scope.kwargs(), 'excluded_session': self._excluded,
+                'timeout_s': self._timeout, 'max_result_bytes': self._max_bytes, 'computation': self._compute}
+
+    async def restore(self, payload: str, source_digest: str) -> PreparedToolEvidence:
+        """Recheck a saved packet through current point reads, never a new search.
+
+        Failures propagate: substituting an unavailable packet would change the
+        accepted model transcript and potentially authorize a different action.
+        """
+        try:
+            if type(payload) is not str or len(payload.encode()) > 64000 or type(source_digest) is not str:
+                raise ValueError('invalid evidence receipt')
+            result = json.loads(payload)
+            if not isinstance(result, dict):
+                raise ValueError('invalid evidence receipt')
+            async with asyncio.timeout(self._timeout):
+                restored = await prepare_tool_evidence(self._memory, self._space, self._scope,
+                    self._excluded, result, self._timeout, raise_unavailable=True,
+                    expected_source_digest=source_digest)
+        except asyncio.CancelledError:
+            raise
+        except (OSError, sqlite3.Error):
+            raise OSError('tool evidence storage unavailable') from None
+        except Exception:
+            raise ValueError('saved tool evidence unavailable') from None
+
+        async def validate() -> bool:
+            try:
+                return await restored.validate()
+            except asyncio.CancelledError:
+                raise
+            except (OSError, sqlite3.Error):
+                raise OSError('tool evidence storage unavailable') from None
+
+        return PreparedToolEvidence(restored.payload, restored.evidence_ids, validate,
+                                    source_digest=restored.source_digest)
 
     def anthropic(self) -> list[dict[str, object]]:
         schemas: list[dict[str, object]] = [{"name": "search_memory", "description": "Search authorized retained passages and quoted facts. Scores rank matches; they are not confidence.",

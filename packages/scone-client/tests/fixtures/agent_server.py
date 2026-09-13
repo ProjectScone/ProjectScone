@@ -8,6 +8,7 @@ import uvicorn
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.agents.catalog import AgentCatalog, AgentDefinition, AgentModel
 from scone_memory.agents.evidence_loop import ToolStep
+from scone_memory.agents.usage import ModelTokenUsage
 from scone_memory.agents.plan_store import AgentPlanStore
 from scone_memory.agents.run_service import AgentRunService
 from scone_memory.api.app import create_app
@@ -23,7 +24,7 @@ async def run():
         async def complete(self, messages, tools):
             with (state / 'calls.jsonl').open('a') as output:
                 output.write(json.dumps({'model': self.name, 'messages': messages}) + '\n')
-            return ToolStep(content=self.name + ' completed the task.')
+            return ToolStep(content=self.name + ' completed the task.', usage=ModelTokenUsage(prompt_tokens=12))
     catalog = AgentCatalog(models=[AgentModel(name, name.title() + ' local', '1', lambda name=name: Model(name))
                                    for name in ('fast', 'careful')], agents=[AgentDefinition(
         agent_id='worker', instructions='Use the provided direction.', models=('fast', 'careful'),

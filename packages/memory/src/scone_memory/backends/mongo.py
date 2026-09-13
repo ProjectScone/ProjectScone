@@ -14,6 +14,9 @@ from typing import Mapping, Optional, Sequence
 
 from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
+from ..core.space_deletion import (
+    SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
+)
 from ..core.retirement import (
     Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
 )
@@ -108,6 +111,7 @@ class MongoDocumentStore:
         self.revisions = self.db["revisions"]
         self.meta = self.db["meta"]
         self.inflight_marks = self.db["inflight"]
+        self._space_deletions = self.db["space_deletions"]
         self._retirements = self.db["retirements"]
 
     async def open(self) -> "MongoDocumentStore":
@@ -233,6 +237,11 @@ class MongoDocumentStore:
             return []
         cursor = self.chunks.find({"space": space, "_id": {"$in": list(chunk_ids)}})
         return [_chunk(doc) async for doc in cursor]
+
+    async def chunk_index(self, space: str) -> list[tuple[int, int]]:
+        deletion_key(space)
+        cursor = self.chunks.find({"space": space}, {"_id": 1, "episode_id": 1}).sort([("_id", 1)])
+        return [(doc["_id"], doc["episode_id"]) async for doc in cursor]
 
     async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
         cursor = self.chunks.find({"space": space, "episode_id": episode_id}).sort("ordinal", 1)
@@ -438,6 +447,32 @@ class MongoDocumentStore:
     async def list_tombstones(self, space: str) -> list[Tombstone]:
         return [_tombstone(doc) async for doc in self.tombstones.find({"space": space}).sort("episode_id", 1)]
 
+    async def record_space_deletion(self, record: SpaceDeletion) -> SpaceDeletion:
+        from pymongo.errors import DuplicateKeyError
+
+        payload = encode_deletion(record)
+        try:
+            await self._space_deletions.insert_one({"_id": record.space, "payload": payload})
+        except DuplicateKeyError:
+            pass
+        doc = await self._space_deletions.find_one({"_id": record.space})
+        if doc is None:
+            raise RuntimeError("space deletion disappeared after its write")
+        return decode_deletion(doc["payload"], record.space)
+
+    async def space_deletion(self, space: str) -> SpaceDeletion | None:
+        doc = await self._space_deletions.find_one({"_id": deletion_key(space)})
+        return decode_deletion(doc["payload"], space) if doc is not None else None
+
+    async def page_space_deletions(self, after: str | None, limit: int) -> list[SpaceDeletion]:
+        deletion_page(after, limit)
+        query = {} if after is None else {"_id": {"$gt": after}}
+        cursor = self._space_deletions.find(query).sort([("_id", 1)]).limit(limit)
+        return [decode_deletion(doc["payload"], doc["_id"]) async for doc in cursor]
+
+    async def clear_space_deletion(self, space: str) -> None:
+        await self._space_deletions.delete_one({"_id": deletion_key(space)})
+
     async def record_retirement(self, record: Retirement) -> Retirement:
         from pymongo.errors import DuplicateKeyError
 
@@ -511,6 +546,10 @@ class MongoDocumentStore:
         if existing is None:
             raise SconeError("MongoDB fact link disappeared during insert")
         return _fact_link(existing)
+
+    async def space_fact_links(self, space: str) -> list[FactLink]:
+        cursor = self._fact_links.find({"space": deletion_key(space)}).sort("_id", 1)
+        return [_fact_link(row) async for row in cursor]
 
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         cursor = self._fact_links.find({"space": space, "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1)

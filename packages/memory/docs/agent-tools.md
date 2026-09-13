@@ -4,6 +4,12 @@
 
 Examples below run from `packages/memory/` unless a section names another working directory.
 
+For host-registered synchronous or asynchronous application functions in native
+agent workflows, see [Registered application tools](agent-application-tools.md).
+For explicit native callback suspension and restart, see
+[Checkpoint-backed workflow pauses](workflow-pauses.md) and
+[Durable native agent turns](agent-turn-journal.md).
+
 ## Using it from a framework
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async

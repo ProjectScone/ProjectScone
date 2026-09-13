@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 import hashlib
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -15,9 +15,14 @@ from .run_store import AgentRunRequest
 from .task_workflow import (AgentTask, AgentTaskReceipt, AgentWorkflow, MAX_HANDOFF_BYTES,
                             _json, _verify_agent_evidence)
 from .workflow import (JSONValue, StepContext, WorkflowError, WorkflowInputStep, WorkflowInputValue,
-                       WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep)
+                       WorkflowResult, WorkflowRunner, WorkflowStatus, WorkflowStep, WorkflowPaused, WorkflowPausableStep)
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine
+
+
+if TYPE_CHECKING:
+    from .approval_store import AgentApprovalStore
+    from .approval_models import ToolApprovalRecord
 
 
 class HumanInputReceipt(BaseModel):
@@ -59,11 +64,13 @@ class InteractiveAgentWorkflow:
     """Activation is captured at admission; later replies cannot unlock this run."""
     def __init__(self, path: str | Path, *, key: bytes, catalog: AgentCatalog, request: AgentRunRequest,
                  memory: MemoryEngine, inputs: AgentInputStore, activated: Sequence[AgentInputRecord],
-                 deadline_s: float = 120.0) -> None:
+                 deadline_s: float = 120.0, approval_store: AgentApprovalStore | None = None,
+                 approval_activation: str | None = None) -> None:
         plan = request.plan.checked_plan(catalog)
         if not isinstance(plan, InteractiveAgentPlan):
             raise ValueError('interactive plan required')
         self._request, self._memory, self._inputs = request, memory, inputs
+        self._approvals, self._approval_activation = approval_store, approval_activation
         self._tasks = {task.task_id: task for task in plan.ordered()}
         self._agents = {task.task_id: catalog.bind(task.agent_id, model_id=task.model_id)
                         for task in self._tasks.values() if isinstance(task, AgentTask)}
@@ -79,12 +86,14 @@ class InteractiveAgentWorkflow:
             'bindings': {name: agent.fingerprint for name, agent in self._agents.items()}}).encode()).hexdigest()
         self._scope = cast(dict[str, JSONValue], {'plan': signature, 'recall': request.scope,
                                                  'exclude_session_id': request.exclude_session_id})
-        steps: list[WorkflowStep | WorkflowInputStep] = []
+        from .workflow_approvals import guarded, model_step
+        steps: list[WorkflowStep | WorkflowInputStep | WorkflowPausableStep] = []
         for task in self._tasks.values():
             if isinstance(task, HumanInputTask):
                 steps.append(WorkflowInputStep(task.task_id, signature, self._poll(task)))
             else:
-                steps.append(WorkflowStep(task.task_id, signature, self._step(task, self._agents[task.task_id])))
+                steps.append(model_step(task.task_id, signature, self._step(task, self._agents[task.task_id]),
+                                        pausable=guarded(self._agents[task.task_id])))
         self._runner = WorkflowRunner(path, key=key, steps=steps, source_verifier=self._verify,
             max_payload_bytes=1000000, deadline=deadline_s, verify_before_step=True,
             max_parallel=request.max_parallel, dependencies={task.task_id: task.depends_on for task in self._tasks.values()})
@@ -111,6 +120,8 @@ class InteractiveAgentWorkflow:
                 if (model.task_id != name or model.agent_id != task.agent_id or model.model_id != agent.model_id
                         or model.binding != agent.fingerprint or model.depends_on != task.depends_on):
                     raise ValueError('model receipt binding changed')
+                if task.answer_requirements is not None and not task.answer_requirements.accepts(model.text):
+                    raise ValueError('saved task violates answer requirements')
                 receipts[name] = model
         for name, receipt in receipts.items():
             if isinstance(receipt, HumanInputReceipt):
@@ -144,20 +155,25 @@ class InteractiveAgentWorkflow:
             return WorkflowInputValue(cast(JSONValue, _human_receipt(task, record).model_dump(mode='json')))
         return poll
 
-    def _step(self, task: AgentTask, agent: BoundAgent) -> Callable[[StepContext], Awaitable[JSONValue]]:
-        async def execute(context: StepContext) -> JSONValue:
+    def _step(self, task: AgentTask, agent: BoundAgent) -> Callable[[StepContext], Awaitable[JSONValue | WorkflowPaused]]:
+        async def execute(context: StepContext) -> JSONValue | WorkflowPaused:
             receipts = self._receipts(context.completed)
             handoff = _context_text(task.depends_on, receipts) if task.depends_on else None
             if not isinstance(context.inputs, str):
                 raise ValueError('workflow question required')
-            result = await agent.run(task.prompt + '\n\nUser request:\n' + context.inputs,
-                                     tools=self._tools(), context=handoff)
+            from .workflow_approvals import invoke_agent
+            result = await invoke_agent(agent, task.prompt + '\n\nUser request:\n' + context.inputs,
+                tools=self._tools(), context=context, step_id=task.task_id, selection_id=task.task_id,
+                store=self._approvals, activation_id=self._approval_activation,
+                prior=handoff, requirements=task.answer_requirements)
+            if isinstance(result, WorkflowPaused):
+                return result
             output = result.output
             receipt = AgentTaskReceipt(task_id=task.task_id, agent_id=result.agent_id, model_id=result.model_id,
                 binding=result.binding, depends_on=task.depends_on, text=output.text,
                 source_status=cast(Literal['retained', 'none'], output.source_status),
                 evidence_ids=output.evidence_ids, evidence_packets=output.evidence_packets,
-                model_calls=output.model_calls, tool_calls=output.tool_calls)
+                model_calls=output.model_calls, tool_calls=output.tool_calls, usage=output.usage)
             return cast(JSONValue, receipt.model_dump(mode='json'))
         return execute
 
@@ -181,9 +197,15 @@ class InteractiveAgentWorkflow:
             visible.append(record)
         return tuple(visible)
 
-    async def run(self, run_id: str, question: str) -> WorkflowResult:
+    async def run(self, run_id: str, question: str, *, resume_steps: Sequence[str] | None = None) -> WorkflowResult:
         return await self._runner.run(run_id, space=self._request.space,
-                                     scope=self._scope, inputs=self._bound(run_id, question))
+                                     scope=self._scope, inputs=self._bound(run_id, question), resume_steps=resume_steps)
+
+    async def inspect_approvals(self, run_id: str, question: str) -> tuple[ToolApprovalRecord, ...]:
+        from .workflow_approvals import inspect_workflow_approvals
+        return await inspect_workflow_approvals(self._runner, self._approvals, run_id=run_id,
+            space=self._request.space, scope=self._scope, inputs=self._bound(run_id, question), tools=self._tools(),
+            select=lambda snapshot: (snapshot.step_id, self._agents[snapshot.step_id]))
 
     async def read_result(self, run_id: str, question: str) -> WorkflowResult | None:
         return await self._runner.read_result(run_id, space=self._request.space,

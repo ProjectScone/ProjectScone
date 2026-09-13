@@ -8,14 +8,17 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import chain
 from typing import Optional
 
+from ..backends.blobs import BlobStore
+from . import attachment_archive, archive_supersession, archive_inventory
 from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput
 from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact, FactLink
 from ..core.ports import DocumentStore, NewFact, NewFactLink
 from ..core.validation import ORIGINS, STATUSES, normalise_term, normalise_time
-from ..ingestion.records import Record, content_hash
+from ..ingestion.records import Record, RetainedVideoRecord, content_hash
 
 
 #: What this version of the archive format is called. An archive says it
@@ -53,10 +56,15 @@ class MergeReceipt:
     episodes: int = 0
     facts: int = 0
     moved: bool = False
+    attachments: int = 0
+    attachment_bytes: int = 0
+    unlinked_attachments: int = 0
+    tombstoned: int = 0
+    attachments_skipped: int = 0
+    forgotten_source_references: int = 0
 
     def record(self) -> dict[str, object]:
-        return {"space": self.space, "into": self.into, "episodes": self.episodes,
-                "facts": self.facts, "moved": self.moved}
+        return dataclasses.asdict(self)
 
 
 @dataclass
@@ -80,6 +88,21 @@ class ImportSummary:
     #: the archive or whose target keeps none.
     affirmations: int = 0
     affirmations_skipped: int = 0
+    #: Verified distinct attachments and links restored, including existing ones.
+    attachments: int = 0
+    attachment_links: int = 0
+    #: Replacement edges restored after fact identity remapping.
+    supersessions: int = 0
+
+    def record(self) -> dict[str, object]:
+        """Keep ordinary legacy receipts stable; disclose nonzero edge repairs."""
+        result: dict[str, object] = dataclasses.asdict(self)
+        if not self.supersessions:
+            result.pop('supersessions')
+        if self.profile == ARCHIVE_PROFILE:
+            result.pop('attachments')
+            result.pop('attachment_links')
+        return result
 
 
 @dataclass(frozen=True)
@@ -89,6 +112,9 @@ class ArchiveRuntime:
     documents: DocumentStore
     clock: Callable[[], str]
     remember_many: Callable[[str, Sequence[Record]], Awaitable[list[Added]]]
+    blobs: BlobStore | None = None
+    max_attachment_bytes: int = 25 * 1024 * 1024
+    attachment_types: Sequence[str] = ()
 
 
 async def export_records(documents: DocumentStore, space: str, *, wrote_at: str = "",
@@ -101,11 +127,12 @@ async def export_records(documents: DocumentStore, space: str, *, wrote_at: str 
     ``left_behind`` counts what the space holds that this profile does not
     carry. The host counts it, because the document store is not where
     those things live."""
+    await archive_inventory.prepare(documents, space)
     counts = await documents.counts(space)
     yield {"type": "archive", "profile": ARCHIVE_PROFILE, "space": space, "wrote_at": wrote_at,
            "carries": list(ARCHIVE_CARRIES),
            "not_carried": {name: count for name, count in (left_behind or {}).items() if count}}
-    for episode in await documents.recent_episodes(space, max(counts.episodes, 1)):
+    async for episode in archive_inventory.episodes(documents, space, counts.episodes):
         yield {
             "type": "episode",
             "space": space,
@@ -118,35 +145,36 @@ async def export_records(documents: DocumentStore, space: str, *, wrote_at: str 
             "metadata": dict(episode.metadata),
             "created_at": episode.created_at,
         }
-    facts = await documents.list_facts(space, include_closed=True)
+    facts = await archive_inventory.facts(documents, space)
     for fact in facts:
         yield {"type": "fact", **fact.model_dump(exclude={"space"})}
-    # A relation is part of the ledger's history, so it moves with it;
-    # each link is read from both ends and written once.
-    seen: set[int] = set()
-    for fact in facts:
-        for link in await documents.fact_links(space, fact.fact_id):
-            if link.link_id not in seen:
-                seen.add(link.link_id)
-                yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
-    # A restatement's later start is history too: without it a backfill
-    # in the new store would erase a value that returned.
-    store = affirmation_store(documents)
-    if store is not None:
-        for affirmation in await store.space_affirmations(space):
-            yield {"type": "affirmation", **affirmation.model_dump(exclude={"space"})}
+    # Read each stored relationship once, even when an endpoint is missing.
+    for link in await archive_inventory.links(documents, space):
+        yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
+    for affirmation in await archive_inventory.affirmations(documents, space):
+        yield {"type": "affirmation", **affirmation.model_dump(exclude={"space"})}
 
 
 async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[Mapping], *,
                          resurrect: bool = False) -> ImportSummary:
     """Restore an archive through normal ingestion and remap its store-local IDs."""
+    iterator = iter(records)
+    first = next(iterator, None)
+    rows: Iterable[Mapping] = chain((), iterator) if first is None else chain((first,), iterator)
+    transfer = None
+    if first is not None and first.get('profile') == attachment_archive.PROFILE:
+        if runtime.blobs is None:
+            raise InvalidInput('attachment archive requires a blob store')
+        transfer = attachment_archive.prepare(attachment_archive.bounded_rows(rows),
+                                               runtime.max_attachment_bytes, runtime.attachment_types)
+        rows = transfer.records
     summary = ImportSummary()
     episodes: list[Record] = []
     source_ids: list[Optional[int]] = []
     facts: list[Mapping] = []
     links: list[Mapping] = []
     affirmations: list[Mapping] = []
-    for record in records:
+    for record in rows:
         kind = record.get("type", "episode")
         _check_fields(kind, record)
         if kind == "archive":
@@ -160,7 +188,9 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
         if kind == "episode":
             episode = _rederived(Record.from_dict(record), record.get("space"), space)
             if episode.content == '' and episode.kind == 'file':
-                raise InvalidInput('visual-only documents require attachment transfer; this archive profile omits attachments')
+                if transfer is None:
+                    raise InvalidInput('visual-only documents require attachment transfer; this archive profile omits attachments')
+                episode = RetainedVideoRecord(**dataclasses.asdict(episode))
             # Forgetting was a decision; an archive that carries the
             # forgotten content does not undo it unless told to.
             digest = episode.content_hash or content_hash(space, episode.content, episode.dedup_key)
@@ -170,27 +200,46 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             episodes.append(episode)
             source_ids.append(record.get("episode_id"))
         elif kind == "fact":
-            facts.append(record)
+            facts.append(dict(record))
         elif kind == "fact_link":
             links.append(record)
         elif kind == "affirmation":
             affirmations.append(record)
         else:
             raise InvalidInput(f"unknown record type {kind!r}")
+    supersessions = archive_supersession.parse(facts)
     # Ids are store-local (spec 3.1). Provenance in the dump names the
     # source store's episodes, so it is remapped through the ids this
     # import produced; a reference to an episode not in the dump is
     # dropped rather than pointed at an unrelated record.
+    if transfer is not None:
+        assert runtime.blobs is not None
+        summary.profile = attachment_archive.PROFILE
+        await transfer.preflight_episodes(runtime.documents, space, episodes, runtime.clock())
+        summary.attachments = await transfer.stage(runtime.blobs, space, source_ids)
     id_map: dict[int, int] = {}
-    for old_id, added in zip(source_ids, await runtime.remember_many(space, episodes)):
+    imported: list[Added] = []
+    if transfer is not None and any(isinstance(episode, RetainedVideoRecord) for episode in episodes):
+        # Textless documents require the retained-evidence singleton path.
+        for episode in episodes:
+            imported.extend(await runtime.remember_many(space, [episode]))
+    else:
+        imported = await runtime.remember_many(space, episodes)
+    for old_id, added in zip(source_ids, imported):
         summary.episodes += 0 if added.deduplicated else 1
         summary.deduplicated += 1 if added.deduplicated else 0
         if old_id is not None:
             id_map[int(old_id)] = added.episode_id
-    existing = {_fact_identity(f): f.fact_id for f in await runtime.documents.list_facts(space, include_closed=True)}
+            if transfer is not None:
+                assert runtime.blobs is not None
+                summary.attachment_links += await transfer.link(runtime.blobs, space, int(old_id), added.episode_id)
+    destination_facts = (await archive_supersession.inventory(runtime.documents, space) if supersessions
+                         else await runtime.documents.list_facts(space, include_closed=True))
+    existing = {_fact_identity(f): f.fact_id for f in destination_facts}
     # Fact ids are store-local too: a link's ends are remapped through
     # the ids this import produced or found already present.
     fact_map: dict[int, int] = {}
+    prepared: list[tuple[Mapping, NewFact]] = []
     for f in facts:
         source = f.get("source_episode_id")
         new = NewFact(
@@ -206,11 +255,14 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             source_episode_id=id_map.get(int(source)) if source is not None else None,
             origin=str(f.get("origin", "stated")),
             excluded_reason=f.get("excluded_reason"),
-            superseded_by=None,  # ids are store-local; the reason text keeps the history
+            superseded_by=None,  # Restored after all destination fact IDs are known.
             quote=f.get("quote"),
         )
         if new.status not in STATUSES or new.origin not in ORIGINS:
             raise InvalidInput(f"fact record has status {new.status!r} and origin {new.origin!r}")
+        prepared.append((f, new))
+    archive_supersession.preflight(supersessions, prepared, destination_facts, _fact_identity)
+    for f, new in prepared:
         identity = _fact_identity(new)
         if identity in existing:
             summary.facts_skipped += 1
@@ -222,6 +274,7 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
         if f.get("fact_id") is not None:
             fact_map[int(f["fact_id"])] = stored.fact_id
         summary.facts += 1
+    summary.supersessions = await archive_supersession.restore(runtime.documents, space, supersessions, fact_map)
     for record in links:
         kind = str(record.get("kind", ""))
         from_fact = fact_map.get(int(record["from_fact"]))
@@ -277,7 +330,7 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
 def _fact_identity(fact: Fact | NewFact) -> tuple:
     """Import identity includes retained evidence after source-ID remapping.
 
-    Store-local fact/supersession IDs are not preserved. Exclusion is mutable
+    Store-local fact IDs are remapped; supersession edges are restored separately. Exclusion is mutable
     target policy: reimporting the same evidence must not create a fresh,
     unexcluded copy of a fact the target has suppressed.
     """

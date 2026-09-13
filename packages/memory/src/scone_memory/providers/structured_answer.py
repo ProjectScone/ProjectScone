@@ -52,18 +52,29 @@ def object_answer(text: str, *, action_envelope: bool = False) -> str | None:
             return None
         if set(value) != {'action', 'answer'} or not isinstance(value['answer'], dict):
             raise ValueError('invalid JSON answer action')
-        # The complete object has already been validated. Walk its two members
-        # with the same decoder to locate the answer without re-encoding values.
-        cursor = _after_whitespace(text, 0) + 1
-        for _ in range(2):
-            key, cursor = decoder.raw_decode(text, _after_whitespace(text, cursor))
-            start = _after_whitespace(text, _after_whitespace(text, cursor) + 1)
-            _, end = decoder.raw_decode(text, start)
-            if key == 'answer':
-                text = text[start:end]
-                break
-            cursor = _after_whitespace(text, end) + 1
+        return object_field(text, 'answer')
     result = _compact(text)
     if len(result.encode('utf-8')) > 64000:
         raise ValueError('JSON answer byte limit')
     return result
+
+
+def object_field(text: str, name: str) -> str:
+    """Extract an object-valued member without rounding or re-encoding tokens."""
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_object,
+        parse_constant=_reject_constant, parse_int=str, parse_float=str)
+    value = decoder.decode(text)
+    if not isinstance(value, dict) or not isinstance(value.get(name), dict):
+        raise ValueError('JSON object field required')
+    cursor = _after_whitespace(text, 0) + 1
+    for _ in value:
+        key, cursor = decoder.raw_decode(text, _after_whitespace(text, cursor))
+        start = _after_whitespace(text, _after_whitespace(text, cursor) + 1)
+        _, end = decoder.raw_decode(text, start)
+        if key == name:
+            result = _compact(text[start:end])
+            if len(result.encode('utf-8')) > 64000:
+                raise ValueError('JSON answer byte limit')
+            return result
+        cursor = _after_whitespace(text, end) + 1
+    raise ValueError('JSON object field missing')

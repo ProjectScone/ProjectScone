@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Optional, Protocol, Sequence
 
-from ..core.errors import NotFound
+from ..core.errors import InvalidInput, NotFound
 from ..core.models import Attachment
 
 
@@ -215,7 +216,12 @@ class FileBlobStore:
         return [i for i in mine if i not in elsewhere]
 
     async def release_space(self, space: str, *, preview: bool = False) -> tuple[list[str], list[str]]:
-        mine = await self.held(space)
+        # An interrupted source unlink can remove holds but retain its episode
+        # link list as the only durable record of bytes still awaiting deletion.
+        targets = set(await self.held(space)) | await self.linked(space)
+        if any(not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None for key in targets):
+            raise InvalidInput("invalid attachment identity in space cleanup inventory")
+        mine = sorted(targets)
         spaces = self.root / "spaces"
 
         def held_elsewhere(attachment_id: str) -> bool:
@@ -226,11 +232,15 @@ class FileBlobStore:
         if not preview:
             import shutil
 
-            shutil.rmtree(spaces / space, ignore_errors=True)
             for attachment_id in released:
                 blob = self._blob(attachment_id)
                 if blob.exists():
                     blob.unlink()
+            # Keep attachment metadata until byte cleanup succeeds. Losing the
+            # held IDs first makes an interrupted byte unlink unrecoverable.
+            folder = spaces / space
+            if folder.exists():
+                shutil.rmtree(folder)
         return released, kept
 
     async def unlink(self, space: str, episode_id: int) -> list[str]:

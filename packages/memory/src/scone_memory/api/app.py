@@ -21,7 +21,7 @@ import re
 from typing import TYPE_CHECKING, Literal, Mapping, Optional
 from collections.abc import Callable
 
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, StrictInt, Field
@@ -150,7 +150,10 @@ _REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/reconsider", 
 
 
 def _is_decision(path: str) -> bool:
-    return path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
+    parts = path.rstrip('/').split('/')
+    tool_decision = (len(parts) == 7 and parts[1:3] == ['v1', 'agent-runs']
+                     and parts[4] == 'approvals' and parts[6] == 'decision')
+    return tool_decision or path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
 
 
 def _is_space_delete(method: str, path: str) -> bool:
@@ -388,7 +391,10 @@ def create_app(
 
     if vision_factory is not None:
         from .image_understanding import mount_image_understanding_routes
+        from .video_understanding import mount_video_understanding_routes
 
+        mount_video_understanding_routes(app, engine, space_for, ingest_slot, document_video, vision_factory,
+                                         assert_current_space=assert_current_space)
         mount_image_understanding_routes(app, engine, space_for, vision_factory,
                                          assert_current_space=assert_current_space)
 
@@ -471,11 +477,18 @@ def create_app(
         }
         if agent_catalog is not None and agent_plan_store is not None:
             features["agents.catalog"] = True
+            features["agents.tools"] = True
             features["agents.plans"] = True
             features["agents.handoffs"] = True
+            from ..agents.task_requirements import output_schema_available
+            features["agents.output_requirements"] = True
+            features["agents.output_schema"] = output_schema_available()
+            features["agents.handoffs.output_requirements"] = features["agents.output_schema"]
         if agent_run_service is not None:
             features["agents.runs"] = True
+            features["agents.usage"] = True
             features["agents.inputs"] = True
+            features["agents.approvals"] = True
             features["agents.parallel"] = agent_run_service.max_parallel_tasks > 1
         features["documents.sync"] = directory_sync_service is not None
         if document_import_service is not None:
@@ -486,8 +499,11 @@ def create_app(
             features["conversations"] = True
         if model_connections_available:
             features["models.manage"] = True
-        if vision_available is not None and vision_available():
+        has_vision = vision_available is not None and vision_available()
+        if has_vision:
             features["images.understand"] = True
+        if has_vision and vision_factory is not None and document_video is not None:
+            features["documents.video.understand"] = True
         # Manual passes must share a server-side guard with scheduled work
         # before the console advertises them as an available workflow.
         return {"schema_version": 1, "implementation": "python", "features": features}
@@ -498,7 +514,13 @@ def create_app(
         mount_agent_plan_routes(app, agent_catalog, agent_plan_store, space_for)
     if agent_run_service is not None:
         from .agent_runs import mount_agent_run_routes
+        from .agent_approvals import mount_agent_approval_routes
         mount_agent_run_routes(app, agent_run_service, space_for, assert_current_space)
+        def approval_actor(request: Request) -> str:
+            current_space_for(request)
+            token = request.headers.get('authorization', '').partition(' ')[2].strip()
+            return agent_run_service.approval_actor(token)
+        mount_agent_approval_routes(app, agent_run_service, space_for, assert_current_space, approval_actor)
 
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
@@ -717,14 +739,22 @@ def create_app(
         return (await engine.space_impact(space)).model_dump()
 
     @app.post("/v1/spaces/{name}/merge")
-    async def post_space_merge(name: str, body: MergeBody, space: str = Depends(space_for)) -> dict:
+    async def post_space_merge(name: str, body: MergeBody, request: Request,
+                               destination_authorization: str = Header(default='', alias='X-Scone-Destination-Authorization',
+                                   description='Bearer key with the full role for the destination space.'),
+                               space: str = Depends(space_for)) -> dict:
         """Move everything this space holds into another. ``preview`` says
         what would move and moves nothing; otherwise ``confirm`` must
         repeat the space being merged, which is then closed for good."""
+        from .space_authorization import authorize_destination
+
         _own_space(name, space)
-        if body.preview:
-            return (await engine.merge_space(space, into=body.into, preview=True)).record()
-        return (await engine.merge_space(space, into=body.into, confirm=body.confirm)).record()
+        def authorize() -> None:
+            assert_current_space(request, space)
+            authorize_destination(destination_authorization, body.into, app.state.keys, app.state.roles)
+        authorize()
+        return (await engine.merge_space(space, into=body.into, preview=body.preview,
+                                         confirm=body.confirm, _authorize=authorize)).record()
 
     @app.delete("/v1/spaces/{name}")
     async def delete_space(name: str, confirm: Optional[str] = None, space: str = Depends(space_for)) -> dict:

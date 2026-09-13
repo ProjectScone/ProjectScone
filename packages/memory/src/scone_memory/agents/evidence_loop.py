@@ -8,9 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -19,6 +19,15 @@ from ..integrations.read_memory import ReadMemoryArgs
 from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
 from ..retrieval.computation import ComputeMemoryArgs
 from .tool_evidence import PreparedToolEvidence
+from .custom_tools import AgentTool, snapshot_tools
+from .progress import ProgressEmitter, operation_scope
+from .turn_journal import ToolTurnJournal, TurnJournalError, TurnJournalPaused
+from .workflow import JSONValue
+from .usage import ModelTokenUsage, ToolTokenUsage
+
+
+if TYPE_CHECKING:
+    from .approval_context import BoundApproval
 
 
 class ToolCall(BaseModel):
@@ -32,6 +41,7 @@ class ToolStep(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
     content: str = Field(default='', max_length=64000)
     calls: tuple[ToolCall, ...] = Field(default=(), max_length=8)
+    usage: ModelTokenUsage = Field(default_factory=ModelTokenUsage)
 
 
 class ToolLoopLimits(BaseModel):
@@ -58,7 +68,7 @@ class ConstrainedToolModel(ToolModel, Protocol):
 class ToolOutcome(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
     call_id: str
-    name: Literal['search_memory', 'trace_memory', 'read_memory', 'compute_memory', 'unknown_tool']
+    name: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')
     status: Literal['prepared', 'empty', 'unavailable']
     error: str | None
     output_bytes: int
@@ -78,6 +88,7 @@ class ToolLoopResult:
     _validator: Callable[[], Awaitable[bool]] = field(repr=False, compare=False)
     verified_accuracy: bool = False
     deadline: float | None = field(default=None, repr=False, compare=False)
+    usage: ToolTokenUsage = field(default_factory=ToolTokenUsage)
 
     async def validate(self) -> bool:
         """Recheck before later capture, within the original turn deadline."""
@@ -132,8 +143,23 @@ def _covers_same_source(evidence: PreparedToolEvidence, key: tuple[int, int, int
     return False
 
 
+def _accepted_step(step: ToolStep, seen: set[str], enabled: bool) -> ToolStep:
+    try:
+        clean = ToolStep.model_validate(step.model_dump(warnings='error'))
+        if len(_json(clean.model_dump(exclude={'usage'})).encode()) > 128000:
+            raise ValueError()
+        ids = [call.id for call in clean.calls]
+        if len(set(ids)) != len(ids) or seen.intersection(ids) or (clean.calls and not enabled):
+            raise ValueError()
+        if any(len(_json(call.arguments).encode()) > 16000 for call in clean.calls):
+            raise ValueError()
+        return clean
+    except Exception:
+        raise RuntimeError('invalid tool protocol') from None
+
+
 class EvidenceToolLoop:
-    """One bounded turn. Call IDs are unique across rounds; tools are read-only.
+    """One bounded turn. Memory tools are read-only; application tools are host code.
 
     At most max_tool_rounds tool-bearing requests plus one final request are
     sent. Unexecuted calls receive explicit denials, preserving protocol pairs.
@@ -145,11 +171,26 @@ class EvidenceToolLoop:
 
     def __init__(self, model: ToolModel, tools: ScopedMemoryTools, *, limits: ToolLoopLimits | None = None,
                  initial_search: bool = False, answer_requirements: AnswerRequirements | None = None,
-                 compact_search_results: bool = False) -> None:
+                 compact_search_results: bool = False,
+                 custom_tools: Sequence[AgentTool] = (), journal: ToolTurnJournal | None = None,
+                 approval: BoundApproval | None = None, progress: ProgressEmitter | None = None) -> None:
+        self._progress = progress
+        if journal is not None and not isinstance(journal, ToolTurnJournal):
+            raise ValueError('invalid turn journal')
+        self._journal = journal
         if type(initial_search) is not bool:
             raise ValueError('initial_search must be a boolean')
         if type(compact_search_results) is not bool:
             raise ValueError('compact_search_results must be a boolean')
+        self._custom_tools = {tool.name: tool for tool in snapshot_tools(custom_tools)}
+        if any(tool.requires_approval for tool in self._custom_tools.values()) and (approval is None or journal is None):
+            raise ValueError('guarded tools require bound approval and journal')
+        if approval is not None:
+            from .approval_context import BoundApproval
+            if not isinstance(approval, BoundApproval) or journal is None:
+                raise ValueError('invalid bound approval')
+            approval.check(tools, tuple(self._custom_tools.values()))
+        self._approval = approval
         self._initial_search = initial_search
         self._compact_search_results = compact_search_results
         self._model, self._tools = model, tools
@@ -167,6 +208,9 @@ class EvidenceToolLoop:
 
     async def run(self, messages: list[dict[str, str]]) -> ToolLoopResult:
         limits = self._limits
+        journal = self._journal
+        memory_binding = _json(self._tools.journal_binding()) if journal is not None else None
+        usage: list[ModelTokenUsage] = []
         # Only ordinary host messages may seed a turn. Models cannot inject a
         # preexisting tool result or select tools by altering the input history.
         if not messages or any(set(row) != {'role', 'content'} or row['role'] not in ('system', 'user', 'assistant')
@@ -186,24 +230,129 @@ class EvidenceToolLoop:
         searches: dict[str, tuple[PreparedToolEvidence, int]] = {}
         outcomes: list[ToolOutcome] = []
         calls = rounds = model_calls = tool_bytes = 0
-        deadline = time.monotonic() + limits.timeout_s
+        if journal is not None:
+            journal.bind_configuration(cast(JSONValue, {'messages': messages,
+                'memory': json.loads(memory_binding) if memory_binding is not None else None, 'tools': [tool.info() for tool in self._custom_tools.values()],
+                'limits': limits.model_dump(mode='json'), 'initial_search': self._initial_search,
+                'compact_search_results': self._compact_search_results,
+                'answer_requirements': self._answer_requirements.model_dump(mode='json') if self._answer_requirements else None}))
+        duration = limits.timeout_s if journal is None else min(limits.timeout_s - journal.elapsed_s, journal.remaining_s)
+        if duration <= 0:
+            raise TurnJournalError('deadline')
+        deadline = time.monotonic() + duration
 
         def check_deadline() -> None:
+            if self._approval is not None:
+                self._approval.check(self._tools, tuple(self._custom_tools.values()))
+            if memory_binding is not None and _json(self._tools.journal_binding()) != memory_binding:
+                raise TurnJournalError('binding_mismatch')
             active = asyncio.current_task()
             if active is not None and active.cancelling():
                 raise asyncio.CancelledError()
             if time.monotonic() >= deadline:
                 raise TimeoutError('tool loop deadline exceeded')
 
-        async def record_call(call: ToolCall, origin: Literal['host', 'model']) -> None:
+        async def finish(text: str) -> ToolLoopResult:
+            check_deadline()
+            if not text.strip() or len(text.encode()) > limits.max_reply_bytes:
+                raise RuntimeError('tool reply byte limit or empty reply')
+            if self._answer_requirements is not None and not self._answer_requirements.accepts(text):
+                raise RuntimeError('tool answer format rejected')
+            retained = tuple(prepared)
+
+            async def validate() -> bool:
+                async with asyncio.timeout_at(deadline):
+                    check_deadline()
+                    for evidence in retained:
+                        valid = await asyncio.create_task(evidence.validate())
+                        check_deadline()
+                        if not valid:
+                            return False
+                    return True
+
+            if not await validate():
+                raise RuntimeError('tool evidence changed before publication')
+            if journal is not None:
+                journal.finish()
+                check_deadline()
+            evidence_ids = tuple(dict.fromkeys(key for evidence in retained for key in evidence.evidence_ids))
+            return ToolLoopResult(text, model_calls, calls, evidence_ids,
+                                  'retained' if evidence_ids else 'none',
+                                  tuple(evidence.payload for evidence in retained if evidence.evidence_ids),
+                                  tuple(outcomes), validate, deadline=deadline,
+                                  usage=ToolTokenUsage(calls=tuple(usage)))
+
+        async def record_call(call: ToolCall, origin: Literal['host', 'model'], *, skipped: bool = False) -> str | None:
             nonlocal calls, tool_bytes
+            name = (call.name if call.name in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory')
+                    or call.name in self._custom_tools else 'unknown_tool')
+            if self._progress is not None:
+                self._progress.emit('tool_proposed', tool_index=len(outcomes) + 1, tool_name=name, origin=origin)
             reused = False
-            if calls >= limits.max_tool_calls:
+            journal_reused = False
+            direct = False
+            if skipped:
+                payload = _denied('direct_return')
+            elif calls >= limits.max_tool_calls:
                 payload = _denied('tool_budget')
             else:
                 calls += 1
                 seed = call.arguments.get('seed_fact_id')
-                if call.name == 'trace_memory' and (type(seed) is not int or seed not in known_facts):
+                if call.name in self._custom_tools:
+                    check_deadline()
+                    if len(_json(transcript).encode()) > limits.max_transcript_bytes:
+                        raise RuntimeError('tool transcript byte limit')
+                    registered = self._custom_tools[call.name]
+                    async def validate_custom() -> None:
+                        check_deadline()
+                        if journal is not None:
+                            for evidence in prepared:
+                                if not await asyncio.create_task(evidence.validate()):
+                                    raise RuntimeError('tool evidence changed before application dispatch')
+                                check_deadline()
+                    approval_record = None
+                    if registered.requires_approval:
+                        assert self._approval is not None and journal is not None
+                        identity, replay = journal.operation_identity('custom', cast(JSONValue, call.model_dump(mode='json')))
+                        arguments_json = registered.prepare_arguments(call.arguments)
+                        check_deadline()
+                        if not replay and arguments_json is not None:
+                            await validate_custom()
+                            journal.operation_identity('custom', cast(JSONValue, call.model_dump(mode='json')))
+                            approval_record = self._approval.request(registered, arguments_json, identity)
+                            if (approval_record.activation_id is None
+                                    or approval_record.activation_id != self._approval.context.activation_id):
+                                boundary = journal.pause()
+                                from .approval_context import ToolApprovalPaused
+                                raise ToolApprovalPaused(boundary.checkpoint, approval_record.request_id)
+                    async def invoke_custom() -> JSONValue:
+                        observation.started()
+                        await validate_custom()
+                        if journal is not None:
+                            journal.check_current()
+                        arguments = call.arguments
+                        if approval_record is not None:
+                            assert self._approval is not None
+                            check_deadline()
+                            admitted = self._approval.claim(approval_record)
+                            if admitted.decision == 'deny':
+                                return _denied('approval_denied')
+                            arguments = admitted.call.arguments()
+                        return await registered.invoke(arguments,
+                            self._tools.invocation_context(deadline),
+                            remaining_output_bytes=limits.max_tool_bytes - tool_bytes)
+                    with operation_scope(self._progress, 'custom', name, len(outcomes) + 1) as observation:
+                        if journal is None:
+                            custom_result = await invoke_custom()
+                        else:
+                            custom_result = await journal.execute('custom', cast(JSONValue, call.model_dump(mode='json')), invoke_custom)
+                        if not isinstance(custom_result, str):
+                            raise TurnJournalError('journal_integrity')
+                    journal_reused = journal is not None and not observation.dispatched
+                    payload = custom_result
+                    check_deadline()
+                    direct = self._custom_tools[call.name].return_direct
+                elif call.name == 'trace_memory' and (type(seed) is not int or seed not in known_facts):
                     payload = _denied('search_for_seed_first')
                 elif call.name == 'read_memory' and (type(call.arguments.get('chunk_id')) is not int
                         or call.arguments['chunk_id'] not in known_chunks):
@@ -229,8 +378,28 @@ class EvidenceToolLoop:
                             payload = _denied('tool_output_budget')
                             reused = False
                     else:
-                        evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
-                        check_deadline()
+                        with operation_scope(self._progress, 'memory', name, len(outcomes) + 1) as observation:
+                            if journal is None:
+                                observation.started()
+                                evidence = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
+                            else:
+                                fresh: PreparedToolEvidence | None = None
+                                async def prepare_memory() -> JSONValue:
+                                    nonlocal fresh
+                                    observation.started()
+                                    check_deadline()
+                                    fresh = await asyncio.create_task(self._tools.prepare(call.name, call.arguments))
+                                    check_deadline()
+                                    if fresh.source_digest is None:
+                                        raise RuntimeError('memory tool has no durable evidence receipt')
+                                    return {'payload': fresh.payload, 'source_digest': fresh.source_digest}
+                                saved = await journal.execute('memory', cast(JSONValue, call.model_dump(mode='json')), prepare_memory)
+                                if (not isinstance(saved, dict) or set(saved) != {'payload', 'source_digest'}
+                                        or not isinstance(saved['payload'], str) or not isinstance(saved['source_digest'], str)):
+                                    raise TurnJournalError('journal_integrity')
+                                evidence = fresh if fresh is not None else await self._tools.restore(saved['payload'], saved['source_digest'])
+                            check_deadline()
+                        journal_reused = journal is not None and not observation.dispatched
                         payload = evidence.payload
                         repeated = (searches.get(payload) if self._compact_search_results
                                     and call.name == 'search_memory' and evidence.evidence_ids else None)
@@ -271,16 +440,22 @@ class EvidenceToolLoop:
             codes = {'unknown_tool', 'invalid_arguments', 'timeout', 'store_error', 'retrieval_failed',
                      'output_bytes', 'evidence_unavailable', 'tool_budget', 'tool_output_budget',
                      'search_for_seed_first', 'search_for_chunk_first', 'unsupported_chunk_window',
-                     'invalid_computation', 'ambiguous_quote', 'numeric_literal_required'}
-            # Model-authored IDs/unknown names can contain source text.
-            # Keep them only in the transient provider protocol.
-            name = cast(Literal['search_memory', 'trace_memory', 'read_memory', 'compute_memory', 'unknown_tool'],
-                        call.name if call.name in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory') else 'unknown_tool')
+                     'invalid_computation', 'ambiguous_quote', 'numeric_literal_required', 'direct_return', 'approval_denied'}
             outcomes.append(ToolOutcome(call_id=f'tool-{len(outcomes) + 1}', name=name, status=packet['status'],
                 error=error if isinstance(error, str) and error in codes else None,
                 output_bytes=len(payload.encode()), origin=origin, reused=reused))
+            if self._progress is not None:
+                outcome = outcomes[-1]
+                self._progress.emit('tool_result', tool_index=len(outcomes), tool_name=name,
+                    status=outcome.status, error=outcome.error, output_bytes=outcome.output_bytes,
+                    origin=origin, reused=reused or journal_reused,
+                    journal_reused=journal_reused, presentation_reused=reused)
+            if direct and packet.get('ok') is True and packet['status'] == 'prepared':
+                result = packet['result']
+                return result if isinstance(result, str) else _json(result)
+            return None
 
-        async with asyncio.timeout(limits.timeout_s):
+        async with asyncio.timeout(duration):
             if self._initial_search:
                 check_deadline()
                 if len(_json(transcript).encode()) > limits.max_transcript_bytes:
@@ -299,60 +474,50 @@ class EvidenceToolLoop:
                 if len(_json(transcript).encode()) > limits.max_transcript_bytes:
                     raise RuntimeError('tool transcript byte limit')
                 enabled = calls < limits.max_tool_calls and rounds < limits.max_tool_rounds
-                schemas = self._tools.openai() if enabled else []
+                schemas = (self._tools.openai() + [tool.openai() for tool in self._custom_tools.values()]) if enabled else []
                 if not known_facts:
                     schemas = [row for row in schemas if cast(dict[str, object], row['function'])['name'] != 'trace_memory']
                 if not known_chunks:
                     schemas = [row for row in schemas if cast(dict[str, object], row['function'])['name'] not in ('read_memory', 'compute_memory')]
-                try:
-                    # Independent copies stop an adapter from mutating the
-                    # authoritative transcript, schemas, or paired call IDs.
-                    step = await asyncio.create_task(self._complete(transcript, schemas))
-                    check_deadline()
-                except (asyncio.CancelledError, TimeoutError):
-                    raise
-                except Exception:
-                    raise RuntimeError('tool model unavailable') from None
-                model_calls += 1
-                try:
-                    step = ToolStep.model_validate(step.model_dump())
-                    if len(_json(step.model_dump()).encode()) > 128000:
-                        raise ValueError()
-                    ids = [call.id for call in step.calls]
-                    if len(set(ids)) != len(ids) or seen.intersection(ids) or (step.calls and not enabled):
-                        raise ValueError()
-                    if any(len(_json(call.arguments).encode()) > 16000 for call in step.calls):
-                        raise ValueError()
-                except Exception:
-                    raise RuntimeError('invalid tool protocol') from None
-                if not step.calls:
-                    if not step.content.strip() or len(step.content.encode()) > limits.max_reply_bytes:
-                        raise RuntimeError('tool reply byte limit or empty reply')
-                    if self._answer_requirements is not None and not self._answer_requirements.accepts(step.content):
-                        raise RuntimeError('tool answer format rejected')
-                    retained = tuple(prepared)
-
-                    async def validate() -> bool:
-                        async with asyncio.timeout_at(deadline):
-                            check_deadline()
-                            for evidence in retained:
-                                valid = await asyncio.create_task(evidence.validate())
+                with operation_scope(self._progress, 'model') as model_observation:
+                    try:
+                        # Independent copies stop an adapter from mutating the
+                        # authoritative transcript, schemas, or paired call IDs.
+                        if journal is None:
+                            model_observation.started()
+                            step = await asyncio.create_task(self._complete(transcript, schemas))
+                        else:
+                            async def complete_model() -> JSONValue:
+                                model_observation.started()
                                 check_deadline()
-                                if not valid:
-                                    return False
-                            return True
-
-                    if not await validate():
-                        raise RuntimeError('tool evidence changed before publication')
-                    evidence_ids = tuple(dict.fromkeys(key for evidence in prepared for key in evidence.evidence_ids))
-                    return ToolLoopResult(step.content, model_calls, calls, evidence_ids,
-                                          'retained' if evidence_ids else 'none',
-                                          tuple(evidence.payload for evidence in retained if evidence.evidence_ids),
-                                          tuple(outcomes), validate, deadline=deadline)
+                                response = await asyncio.create_task(self._complete(transcript, schemas))
+                                check_deadline()
+                                return cast(JSONValue, _accepted_step(response, seen, enabled).model_dump(mode='json'))
+                            saved_step = await journal.execute('model', cast(JSONValue,
+                                {'messages': transcript, 'tools': schemas}), complete_model)
+                            step = ToolStep.model_validate_json(_json(saved_step))
+                        check_deadline()
+                    except (asyncio.CancelledError, TimeoutError, TurnJournalError, TurnJournalPaused):
+                        raise
+                    except Exception:
+                        raise RuntimeError('tool model unavailable') from None
+                    model_calls += 1
+                    step = _accepted_step(step, seen, enabled)
+                ids = [call.id for call in step.calls]
+                usage.append(step.usage)
+                if not step.calls:
+                    return await finish(step.content)
                 rounds += 1
                 seen.update(ids)
                 transcript.append({'role': 'assistant', 'content': step.content or None, 'tool_calls': [
                     {'id': call.id, 'type': 'function', 'function': {'name': call.name, 'arguments': _json(call.arguments)}}
                     for call in step.calls]})
+                direct_result: str | None = None
                 for call in step.calls:
-                    await record_call(call, 'model')
+                    result = await record_call(call, 'model', skipped=direct_result is not None)
+                    if result is not None:
+                        direct_result = result
+                if direct_result is not None:
+                    if len(_json(transcript).encode()) > limits.max_transcript_bytes:
+                        raise RuntimeError('tool transcript byte limit')
+                    return await finish(direct_result)
