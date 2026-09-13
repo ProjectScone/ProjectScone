@@ -169,6 +169,7 @@ class MemoryEngine:
         code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
+        demote_superseded: bool = True,
         blobs: Optional[BlobStore] = None,
         candidate_limit: int | None = None,
         reranker: Reranker | None = None,
@@ -277,6 +278,10 @@ class MemoryEngine:
         #: so it is on. Nothing is dropped either way, only ordered, and a
         #: caller who wants what was believed at the time turns it off.
         self.demote_restated = demote_restated
+        #: Whether recall moves a passage the ledger has retired below the
+        #: passage that replaced it. On by default: it costs nothing when
+        #: a query matched no fact, and one chain read per fact it did.
+        self.demote_superseded = demote_superseded
         #: Experiment 9: with a floor, a recall whose best vector hit sits
         #: below it is flagged low_confidence so a reader can abstain
         #: instead of answering from weak evidence. None (the default) means
@@ -918,7 +923,8 @@ class MemoryEngine:
             candidate_limit=self.candidate_limit, reranker=self.reranker,
             rerank_limit=self.rerank_limit, rerank_max_bytes=self.rerank_max_bytes,
             rerank_timeout=self.rerank_timeout, contextual_embeddings=self.contextual_embeddings,
-            demote_restated=self.demote_restated, similarity_floor=self.similarity_floor,
+            demote_restated=self.demote_restated, demote_superseded=self.demote_superseded,
+            similarity_floor=self.similarity_floor,
             floor_dim=self.abstention.dim if self.abstention is not None else None,
             vector_block=self.vector_block,
         )
