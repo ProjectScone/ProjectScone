@@ -348,7 +348,12 @@ async def test_a_conflicting_after_and_last_event_id_is_refused(setup):
     await start(setup)
     first = frames(await collect(setup[1], query='limit=1'))
     cursor = next(c for k, c, _ in first if k == 'history')
-    response = await setup[0].get('/v1/agent-runs/one/history/stream?after=' + cursor[:-1] + '0',
+    # A different cursor, whatever the digest's last digit happens to be:
+    # replacing it with a fixed digit conflicted only fifteen times in
+    # sixteen, and the sixteenth run streamed a 200.
+    other = cursor[:-1] + ('1' if cursor[-1] == '0' else '0')
+    assert other != cursor
+    response = await setup[0].get('/v1/agent-runs/one/history/stream?after=' + other,
                                   headers={**auth(), 'Last-Event-ID': cursor})
     assert response.status_code == 422
 
