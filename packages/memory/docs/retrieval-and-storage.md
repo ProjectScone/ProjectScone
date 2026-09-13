@@ -798,6 +798,42 @@ A header longer than twelve lines is quoted to there, and says so —
 the name in the terminal. A bound that bit in silence is the fault this
 framework keeps making.
 
+## Where the question's words are in a passage
+
+A recalled passage says which lanes found it and how it ranked. It did
+not say where the matching words are, so a page drawing the passage had
+to tokenise it again, and got it wrong wherever its tokeniser differed
+from the lexical lane's: that lane folds case, normalises width, keeps a
+possessive with its word and reads scripts written without spaces as
+characters and pairs.
+
+```bash
+scone recall "crane repainted" --highlight
+# <score>  <date>  #<episode>  The harbour Crane was repainted in May.
+#       matched: Crane, repainted
+scone --json recall "crane repainted" --highlight   # adds "highlights"
+curl -H "authorization: Bearer $KEY" "$URL/v1/recall?q=crane+repainted&highlight=true"
+```
+
+`highlights` sits beside `items`, one entry per item in the same order,
+each with the question's `terms`, the `spans` (`start`, `end`, `term`)
+and `total`. The rules, each with a test:
+
+- **The lexical lane's own tokeniser decides.** The passage is read word
+  by word and a word is marked when its tokens include a query term, so
+  `CRANE` and `Alves's` are marked and a stopword in the question marks
+  nothing. No stemming is invented here: the lane does not stem, so
+  `repaint` does not mark `repainted`.
+- **Offsets are code points of the text as returned**, and the spans are
+  computed last, after windowing, merging, withholding and code context,
+  because a span is only true of the text it was measured on.
+- **In a script without spaces** the span is where the term's characters
+  stand inside the run, and the overlapping characters and pairs of one
+  query term merge into one region.
+- **The bound says it bit.** A passage keeps at most `MAX_HIGHLIGHTS`
+  spans; `total` counts all of them and `truncated` says some were not
+  listed.
+
 ## One passage instead of three fragments of it
 
 Small chunks match precisely and read badly. Three neighbouring fragments
