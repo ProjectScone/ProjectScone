@@ -594,3 +594,101 @@ async def test_names_past_the_spelling_budget_are_found_by_their_words_alone(mon
     assert "spellings_cut 4 names" in found.coverage["reasons"]  # Lisbon is a name too
     monkeypatch.setattr(duplicates_module, "MAX_SPELLINGS", 250_000)
     assert ("acme gobotics", "acme robotics") in pairs(await likely_duplicates(engine, "alpha", min_score=0.0))
+
+
+async def test_two_files_one_letter_apart_are_not_one_thing():
+    """A one-letter difference is a misspelling in a person's name and a
+    different thing entirely in an identifier. `gate` and `rate` are not
+    a typo for each other, and neither are `min` and `max`.
+
+    Measured on this repository once code symbols reached the entity
+    graph: `scone_memory/audio/gate.py` and `scone_memory/audio/rate.py`
+    were suggested as one thing at 0.667, over the 0.5 default. The score
+    comes from the path, not the name -- every file in a directory shares
+    its directory's words, so two files in one folder whose basenames
+    differ by a letter share four words out of five and differ in one.
+    Shared directories say two files live together, which is not evidence
+    that they are the same file.
+    """
+    engine = await engine_with(
+        ("scone_memory/audio/gate.py", "defines", "scone_memory/audio/gate.py:Gate"),
+        ("scone_memory/audio/rate.py", "defines", "scone_memory/audio/rate.py:Rate"),
+        ("pkg/store.py", "defines", "pkg/store.py:Shelf"),
+        ("pkg.store", "imports", "json"),
+    )
+    try:
+        found = await likely_duplicates(engine, "alpha", min_score=0.0, limit=100)
+    finally:
+        await engine.close()
+    shown = [(one["label"], two["label"], score, why)
+             for one, two, score, *why in (tuple(pair.values()) for pair in found.pairs)]
+    paths = [row for row in shown if "/" in str(row[0]) or "." in str(row[0])]
+    assert not paths, shown
+
+
+async def test_a_persons_initial_does_not_make_their_name_a_module_path():
+    """The narrowing over-reached. `J.Anderson` splits on its dot into two
+    valid Python identifiers, so a rule that called any dotted chain a
+    qualified symbol turned the spelling comparison off for everyone
+    whose name carries an initial -- `J.Anderson` and `J.Andersen` were
+    offered at 0.55 before it and silently gone after, which is the exact
+    opposite of the "prose is unaffected" it was committed as.
+
+    Code's bare dotted names are module paths, and module paths are lower
+    case. A capital, with no path or extension to say otherwise, is a
+    name.
+    """
+    engine = await engine_with(
+        ("J.Anderson", "works_at", "Acme"),
+        ("J.Andersen", "works_at", "Acme"),
+    )
+    try:
+        found = await likely_duplicates(engine, "alpha", limit=100)
+    finally:
+        await engine.close()
+    pairs = [tuple(sorted((tuple(pair.values())[0]["label"], tuple(pair.values())[1]["label"])))
+             for pair in found.pairs]
+    assert ("j.andersen", "j.anderson") in pairs, found.pairs
+
+
+def test_what_counts_as_an_identifier_rather_than_a_name():
+    """The rule itself, case by case, because it decides whether a pair is
+    judged by spelling at all and every miss is silent in both
+    directions."""
+    from scone_memory.entities.duplicates import _identifier
+
+    for identifier in ("pkg/store.py", "pkg/store.py:Shelf.keep",
+                       "scone_memory/audio/gate.py", "a b/c d.py:Holder.keep"):
+        assert _identifier(identifier), identifier
+    for name in ("J.Anderson", "Katherine Brown", "Acme Inc.", "St. Louis",
+                 "J.R.R. Tolkien", "Ana.Maria", "quarterly report"):
+        assert not _identifier(name), name
+    # Bare dotted names sit on the prose side on purpose. `pkg.store` and
+    # `j.anderson` are the same string shape, and folding has already
+    # removed the capital by the time either arrives, so no rule written
+    # over the string can separate them. The one that reads a module as
+    # prose costs a false pair nobody has seen; the one that reads a
+    # person as a module stopped offering real pairs, which is worse.
+    for ambiguous in ("pkg.store", "store.py", "j.anderson"):
+        assert not _identifier(ambiguous), ambiguous
+
+
+async def test_a_misspelt_person_is_still_found_beside_an_identifier():
+    """The narrowing above must cost the heuristic nothing where it
+    belongs. A one-letter difference between two people's names is what
+    it was written for, and it still fires -- in the same space, and in
+    the same answer, as the identifiers it now declines to pair."""
+    engine = await engine_with(
+        ("Katherine Brown", "works_at", "Acme"),
+        ("Katharine Brown", "works_at", "Acme"),
+        ("scone_memory/audio/gate.py", "defines", "scone_memory/audio/gate.py:Gate"),
+        ("scone_memory/audio/rate.py", "defines", "scone_memory/audio/rate.py:Rate"),
+    )
+    try:
+        found = await likely_duplicates(engine, "alpha", min_score=0.0, limit=100)
+    finally:
+        await engine.close()
+    pairs = [tuple(sorted((tuple(pair.values())[0]["label"], tuple(pair.values())[1]["label"])))
+             for pair in found.pairs]
+    assert ("katharine brown", "katherine brown") in pairs, found.pairs
+    assert not any("/" in left or "/" in right for left, right in pairs), found.pairs

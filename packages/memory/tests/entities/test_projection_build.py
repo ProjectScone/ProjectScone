@@ -88,11 +88,41 @@ class Gated(service_module.EntityService):
         self.release = asyncio.Event()
         self.inputs: list[int] = []
 
-    async def _project(self, space, facts, revision):
+    async def _project(self, space, facts, revision, *args, **kwargs):
+        # `*args` on purpose: this override exists to hold a build open,
+        # not to restate the signature it is standing in for. Spelling
+        # out three positional parameters is how it drifted -- the real
+        # `_project` gained `meanings`, `source` and `why` with the
+        # vocabulary work, the override kept taking three, and every
+        # call raised `TypeError` *before* `started.set()` ran. The test
+        # then waited on an event nothing would ever set, which is how
+        # one changed signature became a suite that hung at 41% with no
+        # failing test name.
         self.inputs.append(len(facts))
         self.started.set()
         await self.release.wait()
-        return await super()._project(space, facts, revision)
+        return await super()._project(space, facts, revision, *args, **kwargs)
+
+
+async def begun(gated, build, *, seconds=5.0):
+    """Wait for a held build to begin, or raise what stopped it.
+
+    `await event.wait()` on its own waits forever when the code that
+    should set the event raised first, and reports nothing about why.
+    Racing the event against the build's own task means a failure
+    surfaces as that failure, with its traceback, and a genuine hang
+    surfaces as a bounded assertion instead of a dead run.
+    """
+    waiting = asyncio.ensure_future(gated.started.wait())
+    done, pending = await asyncio.wait({waiting, build}, timeout=seconds,
+                                       return_when=asyncio.FIRST_COMPLETED)
+    if waiting in done:
+        return
+    for task in pending:
+        task.cancel()
+    if build in done:
+        build.result()  # re-raises whatever actually happened
+    raise AssertionError(f"the build did not begin within {seconds}s")
 
 
 async def test_a_build_is_shared_only_by_requests_reading_the_same_ledger(monkeypatch):
@@ -106,7 +136,7 @@ async def test_a_build_is_shared_only_by_requests_reading_the_same_ledger(monkey
     engine.entities = gated = Gated(engine)
     monkeypatch.setattr(read, "MAX_FACTS", 3)
     first = asyncio.ensure_future(gated.projection("alpha", mode="all", when=WHEN))
-    await gated.started.wait()
+    await begun(gated, first)
     monkeypatch.setattr(read, "MAX_FACTS", 1)
     second = asyncio.ensure_future(gated.projection("alpha", mode="all", when=WHEN))
     for _ in range(10):

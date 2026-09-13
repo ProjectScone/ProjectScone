@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, cast
 from ..core.errors import SconeError
 from ..core.models import Fact
 from ..core.timeutil import parse_rfc3339
+from .meanings import RelationMeanings
 from .project import EntityProjection, project_entities
 from . import read as reading
 from .read import LedgerRead, read_ledger
@@ -84,7 +85,9 @@ class ProjectionBuilding(SconeError):
     def __init__(self, space: str) -> None:
         super().__init__(f"the entity projection for {space!r} is still being built; try again shortly")
 
-_Key = tuple[str, datetime | None, datetime | None]
+#: The view key: the status mode and validity window, plus the
+#: identity of the vocabulary the view was built under.
+_Key = tuple[str, datetime | None, datetime | None, str]
 #: One build: the view's key within one ledger read (revision, cap and rows).
 _Slot = tuple[str, int, int, str, _Key]
 
@@ -114,12 +117,16 @@ class _Held:
     #: The store's ledger stamp read before this ledger was, when it has one.
     stamp: str | None = None
 
-    def key(self, mode: "StatusMode", when: datetime) -> _Key:
+    def key(self, mode: "StatusMode", when: datetime, vocabulary: str) -> _Key:
+        """The view's identity. ``vocabulary`` is part of it because a view
+        built under one set of relation meanings is not the same view as one
+        built under another, and saving meanings does not move the
+        revision."""
         if mode not in ("current", "history"):
-            return (mode, None, None)
+            return (mode, None, None, vocabulary)
         index = bisect.bisect_right(self.boundaries, when)
         return (mode, self.boundaries[index - 1] if index else None,
-                self.boundaries[index] if index < len(self.boundaries) else None)
+                self.boundaries[index] if index < len(self.boundaries) else None, vocabulary)
 
 
 class EntityService:
@@ -218,14 +225,18 @@ class EntityService:
     def _projected(self, slot: _Slot, _done: object) -> None:
         self._projecting.pop(slot, None)
 
-    async def _project(self, space: str, facts: list[Fact], revision: int) -> tuple[EntityProjection, int]:
+    async def _project(self, space: str, facts: list[Fact], revision: int,
+                       meanings: "RelationMeanings | None" = None,
+                       source: str = "none", why: str = "") -> tuple[EntityProjection, int]:
         if len(facts) <= INLINE_FACTS:
-            return project_entities(space, facts, revision=revision,
-                                    meanings=self._engine.relation_meanings), len(facts)
+            return project_entities(space, facts, revision=revision, meanings=meanings,
+                                    vocabulary_source=source,
+                                    vocabulary_why=why), len(facts)
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="scone-projection")
         worker = self._executor.submit(partial(project_entities, space, facts, revision=revision,
-                                               meanings=self._engine.relation_meanings))
+                                               meanings=meanings, vocabulary_source=source,
+                                               vocabulary_why=why))
         self._workers.add(worker)
         worker.add_done_callback(self._workers.discard)
         return await asyncio.wrap_future(worker), len(facts)
@@ -243,9 +254,11 @@ class EntityService:
         if self._slots is not None:
             self._slots.release()
 
-    async def _admitted(self, space: str, facts: list[Fact], revision: int) -> tuple[EntityProjection, int]:
+    async def _admitted(self, space: str, facts: list[Fact], revision: int,
+                        meanings: "RelationMeanings | None" = None,
+                        source: str = "none", why: str = "") -> tuple[EntityProjection, int]:
         try:
-            return await self._project(space, facts, revision)
+            return await self._project(space, facts, revision, meanings, source, why)
         finally:
             self._free()
 
@@ -254,7 +267,14 @@ class EntityService:
         from .view import counts
 
         held = await self._ledger(space, timed)
-        key = held.key(mode, when)
+        # The vocabulary in force goes into the view key, so a view built
+        # under one set of relation meanings is never served for another.
+        # It reads no store: the meanings are this process's configuration
+        # while a space cannot hold its own.
+        from .vocabulary import read_vocabulary
+
+        vocabulary = await read_vocabulary(self._engine, space)
+        key = held.key(mode, when, vocabulary.identity)
         found = held.views.get(key)
         if found is None:
             slot = (space, held.ledger.revision, held.ledger.limit, held.digest, key)
@@ -267,7 +287,9 @@ class EntityService:
                 if pending is not None:
                     self._free()
                 else:
-                    pending = asyncio.ensure_future(self._admitted(space, facts, held.ledger.revision))
+                    pending = asyncio.ensure_future(
+                        self._admitted(space, facts, held.ledger.revision, vocabulary.meanings,
+                                       vocabulary.source, vocabulary.why))
                     self._projecting[slot] = pending
                     pending.add_done_callback(partial(self._projected, slot))
             found = await asyncio.shield(pending)

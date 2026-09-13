@@ -105,6 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each")
+    p.add_argument("--window", type=int, metavar="BYTES",
+                   help="return each passage with this many bytes of its episode either side; "
+                        "serves the single precise hit that --merge cannot")
+    p.add_argument("--withhold", metavar="KINDS",
+                   help="withhold matches of these kinds from the answer, comma separated "
+                        "(email,phone,ip,card,secret); a net of patterns, never a guarantee")
+    p.add_argument("--code-context", action="store_true",
+                   help="for a passage of code, also quote the signature it sits inside and the "
+                        "imports of its file; the passage itself is not changed")
     p.add_argument("--parts", action="store_true",
                    help="search each part of a multi-part question and give every part a turn "
                         "(measured to change nothing on LongMemEval; off by default)")
@@ -244,6 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them "
                         "before scoring, to measure what that changes")
+    p.add_argument("--window", type=int, default=0, metavar="BYTES",
+                   help="widen every returned passage by this many bytes either side before "
+                        "scoring, to measure what that changes")
     p.add_argument("--cross-queries", action="store_true",
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
@@ -300,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--until", help="RFC 3339 moment to compare to (default: now)")
     g.add_argument("--limit", type=int, default=50, help="changes to list (1 to 500)")
     g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
+    g = graph.add_parser("affected", help="what rests on this symbol, module or file, nearest "
+                                          "first: what a change to it reaches")
+    g.add_argument("name", help="the symbol, module or file to start from")
+    g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
+    g.add_argument("--limit", type=int, default=200, help="entities to list (1 to 1000)")
+    g.add_argument("--max-bytes", type=int, default=16000, help="byte budget for the answer")
     g = graph.add_parser("health", help="what in the graph wants attention, counted with examples")
     g.add_argument("--limit", type=int, default=None, help="examples shown for each concern")
     g.add_argument("--max-bytes", type=int, default=None)
@@ -642,7 +660,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     itself. What was read and what was not is said: a map that quietly
     skipped half a repository is worse than no map."""
     from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
-    from ..ingestion.code_graph import record_claims
+    from ..ingestion.code_graph import record_claims, unresolved_calls
 
     root = pathlib.Path(args.directory)
     if not root.is_dir():
@@ -686,6 +704,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         return None
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
+    unbound: set[str] = set()
     for path in found[: args.limit]:
         raw = path.read_bytes()
         cut += len(raw) > args.max_bytes
@@ -703,6 +722,11 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
                                        content=text, path=where, when=engine.clock(),
                                        resolve=resolve)
             claims += said
+            # What the graph could not bind. "12 claims" and nothing else
+            # reads as a complete answer, and the difference between
+            # "nothing calls this" and "I could not see what calls this"
+            # is only visible here.
+            unbound.update(unresolved_calls(text, where, language=code_language(where)))
             # A file with nothing to say and a file this cannot read are
             # different things, and a count that adds them together tells
             # a reader neither.
@@ -720,13 +744,16 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
             parts.append(f"{quiet} had nothing to say")
         if unread:
             parts.append(f"{unread} could not be read")
+        if unbound:
+            parts.append(f"{len(unbound)} call(s) left unbound")
     if len(found) > args.limit:
         parts.append(f"{len(found) - args.limit} left unread of {len(found)}")
     if cut:
         parts.append(f"{cut} read only to {args.max_bytes} bytes")
     if getattr(args, "json", False):
         print(_ledger_json({"read": read, "deduplicated": again, "claims": claims, "quiet": quiet,
-                            "unread": unread, "found": len(found), "limit": args.limit,
+                            "unread": unread, "unbound_calls": sorted(unbound),
+                            "found": len(found), "limit": args.limit,
                             "cut": cut}), file=out)
     else:
         print("map: " + ", ".join(parts), file=out)
@@ -833,12 +860,16 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
         return await build_in_process_engine(settings, embedder)
 
     def progress(n, total):
-        if not args.json:
-            print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+        # Always on stderr, --json or not. A run that takes hours with no
+        # sign of life cannot be told from a wedged one, and the JSON goes
+        # to stdout so this spoils nothing that reads it. Learned by
+        # waiting two and a half hours without knowing whether a benchmark
+        # was a tenth or nine tenths of the way through.
+        print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
 
     report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
                              dataset=str(args.dataset), progress=progress, history=args.history,
-                             cross_queries=args.cross_queries, merge=args.merge)
+                             cross_queries=args.cross_queries, merge=args.merge, window=args.window)
     if not args.json:
         print("", file=sys.stderr)
     if args.out:
@@ -850,7 +881,12 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
               f"embedder {report.embedder}, contextual embeddings {'on' if report.contextual_embeddings else 'off'}, "
               f"{report.errors} error(s)", file=out)
         for k in report.ks:
-            print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%", file=out)
+            print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%"
+                  f"   P@{k} {report.precision.get(k, 0.0) * 100:5.1f}%   nDCG@{k} {report.ndcg.get(k, 0.0) * 100:5.1f}%"
+                  f"   hit@{k} {report.hit_rate.get(k, 0.0) * 100:5.1f}%",
+                  file=out)
+        # Rank, which recall cannot see: whether the answer led or trailed.
+        print(f"  MRR {report.mrr:.4f}   MAP {report.mean_average_precision:.4f}", file=out)
         print(f"  context reduction median {(report.context_reduction_median or 0) * 100:.1f}% (bytes, not tokens); "
               f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
         for qt, row in report.by_type.items():
@@ -899,8 +935,12 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
         return await build_in_process_engine(settings, embedder)
 
     def progress(n, total):
-        if not args.json:
-            print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+        # Always on stderr, --json or not. A run that takes hours with no
+        # sign of life cannot be told from a wedged one, and the JSON goes
+        # to stdout so this spoils nothing that reads it. Learned by
+        # waiting two and a half hours without knowing whether a benchmark
+        # was a tenth or nine tenths of the way through.
+        print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
 
     reports = []
     for item in items:
@@ -927,6 +967,18 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
     if args.out:
         pathlib.Path(args.out).write_text(json.dumps([r.as_dict(with_items=True) for r in reports], indent=1), encoding="utf-8")
     return 0
+
+
+def _staged(record: dict) -> dict:
+    """A stage's receipt without its own copy of the passages.
+
+    The rule and the reasoning live in `retrieval/receipts.py`, because
+    the HTTP route stages the same pipeline and the first version of this
+    existed here only.
+    """
+    from ..retrieval.receipts import staged
+
+    return staged(record)
 
 
 def read_original_image(filename: str, limit: int) -> tuple[bytes, str, str]:
@@ -1100,6 +1152,22 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         print(_ledger_json(found_pairs.record(space, status="current", as_of=when)) if getattr(args, "json", False)
               else found_pairs.text, file=out)
         return 0
+    if command == "affected":
+        from ..entities.affected import affected
+
+        blast = await affected(engine, space, args.name, max_hops=args.max_hops,
+                               limit=args.limit, max_bytes=args.max_bytes)
+        if args.json:
+            print(json.dumps(blast.record()), file=out)
+            return 0 if blast.status in ("found", "nothing") else 1
+        print(blast.why, file=out)
+        for one in blast.reached:
+            print(f"  {one.depth}  {one.label}  ({one.through} {one.depends_on})", file=out)
+        if blast.by_depth:
+            shape = ", ".join(f"{count} at {depth} hop(s)"
+                              for depth, count in sorted(blast.by_depth.items()))
+            print(f"reached: {shape}", file=out)
+        return 0 if blast.status in ("found", "nothing") else 1
     if command == "changes":
         from ..entities.changes import ChangesError, graph_changes
 
@@ -1243,6 +1311,30 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0 if answered.status in ("computed", "recalled") else 1
 
     if args.command == "recall":
+        policy: tuple[str, ...] = ()
+        if args.withhold:
+            from ..retrieval.withhold import chosen_kinds
+
+            # Checked before the search, as the HTTP route does: a policy
+            # naming a kind that does not exist is a mistake in the
+            # request, and searching first spends the work for an answer
+            # nobody receives.
+            policy = chosen_kinds(tuple(k.strip() for k in args.withhold.split(",") if k.strip()))
+            # Everything refused here re-reads the episode from the store
+            # *after* withholding and prints source verbatim, which hands
+            # back what was just withheld: --merge and --code-context both
+            # quote the raw episode, and --parts answers without passing
+            # through withholding at all. The HTTP route refuses the same
+            # class of combination; the CLI refusing a different set would
+            # be the same hole wearing different clothes.
+            clashes = [name for name, asked_for in (
+                ("--merge", args.merge), ("--code-context", args.code_context),
+                ("--parts", args.parts)) if asked_for]
+            if clashes:
+                raise InvalidInput(
+                    f"--withhold cannot be combined with {', '.join(clashes)}: each of those "
+                    f"quotes the episode again after withholding, which would hand back what "
+                    f"was withheld; ask for one or the other")
         if args.parts:
             from ..retrieval.parts import recall_parts
 
@@ -1264,16 +1356,68 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost,
         )
+        kept = None
+        opened = None
+        if args.window:
+            from ..retrieval.window import widen
+
+            opened = await widen(engine, space, result.items,
+                                 before=args.window, after=args.window)
+            result = result.model_copy(update={"items": list(opened.items)})
+        if policy:
+            from ..retrieval.withhold import withhold
+
+            # Facts and history too. Fixing this on the HTTP route and
+            # not here left the same address reachable through the CLI.
+            kept = withhold(result.items, facts=list(result.facts) + list(result.history),
+                            kinds=policy)
+            result = result.model_copy(update={
+                "items": list(kept.items),
+                "facts": list(kept.facts[:len(result.facts)]),
+                "history": list(kept.facts[len(result.facts):])})
         joined = None
         if args.merge:
             from ..retrieval.merging import merge_neighbours
 
             joined = await merge_neighbours(engine, space, result.items)
             result = result.model_copy(update={"items": list(joined.items)})
+        inside = None
+        if args.code_context:
+            from ..retrieval.code_context import code_context
+
+            # **Last**, after every stage that re-reads a source. Code
+            # context quotes the file -- a signature, an import line --
+            # and a stage running after it can find that source deleted,
+            # leaving the answer correctly empty while the context still
+            # prints the text. Dropping the receipt's copy of the items
+            # cannot fix that, because the quoted signature is a separate
+            # copy of the same source. Running last is what makes the
+            # context describe passages that survived.
+            inside = await code_context(engine, space, result.items)
+            # A source this stage finds gone is dropped from the answer
+            # too, not only from the context.
+            result = result.model_copy(update={"items": list(inside.items)})
         if args.json:
             said = result.model_dump() | {"context_reduction": result.context_reduction}
-            emit(said | ({"merged": joined.record()} if joined else {}))
+            emit(said | ({"merged": _staged(joined.record())} if joined else {})
+                      | ({"widened": _staged(opened.record())} if opened else {})
+                      | ({"withheld": _staged(kept.record())} if kept else {})
+                      | ({"code_context": _staged(inside.record())} if inside else {}))
             return 0
+        if kept is not None:
+            print(kept.why, file=out)
+        if opened is not None:
+            print(opened.why, file=out)
+        if inside is not None:
+            print(inside.why, file=out)
+            for chunk, context in inside.by_chunk.items():
+                for holder in context.holders:
+                    cut = " (quoted to the line bound, so incomplete)" if holder.clipped else ""
+                    print(f"  #{chunk} inside {holder.name} (line {holder.line}){cut}", file=out)
+                    for line in holder.text.splitlines():
+                        print(f"      {line}", file=out)
+                for brought in context.imports:
+                    print(f"  #{chunk} line {brought.line}: {brought.text}", file=out)
         if joined is not None:
             print(joined.why, file=out)
             for chunk, absorbed in joined.from_chunks.items():
