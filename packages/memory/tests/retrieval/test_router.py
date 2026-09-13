@@ -134,3 +134,76 @@ def test_a_question_over_http_says_the_route_it_took():
         insisted = client.get("/v1/answer", params={"q": "What is Alice Chen's employer?", "route": "recall"},
                               headers={"Authorization": "Bearer key-a"}).json()
         assert insisted["route"] == "recall" and "asked for" in insisted["why"]
+
+
+LONG = "The crane log for the season: " + "x" * 600
+
+
+async def with_a_long_passage() -> MemoryEngine:
+    engine = await memory()
+    await engine.remember(SPACE, LONG, created_at="2024-06-01T00:00:00Z")
+    return engine
+
+
+async def test_a_long_passage_is_cut_and_the_answer_says_so():
+    """The ordinary route shows each passage to 200 characters. That is a
+    bound, and a bound needs a field saying it bit: which passages were
+    cut, by how much, and where the whole text is."""
+    engine = await with_a_long_passage()
+    answered = await answer_question(engine, SPACE, "crane log", route="recall")
+    record = answered.record(SPACE)
+    assert record["shown"] == {"per_item_chars": 200, "items_cut": 1, "chars_omitted": len(LONG) - 200}
+    shown_items = len(record["detail"]["items"])
+    assert answered.text.endswith(f"1 of {shown_items} passage(s) shortened to 200 characters; the items in detail hold them whole")
+    assert "x" * 600 not in answered.text
+    assert any("x" * 600 in item["text"] for item in record["detail"]["items"])
+
+
+async def test_short_passages_are_shown_whole_and_nothing_is_said():
+    engine = await memory()
+    answered = await answer_question(engine, SPACE, "harbour crane", route="recall")
+    assert answered.record(SPACE)["shown"] == {"per_item_chars": 200, "items_cut": 0, "chars_omitted": 0}
+    assert "shortened" not in answered.text
+
+
+async def test_a_caller_can_ask_for_whole_passages():
+    engine = await with_a_long_passage()
+    answered = await answer_question(engine, SPACE, "crane log", route="recall", max_item_chars=0)
+    assert "x" * 600 in answered.text and "shortened" not in answered.text
+    assert answered.record(SPACE)["shown"] == {"per_item_chars": 0, "items_cut": 0, "chars_omitted": 0}
+
+
+async def test_a_negative_cut_is_refused():
+    from scone_memory.core.errors import InvalidInput
+
+    engine = await memory()
+    with pytest.raises(InvalidInput):
+        await answer_question(engine, SPACE, "crane log", route="recall", max_item_chars=-1)
+
+
+async def test_the_command_line_can_ask_for_whole_passages():
+    import io
+
+    from scone_memory.runtime.cli import build_parser, run
+
+    engine = await with_a_long_passage()
+    out = io.StringIO()
+    await run(build_parser().parse_args(["--space", SPACE, "answer", "crane log", "--route", "recall"]), engine, io.StringIO(""), out)
+    assert "shortened to 200 characters" in out.getvalue() and "x" * 600 not in out.getvalue()
+    out = io.StringIO()
+    await run(build_parser().parse_args(["--space", SPACE, "answer", "crane log", "--route", "recall", "--whole"]), engine, io.StringIO(""), out)
+    assert "x" * 600 in out.getvalue() and "shortened" not in out.getvalue()
+
+
+async def test_over_http_whole_is_a_query_flag():
+    from httpx import ASGITransport, AsyncClient
+
+    from scone_memory.api import create_app
+
+    engine = await with_a_long_passage()
+    async with AsyncClient(transport=ASGITransport(app=create_app(engine, {"key-a": SPACE})), base_url="http://fixture") as client:
+        auth = {"authorization": "Bearer key-a"}
+        cut = (await client.get("/v1/answer", params={"q": "crane log", "route": "recall"}, headers=auth)).json()
+        assert cut["shown"]["items_cut"] == 1 and cut["shown"]["per_item_chars"] == 200
+        whole = (await client.get("/v1/answer", params={"q": "crane log", "route": "recall", "whole": "true"}, headers=auth)).json()
+        assert whole["shown"]["per_item_chars"] == 0 and "x" * 600 in whole["text"]
