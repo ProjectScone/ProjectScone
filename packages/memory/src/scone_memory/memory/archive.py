@@ -8,14 +8,17 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import chain
 from typing import Optional
 
+from ..backends.blobs import BlobStore
+from . import attachment_archive
 from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput
 from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact, FactLink
 from ..core.ports import DocumentStore, NewFact, NewFactLink
 from ..core.validation import ORIGINS, STATUSES, normalise_term, normalise_time
-from ..ingestion.records import Record, content_hash
+from ..ingestion.records import Record, RetainedVideoRecord, content_hash
 
 
 #: What this version of the archive format is called. An archive says it
@@ -80,6 +83,17 @@ class ImportSummary:
     #: the archive or whose target keeps none.
     affirmations: int = 0
     affirmations_skipped: int = 0
+    #: Verified distinct attachments and links restored, including existing ones.
+    attachments: int = 0
+    attachment_links: int = 0
+
+    def record(self) -> dict[str, object]:
+        """Keep the legacy wire receipt unchanged for archive/1 imports."""
+        result: dict[str, object] = dataclasses.asdict(self)
+        if self.profile == ARCHIVE_PROFILE:
+            result.pop('attachments')
+            result.pop('attachment_links')
+        return result
 
 
 @dataclass(frozen=True)
@@ -89,6 +103,9 @@ class ArchiveRuntime:
     documents: DocumentStore
     clock: Callable[[], str]
     remember_many: Callable[[str, Sequence[Record]], Awaitable[list[Added]]]
+    blobs: BlobStore | None = None
+    max_attachment_bytes: int = 25 * 1024 * 1024
+    attachment_types: Sequence[str] = ()
 
 
 async def export_records(documents: DocumentStore, space: str, *, wrote_at: str = "",
@@ -140,13 +157,23 @@ async def export_records(documents: DocumentStore, space: str, *, wrote_at: str 
 async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[Mapping], *,
                          resurrect: bool = False) -> ImportSummary:
     """Restore an archive through normal ingestion and remap its store-local IDs."""
+    iterator = iter(records)
+    first = next(iterator, None)
+    rows: Iterable[Mapping] = chain((), iterator) if first is None else chain((first,), iterator)
+    transfer = None
+    if first is not None and first.get('profile') == attachment_archive.PROFILE:
+        if runtime.blobs is None:
+            raise InvalidInput('attachment archive requires a blob store')
+        transfer = attachment_archive.prepare(attachment_archive.bounded_rows(rows),
+                                               runtime.max_attachment_bytes, runtime.attachment_types)
+        rows = transfer.records
     summary = ImportSummary()
     episodes: list[Record] = []
     source_ids: list[Optional[int]] = []
     facts: list[Mapping] = []
     links: list[Mapping] = []
     affirmations: list[Mapping] = []
-    for record in records:
+    for record in rows:
         kind = record.get("type", "episode")
         _check_fields(kind, record)
         if kind == "archive":
@@ -160,7 +187,9 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
         if kind == "episode":
             episode = _rederived(Record.from_dict(record), record.get("space"), space)
             if episode.content == '' and episode.kind == 'file':
-                raise InvalidInput('visual-only documents require attachment transfer; this archive profile omits attachments')
+                if transfer is None:
+                    raise InvalidInput('visual-only documents require attachment transfer; this archive profile omits attachments')
+                episode = RetainedVideoRecord(**dataclasses.asdict(episode))
             # Forgetting was a decision; an archive that carries the
             # forgotten content does not undo it unless told to.
             digest = episode.content_hash or content_hash(space, episode.content, episode.dedup_key)
@@ -181,12 +210,27 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
     # source store's episodes, so it is remapped through the ids this
     # import produced; a reference to an episode not in the dump is
     # dropped rather than pointed at an unrelated record.
+    if transfer is not None:
+        assert runtime.blobs is not None
+        summary.profile = attachment_archive.PROFILE
+        await transfer.preflight_episodes(runtime.documents, space, episodes, runtime.clock())
+        summary.attachments = await transfer.stage(runtime.blobs, space, source_ids)
     id_map: dict[int, int] = {}
-    for old_id, added in zip(source_ids, await runtime.remember_many(space, episodes)):
+    imported: list[Added] = []
+    if transfer is not None and any(isinstance(episode, RetainedVideoRecord) for episode in episodes):
+        # Textless documents require the retained-evidence singleton path.
+        for episode in episodes:
+            imported.extend(await runtime.remember_many(space, [episode]))
+    else:
+        imported = await runtime.remember_many(space, episodes)
+    for old_id, added in zip(source_ids, imported):
         summary.episodes += 0 if added.deduplicated else 1
         summary.deduplicated += 1 if added.deduplicated else 0
         if old_id is not None:
             id_map[int(old_id)] = added.episode_id
+            if transfer is not None:
+                assert runtime.blobs is not None
+                summary.attachment_links += await transfer.link(runtime.blobs, space, int(old_id), added.episode_id)
     existing = {_fact_identity(f): f.fact_id for f in await runtime.documents.list_facts(space, include_closed=True)}
     # Fact ids are store-local too: a link's ends are remapped through
     # the ids this import produced or found already present.
