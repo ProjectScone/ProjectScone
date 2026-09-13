@@ -152,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("forget", help="delete an episode; the receipt says what went and what stayed")
     p.add_argument("episode_id", type=int)
     p.add_argument("--dry-run", action="store_true", help="show the impact and remove nothing")
+    p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
+                   help="exclude: take the claims only this source supported out of recall, reversibly (default keep)")
 
     p = sub.add_parser("facts", help="list facts")
     p.add_argument("--all", action="store_true", help="include closed facts")
@@ -470,9 +472,14 @@ def space_line(receipt) -> str:
 
 
 def receipt_line(r) -> str:
-    return (f"{r.chunks} chunk(s), {len(r.attachments_released)} attachment(s) released, {len(r.attachments_kept)} kept, "
-            f"{len(r.facts_citing)} claim(s), {len(r.links_citing)} link(s) and "
-            f"{len(r.affirmations_citing)} restatement(s) cite it and stand")
+    cited = (f"{len(r.facts_citing)} claim(s), {len(r.links_citing)} link(s) and "
+             f"{len(r.affirmations_citing)} restatement(s) cite it")
+    if r.claims_policy == "exclude":
+        cited += (f"; {len(r.claims_excluded)} claim(s) excluded, {len(r.claims_kept_other_support)} kept with other support, "
+                  f"{len(r.claims_kept_not_in_ledger)} left for review, {len(r.claims_already_excluded)} already excluded; links stand")
+    else:
+        cited += " and stand"
+    return f"{r.chunks} chunk(s), {len(r.attachments_released)} attachment(s) released, {len(r.attachments_kept)} kept, " + cited
 
 
 def link_line(link) -> str:
@@ -1575,7 +1582,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             forget_receipt = await engine.impact(space, args.episode_id)
             emit(forget_receipt.model_dump()) if args.json else print(f"would forget episode {args.episode_id}: {receipt_line(forget_receipt)}", file=out)
             return 0
-        forget_receipt = await engine.forget(space, args.episode_id)
+        forget_receipt = await engine.forget(space, args.episode_id, with_claims=args.with_claims)
         emit({"forgotten": args.episode_id, **forget_receipt.model_dump()}) if args.json else print(f"forgot episode {args.episode_id}: {receipt_line(forget_receipt)}", file=out)
         return 0
 
