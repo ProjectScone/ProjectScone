@@ -141,8 +141,6 @@ def file_resolver(paths: Iterable[str]) -> "Resolve":
     def resolve(path: str, level: int, module: str) -> Optional[str]:
         here = posixpath.dirname(path)
         for _ in range(level - 1):
-            if not here:
-                return None
             here = posixpath.dirname(here)
         stem = posixpath.join(here, *module.split(".")) if module else here
         stems = [stem, posixpath.normpath(posixpath.join(posixpath.dirname(path), module))
