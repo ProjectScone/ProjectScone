@@ -24,6 +24,7 @@ from ..retrieval.recall_scope import RecallScope
 
 if TYPE_CHECKING:
     from .history_capture import AgentRunHistory
+    from .run_text import AgentRunText
     from .approval_store import AgentApprovalStore
     from .approval_models import ToolApprovalRecord
 
@@ -120,7 +121,7 @@ class AgentHandoffWorkflow:
                  plan: AgentHandoffPlan, memory: MemoryEngine, space: str, scope: RecallScope,
                  exclude_session_id: str | None = None, deadline_s: float = 120.0,
                  max_payload_bytes: int = 1000000, approval_store: AgentApprovalStore | None = None,
-                 approval_activation: str | None = None, history: AgentRunHistory | None = None, read_only: bool = False) -> None:
+                 approval_activation: str | None = None, history: AgentRunHistory | None = None, text: AgentRunText | None = None, read_only: bool = False) -> None:
         check_space(space)
         if not isinstance(plan, AgentHandoffPlan) or not isinstance(scope, RecallScope):
             raise ValueError('validated handoff plan and recall scope required')
@@ -131,6 +132,7 @@ class AgentHandoffWorkflow:
         self._memory, self._space = memory, space
         self._approvals, self._approval_activation = approval_store, approval_activation
         self._history = history
+        self._text = text
         self._scope = RecallScope.validated(**scope.kwargs())
         self._excluded = exclude_session_id
         self._tools()
@@ -214,7 +216,7 @@ class AgentHandoffWorkflow:
             from .workflow_approvals import invoke_agent
             result = await invoke_agent(self._agents[current], AgentWorkflow._question(context.inputs),
                 tools=self._tools(), context=context, step_id=self._hop_id(index), selection_id=current,
-                store=self._approvals, activation_id=self._approval_activation, history=self._history,
+                store=self._approvals, activation_id=self._approval_activation, history=self._history, text=self._text,
                 prior=prior, requirements=self._requirements[current])
             if isinstance(result, WorkflowPaused):
                 return result
