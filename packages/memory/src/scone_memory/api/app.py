@@ -487,6 +487,7 @@ def create_app(
         if agent_run_service is not None:
             features["agents.runs"] = True
             features["agents.history"] = True
+            features["agents.text_stream"] = agent_run_service.public_text
             features["agents.usage"] = True
             features["agents.inputs"] = True
             features["agents.approvals"] = True
@@ -519,6 +520,8 @@ def create_app(
         mount_agent_run_routes(app, agent_run_service, space_for, assert_current_space)
         from .agent_history import mount_agent_history_routes
         mount_agent_history_routes(app, agent_run_service, space_for, assert_current_space)
+        from .agent_text import mount_agent_text_routes
+        mount_agent_text_routes(app, agent_run_service, space_for, assert_current_space)
         def approval_actor(request: Request) -> str:
             current_space_for(request)
             token = request.headers.get('authorization', '').partition(' ')[2].strip()
