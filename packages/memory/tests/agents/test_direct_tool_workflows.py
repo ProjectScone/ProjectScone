@@ -2,6 +2,7 @@
 import json
 import pytest
 
+from scone_memory.agents.catalog import AgentCatalog, AgentDefinition, AgentModel
 from scone_memory.agents.evidence_loop import ToolStep
 from scone_memory.agents.handoff_workflow import AgentHandoffPlan, AgentHandoffWorkflow, HandoffAgent
 from scone_memory.agents.input_store import AgentInputStore
@@ -129,6 +130,53 @@ async def test_plain_direct_output_cannot_bypass_handoff_envelope(tmp_path,memor
         with pytest.raises(WorkflowError,match='outcome_unknown'):await reopened.run('one','Question')
         assert len(model.requests)==len(invoked)==1
     finally:reopened.close()
+
+
+@pytest.mark.parametrize('budget', [0, 1])
+async def test_direct_turn_obeys_allowed_handoff_and_selected_next_model(tmp_path, memory, budget):
+    invoked = []
+    def forward(arguments, context):
+        invoked.append(context.space)
+        return {'answer': 'Count three items.', 'handoff_to': 'writer'}
+    first = Script(call())
+    second = Script(ToolStep(content=json.dumps({'answer': {'count': 6}, 'handoff_to': None})))
+    catalog = AgentCatalog(models=[
+        AgentModel('careful', 'Careful', '1', lambda: first),
+        AgentModel('fast', 'Fast', '1', lambda: second),
+    ], agents=[
+        AgentDefinition(agent_id='worker', instructions='Prepare notes.', models=('careful', 'fast'),
+                        default_model='fast', initial_search=False, tools=('double_count',)),
+        AgentDefinition(agent_id='writer', instructions='Write the result.', models=('careful', 'fast'),
+                        default_model='careful', initial_search=False),
+    ], tools=[tool(forward, return_direct=True)])
+    plan = AgentHandoffPlan(workflow_id='direct-chain', root_agent='worker', max_handoffs=budget,
+        answer_requirements=REQUIREMENTS, agents=(
+            HandoffAgent(agent_id='worker', model_id='careful', can_handoff_to=('writer',)),
+            HandoffAgent(agent_id='writer', model_id='fast'),
+        ))
+    def build():
+        return AgentHandoffWorkflow(tmp_path/'journal', key=KEY, catalog=catalog, plan=plan,
+            memory=memory, space='alpha', scope=RecallScope.validated())
+    work = build()
+    try:
+        result = await work.run('one', 'Count')
+        assert result.hops[0].handoff_to == 'writer' and result.hops[0].output.model_id == 'careful'
+        assert result.hops[0].output.model_calls == 1
+        if budget:
+            assert result.status == 'completed' and result.final.text == '{"count":6}'
+            assert result.final.model_id == 'fast' and len(second.requests) == 1
+            assert 'Count three items.' in json.dumps(second.requests[0][0])
+        else:
+            assert result.status == 'handoff_limit' and result.final is None and not second.requests
+    finally:
+        work.close()
+    reopened = build()
+    try:
+        saved = await reopened.run('one', 'Count')
+        assert saved.status == result.status and saved.final == result.final
+        assert len(first.requests) == 1 and len(second.requests) == budget and invoked == ['alpha']
+    finally:
+        reopened.close()
 
 
 async def test_direct_interactive_continuation_reuses_human_activation_and_usage(tmp_path,memory):
