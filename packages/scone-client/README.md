@@ -493,9 +493,54 @@ Cursor shape and position checks do not let the client authenticate the server's
 HMAC independently. The host remains responsible for authorization and encrypted
 journal integrity. History contains execution metadata, never prompts, tool
 arguments, answer text or hidden reasoning. Use `agents.result()` for a currently
-verified final answer. Live streaming remains separate required work; `history()`
-reads one bounded page and does not poll or resume the agent automatically.
+verified final answer. `history()` reads one bounded page and does not poll or
+resume the agent automatically; `stream_history()` below follows the run live.
 
 `tests/test_native_agent_history.py` verifies typed replay across two process
 restarts with the selected model called once, both with and without an initial
 native memory search. Set `SCONE_TEST_NATIVE_PYTHON` as described above to run it.
+
+### Live history over SSE
+
+Hosts advertising `agents.history` also publish the same verified pages as
+`text/event-stream` frames. `stream_history()` opens that route and yields
+`HistoryPage` objects as the server writes them:
+
+```python
+from scone import CollectionEvent
+
+with agents.stream_history("run-1", limit=50) as stream:
+    for page in stream:
+        for entry in page.items:
+            print(entry.position, entry.step_id, type(entry.event).__name__)
+        if any(isinstance(e.event, CollectionEvent) and e.event.kind == "collection_finished"
+               for e in page.items):
+            break
+cursor = stream.cursor  # last page's next_after, kept for a later resume
+
+# After a disconnect, a client error or a server restart, continue from there.
+with agents.stream_history("run-1", after=cursor) as stream:
+    for page in stream:
+        ...
+```
+
+Every page passes the same decoder as `history()` — space, run, model binding,
+event shape, cursor/page continuity — and the frame's SSE `id` must equal the
+page's `next_after`, so a resume cursor always names a page the client actually
+decoded. The `after` cursor is sent both as the query parameter and as
+`Last-Event-ID`, which the server requires to agree. Keep-alive comments are
+ignored; the server's `end` frame stops iteration; an `error` frame raises
+`SconeError("history stream refused: <reason>")`. The stream ending mid-frame is
+an invalid response.
+
+The connection is closed when the `with` block exits, including on an exception
+or an early `break`. Reads are bounded by the client's `timeout`, so a stalled
+server raises `SconeError` instead of hanging; each line is bounded at 1 MiB and
+the whole stream at `max_response_bytes`. `stream_history()` never re-opens the
+connection on its own: reconnecting is the caller's decision, made with the
+cursor the object exposes. This is execution metadata delivered as it is written,
+not answer-token streaming.
+
+`tests/test_native_agent_history_stream.py` follows a real run to completion over
+a loopback server, checks positions are contiguous and no private text is
+delivered, then restarts the server and resumes from the kept cursor.

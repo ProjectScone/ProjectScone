@@ -31,7 +31,7 @@ from .errors import SconeError
 from .models import Added, Fact, Memory, Profile, Recall, Status, Tag
 
 from .agent_events import ProgressEvent, ProgressGap, CollectionEvent
-from .agent_history import HistoryEntry, HistoryPage
+from .agent_history import HistoryEntry, HistoryPage, HistoryStream
 
 __version__ = "0.2.1"
 
@@ -40,7 +40,7 @@ __all__ = [
     "VideoDocuments", "VideoCatalogue", "VideoFrame", "VideoRegion", "VideoInterpretation",
     "Capabilities",
     "AgentClient",
-    "ProgressEvent", "ProgressGap", "CollectionEvent", "HistoryEntry", "HistoryPage",
+    "ProgressEvent", "ProgressGap", "CollectionEvent", "HistoryEntry", "HistoryPage", "HistoryStream",
     "InputRecord", "ApprovalCall", "ToolApprovalRecord", "ToolApprovalActivation", "AgentToolContinuation",
     "TaskAnswerRequirements",
     "ModelTokenUsage", "ToolTokenUsage",

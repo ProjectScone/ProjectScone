@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -42,6 +43,11 @@ class StubScone:
         # Explicit per-(method, path) routes win; otherwise the queue is
         # drained in order, and a `default` covers anything left.
         self.routes: Dict[Tuple[str, str], Tuple[int, Any]] = {}
+        # Streamed routes: frames written one at a time with a flush between
+        # them, so a client that reads frame-by-frame can be told apart from
+        # one that waits for the body to end. `hang_after` leaves the
+        # connection open and silent after that many frames.
+        self.streams: Dict[Tuple[str, str], Tuple[List[bytes], float, Optional[int], str]] = {}
         self.queue: List[Tuple[int, Any]] = []
         self.default: Tuple[int, Any] = (200, {})
         self._server: Optional[ThreadingHTTPServer] = None
@@ -52,6 +58,19 @@ class StubScone:
     def route(self, method: str, path: str, status: int, payload: Any) -> "StubScone":
         """Answer every `method path` with this status and JSON payload."""
         self.routes[(method.upper(), path)] = (status, payload)
+        return self
+
+    def stream(self, method: str, path: str, frames: List[bytes], *, delay: float = 0.0,
+               hang_after: Optional[int] = None,
+               content_type: str = "text/event-stream") -> "StubScone":
+        """Answer `method path` by writing `frames` one at a time.
+
+        Each frame is flushed before the next, after `delay` seconds. With
+        `hang_after`, the server stops writing after that many frames and
+        keeps the socket open -- a stalled server, for testing the client's
+        read bound.
+        """
+        self.streams[(method.upper(), path)] = (list(frames), delay, hang_after, content_type)
         return self
 
     def enqueue(self, status: int, payload: Any) -> "StubScone":
@@ -96,6 +115,27 @@ class StubScone:
                         body=body,
                     )
                 )
+                streamed = stub.streams.get((method, parsed.path))
+                if streamed is not None:
+                    frames, delay, hang_after, content_type = streamed
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.flush()
+                    for index, frame in enumerate(frames):
+                        if hang_after is not None and index >= hang_after:
+                            time.sleep(30)
+                            break
+                        if delay:
+                            time.sleep(delay)
+                        try:
+                            self.wfile.write(frame)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            return
+                    return
                 status, payload = stub._respond_with(method, parsed.path)
                 if isinstance(payload, (bytes, str)):
                     raw = payload.encode("utf-8") if isinstance(payload, str) else payload
