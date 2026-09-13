@@ -920,9 +920,36 @@ The predicates the framework extracts -- `defines`, `imports`, `calls`,
 `develops_with` -- are many-valued by their nature, declared so in the
 core (`scone_memory.core.extracted.MANY_VALUED`), and no configuration
 takes one out of that set. `SCONE_MANY_VALUED` still adds predicates a
-person names; `GET /v1/graph/schema` marks both kinds as `many`. A file
-read again restates its claims; a claim a changed file no longer makes is
-not closed by this, which remains open.
+person names; `GET /v1/graph/schema` marks both kinds as `many`.
+
+### A claim read from a file holds while the file says it
+
+`replace` and `sync` store a changed file as an update: the old episode
+is forgotten, the new one stored, its claims read. Forget's contract
+leaves claims standing, rightly -- a person's memory of a fact survives
+deleting its source -- but for what a reader extracted that meant the
+ledger held what the file used to say beside what it says now: a module
+that dropped an import still imported it, a function that was removed
+was still defined.
+
+So on replacement, the extracted claims the old episode grounded that the
+new content did not restate are closed, reason `no longer stated by
+<path>`, event kind `source_changed`; a restated claim -- the same
+subject, predicate and object read out of the new content -- is one fact,
+still holding. When a sync asked to `remove` forgets a file that is gone,
+every extracted claim it grounded is closed, reason `<path> was removed`,
+kind `source_removed`. Neither is counted as a manual closure. What a
+person stated about the episode is left alone, a plain `forget` still
+touches no claim, and nothing happens with the code graph off.
+
+The receipts say what was done. `Replaced.claims_closed` counts the
+closures, `None` when the store cannot read claims by episode (nothing is
+closed on a guess); `claims_unread` is true when the old episode grounded
+more claims than one read returns, so some were not examined and may
+still stand. A sync receipt carries `claims_closed` and `claims_unread`
+only when there is something to say, so a sync without the code graph
+reads exactly as it did. The durable directory-sync service does not read
+claims and is untouched.
 
 ## Code: cut where the declarations are
 
