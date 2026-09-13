@@ -213,7 +213,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="counts and which stores are in use")
     sub.add_parser("tags", help="tag counts")
     sub.add_parser("profile", help="identity facts plus recent activity")
-    sub.add_parser("export", help="dump the space as JSON lines to stdout")
+    p = sub.add_parser("export", help="dump the space as JSON lines to stdout")
+    p.add_argument("--include-attachments", action="store_true",
+                   help="include verified linked evidence bytes using archive profile 2")
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
     p.add_argument("--resurrect", action="store_true", help="store content this space forgot on purpose; the tombstone stays")
@@ -1603,7 +1605,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0 if report.error is None else 1
 
     if args.command == "export":
-        async for record in engine.export(space):
+        async for record in engine.export(space, include_attachments=args.include_attachments):
             emit(record)
         return 0
 
@@ -1614,6 +1616,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         emit(summary.__dict__) if args.json else print(
             f"imported {summary.episodes} episode(s), {summary.facts} fact(s); already known: "
             f"{summary.deduplicated} episode(s), {summary.facts_skipped} fact(s)"
+            + (f"; attachments: {summary.attachments}, episode links: {summary.attachment_links}"
+               if summary.profile == "scone.archive/2" else "")
             + (f"; forgotten here and left so: {summary.tombstoned}" if summary.tombstoned else ""), file=out
         )
         return 0

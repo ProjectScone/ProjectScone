@@ -1021,6 +1021,10 @@ there stays forgotten, and claims arrive with their history.
 
 ## What an archive says it is
 
+For verified linked attachment bytes and remapped episode links, use the opt-in
+[attachment archive profile](attachment-archives.md). The default below remains
+compatible with existing text archives.
+
 `scone export` writes a header first:
 
 ```json
