@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast
 
@@ -19,6 +19,7 @@ from ..integrations.read_memory import ReadMemoryArgs
 from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
 from ..retrieval.computation import ComputeMemoryArgs
 from .tool_evidence import PreparedToolEvidence
+from .custom_tools import AgentTool, snapshot_tools
 from .usage import ModelTokenUsage, ToolTokenUsage
 
 
@@ -60,7 +61,7 @@ class ConstrainedToolModel(ToolModel, Protocol):
 class ToolOutcome(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
     call_id: str
-    name: Literal['search_memory', 'trace_memory', 'read_memory', 'compute_memory', 'unknown_tool']
+    name: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')
     status: Literal['prepared', 'empty', 'unavailable']
     error: str | None
     output_bytes: int
@@ -136,7 +137,7 @@ def _covers_same_source(evidence: PreparedToolEvidence, key: tuple[int, int, int
 
 
 class EvidenceToolLoop:
-    """One bounded turn. Call IDs are unique across rounds; tools are read-only.
+    """One bounded turn. Memory tools are read-only; application tools are host code.
 
     At most max_tool_rounds tool-bearing requests plus one final request are
     sent. Unexecuted calls receive explicit denials, preserving protocol pairs.
@@ -148,11 +149,13 @@ class EvidenceToolLoop:
 
     def __init__(self, model: ToolModel, tools: ScopedMemoryTools, *, limits: ToolLoopLimits | None = None,
                  initial_search: bool = False, answer_requirements: AnswerRequirements | None = None,
-                 compact_search_results: bool = False) -> None:
+                 compact_search_results: bool = False,
+                 custom_tools: Sequence[AgentTool] = ()) -> None:
         if type(initial_search) is not bool:
             raise ValueError('initial_search must be a boolean')
         if type(compact_search_results) is not bool:
             raise ValueError('compact_search_results must be a boolean')
+        self._custom_tools = {tool.name: tool for tool in snapshot_tools(custom_tools)}
         self._initial_search = initial_search
         self._compact_search_results = compact_search_results
         self._model, self._tools = model, tools
@@ -207,7 +210,15 @@ class EvidenceToolLoop:
             else:
                 calls += 1
                 seed = call.arguments.get('seed_fact_id')
-                if call.name == 'trace_memory' and (type(seed) is not int or seed not in known_facts):
+                if call.name in self._custom_tools:
+                    check_deadline()
+                    if len(_json(transcript).encode()) > limits.max_transcript_bytes:
+                        raise RuntimeError('tool transcript byte limit')
+                    payload = await self._custom_tools[call.name].invoke(call.arguments,
+                        self._tools.invocation_context(deadline),
+                        remaining_output_bytes=limits.max_tool_bytes - tool_bytes)
+                    check_deadline()
+                elif call.name == 'trace_memory' and (type(seed) is not int or seed not in known_facts):
                     payload = _denied('search_for_seed_first')
                 elif call.name == 'read_memory' and (type(call.arguments.get('chunk_id')) is not int
                         or call.arguments['chunk_id'] not in known_chunks):
@@ -278,8 +289,8 @@ class EvidenceToolLoop:
                      'invalid_computation', 'ambiguous_quote', 'numeric_literal_required'}
             # Model-authored IDs/unknown names can contain source text.
             # Keep them only in the transient provider protocol.
-            name = cast(Literal['search_memory', 'trace_memory', 'read_memory', 'compute_memory', 'unknown_tool'],
-                        call.name if call.name in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory') else 'unknown_tool')
+            name = (call.name if call.name in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory')
+                    or call.name in self._custom_tools else 'unknown_tool')
             outcomes.append(ToolOutcome(call_id=f'tool-{len(outcomes) + 1}', name=name, status=packet['status'],
                 error=error if isinstance(error, str) and error in codes else None,
                 output_bytes=len(payload.encode()), origin=origin, reused=reused))
@@ -303,7 +314,7 @@ class EvidenceToolLoop:
                 if len(_json(transcript).encode()) > limits.max_transcript_bytes:
                     raise RuntimeError('tool transcript byte limit')
                 enabled = calls < limits.max_tool_calls and rounds < limits.max_tool_rounds
-                schemas = self._tools.openai() if enabled else []
+                schemas = (self._tools.openai() + [tool.openai() for tool in self._custom_tools.values()]) if enabled else []
                 if not known_facts:
                     schemas = [row for row in schemas if cast(dict[str, object], row['function'])['name'] != 'trace_memory']
                 if not known_chunks:

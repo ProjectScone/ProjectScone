@@ -12,7 +12,10 @@ import math
 import re
 import time
 from collections.abc import Mapping
-from typing import Self
+from typing import TYPE_CHECKING, Self
+
+if TYPE_CHECKING:
+    from ..agents.custom_tools import ToolContext
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -89,6 +92,11 @@ class ScopedMemoryTools:
             raise ValueError("max_result_bytes must be in 512..64000")
         self._memory, self._space, self._excluded = memory, space, exclude_session_id
         self._timeout, self._max_bytes = float(timeout_s), max_result_bytes
+
+    def invocation_context(self, deadline: float) -> ToolContext:
+        """A detached host scope for explicitly registered application tools."""
+        from ..agents.custom_tools import ToolContext
+        return ToolContext(self._space, self._scope, self._excluded, deadline)
 
     def anthropic(self) -> list[dict[str, object]]:
         schemas: list[dict[str, object]] = [{"name": "search_memory", "description": "Search authorized retained passages and quoted facts. Scores rank matches; they are not confidence.",
