@@ -39,7 +39,8 @@ def test_usage_is_detached_immutable_and_per_call_bounded():
     assert output({'calls': [report]*17}, model_calls=17).usage.total_tokens == 17*10**9
 
 
-@pytest.mark.parametrize('bad', [True, -1, 1.5, '12', 10**9+1, float('inf'), float('nan'), 10**10000])
+@pytest.mark.parametrize('bad', [True, -1, 1.5, '12', 10**9+1, float('inf'), float('nan'),
+    pytest.param(10**10000, id='oversized-integer')])
 def test_report_counts_refuse_non_native_values(bad):
     with pytest.raises(SconeError):
         output({'calls': [{**REPORT, 'prompt_tokens': bad}]})
