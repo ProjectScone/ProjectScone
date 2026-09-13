@@ -68,11 +68,38 @@ async def test_one_subject_is_not_cut_for_no_reason():
 
 async def test_the_size_target_still_bounds_a_chunk():
     """Meaning decides *where* to cut, never whether to. A long passage
-    on one subject is still cut, or the target would be a suggestion."""
+    on one subject is still cut, or the target would be a suggestion.
+
+    What this pins is that a long passage **is** cut: replacing the
+    target with a hundred times itself fails here.
+
+    It does not pin the ceiling. This fixture is sentences short enough
+    that no tail-merge happens, so it passes just as well against
+    `widest(target) == target` -- a mutation proof says so. The ceiling
+    is pinned by `test_one_long_sentence_keeps_the_same_bound`, which
+    reaches the junction this one cannot. Recorded because a test named
+    for a bound that does not exercise it is how the prose came to
+    promise a bound the code did not keep.
+    """
+    from scone_memory.ingestion.semantic_chunks import widest
+
     text = ONE * 12
     spans = await semantic_spans(text, HashEmbedder(), target=300)
     assert len(spans) > 1
-    assert all(s.end - s.start <= 300 * 2 for s in spans), [s.end - s.start for s in spans]
+    assert all(s.end - s.start <= widest(300) for s in spans), [s.end - s.start for s in spans]
+
+
+async def test_one_long_sentence_keeps_the_same_bound():
+    """The path with no sentence boundary to cut at. A single sentence
+    one byte over the target is one chunk, because splitting it would
+    leave a one-byte tail; `target + MIN_CHUNK` still holds."""
+    from scone_memory.ingestion.semantic_chunks import widest
+
+    for size in (701, 900, 1500, 4000):
+        spans = await semantic_spans("x" * size, HashEmbedder(), target=700)
+        assert all(s.end - s.start <= widest(700) for s in spans), \
+            (size, [s.end - s.start for s in spans])
+        assert sum(s.end - s.start for s in spans) == size
 
 
 async def test_text_with_one_sentence_is_one_chunk():
@@ -194,3 +221,92 @@ async def test_byte_spans_of_a_semantic_cut_name_their_own_text():
     raw = text.encode()
     for span, converted in zip(spans, byte_spans(text, spans)):
         assert raw[converted.start:converted.end].decode() == text[span.start:span.end]
+
+
+class _Broken:
+    """An embedder that answers wrongly in one specific way."""
+
+    id, dim = "broken", 4
+
+    def __init__(self, answer):
+        self._answer = answer
+
+    async def embed(self, texts):
+        return self._answer(list(texts))
+
+
+@pytest.mark.parametrize("name, answer", [
+    ("nothing at all", lambda texts: []),
+    ("one short", lambda texts: [[1.0] * 4] * (len(texts) - 1)),
+    ("one extra", lambda texts: [[1.0] * 4] * (len(texts) + 1)),
+    ("widths that alternate", lambda texts: [[1.0] if i % 2 else [1.0, 0.0, 0.0, 0.0]
+                                             for i in range(len(texts))]),
+    ("a width it never declared", lambda texts: [[1.0, 0.0]] * len(texts)),
+    ("an empty vector", lambda texts: [[]] * len(texts)),
+    ("not a list", lambda texts: "vectors"),
+    ("infinity", lambda texts: [[float("inf")] * 4] * len(texts)),
+    ("a NaN", lambda texts: [[float("nan")] * 4] * len(texts)),
+])
+async def test_an_embedder_answering_wrongly_is_refused(name, answer):
+    """The failure that must never be silent.
+
+    With no check, an embedder returning nothing yields one span covering
+    the whole text with `subject_changed=False` -- which is *exactly*
+    what a coherent passage returns. Broken provider output would arrive
+    disguised as a finding about the text. Ingestion validates every
+    other embedding call this way; this one did not.
+    """
+    with pytest.raises(ValueError):
+        await semantic_spans(ONE + OTHER, _Broken(answer), target=400)
+
+
+def test_valleys_are_found_in_passes_not_by_walking_out_from_every_gap():
+    """A plateau is the worst case and the likeliest one.
+
+    Walking outward from each gap re-reads the whole flat run every time:
+    measured 1000 gaps 0.059s, 2000 0.198s, 4000 0.780s -- quadratic. A
+    repetitive or zero-vector stream produces exactly that shape, and the
+    input limit allows a great many sentences.
+    """
+    import time
+
+    from scone_memory.ingestion.semantic_chunks import SENSITIVITY, _valleys
+
+    flat = [0.5] * 20000
+    started = time.perf_counter()
+    assert _valleys(flat, SENSITIVITY) == set()
+    assert time.perf_counter() - started < 5.0, "still walking outward from every gap"
+
+
+def test_the_faster_valleys_agree_with_walking_outward():
+    """The refactor's real risk is changing which gaps are boundaries, so
+    this compares against a literal transcription of the outward walk
+    over shapes built to have plateaus, ties and edges."""
+    import random
+
+    from scone_memory.ingestion.semantic_chunks import SENSITIVITY, _valleys
+
+    def by_walking(similar, sensitivity):
+        import statistics
+        if len(similar) < 3:
+            return set()
+        drops = []
+        for index, here in enumerate(similar):
+            left, at = here, index
+            while at > 0 and similar[at - 1] >= left:
+                left, at = similar[at - 1], at - 1
+            right, at = here, index
+            while at < len(similar) - 1 and similar[at + 1] >= right:
+                right, at = similar[at + 1], at + 1
+            drops.append((left - here, right - here))
+        depths = [left + right for left, right in drops]
+        cutoff = statistics.fmean(depths) + sensitivity * statistics.pstdev(depths)
+        return {i for i, (left, right) in enumerate(drops)
+                if left > 0 and right > 0 and left + right >= cutoff}
+
+    rng = random.Random(20260912)
+    for trial in range(300):
+        length = rng.randint(0, 40)
+        # Few distinct values, so plateaus and ties are common rather than rare.
+        similar = [rng.choice([0.0, 0.25, 0.5, 0.75, 1.0]) for _ in range(length)]
+        assert _valleys(similar, SENSITIVITY) == by_walking(similar, SENSITIVITY), similar

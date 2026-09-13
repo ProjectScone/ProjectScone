@@ -50,7 +50,8 @@ import statistics
 from dataclasses import dataclass
 
 from ..core.ports import Embedder
-from .chunker import DEFAULT_TARGET, Span, chunk_spans
+from .chunker import DEFAULT_TARGET, MIN_CHUNK, Span, chunk_spans
+from .vectors import validated_vectors
 
 #: Words that are always followed by a name, so the stop after them
 #: closes a title and not a sentence. Deliberately short: a word listed
@@ -68,6 +69,17 @@ BLOCK = 2
 #: How far above a text's own mean depth a valley must be, in standard
 #: deviations, before it is a boundary. Higher cuts less.
 SENSITIVITY = 1.5
+
+
+def widest(target: int = DEFAULT_TARGET) -> int:
+    """The largest chunk ``semantic_spans`` can return for ``target``.
+
+    A bound that lives only in prose is a bound nobody can check, and
+    this one was described as ``target`` while the code allowed more. A
+    final fragment shorter than ``MIN_CHUNK`` joins its predecessor
+    instead of standing alone, so the real ceiling is that much higher.
+    """
+    return target + MIN_CHUNK
 
 
 @dataclass(frozen=True)
@@ -95,6 +107,13 @@ async def semantic_spans(
     Costs one embedding call for the whole episode, batched over its
     sentences. Offsets are code points, as ``chunk_spans`` returns;
     ``chunker.byte_spans`` converts for storage.
+
+    A chunk is at most ``target + MIN_CHUNK``, not ``target``. A final
+    fragment shorter than ``MIN_CHUNK`` joins its predecessor rather than
+    standing alone as a poor retrieval unit -- ``chunker`` does that
+    deliberately and this inherits it. Saying "the target bounds a chunk"
+    was wrong by up to ``MIN_CHUNK`` bytes, and a bound that does not
+    bind should not be described as one.
     """
     if target <= 0:
         raise ValueError("target must be positive")
@@ -104,7 +123,13 @@ async def semantic_spans(
     if len(sentences) == 1:
         only = sentences[0]
         return _by_size(content, only.start, only.end, target)
-    vectors = await embedder.embed([content[s.start : s.end].strip() for s in sentences])
+    asked = [content[s.start : s.end].strip() for s in sentences]
+    # Checked exactly as every other embedding call in ingestion is.
+    # Unchecked, an embedder returning nothing yields one span over the
+    # whole text with `subject_changed=False` -- indistinguishable from a
+    # genuinely coherent passage, so a broken provider would arrive
+    # disguised as a finding about the text.
+    vectors = validated_vectors(await embedder.embed(asked), len(asked), embedder.dim)
     similar = _block_similarity(vectors, block)
     return _assemble(content, sentences, _valleys(similar, sensitivity), target)
 
@@ -190,6 +215,16 @@ def _valleys(similar: list[float], sensitivity: float) -> set[int]:
     to disagree with, and in evenly repeating text, where every gap looks
     like every other one.
 
+    Computed in two passes rather than by walking outward from every
+    gap. The outward walk re-reads a flat run once per gap, which is
+    quadratic -- measured at 1000 gaps 0.059s, 2000 0.198s, 4000 0.780s
+    -- and a plateau is both the worst case and the likeliest one, since
+    a repetitive or zero-vector stream produces exactly that. The
+    recurrence is exact, not an approximation: walking left from ``i``
+    continues from ``i - 1`` with the same running maximum whenever
+    ``similar[i - 1] >= similar[i]``, which is the definition of
+    ``left[i - 1]``.
+
     It has a cost worth stating plainly: **the first and last gaps can
     never be boundaries**, because each has a side with nothing on it. A
     subject that changes immediately after the opening sentence is not
@@ -198,17 +233,19 @@ def _valleys(similar: list[float], sensitivity: float) -> set[int]:
     for the same reason. Fewer than three gaps means no interior gap at
     all, so a text of three sentences or fewer is never cut by meaning.
     """
-    if len(similar) < 3:
+    size = len(similar)
+    if size < 3:
         return set()
-    drops: list[tuple[float, float]] = []
-    for index, here in enumerate(similar):
-        left, at = here, index
-        while at > 0 and similar[at - 1] >= left:
-            left, at = similar[at - 1], at - 1
-        right, at = here, index
-        while at < len(similar) - 1 and similar[at + 1] >= right:
-            right, at = similar[at + 1], at + 1
-        drops.append((left - here, right - here))
+    highest_left = [similar[0]] * size
+    for index in range(1, size):
+        highest_left[index] = (highest_left[index - 1]
+                               if similar[index - 1] >= similar[index] else similar[index])
+    highest_right = [similar[-1]] * size
+    for index in range(size - 2, -1, -1):
+        highest_right[index] = (highest_right[index + 1]
+                                if similar[index + 1] >= similar[index] else similar[index])
+    drops = [(highest_left[index] - here, highest_right[index] - here)
+             for index, here in enumerate(similar)]
     depths = [left + right for left, right in drops]
     cutoff = statistics.fmean(depths) + sensitivity * statistics.pstdev(depths)
     return {
