@@ -12,7 +12,7 @@ from itertools import chain
 from typing import Optional
 
 from ..backends.blobs import BlobStore
-from . import attachment_archive, archive_supersession
+from . import attachment_archive, archive_supersession, archive_inventory
 from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput
 from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact, FactLink
@@ -127,11 +127,12 @@ async def export_records(documents: DocumentStore, space: str, *, wrote_at: str 
     ``left_behind`` counts what the space holds that this profile does not
     carry. The host counts it, because the document store is not where
     those things live."""
+    await archive_inventory.prepare(documents, space)
     counts = await documents.counts(space)
     yield {"type": "archive", "profile": ARCHIVE_PROFILE, "space": space, "wrote_at": wrote_at,
            "carries": list(ARCHIVE_CARRIES),
            "not_carried": {name: count for name, count in (left_behind or {}).items() if count}}
-    for episode in await documents.recent_episodes(space, max(counts.episodes, 1)):
+    async for episode in archive_inventory.episodes(documents, space, counts.episodes):
         yield {
             "type": "episode",
             "space": space,
@@ -144,23 +145,14 @@ async def export_records(documents: DocumentStore, space: str, *, wrote_at: str 
             "metadata": dict(episode.metadata),
             "created_at": episode.created_at,
         }
-    facts = await documents.list_facts(space, include_closed=True)
+    facts = await archive_inventory.facts(documents, space)
     for fact in facts:
         yield {"type": "fact", **fact.model_dump(exclude={"space"})}
-    # A relation is part of the ledger's history, so it moves with it;
-    # each link is read from both ends and written once.
-    seen: set[int] = set()
-    for fact in facts:
-        for link in await documents.fact_links(space, fact.fact_id):
-            if link.link_id not in seen:
-                seen.add(link.link_id)
-                yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
-    # A restatement's later start is history too: without it a backfill
-    # in the new store would erase a value that returned.
-    store = affirmation_store(documents)
-    if store is not None:
-        for affirmation in await store.space_affirmations(space):
-            yield {"type": "affirmation", **affirmation.model_dump(exclude={"space"})}
+    # Read each stored relationship once, even when an endpoint is missing.
+    for link in await archive_inventory.links(documents, space):
+        yield {"type": "fact_link", **link.model_dump(exclude={"space"})}
+    for affirmation in await archive_inventory.affirmations(documents, space):
+        yield {"type": "affirmation", **affirmation.model_dump(exclude={"space"})}
 
 
 async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[Mapping], *,

@@ -72,3 +72,5 @@ present; these counts do not represent newly allocated storage.
 Base64 is an encoding, not encryption. The export API yields records and the CLI
 writes JSON lines to stdout. Store sensitive archives through your encrypted
 storage or backup pipeline; the archive format does not manage encryption keys.
+
+Source enumeration uses [complete archive inventories](complete-archive-export.md), including backend result-window handling and partial-output limits.

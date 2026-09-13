@@ -62,3 +62,5 @@ archive a lossless full backup: existing target tombstone and exclusion policies
 source-reference omissions, untransported jobs/events/configuration, and
 cross-language profile limitations still apply. See
 [attachment archives](attachment-archives.md) and [space movement](space-merge.md).
+
+Source-side enumeration uses [complete archive inventories](complete-archive-export.md); destination replacement validation retains its separate 100,000-fact bound.
