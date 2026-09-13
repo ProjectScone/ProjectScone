@@ -174,6 +174,10 @@ The loop's deadline and cancellation contract remain in effect. Validate again
 before delayed publication using `await result.output.validate()`; this validator
 uses the original run deadline and is not a durable checkpoint validator.
 
+For live invocation metadata, pass an optional
+[`AgentEventStream`](agent-execution-events.md) to `selected.run`. It reports the
+chosen model, operation progress and terminal state without exposing payloads.
+
 ## Bind workflow checkpoints to the selected model
 
 `selected.fingerprint` hashes the agent instructions, allowed/default models,
