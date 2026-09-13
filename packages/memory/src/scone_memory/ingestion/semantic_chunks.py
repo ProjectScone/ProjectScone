@@ -122,16 +122,71 @@ async def semantic_spans(
         return []
     if len(sentences) == 1:
         only = sentences[0]
-        return _by_size(content, only.start, only.end, target)
+        return _bounded(content, _by_size(content, only.start, only.end, target), target)
     asked = [content[s.start : s.end].strip() for s in sentences]
+    # Snapshot before the await, not after. Read afterwards, `embedder.dim`
+    # is whatever it became, so a response is validated against the width
+    # the embedder ended up claiming rather than the one it was asked
+    # under -- and a 2-wide embedder that answers 3-wide passes.
+    identity, width = embedder.id, embedder.dim
     # Checked exactly as every other embedding call in ingestion is.
     # Unchecked, an embedder returning nothing yields one span over the
     # whole text with `subject_changed=False` -- indistinguishable from a
     # genuinely coherent passage, so a broken provider would arrive
     # disguised as a finding about the text.
-    vectors = validated_vectors(await embedder.embed(asked), len(asked), embedder.dim)
+    vectors = validated_vectors(await embedder.embed(asked), len(asked), width)
+    if embedder.id != identity or embedder.dim != width:
+        raise ValueError('embedding identity changed while chunking')
     similar = _block_similarity(vectors, block)
-    return _assemble(content, sentences, _valleys(similar, sensitivity), target)
+    return _bounded(content, _assemble(content, sentences, _valleys(similar, sensitivity), target),
+                    target)
+
+
+def _bounded(text: str, spans: list[Boundary], target: int) -> list[Boundary]:
+    """Enforce ``widest(target)`` on the spans, rather than assert it.
+
+    A span can only exceed the ceiling by reaching across whitespace.
+    ``chunk_spans`` bounds the text it puts in a chunk, but its tail merge
+    joins a short ending to its predecessor *whatever lies between them*
+    -- so `'one.' + 2000 spaces + 'two.' + 2000 spaces + 'three.'` came
+    back as a 2011-character span holding twelve characters of text. The
+    fix is to undo that reach at the gap it crossed, which is exactly the
+    state before the merge.
+
+    A bound that the code enforces is worth more than one the prose
+    claims, and this module has now got that wrong twice.
+    """
+    ceiling = widest(target)
+    settled: list[Boundary] = []
+    for span in spans:
+        settled.extend(_unreach(text, span, ceiling))
+    return settled
+
+
+def _unreach(text: str, span: Boundary, ceiling: int) -> list[Boundary]:
+    """One span, split at its longest run of whitespace until it fits."""
+    if span.end - span.start <= ceiling:
+        return [span]
+    body = text[span.start : span.end]
+    widest_start, widest_end, index = -1, -1, 0
+    while index < len(body):
+        if not body[index].isspace():
+            index += 1
+            continue
+        run = index
+        while run < len(body) and body[run].isspace():
+            run += 1
+        if run - index > widest_end - widest_start:
+            widest_start, widest_end = index, run
+        index = run
+    if widest_start < 0:
+        # No whitespace to give back: `chunk_spans` bounds text by the
+        # target, so this is unreachable -- and returning the span whole
+        # is the honest answer rather than cutting a word in half.
+        return [span]
+    left = Boundary(span.start, span.start + widest_start, False)
+    right = Boundary(span.start + widest_end, span.end, span.subject_changed)
+    return _unreach(text, left, ceiling) + _unreach(text, right, ceiling)
 
 
 def _sentences(text: str) -> list[Span]:
@@ -282,19 +337,23 @@ def _assemble(
 def _by_size(text: str, start: int, end: int, target: int) -> list[Boundary]:
     """One sentence longer than the target, cut the old way. Meaning has
     nothing to say inside a single sentence, and a target that a long
-    sentence could ignore would not be a bound at all."""
-    if end - start <= target:
+    sentence could ignore would not be a bound at all.
+
+    Each span is exactly what ``chunk_spans`` chose. An earlier version
+    stretched the last one out to ``end`` so that the spans would *tile*
+    the text -- and an unbounded run of whitespace then rode into a chunk
+    with it, which is how ``'x' * 700 + ' ' * 1000`` became a single
+    1700-character span against a ceiling of 820. Whitespace between
+    chunks belongs to nobody; ``chunk_spans`` has always left it behind,
+    and the invariant that actually holds is that nothing **but**
+    whitespace falls between two chunks.
+    """
+    if end - start <= widest(target):
         return [Boundary(start, end, False)]
     inner = chunk_spans(text[start:end], target)
     if not inner:
         return [Boundary(start, end, False)]
-    spans: list[Boundary] = []
-    edge = start
-    for position, span in enumerate(inner):
-        stop = end if position == len(inner) - 1 else start + span.end
-        spans.append(Boundary(edge, stop, False))
-        edge = stop
-    return spans
+    return [Boundary(start + span.start, start + span.end, False) for span in inner]
 
 
 def _centre(vectors: list[list[float]]) -> list[float]:

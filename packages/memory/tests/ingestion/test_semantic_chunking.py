@@ -38,11 +38,14 @@ async def test_a_span_is_exactly_the_bytes_of_its_source():
             covered[index] += 1
     assert all(n == 1 for index, n in enumerate(covered) if not text[index].isspace())
     assert all(n <= 1 for n in covered)
-    # Contiguous, not merely non-overlapping: chunks tile the text, so
-    # each one begins where the last ended and no byte falls between two
-    # of them. Counting characters alone cannot tell a hole from a
-    # separator, and passed against spans that ended a character short.
-    assert [s.end for s in spans[:-1]] == [s.start for s in spans[1:]]
+    # Anything falling between two chunks is whitespace. The earlier
+    # version of this demanded they *tile* -- end exactly where the next
+    # begins -- which is a stronger invariant than `chunk_spans` itself
+    # keeps, since it skips the separator between chunks. Holding the
+    # stronger line here is what forced an unbounded whitespace run to be
+    # re-attached to a chunk, and that is what made the size ceiling
+    # false. The real claim is that nothing but whitespace is uncovered.
+    assert all(not text[a.end:b.start].strip() for a, b in zip(spans, spans[1:]))
     assert "".join(text[s.start:s.end] for s in spans).replace(" ", "") \
         == text.replace(" ", "").replace("\n", "")
 
@@ -310,3 +313,54 @@ def test_the_faster_valleys_agree_with_walking_outward():
         # Few distinct values, so plateaus and ties are common rather than rare.
         similar = [rng.choice([0.0, 0.25, 0.5, 0.75, 1.0]) for _ in range(length)]
         assert _valleys(similar, SENSITIVITY) == by_walking(similar, SENSITIVITY), similar
+
+
+async def test_a_run_of_whitespace_cannot_push_a_chunk_past_the_ceiling():
+    """`widest()` has to be true of the spans, not just of their text.
+
+    `'x' * 700 + ' ' * 1000` produced a single 1700-character span,
+    because the trailing whitespace was re-attached to the last chunk to
+    keep the spans tiling. Whitespace between chunks belongs to nobody --
+    that is what `chunk_spans` already does -- and a ceiling that a
+    thousand spaces can breach is not a ceiling.
+    """
+    from scone_memory.ingestion.semantic_chunks import widest
+
+    for text in ("x" * 700 + " " * 1000,
+                 "x" * 700 + " " * 1000 + "y" * 700,
+                 "x" + " " * 3000,
+                 "one. " + " " * 2000 + "two. " + " " * 2000 + "three."):
+        spans = await semantic_spans(text, HashEmbedder(), target=700)
+        assert all(s.end - s.start <= widest(700) for s in spans), \
+            (text[:12], [s.end - s.start for s in spans])
+        assert all(not text[a.end:b.start].strip() for a, b in zip(spans, spans[1:]))
+        assert "".join(text[s.start:s.end] for s in spans).replace(" ", "") \
+            == text.replace(" ", "")
+
+
+class _Drifting:
+    """An embedder whose identity changes while the request is in flight."""
+
+    def __init__(self, *, ident="steady", dim=4, becomes=None, widens=None):
+        self.id, self.dim = ident, dim
+        self._becomes, self._widens = becomes, widens
+
+    async def embed(self, texts):
+        width = self.dim if self._widens is None else self._widens
+        if self._becomes is not None:
+            self.id = self._becomes
+        if self._widens is not None:
+            self.dim = self._widens
+        return [[1.0] * width for _ in texts]
+
+
+@pytest.mark.parametrize("name, embedder", [
+    ("its id changes mid-call", _Drifting(becomes="someone-else")),
+    ("its width changes mid-call", _Drifting(dim=2, widens=3)),
+])
+async def test_an_embedder_that_changes_identity_mid_call_is_refused(name, embedder):
+    """Read after the await, `embedder.dim` is whatever it became -- so a
+    response validated against it validates against the wrong thing.
+    Ingestion snapshots both before the request; this must too."""
+    with pytest.raises(ValueError):
+        await semantic_spans(ONE + OTHER, embedder, target=400)
