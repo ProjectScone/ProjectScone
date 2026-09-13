@@ -126,13 +126,19 @@ async def test_many_valued_predicates_are_configured_by_name_and_reach_every_eng
     from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
     from scone_memory import HashEmbedder
 
+    from scone_memory.core.extracted import MANY_VALUED
+
     settings = Settings.from_env({"SCONE_MANY_VALUED": " knows, Owns ,"})
     assert settings.many_valued == ("knows", "Owns")
     engine = await build_engine(settings)
-    assert engine.many_valued == frozenset({"knows", "owns"})
-    assert Settings.from_env({}).many_valued == () and (await build_engine(Settings.from_env({}))).many_valued == frozenset()
+    # What a person configures sits beside what the framework extracts,
+    # which is many-valued by nature and needs no setting.
+    assert engine.many_valued - MANY_VALUED == frozenset({"knows", "owns"}) and MANY_VALUED <= engine.many_valued
+    unconfigured = await build_engine(Settings.from_env({}))
+    assert Settings.from_env({}).many_valued == () and unconfigured.many_valued == MANY_VALUED
     assert "many_valued" in ENGINE_SETTINGS
-    assert (await build_in_process_engine(settings, HashEmbedder())).many_valued == frozenset({"knows", "owns"})
+    in_process = await build_in_process_engine(settings, HashEmbedder())
+    assert in_process.many_valued - MANY_VALUED == frozenset({"knows", "owns"})
 
 
 async def test_table_context_embedding_policy_reaches_standard_and_in_process_engines():
