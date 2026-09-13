@@ -15,6 +15,7 @@ from typing import Literal
 from uuid import uuid4
 
 from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
+from ..agents.model_lifecycle import owned_model
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
@@ -270,15 +271,17 @@ class TextConversation:
     async def _reply(self, messages, on_text):
         token = _OWNER.set(self)
         try:
-            async with asyncio.timeout(self._timeout):
+            async with asyncio.timeout(self._timeout) as budget:
                 turn_id = uuid4().hex
                 user_id = await self._record(turn_id, "user", messages[-1]["content"])
-                text, receipt, answer_review, evidence_answer = await self._execute(messages, on_text)
+                text, receipt, answer_review, evidence_answer = await self._execute(messages, on_text, budget.when())
                 complete = [*messages, {"role": "assistant", "content": text}]
                 if _bytes(complete) > self._max_history:
                     raise RuntimeError("model reply exceeded the conversation history byte limit")
                 if self._closed or asyncio.current_task().cancelling():
                     raise asyncio.CancelledError()
+                if budget.when() is not None and asyncio.get_running_loop().time() >= budget.when():
+                    raise TimeoutError('conversation deadline exceeded')
                 assistant_id = await self._record(turn_id, "assistant", text,
                     extractive=evidence_answer is not None and evidence_answer.get("status") != "skipped",
                     evidence_abstention=evidence_answer is not None and evidence_answer.get("source_status") == "none",
@@ -295,9 +298,9 @@ class TextConversation:
         finally:
             _OWNER.reset(token)
 
-    async def _execute(self, messages, on_text):
+    async def _execute(self, messages, on_text, deadline=None):
         if self._tool_factory is not None:
-            return await self._execute_tools(messages, on_text)
+            return await self._execute_tools(messages, on_text, deadline)
         request, receipt = await self._context.prepare(messages)
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
@@ -324,27 +327,45 @@ class TextConversation:
         await self._emit_final(messages, text, on_text)
         return text, receipt, answer_review, None
 
-    async def _execute_tools(self, messages, on_text):
+    async def _execute_tools(self, messages, on_text, deadline=None):
+        def check_active():
+            current = asyncio.current_task()
+            if self._closed or (current is not None and current.cancelling()):
+                raise asyncio.CancelledError()
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError('conversation deadline exceeded')
+
+        check_active()
         factory = self._tool_factory
         if factory is None:
             raise RuntimeError('tool model unavailable')
         try:
             model = factory()
-            if not callable(getattr(model, 'complete', None)):
-                raise ValueError()
         except Exception:
             raise RuntimeError('tool model unavailable') from None
-        tools = ScopedMemoryTools(self._memory, self._space, scope=self._scope,
-                                  exclude_session_id=self._session_id, enable_computation=self._tool_compute)
-        result = await EvidenceToolLoop(model, tools, limits=self._tool_limits,
-                                       initial_search=self._tool_initial_search).run(messages)
+        async with owned_model(model) as closed:
+            check_active()
+            try:
+                if not callable(getattr(model, 'complete', None)):
+                    raise ValueError()
+            except Exception:
+                raise RuntimeError('tool model unavailable') from None
+            tools = ScopedMemoryTools(self._memory, self._space, scope=self._scope,
+                                      exclude_session_id=self._session_id, enable_computation=self._tool_compute)
+            result = await EvidenceToolLoop(model, tools, limits=self._tool_limits,
+                                           initial_search=self._tool_initial_search).run(messages)
+        check_active()
+        if closed and not await result.validate():
+            raise RuntimeError('tool evidence changed during model cleanup')
         receipt = tool_context_receipt(result, self._session_id)
         text, answer_review = result.text, None
         if self._answer_reviewer is not None:
             text, answer_review = await self._review_tool_draft(messages[-1]['content'], result)
         if len(text.encode('utf-8')) > self._tool_limits.max_reply_bytes:
             raise RuntimeError('tool reply exceeded the byte limit')
+        check_active()
         await self._emit_final(messages, text, on_text)
+        check_active()
         if not await result.validate():
             raise RuntimeError('tool evidence changed before capture')
         return text, receipt, answer_review, None
