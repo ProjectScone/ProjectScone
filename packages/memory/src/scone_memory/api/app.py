@@ -486,7 +486,8 @@ def create_app(
         has_vision = vision_available is not None and vision_available()
         if has_vision:
             features["images.understand"] = True
-        features["documents.video.understand"] = bool(has_vision and vision_factory is not None and document_video is not None)
+        if has_vision and vision_factory is not None and document_video is not None:
+            features["documents.video.understand"] = True
         # Manual passes must share a server-side guard with scheduled work
         # before the console advertises them as an available workflow.
         return {"schema_version": 1, "implementation": "python", "features": features}
