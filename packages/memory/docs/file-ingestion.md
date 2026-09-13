@@ -526,6 +526,19 @@ role still determines whether DELETE is allowed.
   citing facts and links retained. It does not reserve a snapshot against writes.
 - `DELETE /v1/episodes/{id}` removes the source through durable cleanup and
   returns a receipt. Repeating DELETE can finish an interrupted cleanup.
+  The claims and links that cited the source stand and are listed. With
+  `?with_claims=exclude` (`forget --with-claims exclude`;
+  `await memory.forget(space, id, with_claims="exclude")`) each ledger
+  claim that cited or affirmed the source and that no retained source still
+  supports is excluded from recall with a reason naming the episode --
+  a reversible policy (`include` undoes it), never an erasure: interval,
+  history and quote stay. A claim another retained source affirms, one
+  stated on its own authority, a proposed or declined one, and one already
+  excluded stay and are listed under `claims_kept_other_support`,
+  `claims_kept_not_in_ledger` and `claims_already_excluded`; `claims_policy`
+  says which path ran. Nothing is excluded before the source is gone, so an
+  interrupted cleanup leaves the default and a repeat finishes the job. Any
+  other value of `with_claims` is refused before the engine is asked.
 - `GET /v1/episodes/{id}/forget-status` reads `present`, `pending`, or `forgotten`
   without starting or resuming cleanup. The engine equivalent is
   `await memory.forget_status(space, episode_id)`.
