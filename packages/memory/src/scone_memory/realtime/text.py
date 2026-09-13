@@ -11,7 +11,10 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing
 from contextvars import ContextVar
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..memory.catalog import ProfilePolicy
 from uuid import uuid4
 
 from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
@@ -140,7 +143,9 @@ class TextConversation:
                  evidence_answer_policy: Literal["when_available", "required"] = "when_available",
                  tool_model_factory: Callable[[], ToolModel] | None = None,
                  tool_limits: ToolLoopLimits | None = None, tool_initial_search: bool = False,
-                 tool_compute: bool = False, history_policy: str = "refuse"):
+                 tool_compute: bool = False, history_policy: str = "refuse",
+                 standing_profile: "ProfilePolicy | None" = None, profile_limit: int = 10,
+                 max_profile_bytes: int = 1000):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
@@ -220,7 +225,8 @@ class TextConversation:
         self._scope = scope
         self._context = MemoryContext(memory, space, session_id, **scope.kwargs(),
                                       adaptive_retriever=adaptive_retriever, recall_timeout=recall_timeout,
-                                      neighbor_chunks=neighbor_chunks)
+                                      neighbor_chunks=neighbor_chunks, standing_profile=standing_profile,
+                                      profile_limit=profile_limit, max_profile_bytes=max_profile_bytes)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task[dict] | None = None
         self._closed = False
