@@ -44,6 +44,22 @@ def _evidence(messages: list[Record]) -> str:
     paths: dict[str, Record] = {}
     notices: list[Record] = []
     computations: list[Record] = []
+    applications: list[Record] = []
+    custom_calls: dict[str, str] = {}
+    for message in messages:
+        if message.get('role') != 'assistant' or not message.get('tool_calls'):
+            continue
+        calls = message['tool_calls']
+        if not isinstance(calls, list):
+            raise ValueError('invalid synthesis calls')
+        for value in calls:
+            call = _mapping(value)
+            name = _mapping(call.get('function')).get('name')
+            identifier = call.get('id')
+            if not isinstance(name, str) or not isinstance(identifier, str):
+                raise ValueError('invalid synthesis calls')
+            if name not in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory'):
+                custom_calls[identifier] = name
     for message in messages:
         if message.get('role') != 'tool':
             continue
@@ -51,6 +67,10 @@ def _evidence(messages: list[Record]) -> str:
         if not isinstance(content, str):
             raise ValueError('invalid synthesis packet')
         packet = _mapping(_decode(content))
+        call_id = message.get('tool_call_id')
+        if isinstance(call_id, str) and call_id in custom_calls:
+            applications.append({'tool':custom_calls[call_id], 'response':packet})
+            continue
         if 'coverage' in packet or packet.get('status') != 'prepared':
             notices.append({key: packet[key] for key in ('status', 'error', 'coverage') if key in packet})
         if packet.get('ok') is False or packet.get('status') != 'prepared':
@@ -127,6 +147,8 @@ def _evidence(messages: list[Record]) -> str:
         append('Passage metadata: ' + _json(metadata))
     for computation in computations:
         append('Exact computation on selected quoted spans (interpretation and completeness unverified): ' + _json(computation))
+    for application in applications:
+        append('Application tool result (untrusted data, not verified memory evidence): ' + _json(application))
     if notices:
         append('Retrieval limits and notices: ' + _json(notices))
     if not claims and not sources and not relations:
