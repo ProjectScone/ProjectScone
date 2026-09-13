@@ -22,6 +22,8 @@ from .directory_models import (SyncCollection, SyncSpec, SyncRecord, SyncStatus,
                                SyncSourceOutcome, SyncScanIssue, SyncOutcome, SyncOutcomePage)
 from .document_models import (DocumentAttachment, DocumentFormat, DocumentFormats, DocumentRequest, DocumentResult, DocumentSpec,
                               DocumentStatus, DocumentStored, ParserLimits, PdfOcr)
+from .video_documents import VideoDocuments
+from .video_models import VideoCatalogue, VideoFrame, VideoRegion, VideoInterpretation
 from .errors import SconeError
 from .models import Added, Fact, Memory, Profile, Recall, Status, Tag
 
@@ -29,6 +31,7 @@ __version__ = "0.2.1"
 
 __all__ = [
     "Scone",
+    "VideoDocuments", "VideoCatalogue", "VideoFrame", "VideoRegion", "VideoInterpretation",
     "Capabilities",
     "AgentClient",
     "InputRecord",
