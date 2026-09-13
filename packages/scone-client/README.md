@@ -544,3 +544,49 @@ not answer-token streaming.
 `tests/test_native_agent_history_stream.py` follows a real run to completion over
 a loopback server, checks positions are contiguous and no private text is
 delivered, then restarts the server and resumes from the kept cursor.
+
+### The answer as it is written
+
+Hosts advertising `agents.text_stream` publish the text a running step is
+writing. `stream_answer()` opens that route and yields events as the host
+publishes them:
+
+```python
+from scone import Ended, Gap, Terminal, TextDelta, Withdrawn
+
+with agents.stream_answer("run-1", "answer") as stream:
+    for event in stream:
+        if isinstance(event, TextDelta):
+            print(event.text, end="", flush=True)
+        elif isinstance(event, Withdrawn):
+            print("\n[what was written so far was not the answer]")
+        elif isinstance(event, Gap):
+            print(f"\n[fell behind: resuming at {event.next_sequence}]")
+        elif isinstance(event, Terminal):
+            print(f"\n[run {event.status}; read the receipt]")
+        elif isinstance(event, Ended):
+            print(f"\n[{event.reason}]")
+cursor = stream.cursor  # the last sequence seen, for after= on a reconnect
+```
+
+`TextDelta` carries one delta and its sequence; `Withdrawn` says text
+streamed before a tool turn was not the answer; `Gap` says the reader fell
+behind the host's bounded window and names the next sequence it can read;
+`Terminal` says the run has a receipt (`read_receipt` is always true);
+`Ended` says the observation window closed. Sequences are contiguous from
+the cursor -- a gap is the only sanctioned jump -- and a frame's SSE `id`
+must name its sequence, because it is what a reconnect sends back. A frame
+with fields beyond its own, a terminal without a receipt, an unknown kind,
+a stream cut mid-frame, or a host that goes quiet past the client's
+`timeout` raises `SconeError`; an `error` frame raises
+`SconeError("answer stream refused: <reason>")`.
+
+What arrives is provisional. The host keeps it in memory only while the
+step runs; after the run, or after a restart, a reader is given `Terminal`
+and no text, and `agents.result()` returns the verified answer. Prompts,
+tool arguments and reasoning are never in this stream: a host whose model
+turn cannot stream, or whose answer is structured, delivers the accepted
+answer as one delta once it is known.
+
+`tests/test_native_agent_answer_stream.py` follows a real run's answer over
+a loopback server, model to receipt.
