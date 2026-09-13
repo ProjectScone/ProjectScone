@@ -139,3 +139,29 @@ async def test_mapping_leaves_out_an_import_of_something_it_did_not_see(tmp_path
     await mapped(engine, str(tmp_path), "--graph")
     assert not [f for f in await engine.documents.list_facts("default", include_closed=True)
                 if f.predicate == "imports"], "nothing points at a file that is not there"
+
+
+async def test_calls_the_graph_could_not_bind_are_reported(tree):
+    """A map that says "12 claims" and stops reads as a complete graph.
+
+    The calls it could not bind are the difference between "nothing calls
+    this" and "I could not see what calls this", and the summary is the
+    only place a reader finds out. Names, never edges -- the count is a
+    disclosure, and no `calls` fact is written for any of them.
+    """
+    (tree / "app" / "outward.py").write_text(
+        "import json\n"
+        "\n"
+        "def handle(thing):\n"
+        "    thing.run()\n"
+        "    json.dumps({})\n"
+        "    return len(thing)\n",
+        encoding="utf-8")
+    engine = await memory()
+    said = await mapped(engine, str(tree), "--graph")
+    assert "call(s) left unbound" in said, said
+
+    facts = await engine.documents.list_facts("default", include_closed=True)
+    calls = {(f.subject, f.object) for f in facts if f.predicate == "calls"}
+    assert not any("thing.run" in obj or "json.dumps" in obj for _, obj in calls), calls
+    assert not any(obj == "len" for _, obj in calls), calls

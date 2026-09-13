@@ -42,6 +42,7 @@ ASSETS = frozenset("css scss sass less styl png jpg jpeg gif svg webp avif ico b
                    "yaml yml toml wasm txt md mdx woff woff2 ttf otf eot mp4 webm mov mp3 wav "
                    "ogg flac pdf csv graphql gql".split())
 
+import builtins
 import re
 
 from .code import Language, MAX_LINES, _line_starts, declarations
@@ -295,8 +296,42 @@ class CodeClaim:
     end: int
 
 
+#: Names that resolve to nothing in any file and never will. Reporting
+#: `len` and `isinstance` as calls the graph could not bind would bury
+#: the names that matter under noise every Python file produces.
+BUILTINS = frozenset(dir(builtins))
+
+
+def unresolved_calls(content: str, path: str, *, language: Optional[Language]) -> tuple[str, ...]:
+    """The calls this file makes that the graph could not bind, by name.
+
+    ``_calls`` records an edge only where it can name the target, and
+    points at nothing otherwise -- which is right, because an edge nobody
+    can check is worse than no edge. But that leaves "what calls this?"
+    answering with everything it *could* see, and nothing distinguishing
+    a function genuinely called by nobody from one whose callers could
+    not be resolved. This is what says which.
+
+    **Names, never edges.** A name here is a disclosure that something
+    was not seen; it is not a claim about what it refers to, and nothing
+    downstream may treat it as one. The same reason
+    ``entities/affected.py`` carries ``unresolved_imports``.
+
+    Empty for a language with no call reader at all: a brace file claims
+    no calls, so there is no subset it failed to resolve, and listing
+    every call in it would read as a defect in the graph rather than as
+    a reader it never had.
+    """
+    if language != "python":
+        return ()
+    unbound: list[str] = []
+    code_claims(content, path, language=language, _unbound=unbound)
+    return tuple(sorted({name for name in unbound if name not in BUILTINS}))
+
+
 def code_claims(content: str, path: str, *, language: Optional[Language],
-                resolve: Optional["Resolve"] = None) -> tuple[CodeClaim, ...]:
+                resolve: Optional["Resolve"] = None,
+                _unbound: Optional[list[str]] = None) -> tuple[CodeClaim, ...]:
     """What a source file defines, imports and calls, as claims about it.
 
     Names are paths: a module is its path, and a declaration is its path
@@ -402,7 +437,7 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                 walk(child, owner, inside)
 
     walk(tree, path, None)
-    _calls(tree, path, named, say)
+    _calls(tree, path, named, say, _unbound)
     _meaning(content, path, "python", say)
     return tuple(found)
 
@@ -513,7 +548,8 @@ def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[st
     return [one for one in (_stem(path, node.level, one) for one in wanted) if one]
 
 
-def _calls(tree: ast.AST, path: str, named: dict[str, str], say) -> None:
+def _calls(tree: ast.AST, path: str, named: dict[str, str], say,
+           unbound: Optional[list[str]] = None) -> None:
     """Calls between things this file can see, and no others.
 
     A bare name is a call to this file's own declaration when it has one.
@@ -527,8 +563,32 @@ def _calls(tree: ast.AST, path: str, named: dict[str, str], say) -> None:
             if not isinstance(call, ast.Call):
                 continue
             target = _target(call.func, inside, named)
-            if target is not None and target != whole:
+            if target is None:
+                # Collected here rather than walked again elsewhere: a
+                # second copy of the name table is the one that drifts
+                # from this one. A self-call resolves and simply earns no
+                # edge, so it is not counted as unseen.
+                if unbound is not None:
+                    spelt = _spelling(call.func)
+                    if spelt is not None:
+                        unbound.append(spelt)
+            elif target != whole:
                 say(whole, CALLS, target, call.lineno)
+
+
+def _spelling(func: ast.AST) -> Optional[str]:
+    """How a call was written, for one the graph could not bind.
+
+    Only the shapes a reader can act on: a bare name and a dotted chain
+    of them. `f()()` and `things[0].go()` name nothing a person could
+    look up, so they are left out rather than reported as a word.
+    """
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        inner = _spelling(func.value)
+        return f"{inner}.{func.attr}" if inner is not None else None
+    return None
 
 
 def _holders(node: ast.AST, inside: Optional[str]):

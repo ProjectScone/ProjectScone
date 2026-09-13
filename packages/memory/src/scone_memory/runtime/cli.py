@@ -658,7 +658,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     itself. What was read and what was not is said: a map that quietly
     skipped half a repository is worse than no map."""
     from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
-    from ..ingestion.code_graph import record_claims
+    from ..ingestion.code_graph import record_claims, unresolved_calls
 
     root = pathlib.Path(args.directory)
     if not root.is_dir():
@@ -702,6 +702,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         return None
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
+    unbound: set[str] = set()
     for path in found[: args.limit]:
         raw = path.read_bytes()
         cut += len(raw) > args.max_bytes
@@ -719,6 +720,11 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
                                        content=text, path=where, when=engine.clock(),
                                        resolve=resolve)
             claims += said
+            # What the graph could not bind. "12 claims" and nothing else
+            # reads as a complete answer, and the difference between
+            # "nothing calls this" and "I could not see what calls this"
+            # is only visible here.
+            unbound.update(unresolved_calls(text, where, language=code_language(where)))
             # A file with nothing to say and a file this cannot read are
             # different things, and a count that adds them together tells
             # a reader neither.
@@ -736,13 +742,16 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
             parts.append(f"{quiet} had nothing to say")
         if unread:
             parts.append(f"{unread} could not be read")
+        if unbound:
+            parts.append(f"{len(unbound)} call(s) left unbound")
     if len(found) > args.limit:
         parts.append(f"{len(found) - args.limit} left unread of {len(found)}")
     if cut:
         parts.append(f"{cut} read only to {args.max_bytes} bytes")
     if getattr(args, "json", False):
         print(_ledger_json({"read": read, "deduplicated": again, "claims": claims, "quiet": quiet,
-                            "unread": unread, "found": len(found), "limit": args.limit,
+                            "unread": unread, "unbound_calls": sorted(unbound),
+                            "found": len(found), "limit": args.limit,
                             "cut": cut}), file=out)
     else:
         print("map: " + ", ".join(parts), file=out)
