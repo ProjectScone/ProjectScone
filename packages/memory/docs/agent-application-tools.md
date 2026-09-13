@@ -196,6 +196,38 @@ Real memory evidence is still revalidated before the answer is returned.
 
 ## Budgets, failures and saved runs
 
+### Return a tool result directly
+
+Set `return_direct=True` on either `AgentTool(...)` or `function_tool(...)` to
+finish a turn with that tool's successful result. The model selects the tool;
+the framework then returns the result without another model request or rewrite.
+For example, `function_tool(multiply, revision="1", context_parameter="context",
+return_direct=True)` returns the function's JSON object as the final answer.
+String results retain their exact text; other JSON values are compact JSON.
+Empty strings still fail the final nonempty-answer check.
+
+The default is `False`. Successful direct return removes the final model call;
+it does not estimate token savings or synthesize a usage report for that call.
+Changing this flag changes the saved agent binding. Explicit `False` preserves
+the historical registration format and identity.
+
+Calls in one model response execute in order. After the first successful direct
+result, later calls receive `direct_return` denials and do not execute. Earlier
+calls retain their outcomes and evidence. Denied invalid arguments do not finish
+the turn; exceptions and uncertain outcomes keep the existing stop/no-retry
+behavior. If a successful direct result fails its final format or size check,
+it is withheld and later calls remain skipped; the framework does not ask a
+model to repair or rewrite it.
+
+Direct results still obey reply/transcript/tool-byte limits, deadlines, and
+the caller's `AnswerRequirements`. Retained memory evidence is revalidated
+before publication and can be checked again later. Application results remain
+unverified data, even if their fields claim otherwise. A handoff workflow still
+requires its existing `{ "answer": ..., "handoff_to": ... }` decision envelope;
+direct tools used there must supply that contract, including any final answer
+schema. Direct return finishes the current agent turn, not the entire task DAG
+or every subsequent handoff selected by a valid decision.
+
 Custom calls share the existing call, round, transcript, output-byte and turn
 deadline budgets. Arguments have a 16,000-byte limit. Each result wrapper has a
 16,000-byte default cap, configurable up to 64,000 bytes, and must also fit the
