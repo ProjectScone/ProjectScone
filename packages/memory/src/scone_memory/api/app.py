@@ -36,6 +36,8 @@ from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as 
 from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
+from ..retrieval.receipts import staged
+from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
 from . import file_documents, pdf_documents
 from .responses import LedgerJSONResponse
@@ -449,6 +451,9 @@ def create_app(
             "recall": True, "recall.conditions": True, "recall.evidence_graph": True, "recall.graph_analysis": True, "facts.read": True, "facts.review": True,
             "recall.candidate_budget": True, "recall.reranking": engine.reranker is not None,
             "recall.structural_context": True,
+            # Both of these were reachable from the CLI only, which made
+            # them features the HTTP consumer did not have.
+            "recall.window": True, "recall.code_context": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -466,6 +471,7 @@ def create_app(
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True,
+            "recall.withhold": True,
             "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
@@ -866,23 +872,94 @@ def create_app(
         evidence_graph: bool = False,
         graph_analysis: bool = False,
         candidate_limit: Optional[int] = Query(default=None, ge=1, le=1000),
+        withhold_kinds: Optional[str] = Query(
+            default=None, alias="withhold",
+            description="Withhold matches of these kinds from the answer, comma separated "
+                        "(email,phone,ip,card,secret). A net of patterns, never a guarantee: "
+                        "nothing withheld is not a finding that there is nothing to find."),
         rerank: bool = True,
+        window: int = Query(default=0, ge=0, le=MAX_WINDOW,
+                            description="Widen every returned passage by this many bytes either "
+                                        "side, read from the episode. 0 leaves them as indexed."),
+        code_context: bool = Query(default=False,
+                                   description="Quote the declaration's signature and the file's "
+                                               "imports beside a code passage, with their line "
+                                               "numbers. Never spliced into the passage."),
         structural_context: bool = False,
         multi_hop: bool = False,
         max_hops: int = Query(default=3, ge=1, le=6),
         expansion_max_bytes: int = Query(default=16000, ge=512, le=256000,
-                                          description="Byte budget per enabled expansion stage."),
+                                          description="Byte budget per enabled expansion stage, "
+                                                      "code context included. `window` is not "
+                                                      "bounded by it: its own size in bytes is "
+                                                      "the budget the caller already set."),
         graph_boost: bool = Query(default=False, description="Add the entity lane: passages naming the question's "
                                                               "entities or their neighbours in the knowledge graph."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
+        policy: tuple[str, ...] = ()
+        if withhold_kinds:
+            from ..retrieval.withhold import chosen_kinds
+
+            # Checked before the search, not after it: a policy naming a
+            # kind that does not exist is a mistake in the request, and
+            # searching first spends the work -- and logs a recall event
+            # -- for an answer nobody receives.
+            policy = chosen_kinds(tuple(k.strip() for k in withhold_kinds.split(",") if k.strip()))
+            # Withholding covers the items and the facts. The expansions
+            # below build their own structures, which it does not reach,
+            # so asking for both is refused rather than answered with a
+            # report that reads as covering the whole response.
+            uncovered = [name for name, asked_for in (
+                ("evidence_graph", evidence_graph), ("graph_analysis", graph_analysis),
+                ("structural_context", structural_context), ("multi_hop", multi_hop),
+                ("graph_boost", graph_boost)) if asked_for]
+            if uncovered:
+                raise InvalidInput(
+                    f"withhold does not reach {', '.join(uncovered)}, and a report that named "
+                    f"only the items would read as covering the whole answer; ask for one or "
+                    f"the other")
+            # A sharper refusal than the one above, and a different
+            # reason. Code context does not merely go unscanned: it reads
+            # the file again *after* withholding and quotes a signature
+            # and import lines out of it, so it hands back what was just
+            # withheld. `window` is absent from both lists on purpose --
+            # it widens before withholding, so what it opens is scanned.
+            if code_context:
+                raise InvalidInput(
+                    "withhold cannot be combined with code_context: code context quotes the "
+                    "file again after withholding, which would hand back what was withheld; "
+                    "ask for one or the other")
         result = await engine.recall(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost,
         )
+        opened = None
+        if window:
+            from ..retrieval.window import widen
+
+            # Before withholding, so the bytes it opens are scanned like
+            # any other. After it, a window would be an unscanned surface
+            # holding exactly the text the policy was asked to remove.
+            opened = await widen(engine, space, result.items, before=window, after=window)
+            result = result.model_copy(update={
+                "items": list(opened.items),
+                "returned_bytes": sum(len(one.text.encode()) for one in opened.items)})
+        kept = None
+        if policy:
+            from ..retrieval.withhold import withhold
+
+            kept = withhold(result.items, facts=list(result.facts) + list(result.history),
+                            kinds=policy)
+            result = result.model_copy(update={
+                "items": list(kept.items),
+                "facts": list(kept.facts[:len(result.facts)]),
+                "history": list(kept.facts[len(result.facts):]),
+                # The bytes handed back changed, so the count must too.
+                "returned_bytes": sum(len(i.text.encode()) for i in kept.items)})
         response: dict[str, object] = {
             "event_id": result.event_id,
             "items": [item_json(i) for i in result.items],
@@ -895,6 +972,19 @@ def create_app(
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),
         }
+        if kept is not None:
+            # Carried on the response, because a caller has to be able to
+            # tell what was withheld -- and to read the sentence saying
+            # that nothing withheld is not a finding of nothing present.
+            response["withheld"] = {"count": kept.withheld, "by_kind": dict(kept.by_kind),
+                                    "kinds_applied": list(kept.kinds_applied),
+                                    "unscanned": kept.unscanned,
+                                    # Beside a count of zero unscanned,
+                                    # what was scanned is the half that
+                                    # stops it reading as coverage.
+                                    "surfaces": list(kept.surfaces), "why": kept.why}
+        if opened is not None:
+            response["widened"] = staged(opened.record())
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
         if graph_boost:
@@ -951,6 +1041,31 @@ def create_app(
                     response["multi_hop"] = expanded.model_dump(mode="json")
                 except Exception as error:
                     response["multi_hop"] = {"status": "unavailable", "error": type(error).__name__}
+        if code_context:
+            from ..retrieval.code_context import code_context as read_code_context
+
+            # **Last**, and last means after the expansions below the
+            # response dictionary too -- not merely last in the order the
+            # stages were written. Code context quotes the file itself, a
+            # second copy of the source that no amount of tidying
+            # receipts removes, so any stage running after it can find
+            # that source deleted while the quoted signature still
+            # prints. Putting this beside the dictionary and calling it
+            # last is exactly the mistake: the evidence graph, structural
+            # context and multi-hop are all awaited after that point.
+            # The same budget the other expansions are given. Its own
+            # description calls it the budget per enabled expansion
+            # stage, and this stage quoted 2,208 bytes against a request
+            # for 512 while reporting `beyond_budget: 0` -- a bound that
+            # read as a fact inside the receipt meant to disclose it.
+            inside = await read_code_context(engine, space, result.items,
+                                             max_bytes=expansion_max_bytes)
+            # A source this stage finds gone leaves the answer too, not
+            # only the context -- so the response is rewritten, not just
+            # appended to.
+            response["items"] = [item_json(one) for one in inside.items]
+            response["returned_bytes"] = sum(len(one.text.encode()) for one in inside.items)
+            response["code_context"] = staged(inside.record())
         return response
 
     @app.get("/v1/facts")

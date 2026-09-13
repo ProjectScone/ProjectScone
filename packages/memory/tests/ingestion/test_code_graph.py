@@ -74,12 +74,24 @@ def test_a_call_this_file_can_see_is_recorded():
         "self.rank is the method of the class it is written in"
 
 
-def test_a_call_this_file_cannot_see_is_left_out_and_counted():
-    """keep() comes from another module and json.dumps from a package. A
-    graph with edges nobody can check is worse than a smaller graph."""
-    found = claims()
-    assert not [claim for claim in found if claim.predicate == "calls" and "keep" in claim.object]
-    assert not [claim for claim in found if claim.predicate == "calls" and "dumps" in claim.object]
+def test_a_call_this_file_cannot_see_is_left_out():
+    """A call is left out when nothing in the file says what it refers to.
+
+    This used to assert that `keep()` and `json.dumps()` were left out
+    too, on the grounds that "a graph with edges nobody can check is
+    worse than a smaller graph". That reasoning was right and the
+    examples were wrong: the file's own `from pkg.store import keep` says
+    where `keep` lives, and the identical import already produces
+    `inherits -> pkg.store.Shelf` for `Shelf`. Refusing the call while
+    making the inheritance edge was an inconsistency, not caution.
+
+    What stays out is a call whose target nothing states -- a method on a
+    value of unknown type -- which is a different thing from a call whose
+    target an import names.
+    """
+    found = code_claims(
+        "def use(thing):\n    return thing.method()\n", "app/x.py", language="python")
+    assert not [claim for claim in found if claim.predicate == "calls"]
 
 
 def test_every_claim_carries_the_line_it_was_read_from():
@@ -110,12 +122,32 @@ from ..entities.read import load
 '''
 
 
-def test_a_relative_import_is_left_out_when_nobody_can_resolve_it():
-    """The file alone cannot know whether .code is a module or a package,
-    or where the package root is. Guessing would put an edge in the graph
-    that nobody can check."""
+def test_a_relative_import_names_its_file_even_when_nobody_can_resolve_it():
+    """This rule used to be the opposite, and the reason it gave was
+    half right: "the file alone cannot know whether .code is a module or
+    a package, or where the package root is. Guessing would put an edge
+    in the graph that nobody can check."
+
+    The package root half is wrong -- a relative import is relative to
+    the importing file, which is the one thing this function does know,
+    so `from ..entities import read` inside `pkg/ingestion/graph.py`
+    names `pkg/entities/read` by arithmetic and by Python's own rules.
+    The module-or-package half is right, and is handled where it can be:
+    `read.py` is named, and a graph that holds `read/__init__.py` instead
+    matches the two at read time rather than at write time.
+
+    "An edge nobody can check" was the cost of leaving it out, not of
+    putting it in. Left out, the edge is unrecoverable: `engine.remember`
+    and the episodes route see one file each and never supply a resolver,
+    so **every** edge between two files of a Python package was dropped.
+    Measured over 57 files of this package: 0 cross-file import edges
+    that way, and 44 once named -- all 44 naming a file that exists on
+    disk exactly as named.
+    """
     found = code_claims(RELATIVE, "pkg/ingestion/graph.py", language="python")
-    assert not [claim for claim in found if claim.predicate == "imports"]
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert imports == {"pkg/ingestion/shared.py", "pkg/ingestion/code.py",
+                       "pkg/entities/read.py"}, imports
 
 
 def test_a_relative_import_resolves_against_the_files_that_were_seen():
@@ -148,3 +180,171 @@ def _by_path(path: str, level: int, module: str, seen: set[str]):
         if candidate in seen:
             return candidate
     return None
+
+
+def test_naming_a_relative_import_does_not_depend_on_what_arrived_first():
+    """The property that makes naming safe where resolving would not be.
+
+    Resolving against the files a space has already seen would make the
+    graph depend on ingestion order: a file imported before the file it
+    imports would stay unresolved for good. Arithmetic on the importing
+    file's own path cannot do that, because it consults nothing.
+
+    Checked on this package as well as here: 532 relations over 60 source
+    files, identical sets under forward, reversed and shuffled ingestion.
+    """
+    files = {
+        "pkg/api/routes.py": "from ..core.errors import Bad\n\n\ndef put(p):\n    return Bad(p)\n",
+        "pkg/core/errors.py": "class Bad(Exception):\n    pass\n",
+        "pkg/api/__init__.py": "from .routes import put\n",
+    }
+    orders = ([*files], [*reversed([*files])], ["pkg/core/errors.py", "pkg/api/__init__.py",
+                                               "pkg/api/routes.py"])
+    seen = []
+    for order in orders:
+        claims: set[tuple[str, str, str]] = set()
+        for path in order:
+            claims |= {(claim.subject, claim.predicate, claim.object)
+                       for claim in code_claims(files[path], path, language="python")}
+        seen.append(claims)
+    assert seen[0] == seen[1] == seen[2], [sorted(one - seen[0]) for one in seen[1:]]
+    assert ("pkg/api/routes.py", "imports", "pkg/core/errors.py") in seen[0], sorted(seen[0])
+
+
+def test_a_brace_relative_import_names_a_file_spelt_like_the_one_importing_it():
+    """TypeScript had no cross-file edge at all.
+
+    Measured over 58 files of this project's own web application: 39
+    import edges, every one of them naming an external package, and **0
+    files with a dependant**. `./store` could be store.ts, store.tsx,
+    store.js, store.jsx or store/index.ts, and the extractor left it out
+    rather than choose.
+
+    It names the file the way the importing file is spelt -- a `.ts` file
+    importing `./store` means `store.ts` far more often than anything
+    else, and a project mixing extensions across one import is rare. The
+    guess is a *candidate*: which spelling the graph actually holds is
+    settled at read time, where every file is visible, exactly as a
+    Python package's `__init__.py` is.
+    """
+    source = ("import {keep} from './store';\n"
+              "import {Api} from '../core/api';\n"
+              "import React from 'react';\n"
+              "export function put(p: string) { return keep(p); }\n")
+    found = code_claims(source, "web/memory/page.tsx", language="braces")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    # `.ts`, not the importer's own `.tsx`: that is what the compiler
+    # tries first, confirmed with `tsc --traceResolution` (7.0.2).
+    assert "web/memory/store.ts" in imports, imports
+    assert "web/core/api.ts" in imports, imports
+    # An external package still names itself and gains no path.
+    assert "react" in imports, imports
+
+
+def test_a_brace_import_that_already_names_its_file_keeps_that_name():
+    """A web application imports stylesheets and images by relative path,
+    and those paths carry their own extension. Appending the importing
+    file's extension to them produced `source-content.css.tsx` and
+    `scone-mark-small.png.tsx` -- names for files that cannot exist.
+
+    Measured before this: of 40 distinct import targets naming a path in
+    this project's web application, 24 landed on nothing, and nearly all
+    of them were this.
+    """
+    source = ("import './page.css';\n"
+              "import mark from '../assets/logo.png';\n"
+              "import {keep} from './store';\n")
+    found = code_claims(source, "web/memory/page.tsx", language="braces")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert "web/memory/page.css" in imports, imports
+    assert "web/assets/logo.png" in imports, imports
+    # No extension of its own: it takes the family's first spelling.
+    assert "web/memory/store.ts" in imports, imports
+
+
+def test_from_dot_import_names_its_module_without_a_resolver_too():
+    """`from .code import x` and `from . import code` name a module the
+    same way and were treated differently: the first went through the
+    import list, the second only bound its alias when a resolver existed.
+    So `core.Base` stayed an unbound word and the base class it named
+    could not be placed in a file."""
+    source = ("from . import core\n"
+              "from .shared import Helper\n\n\n"
+              "class Shelf(core.Base):\n"
+              "    pass\n")
+    found = code_claims(source, "pkg/ingestion/graph.py", language="python")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    inherits = {(claim.subject, claim.object) for claim in found if claim.predicate == "inherits"}
+    assert "pkg/ingestion/core.py" in imports, imports
+    assert ("pkg/ingestion/graph.py:Shelf", "pkg/ingestion/core.py:Base") in inherits, inherits
+
+
+def test_an_unknown_suffix_is_part_of_the_name_not_an_extension():
+    """`./foo.bar` means `foo.bar.ts`, confirmed against
+    `tsc --traceResolution` (TypeScript 7.0.2). Treating `.bar` as an
+    extension to keep sent the import to an unrelated `foo.ts`."""
+    found = code_claims("import {x} from './foo.bar';\n", "web/page.ts", language="braces")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert imports == {"web/foo.bar.ts"}, imports
+
+
+def test_an_import_that_writes_its_own_extension_is_not_given_a_second():
+    """`import {x} from './personas.ts'` is ordinary in modern ESM and
+    under `moduleResolution: bundler`. Appending the family's extension
+    to it produced `personas.ts.ts`.
+
+    Found by measuring this project's web application rather than by
+    reading: five of six import targets that landed on nothing were this,
+    and `./foo.bar` -- where the suffix belongs to no language -- must
+    still become `foo.bar.ts`.
+    """
+    found = code_claims("import {a} from './personas.ts';\n"
+                        "import {b} from './wire.js';\n"
+                        "import {c} from './foo.bar';\n", "web/page.ts", language="braces")
+    imports = {claim.object for claim in found if claim.predicate == "imports"}
+    assert imports == {"web/personas.ts", "web/wire.js", "web/foo.bar.ts"}, imports
+
+
+@pytest.mark.skipif(__import__("scone_memory.ingestion.code_syntax", fromlist=["x"]).available(),
+                    reason="the code-graph extra is installed, so a parser does bind these")
+def test_a_brace_language_gets_no_call_graph_without_a_parser():
+    """Withdrawn after three rounds of false edges, and the record of why
+    belongs here rather than in a commit nobody reads.
+
+    Python has 263 `calls` relations over 60 files of this package and a
+    brace language had none, so I gave braces one: a bare name binds to a
+    declaration this file makes. Every round of review found a new shape
+    of false edge -- two classes with a method of one name calling each
+    other, a bare call binding to a method, a parameter shadowing the
+    function it is named after, a declaration header read as a call, the
+    same header again once a top-level name shared it, a local variable
+    shadowing a global. Each fix was another rule about names, and each
+    one left a case the next rule had to cover.
+
+    The cause is not names. It is that binding a call needs **lexical
+    scope**, and this reader has none: it sees masked lines, not a syntax
+    tree. Cross-file binding through an import does not escape it either,
+    since a parameter can shadow an imported name exactly as it shadows a
+    local one.
+
+    So the rule this file started with stands, and it was right: without
+    a parser, saying what `helper(n)` refers to is guessing, and an edge
+    nobody can check is worse than none. On this project's web
+    application the attempt produced 73 call edges of which 51 crossed a
+    file, and 40 of those 51 named a symbol the graph holds no
+    declaration for -- a larger count, not better evidence.
+
+    It was closed properly afterwards, by a syntax-aware reader behind
+    the `code-graph` extra -- `ingestion/code_syntax.py`, which reads a
+    real tree and lets parameters and locals shadow. This test describes
+    what the framework does **without** that extra, which is the default,
+    and skips when it is installed.
+    """
+    source = ("function helper(p) { return p; }\n"
+              "export class Shelf {\n"
+              "  keep(p) {\n"
+              "    return helper(p);\n"
+              "  }\n"
+              "}\n")
+    found = code_claims(source, "web/shelf.ts", language="braces")
+    assert not [claim for claim in found if claim.predicate == "calls"], found

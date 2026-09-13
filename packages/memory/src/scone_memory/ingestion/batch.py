@@ -17,46 +17,20 @@ from ..core.models import Added, MAX_CONTENT_BYTES
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
+from .semantic_chunks import semantic_spans
+from .structure_chunks import structured_spans
 from .code import code_language, code_spans
 from .records import Record, RetainedVideoRecord, RecoveryReport, _DupOf, _Pending, content_hash
+
+from .vectors import validated_vectors
+
+#: Kept as a private name here because the tests and the abstention floor
+#: reach for it at this address; the implementation moved to `vectors`.
+_validated_vectors = validated_vectors
 
 EMBED_BATCH = 64
 
 
-def _validated_vectors(response: object, count: int, dimension: int) -> list[list[float]]:
-    """Vectors from one batch, checked. ``dimension`` is the width already
-    settled for this operation, or 0 when the embedder declares none and
-    nothing has settled it yet."""
-    if not isinstance(response, list) or len(response) != count:
-        raise ValueError('embedding response must contain one vector per input text')
-    # Not every embedder declares a width -- a remote model behind an
-    # endpoint that does not advertise one reports 0, and the abstention
-    # floor reads the width off the vectors themselves for exactly that
-    # case. Checking against 0 would refuse every vector such an embedder
-    # ever returned. With no declared width the width of the first vector
-    # settles it, and the caller carries that forward across every batch of
-    # one operation: settling it per batch would let 64 vectors be eight
-    # wide and the next sixteen, and an index built from those is silently
-    # incoherent.
-    expected = dimension if dimension else None
-    vectors: list[list[float]] = []
-    for vector in response:
-        if not isinstance(vector, list) or not vector:
-            raise ValueError('embedding vector does not match the configured dimension')
-        if expected is None:
-            expected = len(vector)
-        if len(vector) != expected:
-            raise ValueError('embedding vector does not match the configured dimension')
-        try:
-            valid = all(isinstance(value, (int, float)) and not isinstance(value, bool)
-                        and math.isfinite(value) for value in vector)
-        except OverflowError:
-            valid = False
-        if not valid:
-            raise ValueError('embedding vector must contain finite numeric values')
-        # Providers may reuse their response buffers on the next call.
-        vectors.append(list(vector))
-    return vectors
 
 
 async def _embed_chunks(embedder: Embedder, texts: Sequence[str], *,
@@ -114,6 +88,17 @@ class IngestionRuntime:
     #: Whether a source stored under a name that says it is code is cut at
     #: its declarations rather than every chunk_target characters.
     code_aware: bool = True
+    #: Whether prose is cut at the structure it carries -- headings and
+    #: numbered clauses -- rather than at the target alone. Off by
+    #: default: cut positions decide what chunks exist, and stored
+    #: offsets are part of the shared specification, so this is a
+    #: caller's choice and not ours to make for an existing space.
+    structure_aware: bool = False
+    #: Whether prose is cut where its subject changes rather than where
+    #: the target lands. Off by default for the same reason as
+    #: `structure_aware`, and costs one extra embedding call per episode
+    #: -- its sentences are embedded to find the boundaries.
+    semantic_aware: bool = False
     context_inputs: Callable[[NewEpisode, Sequence[tuple[int, int]]], Awaitable[list[str]]] | None = None
     # With an episode id, verification also repairs its original/manifest links.
     verify_visual: Callable[[str, Record, int | None], Awaitable[None]] | None = None
@@ -156,8 +141,8 @@ async def _validated_record(runtime: IngestionRuntime, space: str, record: Recor
     return validated_record(space, record, when, verified_visual=visual)
 
 
-def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
-    spans = spans_for(runtime, new.content, new.source)
+async def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
+    spans = await spans_for(runtime, new.content, new.source)
     return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in spans],
                     spans=[(sp.start, sp.end) for sp in byte_spans(new.content, spans)])
 
@@ -220,13 +205,26 @@ async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]
 
 
 
-def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
+async def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
     """Where to cut: at declarations when the source is code and the name
-    it was stored under says which language, and by length otherwise."""
+    it was stored under says which language, at the document's own
+    headings and clauses when asked, where its subject changes when asked,
+    and by length otherwise.
+
+    The one dispatch point, and awaitable even though only one branch
+    needs it. A synchronous twin would let a caller reach chunking
+    without an embedder and receive length-cut chunks believing they
+    were something else."""
     language = code_language(source) if runtime.code_aware else None
-    if language is None:
-        return chunk_spans(content, runtime.chunk_target)
-    return list(code_spans(content, runtime.chunk_target, language=language))
+    if language is not None:
+        return list(code_spans(content, runtime.chunk_target, language=language))
+    if runtime.structure_aware:
+        # Prose only. Code has a better boundary than a heading, and the
+        # branch above already took it.
+        return list(structured_spans(content, runtime.chunk_target).spans)
+    if runtime.semantic_aware:
+        return list(await semantic_spans(content, runtime.embedder, runtime.chunk_target))
+    return chunk_spans(content, runtime.chunk_target)
 
 
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record], *,
@@ -263,7 +261,7 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
             continue
         seen[digest] = len(results)
         results.append(None)
-        fresh.append(chunk_record(runtime, new, slot=len(results) - 1))
+        fresh.append(await chunk_record(runtime, new, slot=len(results) - 1))
 
     if fresh:
         vectors = await embed_pending(runtime, space, fresh)
@@ -376,7 +374,7 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
                 report.completed += 1
                 continue
             if not chunks:
-                spans = spans_for(runtime, episode.content, episode.source)
+                spans = await spans_for(runtime, episode.content, episode.source)
                 chunks = await runtime.documents.insert_chunks(
                     [
                         NewChunk(

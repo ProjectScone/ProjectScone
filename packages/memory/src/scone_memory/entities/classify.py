@@ -42,6 +42,7 @@ ClassBasis = Literal[
     "decision", "identity_decision", "quoted_text", "prose", "pronoun", "date_shape", "quantity_shape",
     "identifier_shape", "value_shape", "subject_anchor", "literal_predicate", "determiner_name", "description",
     "name_shape", "uncased_name", "entity_predicate", "shared_object", "common_value",
+    "code_symbol",
 ]
 
 
@@ -85,6 +86,23 @@ _ENTITY_PREDICATES = frozenset("""works_at worked_at works_for worked_for employ
     founded founded_by owns owned_by created_by built_by uses used_by depends_on works_on contributes_to
     leads led_by partner_of friend_of sibling_of parent_of child_of colleague_of acquired acquired_by
     invested_in subsidiary_of competitor_of mentor_of customer_of supplier_of""".split())
+
+#: Predicates whose object is a code symbol by construction -- a file, a
+#: module, a declaration -- rather than something whose shape has to be
+#: guessed at.
+#:
+#: Without this, a code symbol reached the graph only by looking like a
+#: prose name, and `name_shaped` requires a capital letter. Python names
+#: functions and modules in lower case, so `class Shelf` became an entity
+#: while `def put`, `import json` and `import pkg.store` did not: five
+#: facts extracted from two files produced two relations, and every call
+#: edge to a lowercase function left the graph without saying so. The
+#: entity classifier was written for prose about people -- `works_at`,
+#: `lives_in`, `married_to` -- and a code graph was being judged by it.
+#:
+#: The case of a code symbol is a convention of its language, not
+#: evidence about what it is.
+CODE_PREDICATES = frozenset("defines imports calls inherits mixes_in".split())
 
 _MONTHS = ("january|february|march|april|may|june|july|august|september|october|november|december"
            "|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec")
@@ -165,6 +183,63 @@ def _prose(text: str) -> bool:
     return False
 
 
+#: A file extension at the end of a path segment.
+_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
+
+def _declaration(text: str) -> bool:
+    """A dotted chain of identifiers, as a declaration is named.
+
+    ``str.isidentifier`` rather than an ASCII pattern: `def naïve()` is
+    valid Python and an ASCII-only tail refused it, which regressed real
+    symbols in the course of tightening the rule against prose.
+    """
+    parts = text.split(".")
+    return bool(parts) and all(part.isidentifier() for part in parts)
+
+
+def _code_shaped(text: str) -> bool:
+    """Whether a code predicate's object is shaped like a code symbol.
+
+    Three rules were tried here and the first two were too loose.
+
+    "One token" refused `my module.py:leaf`, because a source path may
+    legally contain a space. "Contains a colon or a slash" then admitted
+    ordinary prose -- `a quorum: three members`, `the ratio 1:2`,
+    `a choice between input/output` -- because both marks appear inside
+    sentences, and a rule about delimiter *presence* cannot tell a
+    sentence from a path.
+
+    What our extractor actually emits is a path, a dotted module, or a
+    declaration qualified by one: `pkg/store.py`, `pkg.store`,
+    `my module.py:leaf`. So a multi-word object qualifies only when the
+    separator has no space beside it, the tail is a declaration name, and
+    the head is recognisably a path -- it contains a slash, or its last
+    segment carries a file extension. `input/output` fails on the last of
+    those, which is the one that distinguishes a path from a pair of
+    words with a mark between them.
+    """
+    if not text:
+        return False
+    if len(text.split()) == 1:
+        return True
+    # A multi-word object is a symbol only if it is a **path**, and a
+    # path's last segment carries a file extension. "head contains a
+    # slash" was the previous test and prose satisfies it:
+    # `a choice between input/output/value` is not a path.
+    cut = text.rfind(":")
+    if cut > 0:
+        head, tail = text[:cut], text[cut + 1:]
+        if not head or not tail or head[-1].isspace() or tail[0].isspace():
+            return False
+        if not _declaration(tail):
+            return False
+    else:
+        head = text
+    segment = head.rsplit("/", 1)[-1]
+    return bool(_EXTENSION.search(segment)) and not segment.rstrip().endswith(" ")
+
+
 def _uncased_name(text: str) -> bool:
     letters = [character for character in text if character.isalpha()]
     return (bool(letters) and len(text) <= 12 and len(text.split()) <= 3
@@ -217,6 +292,15 @@ def classify_object(text: str, predicate_key: str, context: ClassificationContex
         return ObjectClassification("entity", None, "identity_decision")
     if _quoted(stripped):
         return ObjectClassification("literal", "text", "quoted_text")
+    if predicate_key.replace(" ", "_") in CODE_PREDICATES and _code_shaped(stripped):
+        # **After** quoting, so `"a quorum: three members"` stays the
+        # quoted text it is -- an earlier version ran before it and
+        # bypassed the check entirely. **Before** prose, because `_prose`
+        # calls anything past 120 characters prose, and a long directory
+        # path is not prose: `pkg/<110 characters>.py` lost its
+        # declarations to that rule. And before `literal_shape`, so a
+        # module called `2024` is not read as a date.
+        return ObjectClassification("entity", None, "code_symbol")
     if _prose(stripped):
         return ObjectClassification("literal", "text", "prose")
     if key in _PRONOUNS:
