@@ -176,6 +176,7 @@ class MemoryEngine:
         code_aware: bool = True,
         structure_aware: bool = False,
         semantic_aware: bool = False,
+        heading_context: bool = False,
         code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
@@ -224,6 +225,10 @@ class MemoryEngine:
         #: specification, so a space that already holds chunks cut another
         #: way must not silently start cutting differently.
         self.semantic_aware = semantic_aware
+        #: Whether a chunk is embedded with the headings above it (for code,
+        #: its file and declarations). Off unless asked for: it changes
+        #: vectors, and a space's existing vectors were made without it.
+        self.heading_context = heading_context
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -491,7 +496,7 @@ class MemoryEngine:
         started = time.perf_counter()
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware)
+                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -509,7 +514,7 @@ class MemoryEngine:
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
                         self.code_aware, self.code_graph, self.structure_aware,
-                        self.semantic_aware) != configuration):
+                        self.semantic_aware, self.heading_context) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -645,7 +650,7 @@ class MemoryEngine:
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
             self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
             structure_aware=self.structure_aware,
-            semantic_aware=self.semantic_aware,
+            semantic_aware=self.semantic_aware, heading_context=self.heading_context,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
         )
 

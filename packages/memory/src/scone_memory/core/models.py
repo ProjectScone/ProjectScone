@@ -453,6 +453,10 @@ class Added(BaseModel):
     #: that stored nothing.
     chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
     structure: Optional[dict[str, object]] = None
+    #: With heading context on: how many chunks were embedded with a line
+    #: of context in front, how many bytes that added, and how many lines
+    #: were cut to the bound. None when the setting is off.
+    embedding_context: Optional[dict[str, object]] = None
 
 
 class Status(BaseModel):
