@@ -206,6 +206,49 @@ OCR behavior; the host owns the parser implementation, revision, and processing 
 Upload and job admission are separate explicit writes. Uploaded bytes must fit the
 host's advertised input limit and the client's 25 MiB ceiling.
 
+Model tasks can carry an explicit output contract on hosts advertising
+`agents.output_requirements`. A schema additionally requires `agents.output_schema`:
+
+```python
+from scone import ModelTask, TaskPlan, TaskAnswerRequirements
+
+requirements = TaskAnswerRequirements(
+    instructions="Return a concise JSON object with a summary.",
+    format="json_object",
+    max_bytes=4000,
+    max_lines=20,
+    output_schema={
+        "type": "object",
+        "$defs": {"summary": {"type": "string"}},
+        "properties": {"summary": {"$ref": "#/$defs/summary"}},
+        "required": ["summary"],
+        "additionalProperties": False,
+    },
+)
+plan = TaskPlan("summarize", (
+    ModelTask("summary", "research", "careful", "Summarize the retained evidence.",
+              answer_requirements=requirements),
+))
+saved = agents.save_plan(plan, expected_revision=0)
+```
+
+`TaskAnswerRequirements` defaults to empty instructions, `max_bytes=64000`,
+`max_lines=None`, and `format="text"`. Instructions accept up to 8000 UTF-8 bytes;
+byte limits are strict integers in `1..128000`, and an optional line limit is a
+strict integer in `1..1000`. A schema requires `json_object` and must be a JSON
+object within 32768 compact serialized UTF-8 bytes, depth 32, and 4096 value
+nodes including the root. The SDK preserves authored `$defs`, `$ref`, and other
+schema content in a detached, deeply immutable snapshot. `to_json()` returns a
+fresh mutable copy. It performs bounded JSON checks, not full JSON Schema
+validation or compilation; the configured native host owns execution validation.
+
+An absent task contract is omitted from the wire for compatibility with older
+hosts. Saving a contracted plan requires the relevant advertised capabilities
+before any write, and its acknowledgement must preserve the authored contract.
+Output contracts guide and constrain model output; they do not establish factual
+accuracy. Result reads preserve the server's returned text and retain the same
+final source-verification ordering.
+
 Completed agent outputs are typed and checked against the saved execution request:
 
 ```python
