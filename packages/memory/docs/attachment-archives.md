@@ -39,7 +39,7 @@ travel in either profile. Keep document and blob storage backups for full-store
 recovery.
 
 The ledger import policies remain the same as profile 1: target exclusions are
-preserved, fact supersession pointers are not reconstructed, and source references
+preserved, [fact replacement edges are remapped](archive-replacement-history.md), and source references
 to episodes skipped by the destination's tombstones are dropped. Facts and quotes
 remain under those existing rules. Profile 2 is an attachment transfer format,
 not a lossless ledger or policy snapshot. For whole-space movement, [space merge](space-merge.md) additionally carries
