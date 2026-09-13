@@ -69,6 +69,10 @@ class AgentClient(ResourceClient):
                 capabilities.require('agents.output_requirements')
             if any(value.output_schema is not None for value in requirements):
                 capabilities.require('agents.output_schema')
+        elif plan.answer_requirements is not None:
+            capabilities.require('agents.handoffs.output_requirements')
+            if plan.answer_requirements.output_schema is not None:
+                capabilities.require('agents.output_schema')
         saved = SavedPlan.from_json(self._client._request('PUT', '/v1/agent-plans/' + address(plan.workflow_id),
             json=body), expected_space=self.expected_space)
         if saved.plan != plan or saved.revision != expected_revision + 1:
