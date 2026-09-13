@@ -269,3 +269,43 @@ validate counts and ordering. They describe the completed scan; they do not asse
 that an episode is still retained. Python preserves full 64-bit episode identities
 and marks escaped filesystem diagnostics separately from source paths. No method
 automatically follows pages, retries a write, downloads a model, or resumes a run.
+
+### Retained video evidence and frame interpretation
+
+Read a sampled video's evidence, download a verified frame, or explicitly ask the
+server's selected self-hosted vision model about that frame:
+
+```python
+from scone import Scone
+
+with Scone('http://127.0.0.1:7437', 'your-space-key', timeout=150) as memory:
+    videos = memory.video_documents(expected_space='research')
+    source = videos.catalogue(episode_id=7)
+    frame = source.frames[0]
+    print(source.frame_time(frame.ordinal))  # exact fractions.Fraction seconds
+    png = videos.frame(source, frame.ordinal)
+    description = videos.interpret(source, frame.ordinal,
+                                   prompt='Describe the visible scene and state uncertainty.')
+    print(description.model, description.text)
+```
+
+Choose the vision connection through the server's Models settings. Each explicit
+interpretation request uses the current saved selection. The result carries the
+source catalogue and frame and has `persisted=False`; it does not write facts,
+embeddings or searchable visual descriptions. There is no implicit retry or
+inference on catalogue reads, frame downloads or host restart. Configure the
+client timeout for your own model latency; the host also bounds interpretation.
+
+Catalogues preserve original and manifest attachment identities, integer frame
+ordinals and presentation timestamps, rational time bases, sampling coverage and
+UTF-8 OCR regions. `frame_time()` keeps fractions exact, including large or
+negative stream offsets. PNG downloads check the recorded byte length, SHA-256,
+frame headers and image dimensions. The client checks the source catalogue before
+and after a download or interpretation, refusing changed source evidence or space.
+These checks observe current server state; they are not an atomic transaction.
+
+The API requires the native video catalogue/frame routes; interpretation also
+requires `documents.video.understand`. Older hosts refuse unsupported operations.
+The client remains independently installable on Python 3.9+, with no decoder,
+OCR, model or native-framework dependencies. Model output is unsaved and may be
+incorrect; sampled frames do not describe everything between those frames.
