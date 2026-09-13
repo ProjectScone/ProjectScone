@@ -547,6 +547,10 @@ class MongoDocumentStore:
             raise SconeError("MongoDB fact link disappeared during insert")
         return _fact_link(existing)
 
+    async def space_fact_links(self, space: str) -> list[FactLink]:
+        cursor = self._fact_links.find({"space": deletion_key(space)}).sort("_id", 1)
+        return [_fact_link(row) async for row in cursor]
+
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         cursor = self._fact_links.find({"space": space, "$or": [{"from_fact": fact_id}, {"to_fact": fact_id}]}).sort("_id", 1)
         return [_fact_link(doc) async for doc in cursor]

@@ -265,6 +265,8 @@ class ElasticsearchDocumentStore:
 
     async def _search(self, name: str, **kwargs) -> list[dict]:
         response = await self.client.search(index=self._idx(name), **kwargs)
+        if response.get("timed_out") or response.get("terminated_early") or response.get("_shards", {}).get("failed", 0):
+            raise RuntimeError("Elasticsearch search returned incomplete results")
         return [hit["_source"] | {"_score": hit.get("_score")} for hit in response["hits"]["hits"]]
 
     async def insert_episode(self, new: NewEpisode) -> Episode:
@@ -507,6 +509,30 @@ class ElasticsearchDocumentStore:
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
         return [_fact(h) for h in hits]
 
+    async def prepare_archive_read(self, space: str) -> None:
+        """Expose acknowledged source writes before export counts and pages."""
+        deletion_key(space)
+        names = ("episodes", "facts", "fact_links", "fact_affirmations")
+        await self.client.indices.refresh(index=",".join(self._idx(name) for name in names))
+
+    async def _complete_archive_rows(self, name: str, space: str, query: dict, identity: str) -> list[dict]:
+        deletion_key(space)
+        found: list[dict] = []
+        after = 0
+        while True:
+            scoped = query if not after else {"bool": {"filter": [query, {"range": {identity: {"gt": after}}}]}}
+            page = await self._search(name, query=scoped, size=self.PAGE, sort=[{identity: "asc"}])
+            if len(page) > self.PAGE:
+                raise RuntimeError("Elasticsearch archive inventory exceeds its page limit")
+            for row in page:
+                value = row.get(identity)
+                if type(value) is not int or not after < value < 2**63 or row.get("space") != space:
+                    raise RuntimeError("Elasticsearch archive inventory has invalid scope, identity or order")
+                after = value
+            found.extend(page)
+            if len(page) < self.PAGE:
+                return found
+
     async def prepare_ledger_read(self, space: str) -> None:
         """Make acknowledged fact writes searchable before archive validation."""
         deletion_key(space)
@@ -681,8 +707,7 @@ class ElasticsearchDocumentStore:
             await self.client.delete_by_query(index=self._idx("fact_affirmations"), query=query, refresh=True)
 
     async def space_affirmations(self, space: str) -> list[Affirmation]:
-        hits = await self._search("fact_affirmations", query={"term": {"space": space}}, size=10_000,
-                                  sort=[{"affirmation_id": "asc"}])
+        hits = await self._complete_archive_rows("fact_affirmations", space, {"term": {"space": space}}, "affirmation_id")
         return [_affirmation(hit) for hit in hits]
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
@@ -704,11 +729,15 @@ class ElasticsearchDocumentStore:
             raise RuntimeError("Elasticsearch fact link disappeared after a conflicting write")
         return _fact_link(existing)
 
+    async def space_fact_links(self, space: str) -> list[FactLink]:
+        rows = await self._complete_archive_rows("fact_links", space, {"term": {"space": space}}, "link_id")
+        return [_fact_link(row) for row in rows]
+
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         query = {"bool": {"filter": [{"term": {"space": space}}],
                           "should": [{"term": {"from_fact": fact_id}}, {"term": {"to_fact": fact_id}}],
                           "minimum_should_match": 1}}
-        hits = await self._search("fact_links", query=query, size=10_000, sort=[{"link_id": "asc"}])
+        hits = await self._complete_archive_rows("fact_links", space, query, "link_id")
         return [_fact_link(h) for h in hits]
 
     async def fact_links_between(self, space: str, fact_ids: Sequence[int], limit: int) -> list[FactLink]:

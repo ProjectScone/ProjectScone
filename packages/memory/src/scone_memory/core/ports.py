@@ -169,6 +169,17 @@ class EpisodeInventory(Protocol):
                             kind: Optional[str]) -> list[Episode]: ...
 
 
+@runtime_checkable
+class ArchiveLinkInventory(Protocol):
+    async def space_fact_links(self, space: str) -> list[FactLink]:
+        """Every stored link in the space, including dangling ends, ascending ID.
+
+        This whole-space archive operation must not truncate at backend search
+        windows. Bounded graph projections use their separate lookup methods.
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class SourcePage:
     episodes: list[Episode]
