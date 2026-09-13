@@ -660,7 +660,8 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     itself. What was read and what was not is said: a map that quietly
     skipped half a repository is worse than no map."""
     from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
-    from ..ingestion.code_graph import record_claims, unresolved_calls
+    from ..ingestion.code_graph import DEFINES, record_claims, unresolved_call_sites
+    from ..ingestion.code_resolution import REACHABLE_DEPTH, unmistakable, resolve_across_files
 
     root = pathlib.Path(args.directory)
     if not root.is_dir():
@@ -705,6 +706,12 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
     unbound: set[str] = set()
+    # A file alone cannot say what `thing.method()` refers to. The corpus
+    # can, when exactly one declaration in it answers to that name --
+    # gathered here and settled once every file has been read.
+    declared: dict[str, list[str]] = {}
+    sites: list[tuple[str, str]] = []
+    episode_of: dict[str, int] = {}
     for path in found[: args.limit]:
         raw = path.read_bytes()
         cut += len(raw) > args.max_bytes
@@ -718,15 +725,27 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
             continue
         read += 1
         if args.graph:
+            recorded: list = []
             said = await record_claims(engine, args.space, episode_id=added.episode_id,
                                        content=text, path=where, when=engine.clock(),
-                                       resolve=resolve)
+                                       resolve=resolve, _recorded=recorded)
             claims += said
+            for claim in recorded:
+                if claim.predicate != DEFINES:
+                    continue
+                qualified = claim.object.rsplit(":", 1)[-1]
+                simple = qualified.rsplit(".", 1)[-1]
+                if qualified.count(".") <= REACHABLE_DEPTH and unmistakable(simple):
+                    declared.setdefault(simple, []).append(claim.object)
+            for caller, spelt in unresolved_call_sites(text, where, language=code_language(where)):
+                sites.append((caller, spelt))
+                episode_of.setdefault(caller, added.episode_id)
             # What the graph could not bind. "12 claims" and nothing else
             # reads as a complete answer, and the difference between
             # "nothing calls this" and "I could not see what calls this"
             # is only visible here.
-            unbound.update(unresolved_calls(text, where, language=code_language(where)))
+            unbound.update(name for _, name in
+                           unresolved_call_sites(text, where, language=code_language(where)))
             # A file with nothing to say and a file this cannot read are
             # different things, and a count that adds them together tells
             # a reader neither.
@@ -735,6 +754,9 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
                     quiet += 1
                 else:
                     unread += 1
+    # Reported, never asserted. See `code_resolution`: a single matching
+    # declaration is a candidate, not evidence, and sampling said so.
+    settled = resolve_across_files(sites, declared) if args.graph else None
     parts = [f"{read} file(s) read"]
     if again:
         parts.append(f"{again} already here")
@@ -746,6 +768,12 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
             parts.append(f"{unread} could not be read")
         if unbound:
             parts.append(f"{len(unbound)} call(s) left unbound")
+        if settled is not None and (settled.edges or settled.ambiguous or settled.unknown):
+            # What the blind spot is made of. "Unbound" alone says how
+            # much was missed; this says how much of it could even be
+            # helped by reading this corpus more carefully.
+            parts.append(f"of those, {len(settled.edges)} name one declaration here, "
+                         f"{settled.ambiguous} several, {settled.unknown} none")
     if len(found) > args.limit:
         parts.append(f"{len(found) - args.limit} left unread of {len(found)}")
     if cut:
@@ -753,6 +781,10 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     if getattr(args, "json", False):
         print(_ledger_json({"read": read, "deduplicated": again, "claims": claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
+                            # Candidates, not claims: nothing here was written
+                            # to the ledger, and the name says so.
+                            "unconfirmed_call_candidates": (
+                                [list(edge) for edge in settled.edges] if settled else []),
                             "found": len(found), "limit": args.limit,
                             "cut": cut}), file=out)
     else:
