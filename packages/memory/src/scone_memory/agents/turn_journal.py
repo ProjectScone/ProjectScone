@@ -139,6 +139,10 @@ class ToolTurnJournal:
         if self.remaining_s <= 0:
             raise TurnJournalError('deadline')
 
+    def check_current(self) -> None:
+        """Recheck deadline, cancellation and checkpoint lease, even inside an operation."""
+        self._check()
+
     @property
     def elapsed_s(self) -> float:
         return self._base_elapsed + time.monotonic() - self._entered
@@ -174,6 +178,32 @@ class ToolTurnJournal:
         if self._state.events or self._state.finished:
             raise TurnJournalError('binding_mismatch')
         self._write(self._state.model_copy(update={'configuration': digest}, deep=True))
+
+    def operation_identity(self, kind: OperationKind, request: JSONValue) -> tuple[str, bool]:
+        """Inspect the next exact operation without admitting it or advancing replay."""
+        self._check()
+        if self._busy:
+            raise TurnJournalError('journal_busy')
+        if kind not in ('model', 'custom', 'memory'):
+            raise TurnJournalError('invalid_operation')
+        digest = hashlib.sha256(_bytes(request, self._maximum)).hexdigest()
+        replay = self._cursor < len(self._state.events)
+        if replay:
+            event = self._state.events[self._cursor]
+            if event.kind != kind or event.request != digest:
+                raise TurnJournalError('operation_mismatch')
+        else:
+            if self._state.finished:
+                raise TurnJournalError('turn_finished')
+            if self._cursor >= self._limit:
+                raise TurnJournalError('operation_limit')
+            if self._quantum is not None and self._new_operations >= self._quantum:
+                self.pause()
+                raise TurnJournalPaused(self._key)
+        identity = hashlib.sha256(_bytes(['tool-operation-v1', self._state.binding,
+            self._state.configuration, self._cursor, kind, digest], self._maximum)).hexdigest()
+        self._check()
+        return identity, replay
 
     async def execute(self, kind: OperationKind, request: JSONValue,
                       operation: Callable[[], Awaitable[JSONValue]]) -> JSONValue:

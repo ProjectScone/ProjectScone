@@ -8,7 +8,6 @@ from typing import Annotated, Literal, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .workflow import JSONValue, _encode, _name
-from ..core.validation import check_space
 
 Digest = Annotated[str, Field(pattern=r'^[0-9a-f]{64}$')]
 Name = Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9._:-]+$')]
@@ -41,7 +40,7 @@ class ApprovalCall(BaseModel):
 
 class ToolApprovalRecord(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid', hide_input_in_errors=True)
-    space: str
+    space: str = Field(min_length=1, max_length=64, pattern=r'^[a-z0-9_-]+$')
     run_id: Name
     request_id: Digest
     invocation_digest: Digest
@@ -57,7 +56,6 @@ class ToolApprovalRecord(BaseModel):
 
     @model_validator(mode='after')
     def stage(self) -> Self:
-        check_space(self.space)
         for value in (self.created_at, self.decided_at, self.activated_at, self.consumed_at):
             if value is not None and value.tzinfo is None:
                 raise ValueError('approval timestamps require a timezone')
@@ -70,7 +68,7 @@ class ToolApprovalRecord(BaseModel):
 
 class ToolApprovalActivation(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid', hide_input_in_errors=True)
-    space: str
+    space: str = Field(min_length=1, max_length=64, pattern=r'^[a-z0-9_-]+$')
     run_id: Name
     activation_id: Name
     invocation_digest: Digest
@@ -80,7 +78,6 @@ class ToolApprovalActivation(BaseModel):
 
     @model_validator(mode='after')
     def valid(self) -> Self:
-        check_space(self.space)
         if self.created_at.tzinfo is None or self.decisions.keys() != self.decision_digests.keys():
             raise ValueError('invalid approval activation')
         for request_id, revision in self.decisions.items():

@@ -169,7 +169,7 @@ class AgentApprovalStore:
                         or decision_digest(record) != digest):
                     raise ValueError()
             return saved
-        except (ValidationError, ValueError, WorkflowError):
+        except (ValidationError, ValueError, WorkflowError, RecursionError):
             raise WorkflowError('approval_key_or_integrity') from None
 
     def activate(self, space: str, run_id: str, activation_id: str, *, decisions: dict[str, int]) -> ToolApprovalActivation:
