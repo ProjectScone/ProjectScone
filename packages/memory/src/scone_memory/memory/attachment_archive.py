@@ -104,22 +104,7 @@ class Transfer:
         """Preflight target collisions, then store only evidence for accepted episodes."""
         wanted = {identity for episode_id in active_ids if episode_id is not None
                   for identity in self.links[episode_id]}
-        absent: list[str] = []
-        for identity in sorted(wanted):
-            expected = self.blobs[identity]
-            try:
-                current = await store.get(space, identity)
-            except NotFound:
-                absent.append(identity)
-                continue
-            if current != expected:
-                raise InvalidInput('target attachment conflicts with archive metadata or bytes')
-        for identity in absent:
-            attachment, data = self.blobs[identity]
-            stored = await store.put(space, data, attachment.media_type, attachment.filename)
-            if stored != attachment or await store.get(space, identity) != (attachment, data):
-                raise InvalidInput('stored attachment does not match the archive')
-        return len(wanted)
+        return await stage_blobs(store, space, {identity: self.blobs[identity] for identity in wanted})
 
     async def link(self, store: BlobStore, space: str, old_id: int, new_id: int) -> int:
         for identity in self.links[old_id]:
@@ -127,6 +112,32 @@ class Transfer:
                 raise InvalidInput('attachment changed before archive episode linking')
             await store.link(space, identity, new_id)
         return len(self.links[old_id])
+
+
+async def preflight_blobs(store: BlobStore, space: str,
+                          blobs: Mapping[str, tuple[Attachment, bytes]]) -> list[str]:
+    """Refuse target byte or metadata conflicts before staging any missing hold."""
+    absent: list[str] = []
+    for identity, expected in sorted(blobs.items()):
+        try:
+            current = await store.get(space, identity)
+        except NotFound:
+            absent.append(identity)
+            continue
+        if current != expected:
+            raise InvalidInput('target attachment conflicts with archive metadata or bytes')
+    return absent
+
+
+async def stage_blobs(store: BlobStore, space: str,
+                      blobs: Mapping[str, tuple[Attachment, bytes]]) -> int:
+    """Stage prevalidated bytes and verify what the target actually retained."""
+    for identity in await preflight_blobs(store, space, blobs):
+        attachment, data = blobs[identity]
+        stored = await store.put(space, data, attachment.media_type, attachment.filename)
+        if stored != attachment or await store.get(space, identity) != (attachment, data):
+            raise InvalidInput('stored attachment does not match the archive')
+    return len(blobs)
 
 
 def prepare(rows: list[dict], max_bytes: int, media_types: Sequence[str]) -> Transfer:

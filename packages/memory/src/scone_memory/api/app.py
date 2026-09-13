@@ -21,7 +21,7 @@ import re
 from typing import TYPE_CHECKING, Literal, Mapping, Optional
 from collections.abc import Callable
 
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, StrictInt, Field
@@ -717,14 +717,22 @@ def create_app(
         return (await engine.space_impact(space)).model_dump()
 
     @app.post("/v1/spaces/{name}/merge")
-    async def post_space_merge(name: str, body: MergeBody, space: str = Depends(space_for)) -> dict:
+    async def post_space_merge(name: str, body: MergeBody, request: Request,
+                               destination_authorization: str = Header(default='', alias='X-Scone-Destination-Authorization',
+                                   description='Bearer key with the full role for the destination space.'),
+                               space: str = Depends(space_for)) -> dict:
         """Move everything this space holds into another. ``preview`` says
         what would move and moves nothing; otherwise ``confirm`` must
         repeat the space being merged, which is then closed for good."""
+        from .space_authorization import authorize_destination
+
         _own_space(name, space)
-        if body.preview:
-            return (await engine.merge_space(space, into=body.into, preview=True)).record()
-        return (await engine.merge_space(space, into=body.into, confirm=body.confirm)).record()
+        def authorize() -> None:
+            assert_current_space(request, space)
+            authorize_destination(destination_authorization, body.into, app.state.keys, app.state.roles)
+        authorize()
+        return (await engine.merge_space(space, into=body.into, preview=body.preview,
+                                         confirm=body.confirm, _authorize=authorize)).record()
 
     @app.delete("/v1/spaces/{name}")
     async def delete_space(name: str, confirm: Optional[str] = None, space: str = Depends(space_for)) -> dict:

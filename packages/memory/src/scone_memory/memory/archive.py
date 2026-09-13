@@ -56,10 +56,15 @@ class MergeReceipt:
     episodes: int = 0
     facts: int = 0
     moved: bool = False
+    attachments: int = 0
+    attachment_bytes: int = 0
+    unlinked_attachments: int = 0
+    tombstoned: int = 0
+    attachments_skipped: int = 0
+    forgotten_source_references: int = 0
 
     def record(self) -> dict[str, object]:
-        return {"space": self.space, "into": self.into, "episodes": self.episodes,
-                "facts": self.facts, "moved": self.moved}
+        return dataclasses.asdict(self)
 
 
 @dataclass
