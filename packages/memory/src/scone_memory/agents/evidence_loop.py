@@ -19,6 +19,7 @@ from ..integrations.read_memory import ReadMemoryArgs
 from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
 from ..retrieval.computation import ComputeMemoryArgs
 from .tool_evidence import PreparedToolEvidence
+from .usage import ModelTokenUsage, ToolTokenUsage
 
 
 class ToolCall(BaseModel):
@@ -32,6 +33,7 @@ class ToolStep(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
     content: str = Field(default='', max_length=64000)
     calls: tuple[ToolCall, ...] = Field(default=(), max_length=8)
+    usage: ModelTokenUsage = Field(default_factory=ModelTokenUsage)
 
 
 class ToolLoopLimits(BaseModel):
@@ -78,6 +80,7 @@ class ToolLoopResult:
     _validator: Callable[[], Awaitable[bool]] = field(repr=False, compare=False)
     verified_accuracy: bool = False
     deadline: float | None = field(default=None, repr=False, compare=False)
+    usage: ToolTokenUsage = field(default_factory=ToolTokenUsage)
 
     async def validate(self) -> bool:
         """Recheck before later capture, within the original turn deadline."""
@@ -167,6 +170,7 @@ class EvidenceToolLoop:
 
     async def run(self, messages: list[dict[str, str]]) -> ToolLoopResult:
         limits = self._limits
+        usage: list[ModelTokenUsage] = []
         # Only ordinary host messages may seed a turn. Models cannot inject a
         # preexisting tool result or select tools by altering the input history.
         if not messages or any(set(row) != {'role', 'content'} or row['role'] not in ('system', 'user', 'assistant')
@@ -315,8 +319,8 @@ class EvidenceToolLoop:
                     raise RuntimeError('tool model unavailable') from None
                 model_calls += 1
                 try:
-                    step = ToolStep.model_validate(step.model_dump())
-                    if len(_json(step.model_dump()).encode()) > 128000:
+                    step = ToolStep.model_validate(step.model_dump(warnings='error'))
+                    if len(_json(step.model_dump(exclude={'usage'})).encode()) > 128000:
                         raise ValueError()
                     ids = [call.id for call in step.calls]
                     if len(set(ids)) != len(ids) or seen.intersection(ids) or (step.calls and not enabled):
@@ -325,6 +329,7 @@ class EvidenceToolLoop:
                         raise ValueError()
                 except Exception:
                     raise RuntimeError('invalid tool protocol') from None
+                usage.append(step.usage)
                 if not step.calls:
                     if not step.content.strip() or len(step.content.encode()) > limits.max_reply_bytes:
                         raise RuntimeError('tool reply byte limit or empty reply')
@@ -348,7 +353,8 @@ class EvidenceToolLoop:
                     return ToolLoopResult(step.content, model_calls, calls, evidence_ids,
                                           'retained' if evidence_ids else 'none',
                                           tuple(evidence.payload for evidence in retained if evidence.evidence_ids),
-                                          tuple(outcomes), validate, deadline=deadline)
+                                          tuple(outcomes), validate, deadline=deadline,
+                                          usage=ToolTokenUsage(calls=tuple(usage)))
                 rounds += 1
                 seen.update(ids)
                 transcript.append({'role': 'assistant', 'content': step.content or None, 'tool_calls': [
