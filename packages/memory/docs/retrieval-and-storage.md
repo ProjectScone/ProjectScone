@@ -222,7 +222,25 @@ says which way it went and why**:
 `route=` insists on one instead, and the answer says it was asked for
 rather than chosen: a rule that cannot be overridden is a rule somebody
 will work around, and then the framework learns nothing from being
-wrong. `GET /v1/answer`, `scone answer`. Nothing here calls a model.
+wrong. `GET /v1/answer`, `scone answer`. Nothing here calls a model
+unless the fourth route is asked for by name:
+
+4. **`route=synthesize`**, which the rule never chooses. A broad question
+   ("what is known about the launch?") is not answered by five passages
+   and a score; this reads up to `limit` passages (fifty at most) and has
+   a model write a few sentences about them, each naming the passage it
+   came from and a quote from that passage **that the framework found
+   there**. A sentence without such a quote is not shown, and is counted.
+   Passages are packed into rounds by bytes, one model call each, so an
+   early passage cannot shape what a later one is allowed to say and a
+   model that fails costs only its round; when more than one round left
+   notes, one more call may fold them into a summary whose sentences cite
+   notes by id. `detail` counts what was read, unread, refused as too
+   large for a round, and dropped as unquoted or uncited, says whether the
+   sentences were cut, and carries `verified_accuracy: false` on every
+   record because only the quotes were checked, not the sentences. It
+   needs a model (`SCONE_CHAT_URL` and `SCONE_CHAT_MODEL`); without one
+   the route is refused. `scone answer --route synthesize --limit 30`.
 
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
