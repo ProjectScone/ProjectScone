@@ -915,6 +915,10 @@ class SqliteDocumentStore:
         ).fetchone()
         return _fact_link(row)
 
+    async def space_fact_links(self, space: str) -> list[FactLink]:
+        rows = self.conn.execute("SELECT * FROM fact_links WHERE space = ? ORDER BY id", (deletion_key(space),))
+        return [_fact_link(row) for row in rows]
+
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         rows = self.conn.execute(
             "SELECT * FROM fact_links WHERE space = ? AND (from_fact = ? OR to_fact = ?) ORDER BY id", (space, fact_id, fact_id)

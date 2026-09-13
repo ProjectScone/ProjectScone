@@ -492,6 +492,10 @@ class InMemoryDocumentStore:
         link = self._links.get(link_id)
         return link if link is not None and link.space == space else None
 
+    async def space_fact_links(self, space: str) -> list[FactLink]:
+        deletion_key(space)
+        return sorted((link for link in self._links.values() if link.space == space), key=lambda link: link.link_id)
+
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         return [l for l in self._links.values() if l.space == space and fact_id in (l.from_fact, l.to_fact)]
 
