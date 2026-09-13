@@ -54,10 +54,10 @@ async def test_activation_durable_before_open_failure_and_retry_reconciles(setup
     await service.start('alpha','one',workflow_id='interactive',plan_revision=1,question='Q');await service.wait('alpha','one')
     await service.respond('alpha','one','choose',response='North',expected_revision=1)
     original=service._open
-    def failure(request):
+    def failure(request, **kwargs):
         if service._inputs.get('alpha','one','choose').activation_id:
             raise WorkflowError('injected_unavailable')
-        return original(request)
+        return original(request, **kwargs)
     monkeypatch.setattr(service,'_open',failure)
     with pytest.raises(WorkflowError,match='injected_unavailable'):
         await service.continue_run('alpha','one',continuation_id='c',responses={'choose':2})
