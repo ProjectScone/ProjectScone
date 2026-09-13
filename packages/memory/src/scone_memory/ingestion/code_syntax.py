@@ -54,14 +54,23 @@ _BINDS = frozenset({"function_declaration", "generator_function_declaration",
 #: `const` respect and `var` does not -- the distinction is the language's
 #: and getting it wrong bound a caller to a global it never called.
 _FUNCTIONS = frozenset({"function_declaration", "generator_function_declaration",
-                        "method_definition", "arrow_function", "function_expression",
-                        "program"})
-#: There is no list of scopes. Every node opens one and binds whatever is
-#: declared directly in it, because a whitelist of node types can only be
-#: as complete as its author and anything missing from it fell through to
-#: the file's own declarations -- a switch body and a generator
-#: expression each did. It failed **open**, and for a graph that means
-#: inventing an edge. This cannot be incomplete in that direction.
+                        "generator_function", "method_definition", "arrow_function",
+                        "function_expression", "program"})
+#: Nodes that own a scope: a function, or a block. Everything else is
+#: descended **through**, so a name declared in it belongs to the nearest
+#: real scope around it.
+#:
+#: This is a list and therefore incomplete, and the direction it fails in
+#: is the point. Miss a scope here and a name is collected into a wider
+#: one than it belongs to, so a call resolves to a local and no edge is
+#: recorded -- an omission. Invent a scope and a call escapes to the
+#: file's own declarations and an edge appears that nobody wrote. The
+#: first version of this failed open, the second invented a scope per
+#: node and split a `switch` into one per case; this one prefers to say
+#: less.
+_SCOPED = _FUNCTIONS | frozenset({"statement_block", "class_body", "for_statement",
+                                  "for_in_statement", "catch_clause", "switch_body"})
+
 #: A declaration whose value is a function: `const keep = (p) => p`. Most
 #: modern TypeScript writes functions this way and the line reader reports
 #: none of them -- 80 in the 60 files first measured.
@@ -168,6 +177,20 @@ def _imports(tree: "Node", source: bytes, path: str) -> dict[str, str]:
     return found
 
 
+def _within(node: "Node"):
+    """Every node of ``node``'s subtree that belongs to ``node``'s scope.
+
+    Descends through anything that does not own a scope of its own, so a
+    `const` written in a `switch_case` belongs to the switch body that
+    holds every case -- which is what JavaScript says, and what a scope
+    per node got wrong by giving each case one.
+    """
+    for child in node.children:
+        yield child
+        if child.type not in _SCOPED:
+            yield from _within(child)
+
+
 def _through(node: "Node"):
     """``node``'s children, looking through an `export_statement`.
 
@@ -217,7 +240,7 @@ def _bindings(scope: "Node", source: bytes):
     and is looked for through every block inside it, because that is
     where JavaScript puts it.
     """
-    for child in _through(scope):
+    for child in _within(scope):
         for name in _declares(child, source):
             yield name, child
     for child in scope.children:
@@ -271,8 +294,9 @@ def _qualified(holder: Optional[str], path: str, name: str) -> str:
 
 def _walk(node: "Node", source: bytes, path: str, stack: list[dict[str, Optional[str]]],
           imports: dict[str, str], holder: Optional[str], seen: set[str], say) -> None:
+    opened = node.type in _SCOPED
     scope: dict[str, Optional[str]] = {}
-    for name, binder in _bindings(node, source):
+    for name, binder in _bindings(node, source) if opened else ():
         # A declaration is a thing the graph can name; any other binding
         # is a value, and a call to it is nobody's edge.
         whole = None
@@ -282,7 +306,8 @@ def _walk(node: "Node", source: bytes, path: str, stack: list[dict[str, Optional
                 seen.add(whole)
                 say(holder or path, DEFINES, whole, _line(binder, source))
         scope.setdefault(name, whole)
-    stack.append(scope)
+    if opened:
+        stack.append(scope)
 
     if node.type == "call_expression" and holder is not None and not node.has_error:
         callee = node.child_by_field_name("function")
@@ -307,7 +332,8 @@ def _walk(node: "Node", source: bytes, path: str, stack: list[dict[str, Optional
             if name is not None:
                 mine = _qualified(holder, path, name)
         _walk(child, source, path, stack, imports, mine, seen, say)
-    stack.pop()
+    if opened:
+        stack.pop()
 
 
 def syntax_claims(content: str, path: str) -> tuple[CodeClaim, ...]:

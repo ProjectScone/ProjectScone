@@ -302,3 +302,44 @@ def test_a_parameter_default_is_evaluated_before_the_body_binds_anything():
     assert ("web/app.ts:caller", "web/app.ts:leaf") in calls, calls
     # And exactly once: the body's own `leaf()` is the local var.
     assert len([one for one in claims(source) if one[1] == "calls"]) == 1, claims(source)
+
+
+def test_one_switch_is_one_scope_however_many_cases_it_has():
+    """A `switch` body is a single block in JavaScript: every case shares
+    it, and a `const` in one case is in scope for the next.
+
+    Opening a scope for every node fixed a whitelist that failed open and
+    replaced it with something that fails **wrong** -- it invented a
+    boundary at each case, so case two stopped seeing case one's `leaf`
+    and resolved to the global instead. A model that invents a scope is
+    as unsound as one that misses a scope.
+    """
+    # No braces on the case: with them it is a block of its own and the
+    # `const` really is scoped to it. Without them the switch body is the
+    # block, which is the case that was wrong.
+    source = ("export function leaf() { return 1; }\n"
+              "export function caller(k: number) {\n"
+              "  switch (k) {\n"
+              "    case 1:\n"
+              "      const leaf = () => 2;\n"
+              "      return leaf();\n"
+              "    case 2:\n"
+              "      return leaf();\n"
+              "  }\n"
+              "}\n")
+    assert not [one for one in claims(source) if one[1] == "calls"], claims(source)
+
+
+def test_a_generator_expression_keeps_its_own_var():
+    """`function*` written as an expression is a function, and a `var`
+    inside it belongs to it. Its node type is `generator_function` and my
+    list of what counts as a function did not have it, so the `var`
+    hoisted out into the enclosing function and suppressed that
+    function's genuine call to the global."""
+    source = ("export function leaf() { return 1; }\n"
+              "export function caller() {\n"
+              "  const inner = function* () { var leaf = () => 2; return leaf(); };\n"
+              "  return leaf() + inner().next().value;\n"
+              "}\n")
+    calls = {(one[0], one[2]) for one in claims(source) if one[1] == "calls"}
+    assert ("web/app.ts:caller", "web/app.ts:leaf") in calls, calls
