@@ -110,3 +110,10 @@ async def test_files_remembered_together_resolve_imports_among_themselves():
         assert imports == ['web/store.ts'], imports
     finally:
         await memory.close()
+
+
+async def test_the_resolver_ignores_what_is_not_a_path():
+    """A partial batch can carry a refused record with no path at all;
+    the resolver over its neighbours must not trip on it."""
+    resolve = file_resolver(['web/store.ts', 17, None, ''])  # type: ignore[list-item]
+    assert resolve('web/api.ts', 1, './store') == 'web/store.ts'
