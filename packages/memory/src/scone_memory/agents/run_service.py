@@ -14,6 +14,8 @@ import stat
 from .approval_models import Decision, ToolApprovalActivation, ToolApprovalRecord
 from .approval_store import AgentApprovalStore
 from .history_capture import AgentRunHistory
+from .run_text import AgentRunText
+from ..api.text_stream import TextWindow
 from .event_history import AgentEventHistoryStore
 from .history_models import AgentHistoryPage
 from .catalog import AgentCatalog
@@ -80,8 +82,14 @@ class AgentRunService:
     """
     def __init__(self, directory: str | Path, *, key: bytes, catalog: AgentCatalog,
                  plans: AgentPlanStore, memory: MemoryEngine, scope_for: Callable[[str], RecallScope],
-                 max_active: int = 4, max_runs: int = 4096, deadline_s: float = 120.0, max_parallel_tasks: int = 1) -> None:
+                 max_active: int = 4, max_runs: int = 4096, deadline_s: float = 120.0, max_parallel_tasks: int = 1,
+                 public_text: bool = False) -> None:
         _integer(max_active, 1, 32)
+        if type(public_text) is not bool:
+            raise ValueError('public_text must be a boolean')
+        # Windows onto the answer each running step is writing; provisional,
+        # process-local, and only when a host asked for them.
+        self._text: AgentRunText | None = AgentRunText() if public_text else None
         _integer(max_parallel_tasks, 1, 8)
         self._parallel = max_parallel_tasks
         if not callable(scope_for):
@@ -178,18 +186,27 @@ class AgentRunService:
             return AgentHandoffWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
                 memory=self._memory, space=request.space, scope=scope,
                 exclude_session_id=request.exclude_session_id, deadline_s=self._deadline,
-                approval_store=self._approvals, approval_activation=approval_activation, history=history, read_only=read_only)
+                approval_store=self._approvals, approval_activation=approval_activation, history=history, text=self._text, read_only=read_only)
         if isinstance(plan, InteractiveAgentPlan):
             return InteractiveAgentWorkflow(self._path(request), key=self._key, catalog=self._catalog,
                 request=request, memory=self._memory, inputs=self._inputs,
                 activated=tuple(record for record in self._inputs.activated(request.space, request.run_id)
                                 if input_activation is not None and record.activation_id == input_activation),
                 deadline_s=self._deadline,
-                approval_store=self._approvals, approval_activation=approval_activation, history=history, read_only=read_only)
+                approval_store=self._approvals, approval_activation=approval_activation, history=history, text=self._text, read_only=read_only)
         return AgentWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
             memory=self._memory, space=request.space, scope=scope,
             exclude_session_id=request.exclude_session_id, deadline_s=self._deadline, max_parallel=request.max_parallel,
-            approval_store=self._approvals, approval_activation=approval_activation, history=history, read_only=read_only)
+            approval_store=self._approvals, approval_activation=approval_activation, history=history, text=self._text, read_only=read_only)
+
+    def text_window(self, space: str, run_id: str, step_id: str) -> TextWindow | None:
+        """The window onto a step's public text while this process runs
+        it, or None: no such run or step here, the host did not ask for
+        public text, or the text is gone with the process that held it.
+        Provisional -- the receipt is what ``result`` returns."""
+        if self._text is None:
+            return None
+        return self._text.window(space, run_id, step_id)
 
     def _progress(self, request: AgentRunRequest) -> WorkflowStatus | None:
         identity = (request.space, request.run_id)
@@ -669,6 +686,8 @@ class AgentRunService:
         if self._closed:
             return
         self._closing = True
+        if self._text is not None:
+            self._text.close_all()
         tasks = (*self._tasks.values(), *self._admissions.values())
         for task in tasks:
             task.cancel()
