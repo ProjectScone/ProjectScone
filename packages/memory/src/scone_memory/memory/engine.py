@@ -551,8 +551,12 @@ class MemoryEngine:
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
             self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
-            context_inputs=context_inputs,
+            context_inputs=context_inputs, verify_visual=self._verify_visual_record,
         )
+
+    async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
+        from ..ingestion.visual_document import verify_visual_record
+        await verify_visual_record(self, space, record, episode_id)
 
     async def _remember_many(self, space: str, records: Sequence[Record], *,
                              embedding_checkpoint: EmbeddingCheckpoint | None = None,
