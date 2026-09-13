@@ -8,9 +8,13 @@ as one conversation episode whose text is the turns joined as
 truth) and whose created_at is the haystack date; then one recall of the
 question at limit k. Recall@k any: at least one evidence session appears
 among the top-k items' sources. Recall@k all: every evidence session
-does. Items with no evidence session (abstention items) count toward the
-denominator only when ``include_abstention`` is set, matching the Rust
-run that reported on all 500; the official evaluator excludes them.
+does. Recall@k share: the fraction of the item's evidence sessions that
+do, averaged over items -- between any and all, which bracket it, and
+reported beside them rather than instead of them because the Rust
+harness has only the two. Items with no evidence session (abstention
+items) count toward the denominator only when ``include_abstention`` is
+set, matching the Rust run that reported on all 500; the official
+evaluator excludes them.
 """
 
 from .runner import BenchItem, ItemResult, RunReport, load_items, run, stratified_sample

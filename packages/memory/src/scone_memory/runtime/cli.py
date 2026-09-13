@@ -152,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("forget", help="delete an episode; the receipt says what went and what stayed")
     p.add_argument("episode_id", type=int)
     p.add_argument("--dry-run", action="store_true", help="show the impact and remove nothing")
+    p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
+                   help="exclude: take the claims only this source supported out of recall, reversibly (default keep)")
 
     p = sub.add_parser("facts", help="list facts")
     p.add_argument("--all", action="store_true", help="include closed facts")
@@ -360,6 +362,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="insist on one route instead of letting the rule choose")
     p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with")
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
+    p.add_argument("--whole", action="store_true",
+                   help="show each passage whole instead of its first 200 characters")
 
     p = sub.add_parser("sync", help="bring a space into step with a directory: added, changed and gone")
     p.add_argument("directory")
@@ -470,9 +474,14 @@ def space_line(receipt) -> str:
 
 
 def receipt_line(r) -> str:
-    return (f"{r.chunks} chunk(s), {len(r.attachments_released)} attachment(s) released, {len(r.attachments_kept)} kept, "
-            f"{len(r.facts_citing)} claim(s), {len(r.links_citing)} link(s) and "
-            f"{len(r.affirmations_citing)} restatement(s) cite it and stand")
+    cited = (f"{len(r.facts_citing)} claim(s), {len(r.links_citing)} link(s) and "
+             f"{len(r.affirmations_citing)} restatement(s) cite it")
+    if r.claims_policy == "exclude":
+        cited += (f"; {len(r.claims_excluded)} claim(s) excluded, {len(r.claims_kept_other_support)} kept with other support, "
+                  f"{len(r.claims_kept_not_in_ledger)} left for review, {len(r.claims_already_excluded)} already excluded; links stand")
+    else:
+        cited += " and stand"
+    return f"{r.chunks} chunk(s), {len(r.attachments_released)} attachment(s) released, {len(r.attachments_kept)} kept, " + cited
 
 
 def link_line(link) -> str:
@@ -934,6 +943,7 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
               f"{report.errors} error(s)", file=out)
         for k in report.ks:
             print(f"  R@{k:<3} any {report.recall_any[k] * 100:5.1f}%   all {report.recall_all[k] * 100:5.1f}%"
+                  f"   share {report.recall_share.get(k, 0.0) * 100:5.1f}%"
                   f"   P@{k} {report.precision.get(k, 0.0) * 100:5.1f}%   nDCG@{k} {report.ndcg.get(k, 0.0) * 100:5.1f}%"
                   f"   hit@{k} {report.hit_rate.get(k, 0.0) * 100:5.1f}%",
                   file=out)
@@ -942,7 +952,8 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
         print(f"  context reduction median {(report.context_reduction_median or 0) * 100:.1f}% (bytes, not tokens); "
               f"recall p50 {report.recall_ms_p50:.1f} ms, p95 {report.recall_ms_p95:.1f} ms", file=out)
         for qt, row in report.by_type.items():
-            print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(f"all@{k} {row[f'all@{k}'] * 100:5.1f}%" for k in report.ks), file=out)
+            print(f"  {qt:<28} n={row['n']:<4}" + "  ".join(
+                f"all@{k} {row[f'all@{k}'] * 100:5.1f}% share@{k} {row.get(f'share@{k}', 0.0) * 100:5.1f}%" for k in report.ks), file=out)
         if report.history:
             print(f"  history asked on every recall: {report.items_with_facts} item(s) had facts, {report.items_with_history} had a chain"
                   + ("" if report.items_with_facts else " (no facts in any item's space: nothing was distilled, so history had nothing to show)"), file=out)
@@ -1573,7 +1584,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             forget_receipt = await engine.impact(space, args.episode_id)
             emit(forget_receipt.model_dump()) if args.json else print(f"would forget episode {args.episode_id}: {receipt_line(forget_receipt)}", file=out)
             return 0
-        forget_receipt = await engine.forget(space, args.episode_id)
+        forget_receipt = await engine.forget(space, args.episode_id, with_claims=args.with_claims)
         emit({"forgotten": args.episode_id, **forget_receipt.model_dump()}) if args.json else print(f"forgot episode {args.episode_id}: {receipt_line(forget_receipt)}", file=out)
         return 0
 
@@ -1604,10 +1615,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0
 
     if args.command == "answer":
-        from ..retrieval.router import answer_question
+        from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
         routed = await answer_question(engine, space, args.question, now=args.now, limit=args.limit,
-                                       route=args.route)
+                                       route=args.route, max_item_chars=0 if args.whole else DEFAULT_ITEM_CHARS)
         if getattr(args, "json", False):
             print(_ledger_json(routed.record(space)), file=out)
             return 0
