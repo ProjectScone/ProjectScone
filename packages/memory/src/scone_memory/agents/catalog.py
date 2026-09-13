@@ -10,10 +10,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 import hashlib
 import json
-from typing import TYPE_CHECKING, Annotated, Self
+from typing import TYPE_CHECKING, Annotated, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
+from .custom_tools import AgentTool, snapshot_tools
 from .evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
 from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
 
@@ -55,11 +56,22 @@ class AgentDefinition(BaseModel):
     default_model: Identifier
     limits: ToolLoopLimits = Field(default_factory=ToolLoopLimits)
     initial_search: bool = True
+    tools: tuple[Identifier, ...] = Field(default=(), max_length=32)
+
+    @model_serializer(mode='wrap')
+    def serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        if type(self.tools) is not tuple or any(not isinstance(name, str) for name in self.tools):
+            raise ValueError('invalid agent tool selection')
+        result = cast(dict[str, object], handler(self))
+        if not self.tools:
+            result.pop('tools', None)
+        return result
 
     @model_validator(mode='after')
     def valid(self) -> Self:
         if (not self.instructions.strip() or len(self.instructions.encode('utf-8')) > 32000
-                or len(self.models) != len(set(self.models)) or self.default_model not in self.models):
+                or len(self.models) != len(set(self.models)) or self.default_model not in self.models
+                or len(self.tools) != len(set(self.tools))):
             raise ValueError('invalid agent instructions or model choices')
         return self
 
@@ -82,6 +94,7 @@ class BoundAgent:
     """
     definition: AgentDefinition
     model: AgentModel = field(repr=False)
+    tools: tuple[AgentTool, ...] = field(default=(), repr=False, compare=False)
     fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -91,10 +104,17 @@ class BoundAgent:
         model = AgentModel(self.model.model_id, self.model.label, self.model.revision, self.model.factory)
         if model.model_id not in snapshot.models:
             raise ValueError('model is not allowed for this agent')
-        identity = json.dumps({'agent': snapshot.model_dump(), 'model': model.info().model_dump()},
+        registered = snapshot_tools(self.tools)
+        if tuple(tool.name for tool in registered) != snapshot.tools:
+            raise ValueError('bound tools do not match the agent policy')
+        configuration: dict[str, object] = {'agent': snapshot.model_dump(), 'model': model.info().model_dump()}
+        if registered:
+            configuration['tools'] = [tool.info() for tool in registered]
+        identity = json.dumps(configuration,
                               sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
         object.__setattr__(self, 'definition', snapshot)
         object.__setattr__(self, 'model', model)
+        object.__setattr__(self, 'tools', registered)
         object.__setattr__(self, 'fingerprint', hashlib.sha256(identity.encode('utf-8')).hexdigest())
 
     @property
@@ -117,7 +137,8 @@ class BoundAgent:
         if not callable(getattr(model, 'complete', None)):
             raise ValueError('agent factory did not return a tool model')
         result = await EvidenceToolLoop(model, tools, limits=self.definition.limits,
-            initial_search=self.definition.initial_search, answer_requirements=requirements).run(messages)
+            initial_search=self.definition.initial_search, answer_requirements=requirements,
+            custom_tools=self.tools).run(messages)
         return AgentResult(self.definition.agent_id, self.model_id, self.fingerprint, result)
 
 
@@ -128,7 +149,8 @@ class AgentCatalog:
     Hosts decide which catalog entries a caller may see and supply tools bound
     to that caller's fixed space and scope. Factories must return fresh clients.
     """
-    def __init__(self, *, models: Sequence[AgentModel], agents: Sequence[AgentDefinition]) -> None:
+    def __init__(self, *, models: Sequence[AgentModel], agents: Sequence[AgentDefinition],
+                 tools: Sequence[AgentTool] = ()) -> None:
         if not 1 <= len(models) <= 64 or not 1 <= len(agents) <= 32:
             raise ValueError('agent catalog requires 1..64 models and 1..32 agents')
         clean_models: dict[str, AgentModel] = {}
@@ -139,6 +161,7 @@ class AgentCatalog:
             if clean.model_id in clean_models:
                 raise ValueError('duplicate agent model')
             clean_models[clean.model_id] = clean
+        clean_tools = {tool.name: tool for tool in snapshot_tools(tools)}
         clean_agents: dict[str, AgentDefinition] = {}
         for definition in agents:
             if not isinstance(definition, AgentDefinition):
@@ -148,8 +171,10 @@ class AgentCatalog:
                 raise ValueError('duplicate agent identifier')
             if any(model_id not in clean_models for model_id in clean_definition.models):
                 raise ValueError('agent references an unregistered model')
+            if any(name not in clean_tools for name in clean_definition.tools):
+                raise ValueError('agent references an unregistered tool')
             clean_agents[clean_definition.agent_id] = clean_definition
-        self._models, self._agents = clean_models, clean_agents
+        self._models, self._agents, self._tools = clean_models, clean_agents, clean_tools
 
     def _definition(self, agent_id: str) -> AgentDefinition:
         if not isinstance(agent_id, str) or agent_id not in self._agents:
@@ -171,7 +196,7 @@ class AgentCatalog:
         if not isinstance(selected, str) or selected not in definition.models:
             raise ValueError('model is not allowed for this agent')
         model = self._models[selected]
-        return BoundAgent(definition, model)
+        return BoundAgent(definition, model, tuple(self._tools[name] for name in definition.tools))
 
 
 __all__ = ['AgentCatalog', 'AgentDefinition', 'AgentModel', 'AgentModelInfo', 'AgentResult', 'BoundAgent']
