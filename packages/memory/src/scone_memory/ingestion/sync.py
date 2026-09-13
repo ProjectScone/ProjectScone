@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 from ..core.errors import InvalidInput, SconeError
 from .code import BRACE_SUFFIXES, PYTHON_SUFFIXES
+from .code_resolution import file_resolver
 from .records import Record
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -362,6 +363,9 @@ async def sync_directory(
             f"without remove to see the plan, or delete the space if that is what you mean.")
 
     tally = _Tally()
+    # Relative imports are followed to files this tree holds: the ones
+    # walked now and the ones the marker already remembers.
+    resolve = file_resolver({*(path.relative_to(where).as_posix() for path in reading), *known})
     seen: set[str] = set()
     for path in reading:
         here = path.relative_to(where).as_posix()
@@ -395,7 +399,7 @@ async def sync_directory(
             # since both halves are text a caller chose.
             done = await engine.replace(space, Record(content=text, kind="file", source=here,
                                                       dedup_key=_key(name, here),
-                                                      metadata={"sync": name}))
+                                                      metadata={"sync": name}), resolve=resolve)
             tally.claims(done.claims_closed, done.claims_unread)
         setattr(tally, what, getattr(tally, what) + 1)
         tally.saw(here, what)
