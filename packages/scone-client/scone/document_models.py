@@ -242,9 +242,12 @@ class DocumentResult:
                 or manifest.attachment_id == original.attachment_id or ocr != request.spec.pdf_ocr
                 or video != request.spec.video_ocr):
             raise invalid('document result binding')
+        segments = integer(row.get('segments'), 0 if video else 1, request.spec.limits.max_segments)
+        added = DocumentStored.from_json(row.get('added'))
+        if segments == 0 and added.chunks != 0:
+            raise invalid('visual-only document chunks')
         return cls(request.space, request.import_id, request.spec.filename, text(row.get('format'), 256),
-                   integer(row.get('segments'), 1, request.spec.limits.max_segments), original, manifest,
-                   DocumentStored.from_json(row.get('added')), ocr, video)
+                   segments, original, manifest, added, ocr, video)
 
 
 @dataclass(frozen=True)

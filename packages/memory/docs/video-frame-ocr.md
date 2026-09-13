@@ -40,8 +40,23 @@ OCR status. Empty means no recognized text, not verified absence of visible text
 
 There is one text segment per nonempty frame. Sampling does not prove coverage
 of unsampled moments. Requests beyond the final decoded frame are counted.
-Entirely empty OCR is refused because common document ingestion requires text;
-the parser does not manufacture text to represent a visual-only source.
+When every sampled frame returns no recognized text, manifest version 7 retains
+that inventory with zero segments. The source episode has empty content and zero
+text chunks or vectors. No caption, filename text or visual interpretation is
+manufactured, and neither embedding nor text-distillation models are invoked.
+Nonempty video documents retain version 6 and their existing serialized identity.
+
+Visual-only retention verifies both retained attachments before writing. An
+interruption leaves the source identity marked until retry or engine recovery
+verifies the evidence and repairs both attachment links. Directory synchronization
+accepts zero chunks only for verified visual-only evidence with no unfinished
+write. Ordinary empty notes and caller-supplied metadata cannot select this path.
+
+Archive profile `scone.archive/1` omits attachment bytes. Import and space merge
+therefore refuse visual-only source records explicitly before mutations; they do
+not create an unverifiable empty source or delete its original space. Use storage
+backups that carry document and attachment stores together until attachment
+transfer is supported.
 
 The default selection limit is 64 frames, configurable up to 256; input and
 execution obey `DocumentLimits`. Each OCR result is limited to 10,000 regions,
@@ -170,9 +185,8 @@ transaction; a change after its final observation is not guaranteed to be caught
 
 This implementation redecodes the sampled inventory for each request and does
 not retain a frame cache. The work remains bounded by the recorded sampling
-policy and the host document limits. Entirely visual documents with no recognized
-text, generated video interpretations and video citation UI remain subsequent
-integration work.
+policy and the host document limits. Generated video interpretations and
+semantic retrieval over visual-only sources remain subsequent integration work.
 
 ## Browser frame catalogue
 

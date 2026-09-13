@@ -13,7 +13,7 @@ from ..core.models import Added, Attachment
 from ..core.validation import MAX_METADATA_VALUE, check_space
 from .extraction_checkpoint import CheckpointedDocumentParser, ExtractionCheckpoints, checkpoint_dispatch_allowed
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
-from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
+from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document, visual_only
 from .document_source import DocumentSource, source_revision_key
 from .video_evidence import DocumentVideoEvidence
 
@@ -39,7 +39,7 @@ FILE_MEDIA_TYPES = {
 
 class DocumentManifest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    schema_version: Literal[1, 2, 3, 4, 5, 6] = 1
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7] = 1
     offset_unit: Literal['extracted_text_utf8_bytes'] = 'extracted_text_utf8_bytes'
     original_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     filename: str = Field(min_length=1, max_length=1024)
@@ -52,6 +52,10 @@ class DocumentManifest(BaseModel):
 
 
 def _validate_manifest_version(manifest: DocumentManifest) -> None:
+    if not manifest.parsed.segments and manifest.schema_version != 7:
+        raise ValueError('visual-only documents require manifest version seven')
+    if manifest.schema_version == 7 and not visual_only(manifest.parsed):
+        raise ValueError('manifest version seven requires a visual-only video document')
     if manifest.parsed.video is not None:
         if manifest.schema_version < 6:
             raise ValueError('document video frames require manifest version six')
@@ -134,7 +138,7 @@ async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser
     has_order = any('ocr_reading_order' in s.metadata for s in parsed.segments)
     has_tables = any(s.table_cells for s in parsed.segments)
     has_merges = any(c.context or c.merged_locators for s in parsed.segments for c in s.table_cells)
-    return DocumentManifest(schema_version=6 if parsed.video is not None else 5 if has_merges else 4 if has_tables else 3 if has_order else 2 if any(s.regions for s in parsed.segments) else 1,
+    return DocumentManifest(schema_version=7 if visual_only(parsed) else 6 if parsed.video is not None else 5 if has_merges else 4 if has_tables else 3 if has_order else 2 if any(s.regions for s in parsed.segments) else 1,
                             original_sha256=digest(data), filename=filename, parsed=parsed)
 
 
@@ -155,15 +159,22 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
     if retained.media_type != 'application/json':
         raise InvalidInput('document manifest has an incompatible retained media type')
     content = '\n\n'.join(segment.text for segment in manifest.parsed.segments)
-    added = await memory.remember(space, content, kind='file', source=f'attachment:{original.attachment_id}',
-        dedup_key=identity or f'document-v1:{original.attachment_id}:{retained.attachment_id}',
-        attachment_ids=(original.attachment_id, retained.attachment_id),
-        embedding_checkpoint=embedding_checkpoint,
-        metadata={'document_format': manifest.parsed.format,
-                  **({'document_filename': manifest.filename} if len(manifest.filename) <= MAX_METADATA_VALUE else {}),
-                  'document_original': original.attachment_id,
-                  'document_manifest': retained.attachment_id, 'evidence_origin': 'extracted_text',
-                  **source_metadata})
+    metadata = {'document_format': manifest.parsed.format,
+                **({'document_filename': manifest.filename} if len(manifest.filename) <= MAX_METADATA_VALUE else {}),
+                'document_original': original.attachment_id,
+                'document_manifest': retained.attachment_id,
+                'evidence_origin': 'sampled_video_frames' if visual_only(manifest.parsed) else 'extracted_text',
+                **source_metadata}
+    key = identity or f'document-v1:{original.attachment_id}:{retained.attachment_id}'
+    if visual_only(manifest.parsed):
+        from .records import RetainedVideoRecord
+        [added] = await memory.remember_many(space, [RetainedVideoRecord(
+            content='', kind='file', source=f'attachment:{original.attachment_id}',
+            dedup_key=key, metadata=metadata)])
+    else:
+        added = await memory.remember(space, content, kind='file', source=f'attachment:{original.attachment_id}',
+            dedup_key=key, attachment_ids=(original.attachment_id, retained.attachment_id),
+            embedding_checkpoint=embedding_checkpoint, metadata=metadata)
     return DocumentIngested(added, original, retained, manifest.parsed.format,
                             len(manifest.parsed.segments), manifest.filename)
 

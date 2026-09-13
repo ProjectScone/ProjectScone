@@ -18,7 +18,7 @@ from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, Ne
 from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
 from .code import code_language, code_spans
-from .records import Record, RecoveryReport, _DupOf, _Pending, content_hash
+from .records import Record, RetainedVideoRecord, RecoveryReport, _DupOf, _Pending, content_hash
 
 EMBED_BATCH = 64
 
@@ -115,12 +115,14 @@ class IngestionRuntime:
     #: its declarations rather than every chunk_target characters.
     code_aware: bool = True
     context_inputs: Callable[[NewEpisode, Sequence[tuple[int, int]]], Awaitable[list[str]]] | None = None
+    # With an episode id, verification also repairs its original/manifest links.
+    verify_visual: Callable[[str, Record, int | None], Awaitable[None]] | None = None
 
 
-def validated_record(space: str, record: Record, when: str) -> NewEpisode:
+def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False) -> NewEpisode:
     """Validate and snapshot caller input before any source can be removed."""
     content = record.content
-    if not isinstance(content, str) or not content.strip():
+    if not isinstance(content, str) or (not content.strip() and not (verified_visual and content == "")):
         raise InvalidInput("content must not be empty")
     if len(content.encode()) > MAX_CONTENT_BYTES:
         raise InvalidInput(f"content exceeds {MAX_CONTENT_BYTES} bytes")
@@ -145,6 +147,15 @@ def validated_record(space: str, record: Record, when: str) -> NewEpisode:
                       tags=clean_tags, metadata=clean_meta)
 
 
+async def _validated_record(runtime: IngestionRuntime, space: str, record: Record, when: str) -> NewEpisode:
+    visual = isinstance(record, RetainedVideoRecord) and record.content == ''
+    if visual:
+        if runtime.verify_visual is None:
+            raise InvalidInput('visual-only documents require retained attachment verification')
+        await runtime.verify_visual(space, record, None)
+    return validated_record(space, record, when, verified_visual=visual)
+
+
 def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
     spans = spans_for(runtime, new.content, new.source)
     return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in spans],
@@ -153,6 +164,8 @@ def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -
 
 async def embedding_inputs(runtime: IngestionRuntime, new: NewEpisode, spans: Sequence[tuple[int, int]],
                            texts: Sequence[str]) -> list[str]:
+    if not texts:
+        return []
     if runtime.context_inputs is not None:
         content = new.content.encode()
         previous = 0
@@ -191,7 +204,7 @@ async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]
     answers: list[Added | None] = []
     for record in records:
         try:
-            validated_record(space, record, runtime.clock())
+            await _validated_record(runtime, space, record, runtime.clock())
         except SconeError as wrong:
             answers.append(Added(episode_id=-1, outcome="failed", reason=str(wrong)))
             continue
@@ -227,12 +240,16 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
     one comes back as failed with the reason, and the rest are stored."""
     if partial:
         return await _each(runtime, space, records)
+    if any(isinstance(record, RetainedVideoRecord) for record in records):
+        if len(records) != 1:
+            raise InvalidInput('visual-only retention requires a single document operation')
+        return [await _retain_visual(runtime, space, records[0])]
     when = runtime.clock()
     results: list[Added | _DupOf | None] = []
     fresh: list[_Pending] = []
     seen: dict[str, int] = {}  # content hash -> index into results
     for record in records:
-        new = validated_record(space, record, when)
+        new = await _validated_record(runtime, space, record, when)
         digest = new.content_hash
         if digest in seen:
             results.append(Added(episode_id=-1, deduplicated=True, chunks=0))
@@ -263,6 +280,27 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
     return resolved
 
 
+async def _retain_visual(runtime: IngestionRuntime, space: str, record: Record) -> Added:
+    """An interrupted link operation leaves its source marked for verified repair.
+
+    Unlike a text batch, this operation has no embeddings to prepare or roll back.
+    Deleting its episode on a link failure would strand already-linked evidence.
+    """
+    new = await _validated_record(runtime, space, record, runtime.clock())
+    if new.content != '' or runtime.verify_visual is None:
+        raise InvalidInput('visual-only retention requires empty content and verified evidence')
+    episode = await runtime.documents.episode_by_hash(space, new.content_hash)
+    duplicate = episode is not None
+    await runtime.documents.mark_inflight(space, new.content_hash)
+    if episode is None:
+        episode = await runtime.documents.insert_episode(new)
+    await runtime.verify_visual(space, record, episode.episode_id)
+    await runtime.documents.bump_revision(space)
+    await runtime.documents.clear_inflight(space, new.content_hash)
+    return Added(episode_id=episode.episode_id, deduplicated=duplicate, chunks=0,
+                 outcome='duplicate' if duplicate else 'accepted')
+
+
 async def write_batch(
     runtime: IngestionRuntime, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list[Added | _DupOf | None]
 ) -> None:
@@ -289,20 +327,15 @@ async def write_batch(
                     for i, ((a, b), text) in enumerate(zip(pending.spans, pending.texts))
                 ]
             )
-            await runtime.vectors.upsert(
-                [
+            if chunks:
+                await runtime.vectors.upsert([
                     VectorPoint(
-                        chunk_id=c.chunk_id,
-                        space=space,
-                        episode_id=episode.episode_id,
-                        created_at=episode.created_at,
-                        vector=v,
-                        tags=pending.new.tags,
+                        chunk_id=c.chunk_id, space=space, episode_id=episode.episode_id,
+                        created_at=episode.created_at, vector=v, tags=pending.new.tags,
                         metadata=pending.new.metadata,
                     )
-                    for c, v in zip(chunks, vectors[offset : offset + len(chunks)])
-                ]
-            )
+                    for c, v in zip(chunks, vectors[offset:offset + len(chunks)])
+                ])
             offset += len(chunks)
             await runtime.documents.clear_inflight(space, pending.new.content_hash)
             results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks))
@@ -334,6 +367,14 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
             report.forgotten += 1
         else:
             chunks = await runtime.documents.chunks_of(space, episode.episode_id)
+            if episode.content == '':
+                if runtime.verify_visual is None or chunks:
+                    raise InvalidInput('visual-only recovery requires verified evidence and zero chunks')
+                await runtime.verify_visual(space, RetainedVideoRecord(content='', kind=episode.kind,
+                    source=episode.source, metadata=episode.metadata, content_hash=episode.content_hash), episode.episode_id)
+                await runtime.documents.clear_inflight(space, digest)
+                report.completed += 1
+                continue
             if not chunks:
                 spans = spans_for(runtime, episode.content, episode.source)
                 chunks = await runtime.documents.insert_chunks(
