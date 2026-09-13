@@ -474,7 +474,11 @@ so mapping again after an edit updates the file's memory rather than
 adding a second, the receipt counts it as `updated`, and with `--graph`
 the claims the new version no longer makes are closed, naming the file
 (`claims_closed`). What `map` stored, `sync` recognises as its own, and
-the other way round. An answer
+the other way round, and both follow a relative import the same way: only
+to a file the walk actually read -- the ones walked now and the ones the
+marker already holds -- never guessed at, through one resolver
+(`code_resolution.file_resolver`) that a batch of files remembered together
+also uses among themselves. An answer
 carries the line it rests on, **re-read from the file** before it is
 shown: a graph of a codebase goes stale the moment somebody edits it, and
 a citation that was not checked is the thing least worth trusting.

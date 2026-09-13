@@ -55,6 +55,9 @@ about without a store.
 
 from __future__ import annotations
 
+import posixpath
+from typing import TYPE_CHECKING, Iterable, Optional
+
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -119,3 +122,42 @@ def resolve_across_files(
             # reader refuses one for the same reason.
             found[(caller, candidates[0])] = None
     return Resolution(edges=tuple(sorted(found)), ambiguous=ambiguous, unknown=unknown)
+
+
+def file_resolver(paths: Iterable[str]) -> "Resolve":
+    """How a relative import is followed: only to a file the walk actually
+    read, and never guessed at otherwise.
+
+    A relative import names a file however the language spells it --
+    Python by module and level, the brace family by a path with the
+    extension left off, either of them possibly a directory's index -- so
+    the candidates are tried in that order against ``paths``, the files a
+    walk saw, and a name that leads anywhere else resolves to None. One
+    function of the paths, shared by ``map``, ``sync`` and any batch of
+    files remembered together, so the three cannot come to differ.
+    """
+    seen = {path.replace("\\", "/") for path in paths}
+
+    def resolve(path: str, level: int, module: str) -> Optional[str]:
+        here = posixpath.dirname(path)
+        for _ in range(level - 1):
+            here = posixpath.dirname(here)
+        stem = posixpath.join(here, *module.split(".")) if module else here
+        stems = [stem, posixpath.normpath(posixpath.join(posixpath.dirname(path), module))
+                 if module.startswith(".") else stem]
+        for base in dict.fromkeys(stems):
+            for suffix in ("py", "ts", "tsx", "js", "jsx", "go", "rs"):
+                if f"{base}.{suffix}" in seen:
+                    return f"{base}.{suffix}"
+                if f"{base}/index.{suffix}" in seen:
+                    return f"{base}/index.{suffix}"
+        for candidate in (f"{stem}.py", f"{stem}/__init__.py"):
+            if candidate in seen:
+                return candidate
+        return None
+
+    return resolve
+
+
+if TYPE_CHECKING:
+    from .code_graph import Resolve
