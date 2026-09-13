@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from .agent_answer import AnswerStream
 from .agent_history import HistoryStream, HistoryPage, history_cursor
 from ._wire import ResourceClient, address, boolean, bounded_body, cursor, identifier, integer, invalid, items, record, text
 from .agent_approvals import AgentToolContinuation, ApprovalCall, ToolApprovalActivation, ToolApprovalRecord
@@ -118,6 +119,24 @@ class AgentClient(ResourceClient):
         request = self.request(run_id)
         return HistoryStream(self._client._stream(path, params=params, headers=headers),
                              request=request, after=after, limit=limit)
+
+    def stream_answer(self, run_id: str, step_id: str, *, after: int = 0) -> AnswerStream:
+        """Read a running step's answer as it is written; resume with a cursor.
+
+        Provisional text: the terminal event says ``read_receipt`` and the
+        receipt is what ``result()`` returns. Never resumes work. Use as a
+        context manager so the connection is released either way.
+        """
+        path = '/v1/agent-runs/' + address(run_id) + '/steps/' + address(step_id) + '/text/stream'
+        cursor = integer(after, 0, 2**63 - 1)
+        params: dict[str, str] = {}
+        headers: dict[str, str] = {}
+        if cursor:
+            params['after'] = str(cursor)
+            headers['Last-Event-ID'] = str(cursor)
+        self._check('agents.runs').require('agents.text_stream')
+        self.request(run_id)
+        return AnswerStream(self._client._stream(path, params=params, headers=headers), after=cursor)
 
     def runs(self, *, limit: int = 20, after: Optional[str] = None) -> RunPage:
         params = {'limit': str(integer(limit, 1, 100))}
