@@ -168,7 +168,7 @@ class AgentWorkflow:
                  memory: MemoryEngine, space: str, scope: RecallScope,
                  exclude_session_id: str | None = None, deadline_s: float = 120.0,
                  max_payload_bytes: int = 1000000, max_parallel: int = 1,
-                 approval_store: AgentApprovalStore | None = None, approval_activation: str | None = None, history: AgentRunHistory | None = None) -> None:
+                 approval_store: AgentApprovalStore | None = None, approval_activation: str | None = None, history: AgentRunHistory | None = None, read_only: bool = False) -> None:
         check_space(space)
         _integer(max_parallel, 1, 8)
         if not isinstance(plan, AgentTaskPlan) or not isinstance(scope, RecallScope):
@@ -188,7 +188,7 @@ class AgentWorkflow:
         self._binding_scope = cast(dict[str, JSONValue], json.loads(_json({
             'plan': signature, 'recall': self._scope.as_dict(), 'exclude_session_id': exclude_session_id})))
         from .workflow_approvals import guarded, model_step
-        self._runner = WorkflowRunner(path, key=key, source_verifier=self._verify,
+        self._runner = WorkflowRunner(path, key=key, read_only=read_only, source_verifier=self._verify,
             deadline=deadline_s, max_payload_bytes=max_payload_bytes, verify_before_step=True,
             max_parallel=max_parallel, dependencies={task.task_id: task.depends_on for task in self._tasks.values()} if max_parallel > 1 else None,
             steps=[model_step(task.task_id, signature, self._step(task, self._agents[task.task_id]),
