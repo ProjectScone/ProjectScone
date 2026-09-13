@@ -27,6 +27,9 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
+from ..core.space_deletion import (
+    SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
+)
 from ..core.retirement import (
     Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
 )
@@ -225,6 +228,9 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("erased_spaces", ERASED_SPACE_MAPPINGS)
         await self.shared.ensure_index("meta", {"properties": {"value": KEYWORD}})
         await self.shared.ensure_index("inflight", {"properties": {"space": KEYWORD, "content_hash": KEYWORD}})
+        await self.shared.ensure_index("space_deletions", {"properties": {
+            "space": KEYWORD, "payload": {"type": "text", "index": False},
+        }})
         await self.shared.ensure_index("retirements", {"properties": {
             "space": KEYWORD, "episode_id": {"type": "long"}, "payload": {"type": "text", "index": False},
         }})
@@ -251,7 +257,7 @@ class ElasticsearchDocumentStore:
         # Wildcards are refused by default (action.destructive_requires_name),
         # so the indices are named one by one.
         names = [self._idx(n) for n in ("episodes", "chunks", "facts", "fact_links", "fact_affirmations", "tombstones",
-                                        "meta", "counters", "vectors", "events", "inflight", "erased_spaces", "retirements")]
+                                        "meta", "counters", "vectors", "events", "inflight", "erased_spaces", "retirements", "space_deletions")]
         await self.client.indices.delete(index=",".join(names), ignore_unavailable=True)
 
     async def close(self) -> None:
@@ -259,6 +265,8 @@ class ElasticsearchDocumentStore:
 
     async def _search(self, name: str, **kwargs) -> list[dict]:
         response = await self.client.search(index=self._idx(name), **kwargs)
+        if response.get("timed_out") or response.get("terminated_early") or response.get("_shards", {}).get("failed", 0):
+            raise RuntimeError("Elasticsearch search returned incomplete results")
         return [hit["_source"] | {"_score": hit.get("_score")} for hit in response["hits"]["hits"]]
 
     async def insert_episode(self, new: NewEpisode) -> Episode:
@@ -382,6 +390,22 @@ class ElasticsearchDocumentStore:
             size=limit, sort=[{'ordinal':'asc'}, {'chunk_id':'asc'}])
         return [_chunk(hit) for hit in hits]
 
+    async def chunk_index(self, space: str) -> list[tuple[int, int]]:
+        deletion_key(space)
+        pairs: list[tuple[int, int]] = []
+        after: list | None = None
+        while True:
+            options = {} if after is None else {"search_after": after}
+            response = await self.client.search(
+                index=self._idx("chunks"), query={"term": {"space": space}}, size=self.PAGE,
+                sort=[{"chunk_id": "asc"}], source=["chunk_id", "episode_id"], **options,
+            )
+            hits = response["hits"]["hits"]
+            pairs.extend((int(hit["_source"]["chunk_id"]), int(hit["_source"]["episode_id"])) for hit in hits)
+            if len(hits) < self.PAGE:
+                return pairs
+            after = hits[-1]["sort"]
+
     async def chunks_of(self, space: str, episode_id: int) -> list[Chunk]:
         out: list[Chunk] = []
         after: Optional[list] = None
@@ -485,6 +509,35 @@ class ElasticsearchDocumentStore:
         hits = await self._search("facts", query={"bool": {"filter": filters}}, size=10_000, sort=[{"fact_id": "asc"}])
         return [_fact(h) for h in hits]
 
+    async def prepare_archive_read(self, space: str) -> None:
+        """Expose acknowledged source writes before export counts and pages."""
+        deletion_key(space)
+        names = ("episodes", "facts", "fact_links", "fact_affirmations")
+        await self.client.indices.refresh(index=",".join(self._idx(name) for name in names))
+
+    async def _complete_archive_rows(self, name: str, space: str, query: dict, identity: str) -> list[dict]:
+        deletion_key(space)
+        found: list[dict] = []
+        after = 0
+        while True:
+            scoped = query if not after else {"bool": {"filter": [query, {"range": {identity: {"gt": after}}}]}}
+            page = await self._search(name, query=scoped, size=self.PAGE, sort=[{identity: "asc"}])
+            if len(page) > self.PAGE:
+                raise RuntimeError("Elasticsearch archive inventory exceeds its page limit")
+            for row in page:
+                value = row.get(identity)
+                if type(value) is not int or not after < value < 2**63 or row.get("space") != space:
+                    raise RuntimeError("Elasticsearch archive inventory has invalid scope, identity or order")
+                after = value
+            found.extend(page)
+            if len(page) < self.PAGE:
+                return found
+
+    async def prepare_ledger_read(self, space: str) -> None:
+        """Make acknowledged fact writes searchable before archive validation."""
+        deletion_key(space)
+        await self.client.indices.refresh(index=self._idx("facts"))
+
     async def page_facts(self, space: str, before_id: int | None, limit: int) -> list[Fact]:
         """Newest first below the cursor. Each page is one bounded search,
         so a whole-space read is never cut at the 10,000-hit window."""
@@ -541,6 +594,40 @@ class ElasticsearchDocumentStore:
     async def tombstone(self, space: str, episode_id: int) -> Optional[Tombstone]:
         doc = await self._doc("tombstones", f"{space}|{episode_id}")
         return _tombstone(doc) if doc is not None else None
+
+    async def record_space_deletion(self, record: SpaceDeletion) -> SpaceDeletion:
+        from elasticsearch import ConflictError
+
+        payload = encode_deletion(record)
+        try:
+            await self.client.index(index=self._idx("space_deletions"), id=record.space, op_type="create", refresh=True,
+                                    document={"space": record.space, "payload": payload})
+        except ConflictError:
+            pass
+        doc = await self._doc("space_deletions", record.space)
+        if doc is None:
+            raise RuntimeError("space deletion disappeared after its write")
+        return decode_deletion(doc["payload"], record.space)
+
+    async def space_deletion(self, space: str) -> SpaceDeletion | None:
+        doc = await self._doc("space_deletions", deletion_key(space))
+        return decode_deletion(doc["payload"], space) if doc is not None else None
+
+    async def page_space_deletions(self, after: str | None, limit: int) -> list[SpaceDeletion]:
+        deletion_page(after, limit)
+        options = {} if after is None else {"search_after": [after]}
+        hits = await self._search("space_deletions", query={"match_all": {}}, size=limit,
+                                  sort=[{"space": "asc"}], **options)
+        return [decode_deletion(hit["payload"], hit["space"]) for hit in hits]
+
+    async def clear_space_deletion(self, space: str) -> None:
+        from elasticsearch import NotFoundError
+
+        deletion_key(space)
+        try:
+            await self.client.delete(index=self._idx("space_deletions"), id=space, refresh=True)
+        except NotFoundError:
+            pass
 
     async def record_retirement(self, record: Retirement) -> Retirement:
         from elasticsearch import ConflictError
@@ -620,8 +707,7 @@ class ElasticsearchDocumentStore:
             await self.client.delete_by_query(index=self._idx("fact_affirmations"), query=query, refresh=True)
 
     async def space_affirmations(self, space: str) -> list[Affirmation]:
-        hits = await self._search("fact_affirmations", query={"term": {"space": space}}, size=10_000,
-                                  sort=[{"affirmation_id": "asc"}])
+        hits = await self._complete_archive_rows("fact_affirmations", space, {"term": {"space": space}}, "affirmation_id")
         return [_affirmation(hit) for hit in hits]
 
     async def insert_fact_link(self, new: NewFactLink) -> FactLink:
@@ -643,11 +729,15 @@ class ElasticsearchDocumentStore:
             raise RuntimeError("Elasticsearch fact link disappeared after a conflicting write")
         return _fact_link(existing)
 
+    async def space_fact_links(self, space: str) -> list[FactLink]:
+        rows = await self._complete_archive_rows("fact_links", space, {"term": {"space": space}}, "link_id")
+        return [_fact_link(row) for row in rows]
+
     async def fact_links(self, space: str, fact_id: int) -> list[FactLink]:
         query = {"bool": {"filter": [{"term": {"space": space}}],
                           "should": [{"term": {"from_fact": fact_id}}, {"term": {"to_fact": fact_id}}],
                           "minimum_should_match": 1}}
-        hits = await self._search("fact_links", query=query, size=10_000, sort=[{"link_id": "asc"}])
+        hits = await self._complete_archive_rows("fact_links", space, query, "link_id")
         return [_fact_link(h) for h in hits]
 
     async def fact_links_between(self, space: str, fact_ids: Sequence[int], limit: int) -> list[FactLink]:

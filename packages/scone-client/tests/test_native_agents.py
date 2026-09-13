@@ -52,9 +52,12 @@ def test_restart_reply_and_explicit_model_continuation(tmp_path):
         assert status.status == 'completed'
         activated, = agents.inputs('one')
         assert activated.revision == 3 and activated.activation_id == 'approval'
-        result = agents.result('one')
+        result = agents.result('one', include_usage=True)
         assert result.results['choose'].text == answered.response
         assert result.results['answer'].model_id == 'careful'
+        assert result.results['answer'].usage.prompt_tokens == 12
+        assert result.results['answer'].usage.total_tokens is None
+        assert not hasattr(result.results['choose'], 'usage')
         assert result.results['answer'].source_status == 'none'
         # Explicit retries retain their original identity and never execute again.
         assert agents.respond(pending, response=answered.response) == activated

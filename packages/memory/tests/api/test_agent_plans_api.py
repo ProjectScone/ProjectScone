@@ -44,6 +44,8 @@ async def test_catalog_and_plans_follow_key_space_and_roles(setup):
     choices=await client.get('/v1/agents/catalog',headers=auth('reader'))
     assert choices.status_code==200 and 'Private system instruction' not in choices.text
     caps=(await client.get('/v1/capabilities',headers=auth())).json()['features']
+    assert caps['agents.tools'] and choices.json()['tools'] == []
+    assert choices.json()['agents'][0]['tools'] == []
     assert caps['agents.catalog'] and caps['agents.plans'] and not caps.get('agents.runs',False)
     for role in ('reader','reviewer'):
         assert (await client.put('/v1/agent-plans/research-plan',json=payload(),headers=auth(role))).status_code==403
@@ -57,6 +59,26 @@ async def test_catalog_and_plans_follow_key_space_and_roles(setup):
     assert (await client.get('/v1/agent-plans',headers=auth('other'))).json()['items']==[]
     stale=await client.put('/v1/agent-plans/research-plan',json=payload(),headers=auth())
     assert stale.status_code==409 and stale.json()['code']=='plan_revision_conflict'
+
+
+async def test_public_tool_catalog_is_authenticated_and_omits_schema_and_code(setup):
+    from scone_memory.agents.custom_tools import AgentTool
+    _, engine, store = setup
+    tools = [AgentTool('count', 'Count matching records.', '2', {'type': 'object',
+        'properties': {'private_field': {'type': 'string', 'description': 'PRIVATE_SCHEMA'}}},
+        lambda args, ctx: pytest.fail('catalog executed a tool'))]
+    catalog = AgentCatalog(models=[AgentModel('local', 'Local', '1', forbidden_model)], tools=tools,
+        agents=[AgentDefinition(agent_id='worker', instructions='PRIVATE_INSTRUCTIONS',
+            models=('local',), default_model='local', tools=('count',))])
+    app = create_app(engine, {'reader': 'alpha'}, roles={'reader': 'read'},
+                     agent_catalog=catalog, agent_plan_store=store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://scone.test') as client:
+        assert (await client.get('/v1/agents/catalog')).status_code == 401
+        response = await client.get('/v1/agents/catalog', headers=auth('reader'))
+        assert response.status_code == 200 and response.headers['cache-control'] == 'no-store'
+        assert response.json()['tools'] == [{'name': 'count', 'description': 'Count matching records.', 'revision': '2'}]
+        assert response.json()['agents'][0]['tools'] == ['count']
+        assert 'PRIVATE' not in response.text and 'parameters' not in response.text and 'handler' not in response.text
 
 
 async def test_bad_requests_never_save_or_leak_inputs(setup):

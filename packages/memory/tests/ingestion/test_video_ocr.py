@@ -426,8 +426,6 @@ async def test_visual_only_source_retention_recovery_and_archive_refusal(video):
         with pytest.raises(InvalidInput, match='visual-only.*attachment'):
             await engine.import_records('beta', archive)
         assert (await engine.documents.counts('beta')).episodes == 0
-        with pytest.raises(InvalidInput, match='visual-only.*attachment'):
-            await engine.merge_space('alpha', into='beta', confirm='alpha')
         assert await engine.space_deleted('alpha') is None
         await engine.forget('alpha', episode.episode_id)
         assert (await engine.documents.counts('alpha')).episodes == 0
@@ -495,5 +493,68 @@ async def test_visual_only_partial_attachment_link_keeps_recoverable_source(vide
         assert await engine.documents.inflight() == []
         await engine.forget('alpha', saved.added.episode_id)
         assert not await engine.blobs.linked('alpha')
+    finally:
+        await engine.close()
+
+
+@pytest.mark.parametrize('empty', [False, True])
+async def test_attachment_archive_restores_video_evidence_with_ordinary_sources(video, tmp_path, empty):
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.backends.blobs import FileBlobStore
+    from scone_memory.backends.sqlite import SqliteDocumentStore, SqliteVectorIndex
+    from scone_memory.ingestion.files import ingest_document, document_provenance
+
+    data, decoder = video
+    source = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    saved = await ingest_document(source, 'alpha', data, filename='slides.mp4', parser=VideoDocumentParser(
+        decoder, ScriptedOcr(empty=empty), model_revision='fixture-v1'))
+    await source.remember('alpha', 'A separate ordinary source')
+    original = await document_provenance(source, 'alpha', saved.added.episode_id)
+    rows = [row async for row in source.export('alpha', include_attachments=True)]
+    path = tmp_path / 'import.db'
+    async def reopen():
+        return await MemoryEngine(SqliteDocumentStore(path), SqliteVectorIndex(path), HashEmbedder(),
+                                  blobs=FileBlobStore(tmp_path / 'blobs')).open()
+    target = await reopen()
+    try:
+        summary = await target.import_records('beta', rows)
+        assert summary.episodes == 2 and summary.attachments == 2
+        restored = next(e for e in await target.documents.recent_episodes('beta', 10) if e.kind == 'file')
+        assert (await document_provenance(target, 'beta', restored.episode_id)).video == original.video
+        if empty:
+            assert restored.content == '' and await target.documents.chunks_of('beta', restored.episode_id) == []
+        await target.close()
+        target = await reopen()
+        assert (await document_provenance(target, 'beta', restored.episode_id)).video == original.video
+        again = await target.import_records('beta', rows)
+        assert again.episodes == 0 and again.deduplicated == 2
+    finally:
+        await target.close()
+        await source.close()
+
+
+@pytest.mark.parametrize('empty', [False, True])
+async def test_video_space_merge_preserves_evidence_without_ocr_replay(video, empty):
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.ingestion.files import ingest_document, document_provenance
+
+    data, decoder = video
+    ocr = ScriptedOcr(empty=empty)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        saved = await ingest_document(engine, 'old', data, filename='slides.mp4', parser=VideoDocumentParser(
+            decoder, ocr, model_revision='fixture-v1'))
+        before = await document_provenance(engine, 'old', saved.added.episode_id)
+        calls = list(ocr.calls)
+        await engine.remember('old', 'A normal source beside the video')
+        receipt = await engine.merge_space('old', into='new', confirm='old')
+        assert receipt.moved and receipt.attachments == 2
+        assert await engine.space_deleted('old') is not None
+        video_episode = next(e for e in await engine.documents.recent_episodes('new', 10) if e.kind == 'file')
+        assert (await document_provenance(engine, 'new', video_episode.episode_id)).video == before.video
+        assert ocr.calls == calls
+        if empty:
+            assert video_episode.content == ''
+            assert await engine.documents.chunks_of('new', video_episode.episode_id) == []
     finally:
         await engine.close()

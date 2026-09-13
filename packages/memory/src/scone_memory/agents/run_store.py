@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import json
 from pathlib import Path
 import re
 from typing import Self
@@ -71,6 +72,11 @@ def _request_bytes(request: AgentRunRequest) -> bytes:
     return request.model_dump_json(exclude={'max_parallel'} if request.max_parallel == 1 else set()).encode()
 
 
+def _invocation_identity(request: AgentRunRequest) -> str:
+    return json.dumps(request.model_dump(mode='json', exclude={'created_at', 'cancel_requested_at'}),
+                      sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+
+
 class AgentRunStore:
     """Request registration is immutable and does not execute or resume a model.
 
@@ -123,11 +129,12 @@ class AgentRunStore:
             row = db.execute('SELECT payload FROM agent_runs WHERE token=?', (token,)).fetchone()
             if row is not None:
                 prior = self._decode(token, row[0], space)
-                if prior.model_dump(exclude={'created_at', 'cancel_requested_at'}) != saved.model_dump(exclude={'created_at', 'cancel_requested_at'}):
+                if _invocation_identity(prior) != _invocation_identity(saved):
                     raise RunConflict()
                 return prior
-            if db.execute('SELECT COUNT(*) FROM agent_runs WHERE token NOT LIKE ? AND token NOT LIKE ?',
-                          ('input:%', 'activation:%')).fetchone()[0] >= self._maximum:
+            if db.execute('SELECT COUNT(*) FROM agent_runs WHERE token NOT LIKE ? AND token NOT LIKE ? '
+                          'AND token NOT LIKE ? AND token NOT LIKE ?',
+                          ('input:%', 'activation:%', 'tool-approval:%', 'tool-activation:%')).fetchone()[0] >= self._maximum:
                 raise WorkflowError('run_store_limit')
             db.execute('INSERT INTO agent_runs VALUES (?, ?)', (token, payload))
         return saved

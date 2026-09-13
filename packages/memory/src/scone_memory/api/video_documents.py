@@ -7,9 +7,9 @@ from typing import AsyncContextManager
 from fastapi import Depends, FastAPI, Path, Request
 from fastapi.responses import Response
 
-from ..core.errors import Gone, InvalidInput, NotFound
+from ..core.errors import InvalidInput
 from ..ingestion.document_video import DocumentVideo
-from ..ingestion.files import digest, document_provenance
+from ..ingestion.video_source import read_video_source, verify_video_source
 from ..ingestion.formats.types import DocumentLimits
 from ..memory.engine import MemoryEngine
 
@@ -25,49 +25,15 @@ def mount_video_frame_routes(app: FastAPI, engine: MemoryEngine,
         if document_video is None:
             raise InvalidInput('video frame decoding is not configured on this server')
         async with ingest_slot(1):
-            evidence = await document_provenance(engine, space, episode_id)
+            source = await read_video_source(engine, space, episode_id, ordinal)
             assert_current_space(request, space)
-            retained = evidence.video
-            if retained is None or evidence.parser != 'video-frame-ocr':
-                raise InvalidInput('document has no retained video frame evidence')
-            if ordinal not in {item.ordinal for item in retained.frames}:
-                raise InvalidInput('requested frame is not in the retained video evidence')
-            original, raw = await engine.attachment(space, evidence.original.attachment_id)
-            manifest, encoded = await engine.attachment(space, evidence.manifest.attachment_id)
-            source = await engine.episode(space, episode_id)
-            snapshot = (source.kind, source.source, source.content, dict(source.metadata))
-            required_links = {original.attachment_id, manifest.attachment_id}
-            if (source.kind != 'file' or original != evidence.original or manifest != evidence.manifest
-                    or digest(raw) != original.attachment_id or digest(encoded) != manifest.attachment_id
-                    or source.metadata.get('document_original') != original.attachment_id
-                    or source.metadata.get('document_manifest') != manifest.attachment_id
-                    or source.metadata.get('document_format') != evidence.format
-                    or source.content != '\n\n'.join(segment.text for segment in evidence.segments)
-                    or not required_links <= {item.attachment_id for item in source.attachments}):
-                raise InvalidInput('video document changed before frame decoding')
-            assert_current_space(request, space)
-            selected = await document_video.parser.read_frame(raw, evidence.filename, retained, ordinal,
+            retained = source.evidence.video
+            assert retained is not None  # read_video_source requires video evidence.
+            selected = await document_video.parser.read_frame(source.raw, source.evidence.filename, retained, ordinal,
                                                                limits=DocumentLimits())
             assert_current_space(request, space)
-            # Hydration itself awaits storage. Read the raw source row last so a
-            # forget during hydration cannot leave a stale source snapshot valid.
-            await engine.episode(space, episode_id)
-            current_original, current_raw = await engine.attachment(space, original.attachment_id)
-            current_manifest, current_encoded = await engine.attachment(space, manifest.attachment_id)
-            await engine.episode(space, episode_id)
-            links = await engine.blobs.for_episode(space, episode_id)
-            current = await engine.documents.get_episode(space, episode_id)
-            if current is None:
-                tombstone = await engine.tombstone(space, episode_id)
-                if tombstone is not None:
-                    raise Gone('This source was forgotten', tombstone.forgotten_at)
-                raise NotFound('Video source unavailable in this space')
+            await verify_video_source(engine, space, episode_id, source)
             assert_current_space(request, space)
-            if (not required_links <= {item.attachment_id for item in links}
-                    or (current.kind, current.source, current.content, current.metadata) != snapshot
-                    or current_original != original or current_manifest != manifest
-                    or current_raw != raw or current_encoded != encoded):
-                raise InvalidInput('video source changed during frame verification')
         return Response(selected.png, media_type='image/png', headers={
             'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
             'Content-Disposition': f'inline; filename="video-frame-{ordinal}.png"',

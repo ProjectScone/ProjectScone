@@ -19,6 +19,7 @@ from ._wire import Capabilities
 from .agents import AgentClient
 from .document_jobs import DocumentJobs
 from .directory_sync import DirectorySyncRuns
+from .video_documents import VideoDocuments
 from .errors import SconeError
 from .models import Added, Fact, Profile, Recall, Status, Tag
 
@@ -110,6 +111,10 @@ class Scone:
     def agents(self, *, expected_space: str) -> AgentClient:
         """Create a typed agent client, checking space without changing authority."""
         return AgentClient(self, expected_space=expected_space)
+
+    def video_documents(self, *, expected_space: str) -> VideoDocuments:
+        """Read verified video evidence and explicitly interpret retained frames."""
+        return VideoDocuments(self, expected_space=expected_space)
 
     def document_jobs(self, *, expected_space: str) -> DocumentJobs:
         """Create a typed client for explicit durable document operations."""
@@ -218,6 +223,26 @@ class Scone:
     # ------------------------------------------------------------------
     # transport
     # ------------------------------------------------------------------
+
+    def _video_frame(self, episode_id: int, ordinal: int, maximum: int) -> tuple[bytes, Mapping[str, str]]:
+        from ._wire import integer
+        integer(episode_id, 1)
+        integer(ordinal, 0, 99999)
+        integer(maximum, 1, 10000000)
+        path = f"/v1/episodes/{episode_id}/document/video/frames/{ordinal}"
+        try:
+            response = self.session.request('GET', self.base_url + path,
+                headers={'Accept': 'image/png', 'Accept-Encoding': 'gzip, deflate', 'Cache-Control': 'no-store'},
+                timeout=self.timeout, allow_redirects=False, stream=True)
+        except requests.RequestException as exc:
+            raise SconeError('video frame request failed') from exc
+        try:
+            if response.status_code != 200:
+                raise SconeError('video frame request refused', response.status_code)
+            body = read_response(response, min(maximum, self.max_response_bytes))
+            return body, {key.lower(): value for key, value in response.headers.items()}
+        finally:
+            response.close()
 
     def _request(
         self,
