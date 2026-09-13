@@ -7,7 +7,7 @@ from typing import Optional
 from ._wire import ResourceClient, address, boolean, bounded_body, cursor, identifier, integer, invalid, items, record, text
 from .agent_inputs import InputRecord
 from .agent_results import AgentResult, parse_result
-from .agent_models import (AgentChoice, HandoffPlan, Plan, RunPolicy, RunRequest, RunStatus,
+from .agent_models import (AgentChoice, HandoffPlan, ModelTask, Plan, RunPolicy, RunRequest, RunStatus,
                            SavedPlan, TaskPlan, parse_catalog)
 
 
@@ -60,7 +60,15 @@ class AgentClient(ResourceClient):
         integer(expected_revision, 0, 2**63 - 2)
         capability = 'agents.handoffs' if isinstance(plan, HandoffPlan) else 'agents.inputs' if plan.interactive else 'agents.plans'
         body = bounded_body({'plan': plan.to_json(), 'expected_revision': expected_revision}, 128000)
-        self._check('agents.plans', mutation=True).require(capability)
+        capabilities = self._check('agents.plans', mutation=True)
+        capabilities.require(capability)
+        if isinstance(plan, TaskPlan):
+            requirements = [task.answer_requirements for task in plan.tasks
+                            if isinstance(task, ModelTask) and task.answer_requirements is not None]
+            if requirements:
+                capabilities.require('agents.output_requirements')
+            if any(value.output_schema is not None for value in requirements):
+                capabilities.require('agents.output_schema')
         saved = SavedPlan.from_json(self._client._request('PUT', '/v1/agent-plans/' + address(plan.workflow_id),
             json=body), expected_space=self.expected_space)
         if saved.plan != plan or saved.revision != expected_revision + 1:
