@@ -109,8 +109,9 @@ journal instances cannot overwrite a newer checkpoint. `pause()` and `finish()`
 require all recorded operations to have been consumed in order; finished turns
 cannot acquire new operations.
 
-This implements native resumable turns and scheduling yields. It does not yet
-implement tool-specific approval requests, user decisions, activation records,
-HTTP/SDK continuation or console approval controls. Existing task/handoff services
-keep their current behavior until that integration is implemented. A scheduling
-yield is never evidence of user approval.
+This implements native resumable turns and scheduling yields. Native exact-call
+requests, decisions, and execution activation are documented in
+[tool approvals](agent-tool-approvals.md). HTTP/SDK continuation and console approval
+controls remain separate work. Existing task/handoff services keep their current
+behavior until that integration is implemented. A scheduling yield is never
+evidence of user approval.
