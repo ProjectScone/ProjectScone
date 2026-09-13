@@ -18,6 +18,7 @@ from .turn_journal import ToolTurnJournal, TurnJournalError
 from .workflow import JSONValue, StepCheckpoints
 from .custom_tools import AgentTool, snapshot_tools
 from .evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
+from .model_lifecycle import owned_model
 from ..realtime.answer_requirements import AnswerRequirements, validated_requirements
 
 if TYPE_CHECKING:
@@ -155,13 +156,16 @@ class BoundAgent:
                 'requirements': requirements.model_dump(mode='json') if requirements else None}),
             timeout_s=self.definition.limits.timeout_s, max_new_operations=max_new_operations)
         model = self.model.factory()
-        if memory_binding is not None and json.dumps(tools.journal_binding(), sort_keys=True, allow_nan=False) != memory_binding:
-            raise TurnJournalError('binding_mismatch')
-        if not callable(getattr(model, 'complete', None)):
-            raise ValueError('agent factory did not return a tool model')
-        result = await EvidenceToolLoop(model, tools, limits=self.definition.limits,
-            initial_search=self.definition.initial_search, answer_requirements=requirements,
-            custom_tools=self.tools, journal=journal, approval=bound_approval).run(messages)
+        async with owned_model(model) as closed:
+            if memory_binding is not None and json.dumps(tools.journal_binding(), sort_keys=True, allow_nan=False) != memory_binding:
+                raise TurnJournalError('binding_mismatch')
+            if not callable(getattr(model, 'complete', None)):
+                raise ValueError('agent factory did not return a tool model')
+            result = await EvidenceToolLoop(model, tools, limits=self.definition.limits,
+                initial_search=self.definition.initial_search, answer_requirements=requirements,
+                custom_tools=self.tools, journal=journal, approval=bound_approval).run(messages)
+        if closed and not await result.validate():
+            raise RuntimeError('agent evidence changed during model cleanup')
         return AgentResult(self.definition.agent_id, self.model_id, self.fingerprint, result)
 
 

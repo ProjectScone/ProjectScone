@@ -102,6 +102,28 @@ protocol supported by your configured model explicitly. Each factory must return
 a fresh model instance. The model identifiers and local endpoint below are
 examples; replace them with services and models you operate.
 
+Each `BoundAgent.run` owns the model returned by its factory. Models that own
+clients or other resources expose a nonblocking `async def aclose(self) -> None`.
+Scone awaits that method exactly once when the invocation completes, fails, is
+cancelled, or pauses for approval or scheduling. Models with no owned resources
+can continue to implement only `complete`. Factories must not return a shared
+client; wrap a shared transport in a fresh adapter with an appropriate lifecycle.
+Models passed directly to `EvidenceToolLoop` remain caller-owned.
+
+Repeated cancellation waits for the already-started cleanup to finish, then
+propagates cancellation. Adapters must cooperate and eventually finish cleanup;
+Scone does not abandon the close task or promise to terminate blocking host code.
+Cleanup is resource disposal outside the journal's persisted active-operation
+time accounting. A successful answer is rechecked against its original deadline
+and source evidence after cleanup, before publication.
+
+Cleanup failure after an otherwise successful turn raises the fixed diagnostic
+`agent_model_cleanup_failed`. If an error, pause, or cancellation is already in
+progress, it remains primary and receives that fixed exception note. Provider
+cleanup messages are not chained into these diagnostics or sent to the asyncio
+exception handler. A failed cleanup does not authorize replay of model requests
+or tool effects; saved workflows retain their existing unknown-outcome rules.
+
 ```python
 from scone_memory.agents.catalog import AgentCatalog, AgentDefinition, AgentModel
 from scone_memory.agents.evidence_loop import ToolLoopLimits
