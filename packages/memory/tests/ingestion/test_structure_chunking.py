@@ -201,7 +201,8 @@ async def test_the_engine_cuts_at_headings_only_when_asked():
         "the default must not have changed"
 
 
-def test_the_dispatch_sends_code_to_declarations_and_prose_to_structure():
+@pytest.mark.asyncio
+async def test_the_dispatch_sends_code_to_declarations_and_prose_to_structure():
     """Structure awareness must not take a source that is code away from
     the declaration-aware path, which is the better cut for code."""
     from scone_memory.ingestion.batch import IngestionRuntime, spans_for
@@ -215,14 +216,14 @@ def test_the_dispatch_sends_code_to_declarations_and_prose_to_structure():
             emit=None, **options)  # type: ignore[arg-type]
 
     prose = "# Title\n\n" + PROSE * 2 + "\n\n## Next\n\n" + PROSE * 2
-    plain = spans_for(runtime(), prose, "notes.txt")
-    structured = spans_for(runtime(structure_aware=True), prose, "notes.txt")
+    plain = await spans_for(runtime(), prose, "notes.txt")
+    structured = await spans_for(runtime(structure_aware=True), prose, "notes.txt")
     assert [(s.start, s.end) for s in plain] != [(s.start, s.end) for s in structured]
     assert prose[structured[0].start:].startswith("# Title")
 
     code = "import os\n\n\ndef alpha():\n    return 1\n\n\ndef beta():\n    return 2\n"
-    assert ([(s.start, s.end) for s in spans_for(runtime(structure_aware=True), code, "m.py")]
-            == [(s.start, s.end) for s in spans_for(runtime(), code, "m.py")]), \
+    assert ([(s.start, s.end) for s in await spans_for(runtime(structure_aware=True), code, "m.py")]
+            == [(s.start, s.end) for s in await spans_for(runtime(), code, "m.py")]), \
         "code must still be cut at its declarations"
 
 

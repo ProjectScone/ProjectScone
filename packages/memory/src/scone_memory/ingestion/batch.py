@@ -17,6 +17,7 @@ from ..core.models import Added, MAX_CONTENT_BYTES
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
+from .semantic_chunks import semantic_spans
 from .structure_chunks import structured_spans
 from .code import code_language, code_spans
 from .records import Record, RecoveryReport, _DupOf, _Pending, content_hash
@@ -121,6 +122,11 @@ class IngestionRuntime:
     #: offsets are part of the shared specification, so this is a
     #: caller's choice and not ours to make for an existing space.
     structure_aware: bool = False
+    #: Whether prose is cut where its subject changes rather than where
+    #: the target lands. Off by default for the same reason as
+    #: `structure_aware`, and costs one extra embedding call per episode
+    #: -- its sentences are embedded to find the boundaries.
+    semantic_aware: bool = False
     context_inputs: Callable[[NewEpisode, Sequence[tuple[int, int]]], Awaitable[list[str]]] | None = None
 
 
@@ -152,8 +158,8 @@ def validated_record(space: str, record: Record, when: str) -> NewEpisode:
                       tags=clean_tags, metadata=clean_meta)
 
 
-def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
-    spans = spans_for(runtime, new.content, new.source)
+async def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
+    spans = await spans_for(runtime, new.content, new.source)
     return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in spans],
                     spans=[(sp.start, sp.end) for sp in byte_spans(new.content, spans)])
 
@@ -214,10 +220,16 @@ async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]
 
 
 
-def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
+async def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
     """Where to cut: at declarations when the source is code and the name
     it was stored under says which language, at the document's own
-    headings and clauses when asked, and by length otherwise."""
+    headings and clauses when asked, where its subject changes when asked,
+    and by length otherwise.
+
+    The one dispatch point, and awaitable even though only one branch
+    needs it. A synchronous twin would let a caller reach chunking
+    without an embedder and receive length-cut chunks believing they
+    were something else."""
     language = code_language(source) if runtime.code_aware else None
     if language is not None:
         return list(code_spans(content, runtime.chunk_target, language=language))
@@ -225,6 +237,8 @@ def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> li
         # Prose only. Code has a better boundary than a heading, and the
         # branch above already took it.
         return list(structured_spans(content, runtime.chunk_target).spans)
+    if runtime.semantic_aware:
+        return list(await semantic_spans(content, runtime.embedder, runtime.chunk_target))
     return chunk_spans(content, runtime.chunk_target)
 
 
@@ -258,7 +272,7 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
             continue
         seen[digest] = len(results)
         results.append(None)
-        fresh.append(chunk_record(runtime, new, slot=len(results) - 1))
+        fresh.append(await chunk_record(runtime, new, slot=len(results) - 1))
 
     if fresh:
         vectors = await embed_pending(runtime, space, fresh)
@@ -347,7 +361,7 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
         else:
             chunks = await runtime.documents.chunks_of(space, episode.episode_id)
             if not chunks:
-                spans = spans_for(runtime, episode.content, episode.source)
+                spans = await spans_for(runtime, episode.content, episode.source)
                 chunks = await runtime.documents.insert_chunks(
                     [
                         NewChunk(
