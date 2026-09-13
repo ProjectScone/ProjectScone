@@ -215,3 +215,26 @@ def test_bypassed_task_contract_is_refused_without_serializer_input_warnings():
         with pytest.raises(ValueError):
             AgentTaskPlan.model_validate(AgentTaskPlan(workflow_id='w', tasks=(forged,)).model_dump())
     assert caught == []
+
+
+@pytest.mark.parametrize('original,changed', [(True, 1), (False, 0), (1, 1.0)])
+def test_run_registration_distinguishes_json_scalar_types_in_authored_schema(tmp_path, original, changed):
+    from scone_memory.agents.plan_store import AgentPlanStore
+    from scone_memory.agents.run_store import AgentRunStore, RunConflict
+    from .test_task_workflow import catalog
+    def make(value):
+        return AgentTaskPlan(workflow_id='w', tasks=(AgentTask(task_id='one', agent_id='worker',
+            model_id='small', prompt='Answer', answer_requirements=TaskAnswerRequirements(
+                format='json_object', output_schema={'properties': {'value': {'const': value}}})),))
+    plans = AgentPlanStore(tmp_path/'plans', key=b'k'*32)
+    runs = AgentRunStore(tmp_path/'runs', key=b'k'*32)
+    try:
+        saved = plans.save('alpha', make(original), catalog=catalog([]), expected_revision=0)
+        first = runs.register('alpha', 'r', plan=saved, question='Question', scope=RecallScope.validated())
+        assert runs.register('alpha', 'r', plan=saved, question='Question', scope=RecallScope.validated()) == first
+        different = saved.model_copy(update={'plan': make(changed)})
+        with pytest.raises(RunConflict):
+            runs.register('alpha', 'r', plan=different, question='Question', scope=RecallScope.validated())
+    finally:
+        runs.close()
+        plans.close()
