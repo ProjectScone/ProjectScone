@@ -177,9 +177,45 @@ read verifies a snapshot; it does not promise sources remain unchanged after the
 response reaches the client or provide an atomic transaction across independent
 storage backends. Final answers must still use the verified result endpoint.
 
+## Live delivery over SSE
+
+Hosts that expose replay also expose
+`GET /v1/agent-runs/{run_id}/history/stream?limit=50&after=<cursor>`, which
+publishes the same verified pages as `text/event-stream` frames. Each `history`
+frame carries the page as `data` and its `next_after` as the SSE `id`, so a
+client that reconnects with `Last-Event-ID` resumes after the last position it
+saw. `after` and `Last-Event-ID` may both be sent only when they agree; a forged,
+foreign, empty or conflicting cursor is refused with 422 before any headers go
+out. A cursor from below the retention floor is not refused: the first frame
+discloses `retained_from` and `omitted`, and delivery resumes from what remains.
+Cursors are signed against the run and its journal, not a process, so they
+survive a server restart.
+
+Admission is verified before the response starts. After that, every frame is
+re-verified through the same delivery path — current key and scope, journal
+identity, retention generation — and a failure once headers are out can only
+emit a fixed `error` frame with `history_unavailable`, never exception text.
+Cancellation from a disconnected client propagates rather than being turned into
+a frame, so nothing more is read on its behalf.
+
+Every bound is a wall-clock promise: an observation ends with
+`observation_window_ended` after 30 seconds, each verification is allowed 5
+seconds, each send is allowed 5 seconds, and idle polling waits half a second.
+Verification does its `stat`s and journal reads synchronously, so a stalled disk
+cannot be interrupted mid-call; the clock is therefore read again after the call
+and an overrun is refused exactly as an interruption would have been. This does
+not shorten the stall, but the bound the route claims is true at the only place
+a reader can observe it.
+
+The window ending is not run completion, and unavailable history ends the
+observation. This is past execution metadata streamed as it is written. It is
+not answer-token streaming, and cursor replay does not simulate one.
+
 ## Remaining delivery work
 
 The standalone SDK exposes immutable typed `agents.history()` pages and cursor
-reconnect, with native process-restart tests. Authenticated live delivery, Console
-rendering and genuine provider public-text streaming remain required.
-Cursor replay does not substitute for these features or simulate token streaming.
+reconnect, with native process-restart tests, and the native host now delivers
+live over SSE as described above. Still required: SDK streaming with
+context-managed cleanup and reconnect (the SDK replays pages only), Console
+rendering, and genuine provider public-text streaming. Neither cursor replay nor
+metadata delivery substitutes for those or simulates token streaming.
