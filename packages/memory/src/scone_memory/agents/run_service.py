@@ -168,7 +168,7 @@ class AgentRunService:
         return descriptor
 
     def _open(self, request: AgentRunRequest, *, approval_activation: str | None = None,
-              input_activation: str | None = None) -> AgentExecution:
+              input_activation: str | None = None, read_only: bool = False) -> AgentExecution:
         plan = request.plan.checked_plan(self._catalog)
         scope = self._scope(request.space)
         if scope.as_dict() != request.scope:
@@ -178,18 +178,18 @@ class AgentRunService:
             return AgentHandoffWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
                 memory=self._memory, space=request.space, scope=scope,
                 exclude_session_id=request.exclude_session_id, deadline_s=self._deadline,
-                approval_store=self._approvals, approval_activation=approval_activation, history=history)
+                approval_store=self._approvals, approval_activation=approval_activation, history=history, read_only=read_only)
         if isinstance(plan, InteractiveAgentPlan):
             return InteractiveAgentWorkflow(self._path(request), key=self._key, catalog=self._catalog,
                 request=request, memory=self._memory, inputs=self._inputs,
                 activated=tuple(record for record in self._inputs.activated(request.space, request.run_id)
                                 if input_activation is not None and record.activation_id == input_activation),
                 deadline_s=self._deadline,
-                approval_store=self._approvals, approval_activation=approval_activation, history=history)
+                approval_store=self._approvals, approval_activation=approval_activation, history=history, read_only=read_only)
         return AgentWorkflow(self._path(request), key=self._key, catalog=self._catalog, plan=plan,
             memory=self._memory, space=request.space, scope=scope,
             exclude_session_id=request.exclude_session_id, deadline_s=self._deadline, max_parallel=request.max_parallel,
-            approval_store=self._approvals, approval_activation=approval_activation, history=history)
+            approval_store=self._approvals, approval_activation=approval_activation, history=history, read_only=read_only)
 
     def _progress(self, request: AgentRunRequest) -> WorkflowStatus | None:
         identity = (request.space, request.run_id)
@@ -572,6 +572,56 @@ class AgentRunService:
         finally:
             if descriptor is not None:
                 os.close(descriptor)
+
+    async def history_for_delivery(self, space: str, run_id: str, *, after: str | None = None,
+                                   limit: int = 50, admission_guard: Callable[[], None] | None = None) -> AgentHistoryPage:
+        """Verify committed and paused sources before delivering metadata only."""
+        page = await self.history(space, run_id, after=after, limit=limit,
+                                  admission_guard=admission_guard)
+        request = self._runs.get(space, run_id)
+        if request is None:
+            raise WorkflowError('run_not_found')
+        self._check_run_request(request, admission_guard)
+        if not page.available:
+            return page
+        path = self._path(request)
+        try:
+            identity = path.stat(follow_symlinks=False)
+        except OSError:
+            raise WorkflowError('journal_unavailable') from None
+        workflow = self._open(request, read_only=True)
+        try:
+            progress = _execution_progress(workflow, request)
+            if progress is None:
+                raise WorkflowError('journal_unavailable')
+            if progress.status == 'sources_invalid':
+                raise WorkflowError('sources_invalid')
+            # The final await verifies committed evidence and exact paused turn
+            # sources; delivery cannot acquire execution authority or create a journal.
+            await workflow.inspect_approvals(run_id, request.question)
+            try:
+                current = path.stat(follow_symlinks=False)
+            except OSError:
+                raise WorkflowError('journal_unavailable') from None
+            if (identity.st_dev, identity.st_ino) != (current.st_dev, current.st_ino):
+                raise WorkflowError('journal_unavailable')
+            progress = _execution_progress(workflow, request)
+            if progress is None:
+                raise WorkflowError('journal_unavailable')
+            if progress.status == 'sources_invalid':
+                raise WorkflowError('sources_invalid')
+            try:
+                tail = self._history.read(request, after=page.next_after, limit=1)
+            except WorkflowError as error:
+                if error.code == 'invalid_history_cursor':
+                    raise WorkflowError('history_changed') from None
+                raise
+            if page.items and tail.retained_from is not None and tail.retained_from > page.items[0].position:
+                raise WorkflowError('history_changed')
+            self._check_run_request(request, admission_guard)
+            return page
+        finally:
+            workflow.close()
 
     async def history(self, space: str, run_id: str, *, after: str | None = None, limit: int = 50,
                       admission_guard: Callable[[], None] | None = None) -> AgentHistoryPage:

@@ -66,7 +66,7 @@ class InteractiveAgentWorkflow:
     def __init__(self, path: str | Path, *, key: bytes, catalog: AgentCatalog, request: AgentRunRequest,
                  memory: MemoryEngine, inputs: AgentInputStore, activated: Sequence[AgentInputRecord],
                  deadline_s: float = 120.0, approval_store: AgentApprovalStore | None = None,
-                 approval_activation: str | None = None, history: AgentRunHistory | None = None) -> None:
+                 approval_activation: str | None = None, history: AgentRunHistory | None = None, read_only: bool = False) -> None:
         plan = request.plan.checked_plan(catalog)
         if not isinstance(plan, InteractiveAgentPlan):
             raise ValueError('interactive plan required')
@@ -96,7 +96,7 @@ class InteractiveAgentWorkflow:
             else:
                 steps.append(model_step(task.task_id, signature, self._step(task, self._agents[task.task_id]),
                                         pausable=guarded(self._agents[task.task_id])))
-        self._runner = WorkflowRunner(path, key=key, steps=steps, source_verifier=self._verify,
+        self._runner = WorkflowRunner(path, key=key, read_only=read_only, steps=steps, source_verifier=self._verify,
             max_payload_bytes=1000000, deadline=deadline_s, verify_before_step=True,
             max_parallel=request.max_parallel, dependencies={task.task_id: task.depends_on for task in self._tasks.values()})
 

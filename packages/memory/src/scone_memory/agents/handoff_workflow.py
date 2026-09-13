@@ -120,7 +120,7 @@ class AgentHandoffWorkflow:
                  plan: AgentHandoffPlan, memory: MemoryEngine, space: str, scope: RecallScope,
                  exclude_session_id: str | None = None, deadline_s: float = 120.0,
                  max_payload_bytes: int = 1000000, approval_store: AgentApprovalStore | None = None,
-                 approval_activation: str | None = None, history: AgentRunHistory | None = None) -> None:
+                 approval_activation: str | None = None, history: AgentRunHistory | None = None, read_only: bool = False) -> None:
         check_space(space)
         if not isinstance(plan, AgentHandoffPlan) or not isinstance(scope, RecallScope):
             raise ValueError('validated handoff plan and recall scope required')
@@ -145,7 +145,7 @@ class AgentHandoffWorkflow:
             'plan': signature, 'recall': self._scope.as_dict(), 'exclude_session_id': exclude_session_id})))
         from .workflow_approvals import guarded, model_step
         pausable = any(guarded(agent) for agent in self._agents.values())
-        self._runner = WorkflowRunner(path, key=key, source_verifier=self._verify,
+        self._runner = WorkflowRunner(path, key=key, read_only=read_only, source_verifier=self._verify,
             deadline=deadline_s, max_payload_bytes=max_payload_bytes, verify_before_step=True,
             completion=WorkflowCompletion(signature, self._finished),
             steps=[model_step(self._hop_id(index), signature, self._hop(index), pausable=pausable)

@@ -11,9 +11,11 @@ run identifiers in row keys are HMAC-derived.
 `AgentRunService` automatically collects metadata for saved task, handoff and
 interactive workflows, including parallel tasks and approval resumptions. Native
 replay checks current space, scope, catalog bindings and an optional host admission
-guard. Authenticated HTTP/SDK replay and a Console timeline remain follow-up work.
+guard. Authenticated HTTP replay is available; live delivery, strict SDK replay
+and a Console timeline remain follow-up work.
 The store itself trusts the host; neither storage nor native metadata replay
-revalidates answers or grants recipient authorization.
+revalidates answers or grants recipient authorization. The HTTP delivery path
+adds current recipient and committed/paused-source verification, described below.
 
 ## Store and replay observations
 
@@ -142,10 +144,41 @@ For hosts constructing workflows directly, `AgentWorkflow`,
 `AgentRunHistory` bound to the exact saved `AgentRunRequest`. The host owns its
 `AgentEventHistoryStore` lifetime. Omitting history preserves unobserved execution.
 
+## Authenticated HTTP replay
+
+Hosts mounting `AgentRunService` advertise `agents.history` and expose
+`GET /v1/agent-runs/{run_id}/history?limit=50&after=<cursor>`. The space comes from
+the current bearer key. Read roles can replay history; cross-space runs remain
+unavailable. Limits are canonical decimal integers in 1..100. Unknown or duplicate
+query fields, empty cursors and oversized cursors are rejected without echoing
+private values. Responses use `Cache-Control: no-store`.
+
+Pages contain `space`, `run_id`, `available`, `items`, `next_after`, `retained_from`
+and `omitted`. Entry/event shapes and cursor behavior match native storage.
+Old or purged runs return unavailable observations rather than invented events.
+Reconnecting with a cursor reads observations only; it never continues a workflow.
+
+The delivery service reads a bounded page, then verifies committed evidence and
+exact paused-turn sources through the existing read-only workflow inspection
+path. Inspection is the final awaited operation. Before returning it synchronously
+checks the current request/key binding, execution-root/file identity and history
+generation/retention. Forgotten evidence refuses delivery without changing the
+executing owner's journal. A page purged or evicted during verification returns
+`history_changed` (409); restart the observation read with current state.
+
+Available history requires its authenticated execution proof. Missing journals,
+missing workflow roots, foreign schemas and wrong keys refuse delivery. Inspection
+opens SQLite in read-only mode, creates neither journals nor lock files, and
+cannot execute work or perform the mutating final-result read. Hosts can explicitly
+select `read_only=True` when constructing native workflows for inspection.
+
+This is past execution metadata, not an answer or source content. A successful
+read verifies a snapshot; it does not promise sources remain unchanged after the
+response reaches the client or provide an atomic transaction across independent
+storage backends. Final answers must still use the verified result endpoint.
+
 ## Remaining delivery work
 
-History describes past execution metadata, not currently authorized source content
-or an answer. Current recipient and source policy still need enforcement in the
-HTTP delivery layer. Authenticated replay/live delivery, strict SDK reconnect,
+Authenticated live delivery, strict standalone SDK history/reconnect models,
 Console rendering and genuine provider public-text streaming remain required.
-The native service and encrypted cursor layer do not substitute for those features.
+Cursor replay does not substitute for these features or simulate token streaming.
