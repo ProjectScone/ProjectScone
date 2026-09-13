@@ -274,6 +274,8 @@ async def export_records(records: AsyncIterator[dict], store: BlobStore, documen
     for episode_id, attached in for_row_links.items():
         if await store.for_episode(space, episode_id) != attached:
             raise InvalidInput('source attachment links changed during export')
+    if await store.linked(space) != set(blobs):
+        raise InvalidInput("source attachment links are missing evidence or changed during export")
     left = set(await store.held(space)) - set(blobs)
     rows[0]['not_carried'] = {'unlinked_attachments': len(left)} if left else {}
     rows.extend(blobs.values())

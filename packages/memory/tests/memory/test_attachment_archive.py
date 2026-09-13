@@ -259,3 +259,13 @@ async def test_caller_mutation_during_staging_cannot_change_validated_evidence(m
         assert await target.blobs.for_episode('beta', episode.episode_id) == [blob]
     await target.close()
     await source.close()
+
+
+async def test_export_refuses_attachment_links_hidden_by_missing_hold_metadata(monkeypatch):
+    source, _, _ = await source_archive()
+    async def missing_metadata(*args):
+        return []
+    monkeypatch.setattr(source.blobs, 'for_episode', missing_metadata)
+    with pytest.raises(InvalidInput, match='attachment.*link'):
+        await anext(source.export('alpha', include_attachments=True))
+    await source.close()
