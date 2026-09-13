@@ -666,6 +666,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
     from ..ingestion.manifests import is_manifest
     from ..ingestion.records import Record
+    from ..ingestion.code_resolution import file_resolver
     from ..ingestion.sync import default_marker, sync_key
     from ..ingestion.code_graph import DEFINES, record_claims, unresolved_call_sites
     from ..ingestion.sensitive import screen
@@ -690,27 +691,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     # exist: a relative import is followed only to a file actually read,
     # and one that leads anywhere else is left out rather than guessed at.
     seen = {str(path.relative_to(root)) for path in found[: args.limit]}
-
-    def resolve(path: str, level: int, module: str) -> str | None:
-        here = posixpath.dirname(path)
-        for _ in range(level - 1):
-            here = posixpath.dirname(here)
-        stem = posixpath.join(here, *module.split(".")) if module else here
-        # A relative import names a file however the language spells it:
-        # Python by module, the brace family by path with the extension
-        # left off. Only a file this walk really read is followed.
-        stems = [stem, posixpath.normpath(posixpath.join(posixpath.dirname(path), module))
-                 if module.startswith(".") else stem]
-        for base in dict.fromkeys(stems):
-            for suffix in ("py", "ts", "tsx", "js", "jsx", "go", "rs"):
-                if f"{base}.{suffix}" in seen:
-                    return f"{base}.{suffix}"
-                if f"{base}/index.{suffix}" in seen:
-                    return f"{base}/index.{suffix}"
-        for candidate in (f"{stem}.py", f"{stem}/__init__.py"):
-            if candidate in seen:
-                return candidate
-        return None
+    resolve = file_resolver(seen)
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
     updated, closed, unread_claims = 0, 0, False
