@@ -110,6 +110,11 @@ can continue to implement only `complete`. Factories must not return a shared
 client; wrap a shared transport in a fresh adapter with an appropriate lifecycle.
 Models passed directly to `EvidenceToolLoop` remain caller-owned.
 
+`TextConversation` applies the same ownership rules to its `tool_model_factory`.
+Cleanup and source revalidation finish before public text callbacks or assistant
+capture. The conversation's total turn deadline still applies when it is shorter
+than the tool loop's budget, including when blocking cleanup delays timer delivery.
+
 Repeated cancellation waits for the already-started cleanup to finish, then
 propagates cancellation. Adapters must cooperate and eventually finish cleanup;
 Scone does not abandon the close task or promise to terminate blocking host code.
