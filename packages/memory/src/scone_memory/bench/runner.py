@@ -270,6 +270,9 @@ class RunReport:
     #: them, since the Rust harness reports only those two. Defaults so a
     #: saved run from before this field still loads.
     recall_share: dict[int, float] = field(default_factory=dict)
+    #: How recall fused its lanes for this run. Recorded for the same
+    #: reason as merge and window; defaults so older saved runs still load.
+    fusion: str = "rank"
 
     def as_dict(self, with_items: bool = True) -> dict:
         d = asdict(self)
@@ -299,6 +302,7 @@ async def run(
     cross_queries: bool = False,
     merge: bool = False,
     window: int = 0,
+    fusion: str = "rank",
 ) -> RunReport:
     """``make_engine`` returns a fresh engine (or an awaitable of one) per
     item, so an item's memory never leaks into the next. ``limit`` is the
@@ -349,7 +353,12 @@ async def run(
                 ))
             await engine.remember_many(space, records)
             t0 = time.perf_counter()
-            pack = await engine.recall(space, item.question, limit=k_max, history=history)
+            # Only when asked for: engines built before the option, and test
+            # stand-ins, take recall without it.
+            if fusion == "rank":
+                pack = await engine.recall(space, item.question, limit=k_max, history=history)
+            else:
+                pack = await engine.recall(space, item.question, limit=k_max, history=history, fusion=fusion)
             if window:
                 from ..retrieval.window import widen
 
@@ -430,7 +439,7 @@ async def run(
     latencies = [r.recall_ms for r in results if r.error is None]
     return RunReport(
         dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention,
-        merge=merge, window=window, ks=list(ks),
+        merge=merge, window=window, fusion=fusion, ks=list(ks),
         recall_any=recall_any, recall_all=recall_all, recall_share=recall_share, by_type=by_type,
         mrr=mean_reciprocal, precision=precision, ndcg=ndcg,
         mean_average_precision=average_precision, hit_rate=hits,

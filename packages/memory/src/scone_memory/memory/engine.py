@@ -937,6 +937,7 @@ class MemoryEngine:
         candidate_limit: int | None = None,
         rerank: bool = True,
         graph_boost: bool = False,
+        fusion: str = "rank",
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -997,7 +998,8 @@ class MemoryEngine:
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
-                            graph_boost=graph_boost, entity_projection=projection, entity_unavailable=unavailable,
+                            graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
+                            entity_unavailable=unavailable,
                             entity_notes=notes)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:

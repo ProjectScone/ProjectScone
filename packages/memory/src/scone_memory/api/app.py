@@ -886,6 +886,8 @@ def create_app(
         evidence_graph: bool = False,
         graph_analysis: bool = False,
         candidate_limit: Optional[int] = Query(default=None, ge=1, le=1000),
+        fusion: Literal["rank", "score"] = Query(default="rank", description="Fuse the lanes by rank (default) or by "
+                                                  "each lane's scores scaled to its own range."),
         withhold_kinds: Optional[str] = Query(
             default=None, alias="withhold",
             description="Withhold matches of these kinds from the answer, comma separated "
@@ -949,7 +951,7 @@ def create_app(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
-            candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost,
+            candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
         )
         opened = None
         if window:
@@ -982,6 +984,7 @@ def create_app(
             "top_similarity": result.top_similarity,
             "low_confidence": result.low_confidence,
             "degraded": result.degraded,
+            "fusion": result.fusion,
             "narrowing": result.narrowing.model_dump() if result.narrowing is not None else None,
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,

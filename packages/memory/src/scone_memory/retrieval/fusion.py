@@ -37,6 +37,36 @@ def rrf(lanes: Sequence[Sequence[tuple[int, float]]], weights: Sequence[float] |
     return scores
 
 
+#: The ways recall can fuse its lanes: by rank alone, or by each lane's
+#: scores scaled to that lane's own range.
+FUSIONS: tuple[str, ...] = ("rank", "score")
+
+
+def relative_scores(lanes: Sequence[Sequence[tuple[int, float]]], weights: Sequence[float] | None = None) -> dict[int, float]:
+    """Relative-score fusion: each lane's scores scaled to 0..1 across that
+    lane's own candidates, then added with the lanes' weights.
+
+    A lane whose scores do not spread gives every candidate full credit. A
+    lane that reports no score (NaN, an index that ranks without a cosine)
+    contributes its order instead: first 1, last 0, evenly between. Scales
+    stay per lane, so a cosine and a BM25 score never meet unscaled."""
+    weights = weights or [1.0] * len(lanes)
+    scores: dict[int, float] = {}
+    for lane, weight in zip(lanes, weights):
+        if not lane:
+            continue
+        raw = [score for _, score in lane]
+        if any(math.isnan(score) for score in raw):
+            count = len(lane)
+            scaled = [1.0 if count == 1 else 1.0 - rank / (count - 1) for rank in range(count)]
+        else:
+            low, high = min(raw), max(raw)
+            scaled = [1.0 if high == low else (score - low) / (high - low) for score in raw]
+        for (chunk_id, _), value in zip(lane, scaled):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + weight * value
+    return scores
+
+
 def recency_boost(created_at: str, now: str) -> float:
     age_days = max(0.0, (parse_rfc3339(now) - parse_rfc3339(created_at)).total_seconds() / 86400)
     return W_RECENCY * math.exp(-age_days / RECENCY_HALF_LIFE_DAYS)
