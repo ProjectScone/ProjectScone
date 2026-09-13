@@ -52,6 +52,8 @@ class GraphBridge(BaseModel):
     relation_count: int
     cut_edge: bool
     cross_community: bool
+    #: One end has no other recorded relation, so the cut is a dangling end, not a join.
+    pendant: bool = False
 
 
 class GraphAnalysisCoverage(BaseModel):
@@ -269,8 +271,8 @@ def _summarize(neighbors: dict[str, tuple[str, ...]], incoming: dict[str, set[st
         if len(result.bridges) >= limits.max_bridges:
             result.coverage.bridges_omitted += 1
             continue
-        result.bridges.append(GraphBridge(source=left, target=right, relation_count=count,
-                                         cut_edge=cut, cross_community=cross))
+        result.bridges.append(GraphBridge(source=left, target=right, relation_count=count, cut_edge=cut, cross_community=cross,
+                                         pendant=len(neighbors[left]) == 1 or len(neighbors[right]) == 1))
     if result.coverage.bridges_omitted:
         result.coverage.reasons.append('max_bridges')
 
