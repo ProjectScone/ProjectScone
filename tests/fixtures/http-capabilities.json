@@ -75,6 +75,7 @@
       "graph.knowledge_walk": true,
       "graph.context_similar": true,
       "graph.knowledge_usage": true,
+      "graph.export_usage": true,
       "graph.match": true,
       "graph.overview": true,
       "graph.changes": true,

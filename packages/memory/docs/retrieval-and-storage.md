@@ -3116,6 +3116,20 @@ How each format places values and escapes its own syntax:
     title, and each entity, name the community (`data-group`); each arrow
     names its relation and the communities at both ends
     (`data-relation`, `data-from-group`, `data-to-group`), loops included.
+- **Recall use on the drawings.** With `usage=true` (or `usage_since`, as
+  on the knowledge view; `scone graph export --usage` on the command line)
+  the SVG and the page say what recent recalls reach. Other formats
+  ignore it.
+  - Each drawn entity's title says how many of the recalls read returned
+    one of its facts, each recall counted once for an entity.
+  - The description says over which recalls: how many the event log
+    keeps, since when, the oldest read, and whether older ones were left
+    unread. It is a window, never all time.
+  - When the engine keeps no events, or the log holds no recalls, it says
+    recall use is unknown and draws no count, never a zero.
+  - The page carries the counts in its data and on each entity
+    (`data-recalled`). It adds a box that dims the entities no recall
+    returned, and the panel says how many recalls returned the chosen one.
 - **The community map** (`communities`) is for a graph the drawings cannot
   show whole. They draw the 200 most connected entities, and when they
   leave some out their description says the community map exists.

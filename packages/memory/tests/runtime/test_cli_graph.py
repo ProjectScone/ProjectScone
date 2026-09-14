@@ -263,6 +263,20 @@ async def test_report_can_say_what_recall_uses():
     assert code == 0 and "## What recall uses" in text and "Alice Chen (1)" in text.replace("alice chen (1)", "Alice Chen (1)")
 
 
+async def test_export_can_draw_what_recall_returned():
+    from scone_memory.observability.events import InMemoryEventLog
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await memory.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    await memory.recall("default", "alice chen")
+    code, text = await graph(memory, "export", "--format", "svg", "--usage")
+    plain_code, plain = await graph(memory, "export", "--format", "svg")
+    await memory.close()
+    assert code == 0 and "returned by 1 of the 1 recall read" in text
+    assert plain_code == 0 and "returned by" not in plain
+
+
 async def test_match_answers_a_structured_question_and_exits_zero_on_a_row(engine):
     code, text = await graph(engine, "match", "--pattern", "?who", "works_at", "?org",
                              "--pattern", "?org", "based_in", "Lisbon", "--returns", "?who")
