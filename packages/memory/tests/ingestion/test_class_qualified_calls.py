@@ -86,3 +86,15 @@ def test_a_function_nested_in_a_function_or_a_method_is_not_reached_through_its_
     made = {(c.subject, c.object) for c in code_claims(source, "m.py", language="python") if c.predicate == "calls"}
     assert not any(target in ("m.py:outer.helper", "m.py:Shelf.put.inner") for _, target in made), made
     assert {"outer.helper", "Shelf.put.inner"} <= set(unresolved_calls(source, "m.py", language="python"))
+
+
+def test_a_class_that_is_also_imported_is_not_followed_through_the_local_one():
+    """``try: from fast import Shelf`` with ``class Shelf`` as the fallback:
+    which one runs is decided when the file is imported, so ``Shelf.keep()``
+    names a method of either and is left unbound."""
+    source = ("try:\n    from fast import Shelf\nexcept ImportError:\n    class Shelf:\n        def keep(self):\n"
+              "            return 1\n\n        class Label:\n            def print(self):\n                return 2\n\n\n"
+              "def main():\n    Shelf.Label.print(None)\n    return Shelf.keep(None)\n")
+    made = {(c.subject, c.object) for c in code_claims(source, "m.py", language="python") if c.predicate == "calls"}
+    assert not {("m.py:main", "m.py:Shelf.keep"), ("m.py:main", "m.py:Shelf.Label.print")} & made, made
+    assert {"Shelf.keep", "Shelf.Label.print"} <= set(unresolved_calls(source, "m.py", language="python"))

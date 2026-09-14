@@ -670,7 +670,8 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
     everything before the last name is a class declared here; ``cls`` in a
     class is that class, as ``self`` is. An imported class is not followed
     the same way: a file cannot tell an imported class from an imported
-    object, so ``from x import Y`` then ``Y.m()`` stays unbound.
+    object, so ``from x import Y`` then ``Y.m()`` stays unbound, and so does
+    a call through a class declared here under a name also imported here.
     """
     if isinstance(func, ast.Name):
         here = named.get(func.id)
@@ -683,7 +684,8 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
     if isinstance(func, ast.Attribute):
         spelt = _spelling(func)
         holder = spelt.rpartition(".")[0] if spelt is not None else ""
-        if holder in classes and spelt in named:
+        # A class also imported here, as a fallback beside `try: from x import Shelf`, may not be the one that runs.
+        if holder in classes and spelt in named and holder.split(".")[0] not in (imported or {}):
             return named[spelt]
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
         if func.value.id in ("self", "cls"):
