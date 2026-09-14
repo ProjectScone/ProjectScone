@@ -727,6 +727,29 @@ def create_app(
     async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
         return episode_json(await engine.episode(space, episode_id))
 
+    @app.post("/v1/episodes/{episode_id}/summaries")
+    async def post_episode_summaries(episode_id: int, fan_in: int = Query(default=6, ge=2, le=24),
+                                     max_levels: int = Query(default=5, ge=1, le=5),
+                                     space: str = Depends(space_for)) -> JSONResponse:
+        """Write and store the episode's summary tree with the synthesis
+        model: notes the framework wrote, each saying what it summarizes,
+        every sentence resting on a quote from the level below."""
+        from ..retrieval.summary_tree import build_summary_tree
+
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            return JSONResponse({"error": "no synthesis model configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)"}, status_code=501)
+        tree = await build_summary_tree(engine, model, space, episode_id, fan_in=fan_in, max_levels=max_levels,
+                                        store=True, model_name=getattr(model, "model", type(model).__name__))
+        return JSONResponse(tree.record())
+
+    @app.get("/v1/episodes/{episode_id}/summaries")
+    async def get_episode_summaries(episode_id: int, space: str = Depends(space_for)) -> dict:
+        """The summaries stored for the episode, top level first, each saying whether the document has changed since."""
+        from ..retrieval.summary_tree import stored_summaries
+
+        return {"episode_id": episode_id, "summaries": [s.record() for s in await stored_summaries(engine, space, episode_id)]}
+
     @app.get("/v1/episodes/{episode_id}/impact")
     async def episode_impact(episode_id: int, space: str = Depends(space_for)) -> dict:
         """What forgetting would take and leave; removes nothing."""
