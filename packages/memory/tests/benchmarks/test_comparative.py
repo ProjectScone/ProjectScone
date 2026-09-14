@@ -137,3 +137,28 @@ async def test_a_reference_synthesizer_whose_model_fails_says_so_instead_of_rais
 
     summary = await llamaindex_summary(FakeChat([ChatError("down")]), "q", ["one passage"])
     assert summary.text == "" and summary.failed == "ChatError" and summary.model_calls == 1
+
+
+async def test_the_reference_at_its_best_fuses_its_bm25_and_vector_retrievers():
+    """The default vector index misses a session that shares only rare exact
+    words with the question; the reference's own hybrid (BM25 fused with the
+    vector retriever by reciprocal rank) finds it, and the record says so."""
+    pytest.importorskip("llama_index.retrievers.bm25")
+    from scone_memory.bench.comparative import compare, llamaindex_session_ranking
+
+    rare = item("q-rare", "What did Ximena say about the zorbing trip?",
+                [["Ximena said the zorbing trip was on for Saturday."] + ["Nothing else here."] * 3,
+                 ["A long unrelated day: meetings, lunch, a walk, and a nap after the walk."] * 4,
+                 ["Another unrelated day with the same words: meetings, lunch, a walk, a nap."] * 4],
+                answer=[0])
+    embedder = HashEmbedder()
+    plain = await llamaindex_session_ranking(rare, embedder, k=3)
+    hybrid = await llamaindex_session_ranking(rare, embedder, k=3, hybrid=True)
+    assert hybrid[0].endswith("s0"), hybrid
+    assert set(plain) == set(hybrid), "both rank every session; the order is what the lexical retriever changes"
+    def make_engine():
+        return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+
+    report = await compare([rare], make_engine, embedder, ks=(1,), hybrid=True)
+    assert "BM25" in report.config["llamaindex"]["retriever"] and report.config["llamaindex"]["fusion"] == "reciprocal_rerank"
+    assert report.sides["llamaindex"].recall_any[1] == 1.0
