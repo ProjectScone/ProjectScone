@@ -950,10 +950,13 @@ A manifest is where a project writes down what it needs, and until now
 none was read: the graph knew every `import requests` and nothing about
 which project declares requests, at what version, or only for its tests.
 `pyproject.toml` (PEP 621, PEP 735 dependency groups, Poetry),
-`requirements*.txt`, `package.json`, `Cargo.toml` and `go.mod` are now read
-wherever they sit, by `scone map --graph` and by any remembered file with
-one of those names as its source, into claims like a source file's --
-quoted from the line, cited to the file, extracted rather than stated:
+`requirements*.txt`, `Pipfile`, `package.json`, `Cargo.toml`, `go.mod`,
+`pom.xml`, `build.gradle` and `build.gradle.kts`, `Gemfile`,
+`composer.json` and a .NET project file (`.csproj`, `.fsproj`, `.vbproj`)
+are read wherever they sit, by `scone map --graph` and by any remembered
+file with one of those names as its source, into claims like a source
+file's -- quoted from the line, cited to the file, extracted rather than
+stated:
 
 ```
 packages/memory/pyproject.toml  defines        scone-memory
@@ -969,8 +972,17 @@ dependency groups, dev dependencies. A project does not run on pytest.
 
 The object is the package's bare name, spelled as its index spells it (a
 Python name lowercased with runs of `-_.` as one `-`, a crate with `_` as
-`-`, an npm name lowercased), and the extras, version and marker stay in
-the quote. So a package five manifests name is one thing in the graph,
+`-`, an npm, Composer or NuGet name lowercased, a Maven or Gradle
+artifact as `group:artifact`, a gem as named), and the extras, version
+and marker stay in the quote. Each format's own way of saying "for
+tests" is read: Maven's `<scope>test</scope>` and build plugins,
+Gradle's `test*`, `annotationProcessor`, `kapt`, `ksp` and `classpath`
+configurations and its `plugins { id }` block, a Gemfile's
+`group :test, :development` blocks and inline `group:`, Composer's
+`require-dev`, a .NET `PrivateAssets="all"` reference, a Pipfile's
+`[dev-packages]`. What the reader cannot place it leaves out: a Gradle
+`project(':lib')` or map-style dependency, a Composer platform
+requirement (`php`, `ext-json`), a .NET `ProjectReference`. So a package five manifests name is one thing in the graph,
 and each manifest's line says what it asked for. The subject is the
 project's declared name where it has one, else the manifest's path. A Go
 `// indirect` requirement is left out: it is what a dependency needs, not
