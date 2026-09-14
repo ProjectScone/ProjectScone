@@ -242,7 +242,11 @@ and the two must agree; one ahead of what was observed is refused.
 
 What streams is provisional. The window is never stored and does not
 survive the process; after the run, or after a restart, a reader is given
-`terminal` and no text, and `/result` returns the verified answer. Nothing
+`terminal` and no text, and `/result` returns the verified answer. A reader
+already listening when the step ends is given every chunk that landed
+before the receipt -- the last chunk and the receipt can be microseconds
+apart, and one chunk behind at that moment is not the same as too late --
+and the text is dropped once the last such reader leaves. Nothing
 here restarts a run, calls a model, counts tokens, or exposes a tool
 argument. The standalone SDK reads it as `agents.stream_answer()` and the
 Console shows it as a **Live answer** pane that yields to the verified

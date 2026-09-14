@@ -12,7 +12,7 @@ import hashlib
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Mapping, Optional,
+from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Literal, Mapping, Optional,
                     Sequence, TypedDict, cast)
 
 from . import (archive, catalog, fact_placement, fact_relationships, fact_review, file_claims, retention,
@@ -35,6 +35,7 @@ from ..entities.meanings import RelationMeanings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..ingestion.code_graph import Resolve
+    from ..ingestion.embedding_cache import EmbeddingCache
     # Type-only: the vocabulary store needs cryptography, and a base
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
@@ -45,6 +46,10 @@ from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
 from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
+from ..retrieval.synonyms import Synonyms
+
+#: The vector lane's default voice when the embedder is a hash of tokens (see MemoryEngine).
+HASHED_VECTOR_WEIGHT = 0.25
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core import extracted
@@ -72,6 +77,7 @@ from ..core.errors import Conflict, InvalidInput, NotFound
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
     Added,
+    BulkForgetReport,
     Attachment,
     BatchDecision,
     DecisionOutcome,
@@ -176,6 +182,7 @@ class MemoryEngine:
         code_aware: bool = True,
         structure_aware: bool = False,
         semantic_aware: bool = False,
+        heading_context: bool = False,
         code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         demote_restated: bool = True,
@@ -196,10 +203,46 @@ class MemoryEngine:
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
         table_context_embeddings: bool = False,
+        embedding_cache: "EmbeddingCache | None" = None,
+        synonyms: "Synonyms | None" = None,
+        context_lane: bool = False,
+        lexical_stems: bool = True,
+        vector_weight: Optional[float] = None,
     ) -> None:
+        if vector_weight is None:
+            # A hashed-token embedder ranks by word overlap, badly: a weak
+            # echo of the text lane. Measured on LongMemEval-S, giving it a
+            # quarter voice moved the fused ranking from behind the text lane
+            # alone to level with the reference's best; a real embedder knows
+            # things the text lane does not and keeps its full voice.
+            vector_weight = HASHED_VECTOR_WEIGHT if embedder.id.startswith("hash-") else 1.0
+        if isinstance(vector_weight, bool) or not isinstance(vector_weight, (int, float)) or not 0 < vector_weight <= 4:
+            raise InvalidInput("vector_weight must be a number above 0 and at most 4")
+        #: The vector lane's voice in rank fusion against the text lane's 1.0,
+        #: resolved from the embedder when the caller did not say; on every
+        #: recall event as fusion_weights.
+        self.vector_weight = float(vector_weight)
+        if type(lexical_stems) is not bool:
+            raise InvalidInput("lexical_stems must be a boolean")
+        #: Whether a query term's family (bills, billing, billed) is searched
+        #: by stem prefix in the text lane; the index is untouched.
+        self.lexical_stems = lexical_stems
+        if type(context_lane) is not bool:
+            raise InvalidInput("context_lane must be a boolean")
+        #: Whether what each chunk is under is indexed beside its text and
+        #: searched as a lane of its own. Stored text never changes.
+        self.context_lane = context_lane
         if type(table_context_embeddings) is not bool:
             raise InvalidInput('table_context_embeddings must be a boolean')
         self._table_context_embeddings = table_context_embeddings
+        #: Vectors kept by the text they embed (ingestion/embedding_cache.py);
+        #: None embeds every chunk of every stored record.
+        self.embedding_cache = embedding_cache
+        if synonyms is not None and not isinstance(synonyms, Synonyms):
+            raise InvalidInput(f"synonyms must be a Synonyms list, not {type(synonyms).__name__}")
+        #: The caller's synonym list; the text lane's query gains the other
+        #: members of every group a query term is in. None leaves it alone.
+        self.synonyms = synonyms
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
@@ -224,6 +267,10 @@ class MemoryEngine:
         #: specification, so a space that already holds chunks cut another
         #: way must not silently start cutting differently.
         self.semantic_aware = semantic_aware
+        #: Whether a chunk is embedded with the headings above it (for code,
+        #: its file and declarations). Off unless asked for: it changes
+        #: vectors, and a space's existing vectors were made without it.
+        self.heading_context = heading_context
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -353,6 +400,11 @@ class MemoryEngine:
     async def reembed_vectors(self) -> vector_identity.ReembedReport:
         """Re-embed every stored chunk with this engine's embedder and record it
         as the writer, which turns a disabled vector lane back on."""
+        if self.embedding_cache is not None:
+            # A model can change behind an id that did not; a rebuild is
+            # the moment that is said, and nothing kept before it may be
+            # served after it.
+            self.embedding_cache.clear()
         try:
             report = await vector_identity.rebuild(self)
         except BaseException:
@@ -386,7 +438,7 @@ class MemoryEngine:
         self._closed = True
         await self.entities.aclose()
         first: Optional[BaseException] = None
-        for store in (self.documents, self.vectors, self.events, self.blobs):
+        for store in (self.documents, self.vectors, self.events, self.blobs, self.embedding_cache):
             closer = getattr(store, "close", None)
             if store is None or not callable(closer):
                 continue
@@ -445,14 +497,18 @@ class MemoryEngine:
         dedup_key: Optional[str] = None,
         replace: bool = False,
         *, embedding_checkpoint: EmbeddingCheckpoint | None = None,
+        chunking: Optional[str] = None,
     ) -> Added:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
-        ``replace``) instead of a duplicate."""
+        ``replace``) instead of a duplicate. ``chunking`` names how this
+        record is cut (length, code, structure, semantic); None keeps the
+        engine's rule."""
         await self._living(space)
         if replace and embedding_checkpoint is not None:
             raise InvalidInput('embedding checkpoints apply to append ingestion, not replacement')
-        record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key)
+        record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key,
+                        chunking=chunking)
         if replace:
             added = (await self.replace(space, record)).added
         else:
@@ -487,7 +543,7 @@ class MemoryEngine:
         started = time.perf_counter()
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware)
+                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -497,7 +553,7 @@ class MemoryEngine:
                 added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
                 return Replaced(added=added, outcome="duplicate", replaced=None)
             pending = await ingestion_batch.chunk_record(runtime, new)
-            vectors = await ingestion_batch.embed_pending(runtime, space, [pending])
+            vectors, reused = await ingestion_batch.embed_pending_counted(runtime, space, [pending])
             # Embedding can yield for a long time. Never revoke a different source
             # or recreate one that the user forgot during preparation.
             await self._living(space)
@@ -505,7 +561,7 @@ class MemoryEngine:
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
                         self.code_aware, self.code_graph, self.structure_aware,
-                        self.semantic_aware) != configuration):
+                        self.semantic_aware, self.heading_context) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -522,7 +578,7 @@ class MemoryEngine:
             receipt = await self.forget(space, existing.episode_id)
         try:
             results: list[Added | _DupOf | None] = [None]
-            await ingestion_batch.write_batch(runtime, space, [pending], vectors, results)
+            await ingestion_batch.write_batch(runtime, space, [pending], vectors, results, reused=reused)
             await self.documents.bump_revision(space)
             added = cast(Added, results[0])
             retired = file_claims.Retired(closed=0)
@@ -639,10 +695,12 @@ class MemoryEngine:
             context_inputs = partial(embedding_inputs, blobs=self.blobs)
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
-            self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
+            self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint,
+            embedding_cache=self.embedding_cache, code_aware=self.code_aware,
             structure_aware=self.structure_aware,
-            semantic_aware=self.semantic_aware,
+            semantic_aware=self.semantic_aware, heading_context=self.heading_context,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
+            context_lane=self.context_lane,
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
@@ -750,6 +808,17 @@ class MemoryEngine:
         it are reported, not closed: a source being gone is a fact about
         the evidence."""
         return await retention.impact(self._retention_runtime(), space, episode_id)
+
+    async def forget_matching(self, space: str, *, source_prefix: Optional[str] = None, tags: Sequence[str] = (),
+                              conditions: Mapping[str, object] | None = None, kind: Optional[str] = None,
+                              limit: int = 100, apply: bool = False, selection: Optional[str] = None,
+                              with_claims: Literal["keep", "exclude"] = "keep") -> "BulkForgetReport":
+        """Forget what a filter selects: a preview by default, the forgets only
+        with the preview's selection digest. See ``memory.bulk_forget``."""
+        from .bulk_forget import forget_matching
+
+        return await forget_matching(self, space, source_prefix=source_prefix, tags=tags, conditions=conditions,
+                                     kind=kind, limit=limit, apply=apply, selection=selection, with_claims=with_claims)
 
     async def forget_status(self, space: str, episode_id: int) -> ForgetStatus:
         """Observe retained, pending or completed source removal without writes."""
@@ -937,6 +1006,7 @@ class MemoryEngine:
         candidate_limit: int | None = None,
         rerank: bool = True,
         graph_boost: bool = False,
+        fusion: str = "rank",
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -994,10 +1064,15 @@ class MemoryEngine:
             similarity_floor=self.similarity_floor,
             floor_dim=self.abstention.dim if self.abstention is not None else None,
             vector_block=self.vector_block,
+            synonyms=self.synonyms,
+            context_lane=self.context_lane,
+            lexical_stems=self.lexical_stems,
+            vector_weight=self.vector_weight,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
-                            graph_boost=graph_boost, entity_projection=projection, entity_unavailable=unavailable,
+                            graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
+                            entity_unavailable=unavailable,
                             entity_notes=notes)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:

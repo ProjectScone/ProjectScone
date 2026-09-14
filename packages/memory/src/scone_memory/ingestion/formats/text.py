@@ -12,12 +12,15 @@ from html.parser import HTMLParser
 from io import StringIO
 from pathlib import PurePath
 from time import monotonic
+
+from pydantic import ValidationError
 from typing import cast
 from xml.etree.ElementTree import Element
 
 from ...core.errors import InvalidInput
 from .bounded_xml import parse_xml
 from .html_tables import HtmlTables
+from .table_types import DocumentTableCell
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 
 TEXT_EXTENSIONS = frozenset({
@@ -53,7 +56,8 @@ class _Collector:
         if monotonic() > self.deadline:
             raise InvalidInput('document parsing timed out')
 
-    def add(self, text: str, locator: str, metadata: dict[str, str] | None = None) -> None:
+    def add(self, text: str, locator: str, metadata: dict[str, str] | None = None,
+            table_cells: tuple[DocumentTableCell, ...] = ()) -> None:
         self.check()
         if not text.strip():
             return
@@ -65,7 +69,7 @@ class _Collector:
             raise InvalidInput('document exceeds its extracted text byte limit')
         if len(self.segments) >= self.limits.max_segments:
             raise InvalidInput('document exceeds its segment limit')
-        self.segments.append(DocumentSegment(text=text, locator=locator, metadata=metadata or {}))
+        self.segments.append(DocumentSegment(text=text, locator=locator, metadata=metadata or {}, table_cells=table_cells))
 
 
 def _valid_unicode(text: str) -> None:
@@ -120,10 +124,26 @@ def _table(text: str, delimiter: str, out: _Collector) -> None:
                 continue
             if len(row) != len(headers):
                 raise InvalidInput('delimited row has a different column count than its header')
-            out.add('\n'.join(f'{label}: {value}' for label, value in zip(labels, row)),
-                    f'row:{row_number}', {'line_start': str(start), 'line_end': str(end)})
+            # Each value is a cell with its span in the row's text, so a
+            # table query can quote it; the labels are the parser's rendering
+            # of the header line, named once per row in table_columns.
+            lines = [f'{label}: {value}' for label, value in zip(labels, row)]
+            cells = []
+            position = 0
+            for index, (label, value) in enumerate(zip(labels, row)):
+                head = position + len(f'{label}: '.encode('utf-8'))
+                cells.append(DocumentTableCell(table_locator='delimited', locator=f'row:{row_number}/column:{index + 1}',
+                                               row=row_number - header_record - 1, column=index, text=value,
+                                               start=head, end=head + len(value.encode('utf-8'))))
+                position += len(lines[index].encode('utf-8')) + 1
+            out.add('\n'.join(lines), f'row:{row_number}',
+                    {'line_start': str(start), 'line_end': str(end), 'table_locator': 'delimited',
+                     'table_columns': json.dumps(labels), 'table_status': 'structured'},
+                    table_cells=tuple(cells))
     except csv.Error:
         raise InvalidInput('document contains malformed delimited text') from None
+    except ValidationError:
+        raise InvalidInput('document exceeds its table row limit') from None
 
 
 class _Number(str):
@@ -153,10 +173,40 @@ def _json(text: str, out: _Collector, prefix: str = '') -> None:
     _json_value(value, '', out, prefix, 0)
 
 
-def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth: int) -> None:
+def _is_table(value: list[object]) -> bool:
+    """An array of flat objects is a table: every element an object whose values are all scalars."""
+    if not value or len(value) > 20_000:
+        return False
+    for element in value:
+        if not isinstance(element, dict) or not element:
+            return False
+        if any(isinstance(item, (dict, list)) for item in element.values()):
+            return False
+    return True
+
+
+def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth: int,
+                cell: tuple[str, int, int, tuple[str, ...]] | None = None) -> None:
     out.check(depth)
     if len(prefix) + 1 + len(pointer) > 4096:
         raise InvalidInput('document source locator exceeds its limit')
+    if isinstance(value, list) and value and _is_table(cast(list[object], value)):
+        # A table's rows: each scalar is a cell with its span in the leaf's
+        # text, named by its object key once per row in table_columns, so a
+        # JSON document queries like a spreadsheet's declared table.
+        columns: list[str] = []
+        for element in cast(list[dict[str, object]], value):
+            for key in element:
+                if key not in columns:
+                    columns.append(key)
+        if len(columns) > 1000:
+            columns = []
+        for index, element in enumerate(cast(list[dict[str, object]], value)):
+            for key, child in element.items():
+                escaped = key.replace('~', '~0').replace('/', '~1')
+                at = (f'json:{pointer or "/"}', index, columns.index(key), tuple(columns)) if columns else None
+                _json_value(child, f'{pointer}/{index}/{escaped}', out, prefix, depth + 2, at)
+        return
     if isinstance(value, dict) and value:
         for key, child in cast(dict[str, object], value).items():
             escaped = key.replace('~', '~0').replace('/', '~1')
@@ -169,8 +219,22 @@ def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth
     if isinstance(value, str):
         _valid_unicode(value)
     rendered = str(value) if isinstance(value, _Number) else json.dumps(value, ensure_ascii=False)
-    out.add(f'{pointer}: {rendered}' if pointer else rendered,
-            f'{prefix}#{pointer}', {'json_pointer': pointer})
+    text = f'{pointer}: {rendered}' if pointer else rendered
+    metadata = {'json_pointer': pointer}
+    cells: tuple[DocumentTableCell, ...] = ()
+    if cell is not None:
+        table, row, column, names = cell
+        quoted = isinstance(value, str) and not isinstance(value, _Number)  # a JSON number is a str subclass here
+        # The cell quotes the segment as written, so a string's text is its
+        # JSON rendering between the quotes, escapes and all: the span then
+        # holds exactly those bytes.
+        inner: str = rendered[1:-1] if quoted else rendered
+        head = len(f'{pointer}: '.encode('utf-8')) + (1 if quoted else 0)
+        cells = (DocumentTableCell(table_locator=table, locator=f'{prefix}#{pointer}', row=row, column=column,
+                                   text=inner, start=head, end=head + len(inner.encode('utf-8'))),)
+        metadata.update({'table_locator': table, 'table_columns': json.dumps(list(names)),
+                         'table_status': 'structured', 'header_basis': 'json_object_keys'})
+    out.add(text, f'{prefix}#{pointer}', metadata, table_cells=cells)
 
 
 _BLOCKS = frozenset({'p', 'div', 'section', 'article', 'header', 'footer', 'main', 'aside',

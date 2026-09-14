@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import math
 from typing import Callable
 
-from .analysis import cached_analysis
+from .analysis import cached_analysis, external_entities
 from .project import Entity, EntityProjection, Relation
 
 MAX_NODES = 200
@@ -126,7 +126,12 @@ def layout_projection(projection: EntityProjection, *, max_nodes: int = MAX_NODE
     included, given its radius; rings and boxes are spaced by that, so a
     name never runs into another entity or out of its box."""
     degree = _degrees(projection)
-    ranked = sorted(projection.entities, key=lambda e: (-degree[e.entity_id], e.label.casefold(), e.entity_id))
+    # The drawing's budget goes to the graph's own things first: `typing`
+    # and `json`, imported everywhere, would otherwise take the middle of
+    # every picture and the room of the code around them.
+    external = external_entities(projection)
+    ranked = sorted(projection.entities,
+                    key=lambda e: (e.entity_id in external, -degree[e.entity_id], e.label.casefold(), e.entity_id))
     shown = ranked[:max_nodes]
     ids = {entity.entity_id for entity in shown}
     between = [r for r in projection.relations if r.subject_id in ids and r.object_id in ids]
