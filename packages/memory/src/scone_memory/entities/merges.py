@@ -30,7 +30,7 @@ __all__ = ["SAME_ENTITY", "EntityMerges", "MergeDecision", "entity_merges", "is_
 #: a document saying "X same as Y" is a claim to weigh, not a decision.
 SAME_ENTITY = "scone:same entity"
 
-MergeOutcome = Literal["applied", "cycle", "same_name"]
+MergeOutcome = Literal["applied", "replaced", "cycle", "same_name"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +88,8 @@ def entity_merges(facts: Iterable[Fact], at: datetime | None = None) -> EntityMe
     reported rather than dropped."""
     pointer: dict[str, str] = {}
     recorded: list[tuple[int, str, str, MergeOutcome]] = []
+    #: Where in ``recorded`` each alias's applied decision sits.
+    applied_at: dict[str, int] = {}
 
     def chain(key: str) -> list[str]:
         walked = [key]
@@ -111,7 +113,14 @@ def entity_merges(facts: Iterable[Fact], at: datetime | None = None) -> EntityMe
             # the only way a new pointer can loop.
             recorded.append((fact.fact_id, alias, named, "cycle"))
         else:
+            # One decision per alias holds at a time; should the ledger hold
+            # two (restored from an archive, say) the later replaces the
+            # earlier, and the earlier says so.
+            if alias in applied_at:
+                earlier = recorded[applied_at[alias]]
+                recorded[applied_at[alias]] = (earlier[0], earlier[1], earlier[2], "replaced")
             pointer[alias] = named
+            applied_at[alias] = len(recorded)
             recorded.append((fact.fact_id, alias, named, "applied"))
     into = {alias: resolve(alias) for alias in pointer}
     return EntityMerges(into, tuple(

@@ -18,6 +18,7 @@ from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Literal, M
 from . import (archive, catalog, entity_merging, fact_placement, fact_relationships, fact_review, file_claims, retention,
                source_keys, vector_identity)
 from .identity import join_match
+from ..entities.merges import is_decision
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
@@ -1573,6 +1574,8 @@ def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
     both subjects in one group, so "mark works_at acme" and "acme based_in
     lisbon" meet. Pure; order is by the smallest fact id in each group."""
     parent: dict[str, str] = {}
+    # A merge decision says two names are one; it is not a claim to reason from.
+    facts = [fact for fact in facts if not is_decision(fact)]
 
     key = entity_key
 

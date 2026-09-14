@@ -17,7 +17,9 @@ time, so it reads only the chain, never the whole ledger.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Optional
+from weakref import WeakKeyDictionary
 
 from ..core.errors import InvalidInput, NotFound
 from ..core.models import Fact
@@ -35,6 +37,17 @@ __all__ = ["MAX_MERGE_CHAIN", "merge_entities", "unmerge_entities"]
 #: merge is refused, since a loop could not be ruled out.
 MAX_MERGE_CHAIN = 64
 _UNJOINABLE = frozenset({"prose", "quoted_text", "pronoun"})
+#: One merge at a time per engine and space, so two merges racing in
+#: opposite directions cannot both pass the loop check before either is
+#: written. Kept per event loop, since a lock belongs to the loop it first
+#: waits on. Processes sharing a store are not serialised by this; a loop
+#: they record anyway is refused when the graph is read (``cycle``).
+_LOCKS: "WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[int, str], asyncio.Lock]]" = WeakKeyDictionary()
+
+
+def _lock(engine: "MemoryEngine", space: str) -> asyncio.Lock:
+    held = _LOCKS.setdefault(asyncio.get_running_loop(), {})
+    return held.setdefault((id(engine), space), asyncio.Lock())
 
 
 def _name(text: str, what: str) -> str:
@@ -59,6 +72,15 @@ async def merge_entities(engine: "MemoryEngine", space: str, alias: str, into: s
     if alias_key == into_key:
         raise InvalidInput(f"{alias.strip()!r} and {into.strip()!r} are already one name; nothing was merged")
     reason = fact_review._reason(reason)
+    async with _lock(engine, space):
+        fact = await _checked_and_recorded(engine, space, alias, into, alias_key, into_key)
+    await engine._emit(space, "entity_merge", {"fact_id": fact.fact_id, "alias": alias_key, "into": into_key,
+                                               "reason": reason, "actor": actor})
+    return fact
+
+
+async def _checked_and_recorded(engine: "MemoryEngine", space: str, alias: str, into: str, alias_key: str,
+                                into_key: str) -> Fact:
     step = into_key
     for _ in range(MAX_MERGE_CHAIN):
         decision = await _in_force(engine, space, step)
@@ -71,10 +93,7 @@ async def merge_entities(engine: "MemoryEngine", space: str, alias: str, into: s
     else:
         raise InvalidInput(f"{into.strip()!r} starts a chain of more than {MAX_MERGE_CHAIN} merges; "
                            "merge into the end of the chain")
-    fact = await engine._assert_placed(space, alias_key, SAME_ENTITY, into.strip(), origin="stated")
-    await engine._emit(space, "entity_merge", {"fact_id": fact.fact_id, "alias": alias_key, "into": into_key,
-                                               "reason": reason, "actor": actor})
-    return fact
+    return await engine._assert_placed(space, alias_key, SAME_ENTITY, into.strip(), origin="stated")
 
 
 async def unmerge_entities(engine: "MemoryEngine", space: str, alias: str, *, reason: str,
