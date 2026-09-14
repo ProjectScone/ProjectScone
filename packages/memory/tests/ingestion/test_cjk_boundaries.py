@@ -90,6 +90,24 @@ def test_chinese_and_japanese_clause_numbering_is_structure():
                                              "（一）吊臂", "（二）回转支承", "1、每年检查一次", "第3条 検査は毎年行う。"]
 
 
+def test_ascii_parentheses_around_a_number_are_no_clause_the_latin_rule_did_not_make_one():
+    """The Chinese and Japanese spellings each hold a full-width mark or a
+    CJK numeral, so plain English keeps the boundaries it had: a year in
+    parentheses is text, and a Latin clause still needs its space."""
+    doc = ("(2024) Annual report of the harbour\n(12)text without a space\n(12345) a reference number\n"
+           "(2) the second item\n（2）第二项\n(二)第二项\n(２)第二项\n(3）第三项\n")
+    found = [unit.label for unit in units(doc) if unit.kind == "clause"]
+    assert found == ["(2) the second item", "（2）第二项", "(二)第二项", "(２)第二项", "(3）第三项"]
+
+
+def test_english_with_numbers_in_parentheses_is_cut_as_before():
+    doc = ("Harbour survey (2024) summary\n\n" + "(2024) The crane was inspected in May and the jib had rust.\n" * 12
+           + "(12)No space after this marker, so it stays prose.\n" * 12)
+    made = structured_spans(doc, target=160)
+    assert all(doc[span.start:span.end] for span in made.spans)
+    assert made.at_boundary == 0, "no line here opens a clause, in English or in the CJK spellings"
+
+
 def test_a_chinese_law_is_chunked_at_its_articles():
     articles = [f"第{n}条 " + "起重机的使用单位应当建立安全管理制度，并定期检查设备状况。" * 3 + "\n" for n in "一二三四五六"]
     doc = "".join(articles)
