@@ -73,8 +73,10 @@ the per-episode cap and the limit, so a passage ranked below the limit
 that holds the phrase takes the place of one that does not. `phrases` in
 the answer (and the recall event) says how many candidates were checked,
 how many each rule dropped, and `short: true` when fewer passages came
-back than the limit after the phrases dropped some, because passages
-beyond the candidate window were never checked. Facts are not filtered.
+back than the limit after the phrases dropped some while a lane filled
+its candidate window, because passages beyond that window were never
+checked. When no lane filled its window every passage was a candidate,
+and a short answer is only a small space. Facts are not filtered.
 A phrase both required and excluded, one with no word to match, more than
 20 phrases or one over 200 characters is refused. Advertised as
 `recall.phrases`.

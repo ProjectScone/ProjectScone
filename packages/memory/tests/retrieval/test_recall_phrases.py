@@ -51,6 +51,7 @@ def test_a_phrase_matches_whole_words_whatever_the_case_and_punctuation_between_
     assert not holds("The party was late", "art")
     assert not holds("slew, then ring", "slew ring"), "words apart are not the phrase"
     assert holds("港口起重机已检修", "起重机"), "scripts written without spaces match inside a run"
+    assert holds("ㄅㄆㄇㄈ", "ㄆㄇ"), "every script the search tokenizer reads as unspaced, bopomofo included"
 
 
 async def test_passages_without_a_required_phrase_give_their_places_to_ones_ranked_below_the_limit():
@@ -64,7 +65,8 @@ async def test_passages_without_a_required_phrase_give_their_places_to_ones_rank
     assert [item.text for item in needed.items] == [NOTES[4]]
     trace = needed.phrases
     assert trace.required == ["hoist rope"] and trace.dropped_required == trace.checked - 1
-    assert trace.short is True and "window" in trace.why
+    # Every passage in the space was a candidate, so nothing beyond the window went unchecked.
+    assert trace.short is False and "window" not in trace.why
 
 
 async def test_every_required_phrase_must_appear_and_any_excluded_one_removes_a_passage():
@@ -129,7 +131,8 @@ async def test_phrases_are_asked_for_over_http_and_the_command_line():
     assert [item["text"] for item in made.json()["items"]] == [NOTES[4]]
     assert made.json()["phrases"]["required"] == ["hoist rope"] and made.json()["phrases"]["excluded"] == ["canteen"]
     assert bad.status_code == 422 and features["recall.phrases"] is True
-    assert code == 0 and json.loads(out.getvalue())["phrases"]["short"] is True
+    said = json.loads(out.getvalue())["phrases"]
+    assert code == 0 and said["dropped_required"] == said["checked"] - 1 and said["short"] is False
 
 
 async def test_an_answer_short_only_because_the_space_is_small_is_not_blamed_on_the_phrases():
@@ -139,3 +142,41 @@ async def test_an_answer_short_only_because_the_space_is_small_is_not_blamed_on_
     finally:
         await engine.close()
     assert len(small.items) < 10 and small.phrases.dropped_excluded == 0 and small.phrases.short is False
+
+
+async def test_an_answer_short_with_a_full_window_is_not_blamed_on_phrases_that_dropped_nothing():
+    engine = await stored()
+    try:
+        full = await engine.recall("default", "crane survey jib", limit=5, candidate_limit=1, exclude=["telescope"])
+    finally:
+        await engine.close()
+    assert len(full.items) < 5 and full.phrases.dropped_excluded == 0 and full.phrases.short is False
+
+
+async def test_an_answer_short_after_drops_is_short_only_when_a_lane_filled_its_window():
+    engine = await stored()
+    try:
+        # Six passages, a limit of ten: one dropped, five back, and every passage was a candidate.
+        roomy = await engine.recall("default", "crane survey jib", limit=10, exclude=["canteen"])
+        # Two candidates a lane: the lanes stop at their window, and passages past it went unread.
+        narrow = await engine.recall("default", "crane survey jib", limit=3, candidate_limit=2,
+                                     require=["hoist rope"])
+    finally:
+        await engine.close()
+    assert len(roomy.items) == 5 and roomy.phrases.dropped_excluded == 1 and roomy.phrases.short is False
+    assert narrow.phrases.short is True and "window" in narrow.phrases.why
+    engine = await stored()
+    try:
+        vector_only = await engine.recall("default", "crane survey jib", limit=3, candidate_limit=2,
+                                          lanes=("vector",), require=["hoist rope"])
+    finally:
+        await engine.close()
+    assert vector_only.phrases.short is True, "the vector lane filling its window counts as much as the text lane"
+    engine = await stored()
+    try:
+        text_only = await engine.recall("default", "crane survey jib", limit=3, candidate_limit=2,
+                                        lanes=("text",), require=["hoist rope"])
+    finally:
+        await engine.close()
+    assert text_only.phrases.short is True
+    assert len(narrow.items) < 3 and narrow.phrases.dropped_required > 0

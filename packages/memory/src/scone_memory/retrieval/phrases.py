@@ -15,6 +15,7 @@ import unicodedata
 from typing import Sequence
 
 from ..core.errors import InvalidInput
+from .lexical import UNSPACED_CHAR
 
 #: Phrases one recall may require and exclude together.
 MAX_PHRASES = 20
@@ -22,8 +23,6 @@ MAX_PHRASES = 20
 MAX_PHRASE_CHARS = 200
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
-_UNSPACED = re.compile("[฀-໿က-႟ក-៿぀-ヿ㐀-䶿一-鿿"
-                       "가-퟿豈-﫿]")
 
 
 def _words(text: str) -> str:
@@ -32,12 +31,16 @@ def _words(text: str) -> str:
 
 def holds(text: str, phrase: str) -> bool:
     """Whether ``text`` holds ``phrase`` as whole words in order."""
-    wanted = _words(phrase)
+    return _within(_words(text), _words(phrase))
+
+
+def _within(words: str, wanted: str) -> bool:
+    """Whether normalised ``words`` hold normalised ``wanted``."""
     if not wanted:
         return False
-    if _UNSPACED.search(wanted):
-        return wanted.replace(" ", "") in _words(text).replace(" ", "")
-    return f" {wanted} " in f" {_words(text)} "
+    if UNSPACED_CHAR.search(wanted):
+        return wanted.replace(" ", "") in words.replace(" ", "")
+    return f" {wanted} " in f" {words} "
 
 
 def checked_phrases(require: object, exclude: object) -> tuple[list[str], list[str]]:
@@ -60,10 +63,19 @@ def checked_phrases(require: object, exclude: object) -> tuple[list[str], list[s
     return lists[0], lists[1]
 
 
-def passes(text: str, require: Sequence[str], exclude: Sequence[str]) -> tuple[bool, str]:
-    """Whether ``text`` holds every required phrase and no excluded one, and the rule that dropped it."""
-    if not all(holds(text, phrase) for phrase in require):
-        return False, "required"
-    if any(holds(text, phrase) for phrase in exclude):
-        return False, "excluded"
-    return True, ""
+class Phrases:
+    """Required and excluded phrases, normalised once, to check many passages against."""
+
+    def __init__(self, require: Sequence[str], exclude: Sequence[str]) -> None:
+        self.require = [_words(phrase) for phrase in require]
+        self.exclude = [_words(phrase) for phrase in exclude]
+
+    def passes(self, text: str) -> tuple[bool, str]:
+        """Whether ``text`` holds every required phrase and no excluded one, and the rule that dropped it.
+        The passage is normalised once, however many phrases it is checked for."""
+        words = _words(text)
+        if not all(_within(words, phrase) for phrase in self.require):
+            return False, "required"
+        if any(_within(words, phrase) for phrase in self.exclude):
+            return False, "excluded"
+        return True, ""
