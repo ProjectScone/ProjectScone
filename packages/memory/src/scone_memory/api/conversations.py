@@ -878,9 +878,12 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
 
-        return StreamingResponse(output(), media_type="text/event-stream", headers={
-            "Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff",
-        })
+        # A send bounded in time and a generator closed on the way out: a
+        # client that stops reading cannot hold the window's text, or its
+        # place among the readers, past the bound.
+        from .agent_history import _HistoryResponse
+
+        return _HistoryResponse(output())
 
     @app.delete("/v1/conversations/{sid}", status_code=204)
     async def delete(sid: str, space=Depends(space_for)):
