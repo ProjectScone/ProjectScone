@@ -168,3 +168,62 @@ def test_the_command_writes_with_a_model_and_measures_without_one(tmp_path, monk
     assert payload["quote_at"] == {"1": 1.0, "3": 1.0} and payload["stored"]["files"] == 1
     out = io.StringIO()
     assert cli.main(["bench-questions", str(tmp_path / "nowhere"), "--set", "x.json"], env={}, stdin=io.StringIO(""), out=out) == 2
+
+
+async def test_a_bad_question_a_short_quote_and_a_bracket_in_the_prose_are_each_handled():
+    engine = await corpus()
+    try:
+        model = FakeChat([
+            'Sure [as requested]: ' + reply(("When does the harbour close?", "The harbour at Vellmar closes to sailing boats every November."),
+                                             ("Q" * 401 + "?", "Pilots board arriving ships two miles out, at the red buoy."),
+                                             ("What is in every chunk?", "the")),
+            reply(("Which apples grow on the ridge?", "The orchard on the ridge grows only Bramley apples.")),
+        ])
+        written = await write_questions(engine, "s", model, per_chunk=3)
+        assert [q.question for q in written.questions] == ["When does the harbour close?", "Which apples grow on the ridge?"]
+        assert (written.dropped_unasked, written.dropped_unquoted, written.dropped_unparsed) == (1, 1, 0), \
+            "an over-long question is not an unquoted one; a three-letter quote tells no passage apart"
+        assert "1 with no question or one over 400 characters" in written.text()
+    finally:
+        await engine.close()
+
+
+def test_a_payload_with_a_wrong_typed_field_is_refused_before_it_is_measured(tmp_path):
+    good = {"corpus": "c", "model": "m", "questions": [{"question": "Q?", "quote": "a b c d", "source": None, "episode_id": 1}],
+            "chunks_total": 1, "chunks_asked": 1, "per_chunk": 1, "seed": 42, "dropped_unparsed": 0, "dropped_unquoted": 0,
+            "skipped_long": 0, "calls_failed": 0, "version": "questions-v1"}
+    assert QuestionSet.from_payload(good).questions[0].quote == "a b c d"
+    for broken in ({**good, "questions": [{**good["questions"][0], "quote": 5}]},
+                   {**good, "questions": [{**good["questions"][0], "extra": 1}]},
+                   {**good, "chunks_total": "1"}, {**good, "model": None}):
+        with pytest.raises(InvalidInput):
+            QuestionSet.from_payload(broken)
+
+
+async def test_a_root_under_a_hidden_directory_is_read_and_a_pdf_keeps_its_path(tmp_path):
+    pypdf = pytest.importorskip("pypdf")
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    root = tmp_path / ".hidden" / "corpus"
+    (root / "reports").mkdir(parents=True)
+    (root / ".drafts").mkdir()
+    (root / "notes.md").write_text(HARBOUR, encoding="utf-8")
+    (root / ".drafts" / "secret.md").write_text(ORCHARD, encoding="utf-8")
+    writer = pypdf.PdfWriter()
+    font = DictionaryObject({NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/Type1'),
+                             NameObject('/BaseFont'): NameObject('/Helvetica'), NameObject('/Encoding'): NameObject('/WinAnsiEncoding')})
+    page = writer.add_blank_page(width=612, height=792)
+    page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): writer._add_object(font)})})
+    stream = DecodedStreamObject()
+    stream.set_data(f'BT /F1 12 Tf 72 720 Td <{"The press makes two thousand litres a season.".encode("cp1252").hex()}> Tj ET'.encode())
+    page[NameObject('/Contents')] = writer._add_object(stream)
+    with open(root / "reports" / "press.pdf", "wb") as handle:
+        writer.write(handle)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        stored = await store_corpus(engine, "s", root)
+        assert stored == {"files": 2, "files_total": 2, "files_cut": 0, "pdf_unread": 0}, "the root's own hidden ancestor does not hide it; a hidden directory under it does"
+        sources = sorted({source for _, source, _, _ in await chunks_in(engine, "s")})
+        assert sources == ["notes.md", "reports/press.pdf"], "a PDF is stored under its path from the root, not its attachment hash"
+    finally:
+        await engine.close()
