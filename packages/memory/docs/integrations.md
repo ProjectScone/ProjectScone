@@ -12,7 +12,12 @@ nodes, and `SconeChatStore` is a LlamaIndex chat store;
 `scone_memory.integrations.langchain.SconeRetriever` returns documents, and
 `SconeChatMessageHistory` provides explicit session history. The chat store,
 the LangChain history and the OpenAI Agents session keep a conversation the
-same way, so one session id reads the same messages through any of them.
+same way. Plain text messages read with the same speakers through any of
+them: LangChain's `human` and `ai` are LlamaIndex's `user` and `assistant`,
+and the reverse. A structured message is read back exactly by the adapter
+that wrote it. Read through another adapter, LangChain gives it as a
+`ChatMessage` carrying its role and JSON, and the LlamaIndex store refuses it,
+naming its position, rather than guess a speaker or drop its content.
 
 The packaged [composition API](../src/scone_memory/integrations/composition.py) runs
 LlamaIndex retrieval inside a LangChain Runnable workflow while preserving

@@ -72,20 +72,45 @@ class SconeRetriever(BaseRetriever):
         return nodes(await engine.recall(self.space, formulate_query(query_bundle.query_str).text, **self._kwargs()))
 
 
+#: A plain speaker as LlamaIndex names it, from any adapter's spelling: LangChain writes human and ai.
+_ROLES: dict[str, MessageRole] = {"human": MessageRole.USER, "ai": MessageRole.ASSISTANT,
+                                  **{role.value: role for role in MessageRole}}
+
+
 def message_turn(message: ChatMessage) -> Turn:
-    """A plain text message as its text, so recall over the conversation reads well;
-    any other message (tool calls, several blocks, extra fields) as its JSON, whole."""
+    """A message that is nothing but some text as that text, so recall over the conversation
+    reads well; any other message (tool calls, several blocks, extra fields, no text) as its
+    JSON, whole."""
     role = message.role.value if isinstance(message.role, MessageRole) else str(message.role)
     first = message.blocks[0] if message.blocks else None
-    if not message.additional_kwargs and len(message.blocks) == 1 and isinstance(first, TextBlock):
+    if (not message.additional_kwargs and len(message.blocks) == 1 and isinstance(first, TextBlock)
+            and first.text.strip()):
         return Turn(role, first.text)
     return Turn(role, None, message.model_dump(mode="json"))
 
 
-def turn_message(turn: Turn) -> ChatMessage:
+def turn_message(turn: Turn, position: int = 0) -> ChatMessage:
+    """The message a turn holds. A turn another adapter wrote that a ChatMessage cannot hold
+    (a speaker LlamaIndex has no role for, an Agents SDK item, a LangChain message dict) is
+    refused by its position rather than read with a guessed speaker or without its content."""
     if turn.payload is not None:
-        return ChatMessage.model_validate(turn.payload)
-    return ChatMessage(role=MessageRole(turn.role), content=turn.text)
+        payload = turn.payload
+        if isinstance(payload, dict) and "role" in payload and set(payload) <= set(ChatMessage.model_fields):
+            try:
+                return ChatMessage.model_validate(payload)
+            except ValueError:
+                pass
+        raise InvalidInput(f"the message at position {position} was written as a {turn.role!r} item a "
+                           f"LlamaIndex ChatMessage cannot hold")
+    role = _ROLES.get(turn.role)
+    if role is None:
+        raise InvalidInput(f"the message at position {position} has the speaker {turn.role!r}, "
+                           f"which LlamaIndex has no role for")
+    return ChatMessage(role=role, content=turn.text)
+
+
+def _messages(episodes: list[Episode]) -> list[ChatMessage]:
+    return [turn_message(read_turn(episode), position) for position, episode in enumerate(_in_order(episodes))]
 
 
 def _in_order(episodes: list[Episode]) -> list[Episode]:
@@ -120,7 +145,7 @@ class SconeChatStore(BaseChatStore):
         return turn_records(key, [message_turn(message) for message in messages], start, self.extra)
 
     def get_messages(self, key: str) -> list[ChatMessage]:
-        return [turn_message(read_turn(e)) for e in _in_order(_sync(self._memory).episodes(self.space, self._where(key)))]
+        return _messages(_sync(self._memory).episodes(self.space, self._where(key)))
 
     def set_messages(self, key: str, messages: list[ChatMessage]) -> None:
         engine = _sync(self._memory)
@@ -144,7 +169,7 @@ class SconeChatStore(BaseChatStore):
             return None
         for episode in stored:
             engine.forget(self.space, episode.episode_id)
-        return [turn_message(read_turn(e)) for e in stored]
+        return [turn_message(read_turn(e), position) for position, e in enumerate(stored)]
 
     def delete_message(self, key: str, idx: int) -> Optional[ChatMessage]:
         engine = _sync(self._memory)
@@ -152,7 +177,7 @@ class SconeChatStore(BaseChatStore):
         if not -len(stored) <= idx < len(stored):
             return None
         engine.forget(self.space, stored[idx].episode_id)
-        return turn_message(read_turn(stored[idx]))
+        return turn_message(read_turn(stored[idx]), idx % len(stored))
 
     def delete_last_message(self, key: str) -> Optional[ChatMessage]:
         return self.delete_message(key, -1)
@@ -161,8 +186,7 @@ class SconeChatStore(BaseChatStore):
         return sorted(_sync(self._memory).scopes(self.space).get("session_id", {}))
 
     async def aget_messages(self, key: str) -> list[ChatMessage]:
-        stored = await _async(self._memory).episodes(self.space, self._where(key))
-        return [turn_message(read_turn(e)) for e in _in_order(stored)]
+        return _messages(await _async(self._memory).episodes(self.space, self._where(key)))
 
     async def aset_messages(self, key: str, messages: list[ChatMessage]) -> None:
         engine = _async(self._memory)
@@ -185,7 +209,7 @@ class SconeChatStore(BaseChatStore):
             return None
         for episode in stored:
             await engine.forget(self.space, episode.episode_id)
-        return [turn_message(read_turn(e)) for e in stored]
+        return [turn_message(read_turn(e), position) for position, e in enumerate(stored)]
 
     async def adelete_message(self, key: str, idx: int) -> Optional[ChatMessage]:
         engine = _async(self._memory)
@@ -193,7 +217,7 @@ class SconeChatStore(BaseChatStore):
         if not -len(stored) <= idx < len(stored):
             return None
         await engine.forget(self.space, stored[idx].episode_id)
-        return turn_message(read_turn(stored[idx]))
+        return turn_message(read_turn(stored[idx]), idx % len(stored))
 
     async def adelete_last_message(self, key: str) -> Optional[ChatMessage]:
         return await self.adelete_message(key, -1)
