@@ -40,7 +40,7 @@ from ..entities.view import STATUS_MODES  # noqa: E402
 
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .tool_retrieval import Selection, ToolIndex
+    from .tool_offering import Selection, ToolIndex
 
 
 @dataclass(frozen=True)
@@ -446,16 +446,17 @@ class ToolBox:
     def anthropic(self, names: Optional[Sequence[str]] = None) -> list[dict]:
         return [tool.as_anthropic() for tool in self._named(names)]
 
-    async def offer(self, query: str, *, limit: int = 8, always: Sequence[str] = ()) -> "Selection":
+    async def offer(self, query: str, *, limit: Optional[int] = None, always: Sequence[str] = ()) -> "Selection":
         """The few tools this turn needs, chosen from the ones held by the
-        query (`tool_retrieval.py`): a suggestion for what to put in front
+        query (`tool_offering.py`): a suggestion for what to put in front
         of the model, never a gate on what `run` will run. The tools are
-        embedded once per toolbox, with the engine's embedder."""
-        from .tool_retrieval import ToolIndex
+        embedded once per toolbox, with the engine's embedder; the always
+        tools come first and past the limit if there are more of them."""
+        from .tool_offering import DEFAULT_LIMIT, ToolIndex
 
         if self._index is None:
             self._index = await ToolIndex.build(self.tools, self.engine.embedder)
-        return await self._index.select(query, limit=limit, always=always)
+        return await self._index.select(query, limit=limit if limit is not None else DEFAULT_LIMIT, always=always)
 
     async def run(self, name: str, arguments: Mapping[str, Any]) -> dict:
         """Run one tool call. The answer is always a dict with ``ok``:
