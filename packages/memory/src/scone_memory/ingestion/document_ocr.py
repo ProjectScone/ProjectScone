@@ -58,14 +58,13 @@ class DocumentOcr:
 
     def parser(self, selection: PdfOcrSelection) -> SelectedDocumentOcr:
         choice = PdfOcrSelection.model_validate(selection.model_dump())
+        # A language the host does not offer is refused whatever else this host has installed.
+        if choice.language is not None and (choice.language not in self.languages or self.engine_for is None):
+            offered = ', '.join(self.languages) or 'none'
+            raise InvalidInput(f'OCR language {choice.language!r} is not offered by this server; offered: {offered}')
         if not self.available():
             raise InvalidInput('document OCR requires the installed pdf-ocr extra')
-        engine = self.engine
-        if choice.language is not None:
-            if choice.language not in self.languages or self.engine_for is None:
-                offered = ', '.join(self.languages) or 'none'
-                raise InvalidInput(f'OCR language {choice.language!r} is not offered by this server; offered: {offered}')
-            engine = self.engine_for(choice.language)
+        engine = self.engine if choice.language is None or self.engine_for is None else self.engine_for(choice.language)
         options = OcrPdfOptions(mode=choice.mode, reading_order=choice.reading_order, dpi=self.dpi)
         return SelectedDocumentOcr(BuiltinDocumentParser(pdf_parser=OcrPdfParser(engine, options=options)),
                                    choice, self.dpi)
