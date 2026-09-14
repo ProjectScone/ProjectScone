@@ -853,6 +853,18 @@ def test_the_graph_exports_as_a_drawing_and_as_a_canvas(seeded):
     assert {node["type"] for node in json.loads(canvas.content)["nodes"]} >= {"group", "text"}
 
 
+def test_the_graph_exports_as_the_whole_graph_on_one_page(seeded):
+    client, _ = seeded
+    page = client.get("/v1/graph/export", params={"format": "explorer"}, headers=auth())
+    assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
+    assert page.headers["content-disposition"] == 'attachment; filename="explorer.html"'
+    assert page.headers["X-Scone-Truncated"] == "false" and page.headers["X-Scone-Projection-Digest"]
+    body = page.text
+    assert body.count("<script") == 2 and "Content-Security-Policy" in body and "graph-data" in body
+    assert "projection " + page.headers["X-Scone-Projection-Digest"][:12] in body, "the page says which projection it holds"
+
+
+
 def test_the_graph_says_what_changed_between_two_moments(seeded):
     client, works = seeded
     answered = client.get("/v1/graph/changes", params={"since": "2023-01-01T00:00:00Z",
