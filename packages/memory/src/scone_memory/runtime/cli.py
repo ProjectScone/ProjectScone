@@ -419,6 +419,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--whole", action="store_true",
                    help="show each passage whole instead of its first 200 characters")
 
+    p = sub.add_parser("attribute", help="say which stored chunk each sentence of an answer came from, without a model")
+    p.add_argument("--answer", required=True, help="the answer's text")
+    p.add_argument("--chunk", type=int, action="append", required=True, metavar="ID",
+                   help="a chunk the answer was composed from (repeat for each)")
+
     p = sub.add_parser("sync", help="bring a space into step with a directory: added, changed and gone")
     p.add_argument("directory")
     p.add_argument("--marker", help="the name these memories are held under; defaults to the "
@@ -2047,6 +2052,23 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         emit(link.model_dump()) if args.json else print(link_line(link), file=out)
         return 0
 
+    if args.command == "attribute":
+        from ..retrieval.attribution import OVERLAP_SHARE, QUOTE_WORDS, attribute_to_chunks
+
+        made, missing = await attribute_to_chunks(engine, space, args.answer, args.chunk)
+        if getattr(args, "json", False):
+            print(json.dumps({**made.record(), "chunks_missing": list(missing)}, ensure_ascii=False), file=out)
+            return 0
+        for sentence in made.sentences:
+            where = f" {sentence.passage}" if sentence.passage else ""
+            numbers = f" (numbers not in it: {', '.join(sentence.numbers_missing)})" if sentence.numbers_missing else ""
+            print(f"{sentence.status}{where}: {sentence.text}{numbers}", file=out)
+        if missing:
+            print(f"not in this space: chunk {', '.join(map(str, missing))}", file=out)
+        print(f"quoted means {QUOTE_WORDS}+ words in a row shared; overlapping means {OVERLAP_SHARE:.0%} of its "
+              "words in one passage; both rules are unmeasured, and this is not a check that the answer is true",
+              file=out)
+        return 0
     if args.command == "answer":
         from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 

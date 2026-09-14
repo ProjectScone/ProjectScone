@@ -1186,6 +1186,55 @@ most is an answer-bench question, and until that number exists `compress`
 stays opt-in and its record says `measured: false`. Advertised as
 `recall.compress`.
 
+## Where each sentence of an answer came from
+
+An answer composed from recalled passages reads as sourced whether it is
+or not. The leading framework asks the model to cite numbered sources as
+it writes, and nothing checks the numbers afterwards. Attribution takes an
+answer already written, by a model or a person, and the stored chunks it
+was composed from, and aligns each sentence to them without a model.
+
+```bash
+scone attribute --answer "Priya moved the launch to March because the audit ran late. The board was not told." \
+  --chunk 12 --chunk 14
+# quoted chunk:12: Priya moved the launch to March because the audit ran late.
+# unattributed: The board was not told.
+```
+
+Over HTTP, `POST /v1/answers/attribute` with `{"answer": ..., "chunk_ids": [...]}`.
+The chunks are read from the space, never taken from the caller, so an
+answer cannot be attributed to text the space does not hold. An id the
+space does not hold is named in `chunks_missing`.
+
+Each sentence gets one status:
+
+- **quoted**: it shares a run of at least 5 consecutive words with a
+  passage, compared case-folded, with the punctuation between words
+  ignored. The record gives the run's span in the passage and its text.
+- **overlapping**: no such run, but at least 60% of its content words
+  (the lexical lane's tokens, stopwords left out) are in one passage.
+- **unattributed**: neither, for every passage given.
+- **too_short**: fewer than two content words.
+
+A quote beats an overlap and a longer run beats a shorter one; then more
+of the sentence's words wins, then the passage given first. Numbers in a
+sentence that its passage does not hold, such as `14th` against a passage
+saying `twelfth`, are named on the sentence.
+
+What it is not:
+
+- **Word overlap is not support.** A sentence can quote a passage and
+  still misstate it, and a faithful paraphrase can come out unattributed.
+  The record says `verified_accuracy: false`.
+- **Both rules are unmeasured**, and the record says so (`rules.measured:
+  false`).
+- **A run is counted between words separated by space or punctuation**,
+  so text in scripts written without spaces can overlap but is rarely
+  quoted.
+
+An answer over 20,000 characters or more than 50 passages is refused, not
+cut. Advertised as `answers.attribution`.
+
 ## What a codebase says about itself beyond who calls whom
 
 Call edges are not a code graph. Two questions people actually ask are
