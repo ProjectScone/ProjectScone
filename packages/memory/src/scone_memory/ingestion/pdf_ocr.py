@@ -124,6 +124,15 @@ class _PageReceipt(BaseModel):
     result: OcrResult
 
 
+def needs_recognition(encoded: bytes, page: PdfPage, options: OcrPdfOptions) -> bool:
+    """Whether OCR reads ``page`` of the extracted text ``encoded``: every page in
+    ``all_pages`` mode, otherwise a page with no text or with a text layer no reader can use.
+    The parser and the resumable workflow both choose through here, so they cannot come to
+    choose different pages."""
+    return (options.mode == 'all_pages' or page.empty
+            or unreadable(encoded[page.start:page.end].decode('utf-8')))
+
+
 def _checkpoint_binding(data: bytes, parsed: ParsedPdf, options: OcrPdfOptions,
                         limits: PdfLimits) -> str:
     dependencies: dict[str, str] = {}
@@ -194,9 +203,7 @@ class OcrPdfParser:
         encoded = parsed.text.encode()
         text_bytes = len(encoded)
         for page in parsed.pages:
-            # A text layer no reader can use is missing text too, though the page is not empty.
-            if (page.empty or self.options.mode == 'all_pages'
-                    or unreadable(encoded[page.start:page.end].decode('utf-8'))):
+            if needs_recognition(encoded, page, self.options):
                 key = f'ocr-page:{page.number}'
                 cached = checkpoints.get(key) if checkpoints is not None else None
                 if cached is None:

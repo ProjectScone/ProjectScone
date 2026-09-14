@@ -127,3 +127,25 @@ async def test_an_ingested_pdf_with_an_unreadable_page_is_partial_and_names_it()
     assert episode.metadata["pdf_coverage"] == "partial" and episode.metadata["pdf_unreadable_pages"] == "2"
     assert readable.unreadable_pages == () and plain.metadata["pdf_coverage"] == "text_layer"
     assert "pdf_unreadable_pages" not in plain.metadata
+
+
+async def test_the_resumable_ocr_workflow_recognizes_an_unreadable_page_too(tmp_path):
+    """The workflow chooses its pages in a loop of its own; it must choose the same pages the parser does."""
+    pytest.importorskip('pypdfium2')
+    from scone_memory.ingestion.pdf_ocr import OcrPdfOptions
+
+    from .test_pdf_ocr import ObservedOcr
+    from .test_pdf_ocr_workflow import open_memory, retain, workflow
+
+    memory = await open_memory(tmp_path)
+    original = await retain(memory, mixed_pdf(PAGES))
+    engine = ObservedOcr()
+    job = workflow(memory, tmp_path, engine, options=OcrPdfOptions())
+    try:
+        result = await job.run('garbled', space='alpha', attachment_id=original.attachment_id)
+        episode = await memory.episode('alpha', result.added.episode_id)
+    finally:
+        job.close()
+        await memory.close()
+    assert engine.calls == 1 and result.unreadable_pages == ()
+    assert episode.content == f"{READABLE}\n\nCafé uses Polaris"
