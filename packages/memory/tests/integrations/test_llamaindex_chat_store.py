@@ -141,3 +141,61 @@ def test_replacing_a_conversation_on_sqlite_keeps_every_new_message(tmp_path):
         store.set_messages("chat-1", [QUESTION, ANSWER])
         store.set_messages("chat-1", [ANSWER, QUESTION])
         assert store.get_messages("chat-1") == [ANSWER, QUESTION]
+
+
+def test_an_empty_message_is_kept():
+    empty = ChatMessage(role=MessageRole.ASSISTANT, content="")
+    with sync_memory() as memory:
+        store = SconeChatStore(memory, "default")
+        store.add_message("chat-1", empty)
+        assert store.get_messages("chat-1") == [empty]
+
+
+def test_a_session_written_through_langchain_reads_with_the_same_speakers():
+    pytest.importorskip("langchain_core")
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from scone_memory.integrations.langchain import SconeChatMessageHistory
+
+    with sync_memory() as memory:
+        SconeChatMessageHistory(memory, "default", "chat-1").add_messages(
+            [SystemMessage(content="Be brief."), HumanMessage(content="When?"), AIMessage(content="In May.")])
+        read = SconeChatStore(memory, "default").get_messages("chat-1")
+    assert [(message.role, message.content) for message in read] == [
+        (MessageRole.SYSTEM, "Be brief."), (MessageRole.USER, "When?"), (MessageRole.ASSISTANT, "In May.")]
+
+
+def test_a_session_written_here_reads_through_langchain_with_the_same_speakers():
+    pytest.importorskip("langchain_core")
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.messages import ChatMessage as LangChainChatMessage
+
+    from scone_memory.integrations.langchain import SconeChatMessageHistory
+
+    with sync_memory() as memory:
+        SconeChatStore(memory, "default").set_messages("chat-1", [
+            QUESTION, ANSWER, ChatMessage(role=MessageRole.MODEL, content="From a model role.")])
+        read = SconeChatMessageHistory(memory, "default", "chat-1").messages
+    assert isinstance(read[0], HumanMessage) and isinstance(read[1], AIMessage)
+    assert isinstance(read[2], LangChainChatMessage) and read[2].role == "model", "an unknown speaker keeps its role"
+
+
+def test_a_turn_this_store_cannot_represent_is_refused_by_position_not_guessed():
+    from scone_memory.core.errors import InvalidInput
+    from scone_memory.integrations.turns import Turn, turn_records
+
+    with sync_memory() as memory:
+        memory.remember_many("default", turn_records("chat-1", [Turn("user", "hello"),
+                                                                Turn("item", None, {"type": "function_call", "name": "x"})], 0))
+        with pytest.raises(InvalidInput, match="position 1"):
+            SconeChatStore(memory, "default").get_messages("chat-1")
+
+
+def test_a_plain_message_from_a_speaker_llamaindex_has_no_role_for_is_refused():
+    from scone_memory.core.errors import InvalidInput
+    from scone_memory.integrations.turns import Turn, turn_records
+
+    with sync_memory() as memory:
+        memory.remember_many("default", turn_records("chat-1", [Turn("narrator", "Once upon a time.")], 0))
+        with pytest.raises(InvalidInput, match="speaker 'narrator'"):
+            SconeChatStore(memory, "default").get_messages("chat-1")
