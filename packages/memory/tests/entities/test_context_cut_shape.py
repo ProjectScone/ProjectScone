@@ -167,3 +167,17 @@ async def test_on_a_hub_the_shape_of_the_cut_survives_the_byte_budget():
         await engine.close()
     assert cut_count(packet) == 16 and "omitted:" in packet.text
     assert prefixed(packet.text, "cut: ") == ["cut: 16 entities -knows-> alice chen"]
+
+
+async def test_a_relation_reached_from_both_its_ends_is_cut_once():
+    """Walked out from alice, the relation back from bob is cut; walked out
+    from bob a hop later, the same relation was cut again and counted twice,
+    as two groups describing one edge."""
+    engine = await engine_with([("alice chen", "knows", "bob stone"), ("bob stone", "knows", "alice chen")])
+    try:
+        packet = await graph_context(engine, "alpha", names=["alice chen"],
+                                     limits=ContextLimits(max_hops=2, max_relations=1))
+    finally:
+        await engine.close()
+    assert cut_count(packet) == 1 and len(prefixed(packet.text, "cut: ")) == 1
+    assert sum(group["count"] for group in packet.record("alpha", "current", DAY)["coverage"]["relations_cut_by"]) == 1
