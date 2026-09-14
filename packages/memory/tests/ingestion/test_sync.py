@@ -473,7 +473,7 @@ async def test_a_named_pipe_is_never_opened(tmp_path):
 
     tree(tmp_path, **{"real.md": "the real note"})
     os.mkfifo(tmp_path / "stream.md")
-    reading, there, unreadable, links, special = _files(tmp_path, (".md",), 100)
+    reading, there, unreadable, links, special, ignored, pruned = _files(tmp_path, (".md",), 100)
     assert [path.name for path in reading] == ["real.md"], reading
     assert (there, special) == (1, 1), (there, special)
 
@@ -484,3 +484,31 @@ async def test_a_named_pipe_is_never_opened(tmp_path):
         await engine.close()
     assert done.files_found == 1 and done.added == 1, done.record()
     assert done.special == 1 and "not ordinary files" in done.text(), done.text()
+
+
+async def test_a_sync_of_code_reads_the_projects_manifests_and_a_sync_of_notes_does_not(tmp_path):
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+
+    tree(tmp_path, **{"pkg/app.py": "import requests\n", "pyproject.toml": "[project]\nname = 'shop'\ndependencies = ['requests']\n",
+                      "package.json": '{"name": "shop-ui", "dependencies": {"react": "18"}}', "notes.md": "notes"})
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
+    try:
+        done = await sync_directory(engine, "default", tmp_path, apply=True)
+        assert done.files_found == 4 and done.added == 4, "code, both manifests, and the note"
+        facts = await engine.facts("default")
+        assert ("shop", "depends_on", "requests") in {(f.subject, f.predicate, f.object) for f in facts}
+        assert ("shop-ui", "depends_on", "react") in {(f.subject, f.predicate, f.object) for f in facts}
+        notes = await sync_directory(engine, "default", tmp_path, suffixes=(".md",), marker="notes", apply=True)
+        assert notes.files_found == 1 and notes.added == 1, "a sync of notes alone leaves the manifests"
+        # A manifest that was synced and is then out of the suffixes' scope
+        # is out of scope, not missing: nothing is forgotten for a flag.
+        narrowed = await sync_directory(engine, "default", tmp_path, suffixes=(".md",), apply=True, remove=True)
+        assert narrowed.removed == 0 and narrowed.forgotten == 0 and narrowed.out_of_scope == 3
+        # A sync of code alone reads the manifests too: the rule is about
+        # code, not about the default suffixes.
+        tree(tmp_path, **{"requirements/test.txt": "pytest>=8\n", ".venv/lib/pyproject.toml": "[project]\nname = 'vendored'\n"})
+        code = await sync_directory(engine, "default", tmp_path, suffixes=(".py",), marker="code", apply=True)
+        assert code.files_found == 4, "app.py, both manifests, and requirements/test.txt by its path; not the one under .venv"
+        assert ("requirements/test.txt", "depends_on", "pytest") in {(f.subject, f.predicate, f.object) for f in await engine.facts("default")}
+    finally:
+        await engine.close()

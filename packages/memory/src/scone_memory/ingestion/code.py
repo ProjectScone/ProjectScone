@@ -35,7 +35,12 @@ from typing import Literal, Optional, Sequence
 
 from .chunker import DEFAULT_TARGET, MIN_CHUNK, Span, chunk_spans
 
-Language = Literal["python", "braces"]
+#: "python" and "braces" are the two families the line readers know;
+#: "tree:<grammar>" names a language read from its syntax tree by
+#: ``code_tree`` when the optional grammar pack is installed.
+Language = str
+PYTHON_LANGUAGE: Language = "python"
+BRACES_LANGUAGE: Language = "braces"
 
 #: Suffixes ``ast`` can parse, so their spans are exact.
 PYTHON_SUFFIXES = (".py", ".pyi")
@@ -118,7 +123,12 @@ def code_language(source: Optional[str]) -> Optional[Language]:
     suffix = name[dot:]
     if suffix in PYTHON_SUFFIXES:
         return "python"
-    return "braces" if suffix in BRACE_SUFFIXES else None
+    if suffix in BRACE_SUFFIXES:
+        return "braces"
+    from .code_tree import available, grammar_for
+
+    grammar = grammar_for(suffix)
+    return f"tree:{grammar}" if grammar is not None and available() else None
 
 
 def declarations(content: str, *, language: Optional[Language]) -> tuple[Declaration, ...]:
@@ -136,7 +146,13 @@ def declarations(content: str, *, language: Optional[Language]) -> tuple[Declara
 def _found(content: str, language: Language) -> tuple[Declaration, ...]:
     """The last few files' declarations, so that naming every chunk of one
     recall does not parse the same file over and over."""
-    return _python(content) if language == "python" else _braces(content)
+    if language == "python":
+        return _python(content)
+    if language.startswith("tree:"):
+        from .code_tree import tree_declarations
+
+        return tuple(tree_declarations(content, language[len("tree:"):]))
+    return _braces(content)
 
 
 def code_spans(content: str, target: int = DEFAULT_TARGET, *,

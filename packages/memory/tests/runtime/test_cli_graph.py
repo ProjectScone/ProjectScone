@@ -4,6 +4,7 @@ the HTTP routes and MCP tools read."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import sys
 import json
@@ -615,3 +616,71 @@ async def test_recall_can_widen_a_single_hit():
     code = await run(build_parser().parse_args(asked[:2] + ["--limit", "1"]),
                      memory, io.StringIO(""), plain)
     assert code == 0 and "widened" not in plain.getvalue(), "widening stays opt-in"
+
+
+def json_stream(text: str) -> list[dict]:
+    """Every JSON value in the text, however it is indented -- what `jq` reads."""
+    decoder, at, values = json.JSONDecoder(), 0, []
+    while at < len(text):
+        while at < len(text) and text[at].isspace():
+            at += 1
+        if at >= len(text):
+            break
+        value, at = decoder.raw_decode(text, at)
+        values.append(value)
+    return values
+
+
+async def test_map_watch_records_what_changed_between_passes(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (root / "c.py").write_text("def c():\n    return a()\n", encoding="utf-8")
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    out = io.StringIO()
+
+    async def change_between_passes():
+        await asyncio.sleep(0.15)
+        (root / "a.py").write_text("def a():\n    return 2\n", encoding="utf-8")
+        (root / "b.py").write_text("def b():\n    return 3\n", encoding="utf-8")
+        (root / "c.py").unlink()
+
+    changing = asyncio.create_task(change_between_passes())
+    code = await run(build_parser().parse_args(["--json", "map", str(root), "--watch", "--every", "0.3", "--rounds", "2", "--graph"]),
+                     memory, io.StringIO(""), out)
+    await changing
+    lines = json_stream(out.getvalue())
+    assert code == 0 and [line.get("pass") for line in lines] == [1, None, 2, None], "a JSON stream: a pass marker, then its receipt"
+    first, second = lines[1], lines[3]
+    assert (first["read"], first["updated"], first["removed"]) == (2, 0, 0), "pass one read a.py and c.py"
+    assert (second["read"], second["updated"], second["removed"]) == (2, 1, 1), "pass two: a.py changed, b.py new, c.py gone"
+    assert (await memory.status("default")).episodes == 2, "c.py is forgotten, a.py replaced, b.py added"
+    found = await memory.recall("default", "return 2", limit=2)
+    assert any("return 2" in item.text for item in found.items), "the changed file's new text is what is remembered"
+    out = io.StringIO()
+    with pytest.raises(InvalidInput, match="--every"):
+        await run(build_parser().parse_args(["map", str(root), "--watch", "--every", "0", "--rounds", "1"]), memory, io.StringIO(""), out)
+    await memory.close()
+
+
+async def test_map_watch_lets_a_changed_caller_find_an_unchanged_declaration(tmp_path):
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "b.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    # A call by a bare name with no import: the graph cannot bind it inside
+    # the file, so the corpus-wide pass is what places it.
+    (root / "pkg" / "a.py").write_text("def go(x):\n    return x.helper()\n", encoding="utf-8")
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--json", "map", str(root), "--graph"]), memory, io.StringIO(""), out)
+    first = json_stream(out.getvalue())[-1]
+    assert code == 0 and first["unconfirmed_call_candidates"] == [["pkg/a.py:go", "pkg/b.py:helper"]], \
+        "the first pass binds the call to the declaration"
+    (root / "pkg" / "a.py").write_text("def go(x):\n    return x.helper() + 1\n", encoding="utf-8")
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--json", "map", str(root), "--graph"]), memory, io.StringIO(""), out)
+    second = json_stream(out.getvalue())[-1]
+    assert code == 0 and second["deduplicated"] == 1 and second["updated"] == 1
+    assert second["unconfirmed_call_candidates"] == first["unconfirmed_call_candidates"], \
+        "the unchanged file's declaration still binds the changed caller's call"
+    await memory.close()

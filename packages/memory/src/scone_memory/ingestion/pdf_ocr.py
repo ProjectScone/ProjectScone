@@ -95,7 +95,14 @@ def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], lim
                 direction='rtl' if reading_order == 'columns_rtl' else 'ltr')
             text, regions = _page_text(result, offset, limits.max_text_bytes, order)
             updates = {'extraction': 'ocr', 'ocr_engine': result.engine, 'regions': regions,
-                       'reading_order': order.receipt if order else None}
+                       'reading_order': order.receipt if order else None, 'running': (),
+                       'region_geometry': 'normalized_displayed_page_top_left'}
+        elif page.regions:
+            # A text-layer page laid out in reading order keeps its regions,
+            # moved by however much the pages before it grew or shrank.
+            shift = offset - page.start
+            updates = {'regions': tuple(region.model_copy(update={'start': region.start + shift, 'end': region.end + shift})
+                                        for region in page.regions)}
         end = offset + len(text.encode('utf-8'))
         if end > limits.max_text_bytes:
             raise InvalidInput('PDF OCR text exceeds its byte limit')
