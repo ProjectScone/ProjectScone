@@ -169,10 +169,40 @@ def _json(text: str, out: _Collector, prefix: str = '') -> None:
     _json_value(value, '', out, prefix, 0)
 
 
-def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth: int) -> None:
+def _is_table(value: list[object]) -> bool:
+    """An array of flat objects is a table: every element an object whose values are all scalars."""
+    if not value or len(value) > 20_000:
+        return False
+    for element in value:
+        if not isinstance(element, dict) or not element:
+            return False
+        if any(isinstance(item, (dict, list)) for item in element.values()):
+            return False
+    return True
+
+
+def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth: int,
+                cell: tuple[str, int, int, tuple[str, ...]] | None = None) -> None:
     out.check(depth)
     if len(prefix) + 1 + len(pointer) > 4096:
         raise InvalidInput('document source locator exceeds its limit')
+    if isinstance(value, list) and value and _is_table(cast(list[object], value)):
+        # A table's rows: each scalar is a cell with its span in the leaf's
+        # text, named by its object key once per row in table_columns, so a
+        # JSON document queries like a spreadsheet's declared table.
+        columns: list[str] = []
+        for element in cast(list[dict[str, object]], value):
+            for key in element:
+                if key not in columns:
+                    columns.append(key)
+        if len(columns) > 1000:
+            columns = []
+        for index, element in enumerate(cast(list[dict[str, object]], value)):
+            for key, child in element.items():
+                escaped = key.replace('~', '~0').replace('/', '~1')
+                at = (f'json:{pointer or "/"}', index, columns.index(key), tuple(columns)) if columns else None
+                _json_value(child, f'{pointer}/{index}/{escaped}', out, prefix, depth + 2, at)
+        return
     if isinstance(value, dict) and value:
         for key, child in cast(dict[str, object], value).items():
             escaped = key.replace('~', '~0').replace('/', '~1')
@@ -185,8 +215,19 @@ def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth
     if isinstance(value, str):
         _valid_unicode(value)
     rendered = str(value) if isinstance(value, _Number) else json.dumps(value, ensure_ascii=False)
-    out.add(f'{pointer}: {rendered}' if pointer else rendered,
-            f'{prefix}#{pointer}', {'json_pointer': pointer})
+    text = f'{pointer}: {rendered}' if pointer else rendered
+    metadata = {'json_pointer': pointer}
+    cells: tuple[DocumentTableCell, ...] = ()
+    if cell is not None:
+        table, row, column, names = cell
+        quoted = isinstance(value, str) and not isinstance(value, _Number)  # a JSON number is a str subclass here
+        inner: str = str(value) if quoted else rendered
+        head = len(f'{pointer}: '.encode('utf-8')) + (1 if quoted else 0)
+        cells = (DocumentTableCell(table_locator=table, locator=f'{prefix}#{pointer}', row=row, column=column,
+                                   text=inner, start=head, end=head + len(inner.encode('utf-8'))),)
+        metadata.update({'table_locator': table, 'table_columns': json.dumps(list(names)),
+                         'table_status': 'structured', 'header_basis': 'json_object_keys'})
+    out.add(text, f'{prefix}#{pointer}', metadata, table_cells=cells)
 
 
 _BLOCKS = frozenset({'p', 'div', 'section', 'article', 'header', 'footer', 'main', 'aside',

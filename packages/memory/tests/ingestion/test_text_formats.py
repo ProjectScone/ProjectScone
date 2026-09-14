@@ -252,3 +252,21 @@ def test_csv_rows_carry_their_cells_with_spans_and_the_column_names() -> None:
     assert first.text.encode()[first.table_cells[1].start:first.table_cells[1].end] == b"1,250.50"
     assert [c.locator for c in second.table_cells] == ["row:3/column:1", "row:3/column:2"]
     assert doc.parser == "scone-text-tables-v1"
+
+
+def test_a_json_array_of_flat_objects_is_a_table_with_cells() -> None:
+    import json
+
+    from scone_memory.ingestion.formats.table_types import validate_tables
+
+    raw = json.dumps({"title": "Sales", "rows": [{"region": "West", "revenue": "1,250.50"}, {"region": "East", "revenue": 35}],
+                      "tags": ["a", "b"], "nested": [{"x": {"y": 1}}]}).encode()
+    doc = parse_text(raw, "sales.json", DocumentLimits())
+    validate_tables(doc.segments)
+    cells = [(c.table_locator, c.row, c.column, c.text) for s in doc.segments for c in s.table_cells]
+    assert cells == [("json:/rows", 0, 0, "West"), ("json:/rows", 0, 1, "1,250.50"), ("json:/rows", 1, 0, "East"), ("json:/rows", 1, 1, "35")]
+    west = next(s for s in doc.segments if s.table_cells and s.table_cells[0].text == "West")
+    assert west.text == '/rows/0/region: "West"' and west.text.encode()[west.table_cells[0].start:west.table_cells[0].end] == b"West"
+    assert json.loads(west.metadata["table_columns"]) == ["region", "revenue"] and west.metadata["header_basis"] == "json_object_keys"
+    plain = [s for s in doc.segments if s.metadata["json_pointer"] in ("/title", "/tags/0", "/nested/0/x/y")]
+    assert plain and all(not s.table_cells for s in plain), "scalars, arrays of scalars and nested objects are not tables"
