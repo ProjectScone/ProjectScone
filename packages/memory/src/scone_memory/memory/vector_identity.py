@@ -93,6 +93,10 @@ def writer_of(engine: "MemoryEngine") -> str:
     if engine.table_context_embeddings:
         from ..ingestion.table_context import TABLE_CONTEXT_VERSION
         writer += ';tables=' + TABLE_CONTEXT_VERSION
+    if engine.heading_context:
+        # Headings change what is embedded, exactly as table headers do.
+        from ..ingestion.batch import HEADING_CONTEXT_VERSION
+        writer += ';headings=' + HEADING_CONTEXT_VERSION
     return writer
 
 

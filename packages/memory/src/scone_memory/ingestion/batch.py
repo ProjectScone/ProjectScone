@@ -157,6 +157,10 @@ async def _validated_record(runtime: IngestionRuntime, space: str, record: Recor
 #: path longer than this keeps its innermost headings, and the receipt
 #: counts the chunks it was cut for.
 MAX_HEADING_CONTEXT_BYTES = 256
+#: Names the rule that builds a heading path into an embedding input. It is
+#: part of the vector writer's identity, so change it whenever that rule, or
+#: the bound above, changes what a chunk is embedded with.
+HEADING_CONTEXT_VERSION = "heading-path-v1"
 
 
 def context_lines(content: str, source: str | None, spans: Sequence[tuple[int, int]],
