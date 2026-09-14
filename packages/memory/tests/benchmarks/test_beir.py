@@ -122,3 +122,47 @@ def test_the_command_line_runs_a_beir_directory(tmp_path):
     code = main(["bench-beir", str(tmp_path / "set"), "--k", "1,3", "--json"], env={}, stdin=io.StringIO(""), out=out)
     record = json.loads(out.getvalue())
     assert code == 0 and record["queries_run"] == 3 and "ndcg@3" in record["metrics"]
+
+
+async def test_a_query_longer_than_recall_takes_is_cut_at_a_word_and_counted(tmp_path):
+    """Argument-retrieval sets hold whole paragraphs as queries, past the
+    1,000 characters recall takes. The run scores the query as recall can
+    take it, cut at a word, and says so, rather than failing after the
+    corpus is stored."""
+    from scone_memory.core.validation import MAX_QUERY
+
+    long_query = "what was wrong with the crane jib " * 60
+    data = load_beir(write(tmp_path, queries={**QUERIES, "q1": long_query}))
+    report = await run_beir(sampled(data), ks=(1, 3))
+    record = report.record()
+    assert record["queries_run"] == 3 and record["queries_cut"] == 1 and record["queries_empty"] == 0
+    [cut] = [query for query in record["per_query"] if query["query_id"] == "q1"]
+    assert cut["cut"] is True and cut["ranked"][0] == "d1"
+    assert all("cut" not in query for query in record["per_query"] if query["query_id"] != "q1")
+    assert len(long_query) > MAX_QUERY and "1 queries were longer than recall takes" in report.text()
+
+
+async def test_an_empty_query_retrieves_nothing_and_is_counted(tmp_path):
+    data = load_beir(write(tmp_path, queries={**QUERIES, "q2": ""}))
+    report = await run_beir(sampled(data), ks=(1, 3))
+    record = report.record()
+    [empty] = [query for query in record["per_query"] if query["query_id"] == "q2"]
+    assert empty["empty"] is True and empty["ranked"] == [] and set(empty["scores"].values()) == {0.0}
+    assert record["queries_empty"] == 1 and record["queries_run"] == 3 and "1 queries were empty" in report.text()
+
+
+def test_the_cut_ends_at_a_word_within_the_limit():
+    from scone_memory.bench.beir import fitted_query
+    from scone_memory.core.validation import MAX_QUERY
+
+    words = "harbour  " * 200
+    cut = fitted_query(words)
+    assert len(cut) <= MAX_QUERY and cut.endswith("harbour") and words.startswith(cut), "no space left at the end"
+    exactly = "harbour " * 125  # 1,000 characters
+    assert fitted_query(exactly) == exactly, "a query at the limit is taken whole"
+    assert fitted_query(exactly + "x") == exactly.rstrip(), "a word ending at the limit is kept"
+    assert fitted_query(exactly + "  x") == exactly.rstrip(), "a space just past the limit is the break"
+    assert fitted_query("ab " + "x" * 997 + " y") == "ab " + "x" * 997, "a long last word that ends at the limit is kept"
+    assert fitted_query("x" * (MAX_QUERY + 5)) == "x" * MAX_QUERY, "one long token is cut where the limit falls"
+    assert fitted_query("short query") == "short query"
+    assert fitted_query("a" * MAX_QUERY) == "a" * MAX_QUERY
