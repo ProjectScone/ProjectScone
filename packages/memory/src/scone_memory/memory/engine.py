@@ -189,7 +189,13 @@ class MemoryEngine:
         profile_policy: "catalog.ProfilePolicy | None" = None,
         table_context_embeddings: bool = False,
         synonyms: "Synonyms | None" = None,
+        context_lane: bool = False,
     ) -> None:
+        if type(context_lane) is not bool:
+            raise InvalidInput("context_lane must be a boolean")
+        #: Whether what each chunk is under is indexed beside its text and
+        #: searched as a lane of its own. Stored text never changes.
+        self.context_lane = context_lane
         if type(table_context_embeddings) is not bool:
             raise InvalidInput('table_context_embeddings must be a boolean')
         self._table_context_embeddings = table_context_embeddings
@@ -625,6 +631,7 @@ class MemoryEngine:
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
+            context_lane=self.context_lane,
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
@@ -953,6 +960,7 @@ class MemoryEngine:
             floor_dim=self.abstention.dim if self.abstention is not None else None,
             vector_block=self.vector_block,
             synonyms=self.synonyms,
+            context_lane=self.context_lane,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,

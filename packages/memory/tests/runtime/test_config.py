@@ -176,3 +176,20 @@ async def test_a_synonym_file_is_read_at_build_time_and_reaches_every_engine(tmp
     assert in_process.synonyms is not None and in_process.synonyms.expand("a car").added == ("automobile",)
     with pytest.raises(InvalidInput, match="not found"):
         await build_engine(Settings.from_env({"SCONE_SYNONYMS": str(tmp_path / "missing.txt")}))
+
+
+async def test_the_context_lane_is_a_flag_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_CONTEXT_LANE": "1"})
+    assert settings.context_lane is True and Settings.from_env({}).context_lane is False
+    assert "context_lane" in ENGINE_SETTINGS
+    engine = await build_engine(settings)
+    try:
+        assert engine.context_lane is True
+    finally:
+        await engine.close()
+    assert (await build_in_process_engine(settings, HashEmbedder())).context_lane is True
+    with pytest.raises(InvalidInput, match="SCONE_CONTEXT_LANE"):
+        Settings.from_env({"SCONE_CONTEXT_LANE": "maybe"})

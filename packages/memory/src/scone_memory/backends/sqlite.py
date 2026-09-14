@@ -55,6 +55,14 @@ CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
     INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text); END;
 CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.id, old.text); END;
+CREATE TABLE IF NOT EXISTS chunk_context (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    text TEXT NOT NULL);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_context_fts USING fts5(text, content='chunk_context', content_rowid='chunk_id');
+CREATE TRIGGER IF NOT EXISTS chunk_context_ai AFTER INSERT ON chunk_context BEGIN
+    INSERT INTO chunk_context_fts(rowid, text) VALUES (new.chunk_id, new.text); END;
+CREATE TRIGGER IF NOT EXISTS chunk_context_ad AFTER DELETE ON chunk_context BEGIN
+    INSERT INTO chunk_context_fts(chunk_context_fts, rowid, text) VALUES ('delete', old.chunk_id, old.text); END;
 CREATE TABLE IF NOT EXISTS facts (
     id INTEGER PRIMARY KEY, space TEXT NOT NULL,
     subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL,
@@ -429,6 +437,8 @@ class SqliteDocumentStore:
             r["id"] for r in self.conn.execute("SELECT id FROM chunks WHERE episode_id = ? AND space = ?", (episode_id, space))
         ]
         with self.conn:
+            # chunk_context goes with its chunk by cascade, and the cascade
+            # fires the context index's delete trigger (proven by mutation).
             self.conn.execute("DELETE FROM chunks WHERE episode_id = ? AND space = ?", (episode_id, space))
             self.conn.execute("DELETE FROM episodes WHERE id = ? AND space = ?", (episode_id, space))
         return removed
@@ -497,21 +507,43 @@ class SqliteDocumentStore:
     #: This store applies a metadata filter itself, so the lanes
     #: do not have to be widened to compensate for it.
     narrows_metadata = True
+    #: This store keeps a context index beside chunk text (see ContextIndex).
+    context_lane = True
 
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
-        terms = tokenize(query)
-        if not terms:
+        match = _match(query)
+        if match is None:
             return []
-        match = " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
         sql = (
             "SELECT c.id AS id, bm25(chunks_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
             " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
             " JOIN episodes e ON e.id = c.episode_id"
             " WHERE chunks_fts MATCH ? AND c.space = ?"
         )
-        params: list[object] = [match, space]
+        return self._ranked(sql, [match, space], filter, limit)
+
+    async def index_context(self, space: str, chunk_id: int, text: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM chunk_context WHERE chunk_id = ?", (chunk_id,))
+            self.conn.execute("INSERT INTO chunk_context(chunk_id, text) VALUES (?, ?)", (chunk_id, text))
+
+    async def search_context(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        match = _match(query)
+        if match is None:
+            return []
+        sql = (
+            "SELECT c.id AS id, bm25(chunk_context_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
+            " FROM chunk_context_fts JOIN chunk_context cc ON cc.chunk_id = chunk_context_fts.rowid"
+            " JOIN chunks c ON c.id = cc.chunk_id"
+            " JOIN episodes e ON e.id = c.episode_id"
+            " WHERE chunk_context_fts MATCH ? AND c.space = ?"
+        )
+        return self._ranked(sql, [match, space], filter, limit)
+
+    def _ranked(self, sql: str, params: list[object], filter: TextFilter, limit: int) -> list[tuple[int, float]]:
+        """``sql`` narrowed by every scope condition, ordered by rank, settled after LIMIT."""
         if filter.as_of:
             sql += " AND c.created_at <= ?"
             params.append(filter.as_of)
@@ -1137,3 +1169,11 @@ class SqliteVectorIndex:
     async def delete_space(self, space: str) -> None:
         self.conn.execute("DELETE FROM vectors WHERE space = ?", (space,))
         self.conn.commit()
+
+
+def _match(query: str) -> str | None:
+    """The FTS5 expression for ``query``'s tokens, OR-joined and quoted; None when it has none."""
+    terms = tokenize(query)
+    if not terms:
+        return None
+    return " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
