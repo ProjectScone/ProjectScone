@@ -1608,6 +1608,14 @@ order; recall and precision of documents judged relevant (grade above 0);
 and reciprocal rank at the largest k. Every per-query ranking and score is
 in the JSON.
 
+Recall takes a query of at most 1,000 characters, and argument-retrieval
+sets hold whole paragraphs as queries. A longer query is recalled cut at
+the last space within the limit, marked `"cut": true` in its per-query
+entry and counted in `queries_cut`. A query with no text retrieves
+nothing, scores zero and is counted in `queries_empty`. Neither stops the
+run after the corpus is stored, and both stay in the averages, so a run
+over such a set says how many of its queries it asked as written.
+
 `--queries` runs that many judged queries chosen by `--seed`.
 `--max-documents` stores at most that many documents, keeping every
 document judged for the queries run and filling the rest in file order.

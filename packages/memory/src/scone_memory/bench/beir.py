@@ -182,6 +182,18 @@ def reciprocal_rank_at(ranked: Sequence[str], judged: Mapping[str, int], k: int)
     return next((1 / rank for rank, doc in enumerate(ranked[:k], start=1) if judged.get(doc, 0) > 0), 0.0)
 
 
+def fitted_query(text: str) -> str:
+    """``text`` as recall takes it: whole when it fits, otherwise cut at the
+    last space within the limit, or where the limit falls inside one token."""
+    from ..core.validation import MAX_QUERY
+
+    if len(text) <= MAX_QUERY:
+        return text
+    head = text[:MAX_QUERY + 1]
+    space = head.rfind(" ")
+    return head[:space].rstrip() if space > 0 else text[:MAX_QUERY]
+
+
 @dataclass
 class BeirReport:
     sample: Sampled
@@ -190,6 +202,10 @@ class BeirReport:
     per_query: list[dict] = field(default_factory=list)
     config: dict[str, object] = field(default_factory=dict)
     short: int = 0
+    #: Queries longer than recall takes, scored as cut at a word.
+    cut: int = 0
+    #: Queries with no text, which retrieve nothing and score zero.
+    empty: int = 0
 
     def record(self) -> dict:
         data = self.sample.data
@@ -198,7 +214,8 @@ class BeirReport:
                 "corpus": {"documents": self.sample.corpus_documents, "stored": self.sample.kept_documents,
                            "reduced": self.sample.reduced, "why": self.sample.why},
                 "queries_run": len(data.queries), "seed": self.sample.seed, "ks": list(self.ks),
-                "metrics": self.metrics, "queries_short": self.short, "config": self.config,
+                "metrics": self.metrics, "queries_short": self.short, "queries_cut": self.cut,
+                "queries_empty": self.empty, "config": self.config,
                 "per_query": self.per_query, "measured": True}
 
     def text(self) -> str:
@@ -207,6 +224,10 @@ class BeirReport:
         lines += [f"  {name}: {value:.4f}" for name, value in self.metrics.items()]
         if self.short:
             lines.append(f"  {self.short} queries returned fewer documents than the largest k")
+        if self.cut:
+            lines.append(f"  {self.cut} queries were longer than recall takes and were cut at a word")
+        if self.empty:
+            lines.append(f"  {self.empty} queries were empty, retrieved nothing and scored zero")
         return "\n".join(lines)
 
 
@@ -232,11 +253,21 @@ async def run_beir(sample: Sampled, *, ks: Sequence[int] = (1, 3, 10), engine=No
         deepest = ks[-1]
         per_query: list[dict] = []
         totals = {name: 0.0 for name in _names(ks)}
-        short = 0
+        short = cut = empty = 0
         for query_id, text in data.queries.items():
-            result = await memory.recall("beir", text, limit=min(MAX_LIMIT, deepest * OVERSAMPLE))
-            ranked = list(dict.fromkeys(item.source.removeprefix("beir:") for item in result.items
-                                        if item.source and item.source.startswith("beir:")))
+            asked = fitted_query(text)
+            marks: dict[str, bool] = {}
+            if not asked:
+                ranked: list[str] = []
+                marks["empty"] = True
+                empty += 1
+            else:
+                if asked != text:
+                    marks["cut"] = True
+                    cut += 1
+                result = await memory.recall("beir", asked, limit=min(MAX_LIMIT, deepest * OVERSAMPLE))
+                ranked = list(dict.fromkeys(item.source.removeprefix("beir:") for item in result.items
+                                            if item.source and item.source.startswith("beir:")))
             judged = data.qrels[query_id]
             short += len(ranked) < deepest
             scores: dict[str, float] = {}
@@ -247,12 +278,13 @@ async def run_beir(sample: Sampled, *, ks: Sequence[int] = (1, 3, 10), engine=No
             scores[f"mrr@{deepest}"] = reciprocal_rank_at(ranked, judged, deepest)
             for name, value in scores.items():
                 totals[name] += value
-            per_query.append({"query_id": query_id, "ranked": ranked[:deepest],
+            per_query.append({"query_id": query_id, "ranked": ranked[:deepest], **marks,
                               "scores": {name: round(value, 4) for name, value in scores.items()}})
         count = len(data.queries)
         metrics = {name: round(total / count, 4) if count else 0.0 for name, total in totals.items()}
         config = {"embedder": memory.embedder.id, "oversample": OVERSAMPLE, "store": "in-process" if owned else "given"}
-        return BeirReport(sample=sample, ks=ks, metrics=metrics, per_query=per_query, config=config, short=short)
+        return BeirReport(sample=sample, ks=ks, metrics=metrics, per_query=per_query, config=config, short=short,
+                          cut=cut, empty=empty)
     finally:
         if owned:
             await memory.close()
