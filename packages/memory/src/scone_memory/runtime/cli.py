@@ -705,6 +705,9 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
     updated, closed, unread_claims = 0, 0, False
+    # Chunks whose vector the embedding cache answered: what a second map
+    # of a tree with one changed line does not pay the embedder for.
+    reused_vectors = 0
     # A map is of the tree as it is. A file is held under the identity
     # `sync` uses for it, so a changed file updates its memory rather
     # than adding a second, and the two commands recognise each other's.
@@ -743,6 +746,7 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
             again += 1
             continue
         read += 1
+        reused_vectors += added.embeddings_reused
         updated += done.outcome == "updated"
         if done.claims_closed is None:
             unread_claims = True
@@ -800,6 +804,8 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         parts.append(f"{updated} updated")
     if again:
         parts.append(f"{again} already here")
+    if reused_vectors:
+        parts.append(f"{reused_vectors} chunk embedding(s) reused, unchanged since last stored")
     if args.graph:
         parts.append(f"{claims} claim(s)")
         if closed:
@@ -826,7 +832,8 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         parts.append(f"{len(withheld)} withheld as sensitive: "
                      + ", ".join(where for where, _ in sorted(withheld)))
     if getattr(args, "json", False):
-        print(_ledger_json({"read": read, "updated": updated, "deduplicated": again, "claims": claims,
+        print(_ledger_json({"read": read, "updated": updated, "deduplicated": again, "embeddings_reused": reused_vectors,
+                            "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
                             "withheld": [{"path": where, "reason": reason}

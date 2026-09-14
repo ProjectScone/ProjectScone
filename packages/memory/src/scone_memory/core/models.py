@@ -441,6 +441,10 @@ class Added(BaseModel):
     episode_id: int
     deduplicated: bool = False
     chunks: int = 0
+    #: Of those chunks, how many took their vector from the embedding cache
+    #: rather than the embedder: the same text under the same embedder was
+    #: stored before. 0 without a cache.
+    embeddings_reused: int = 0
     outcome: Literal["accepted", "duplicate", "updated", "failed"] = "accepted"
     replaced: Optional[ForgetReceipt] = None
     #: Why nothing was stored, for a failed record. None for the rest.

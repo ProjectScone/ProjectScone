@@ -516,6 +516,42 @@ revision history, metadata-only updates and transactional attachment transfer
 remain separate gaps; ordinary content-addressed document ingestion does not
 itself manage an external source's current revision.
 
+### Reusing embeddings across updates
+
+A file that changes on one line is stored again whole, and every chunk of
+it is embedded again though all but one are the same text as before. With
+an embedding cache the embedder sees only the chunks whose text is new:
+vectors are kept by the embedder's id and width and the exact text it was
+given (a contextual prefix included), so a hit is the vector the embedder
+would have returned, and a different embedder, width or prefix is a
+different key. `SCONE_EMBEDDING_CACHE=memory` keeps vectors for the
+process; a path keeps them in a file every process that opens it shares,
+so tomorrow's `scone sync` reuses what today's embedded. Unset, nothing
+is cached. A cache holds at most 20,000 vectors (`max_entries`; about
+120 MB at 768 doubles each) and drops the least recently used past that;
+its record says how many it dropped. A vector read back from the file is
+checked for width and finiteness, and a row that fails is removed rather
+than served.
+
+Every receipt says what it did not pay for: `Added.embeddings_reused` on
+the record, `embeddings_reused` in `map`'s and `sync`'s receipts.
+Interrupted preparation keeps nothing partial: a batch is kept in the
+cache only after every vector in it was validated. One interaction to
+know: contextual embeddings prefix each chunk with the record's day and
+source, so a file re-stored on a later day is a new key and is embedded
+again unless the record carries its own `created_at`.
+
+Measured on this framework's own source (409 files, 7,679 chunks, the
+hash embedder): a second `map` after a one-line edit to `engine.py`
+embedded 1 chunk and reused 140; a third with nothing changed embedded
+none. Without the cache the second pass embeds all 141 chunks of the
+edited file.
+
+```bash
+SCONE_EMBEDDING_CACHE=~/.scone/embeddings.sqlite scone map src/ --graph
+# 312 file(s) read, 1 updated, 311 already here, 4 chunk embedding(s) reused, unchanged since last stored, …
+```
+
 ### Inspecting source removal
 
 Servers with `episodes.forget: true` in `/v1/capabilities` expose the complete

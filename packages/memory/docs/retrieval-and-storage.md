@@ -1195,7 +1195,9 @@ scone sync ~/work/notes --apply --remove         # also forgets what is gone
 An unchanged file is **not a write**: the space's revision does not move,
 so a sync on a timer does not churn the store. A changed file is an
 update through the engine's keyed `replace`, so a source that changed
-leaves **one** memory and not two.
+leaves **one** memory and not two — and with `SCONE_EMBEDDING_CACHE` set,
+only the chunks whose text changed reach the embedder; the receipt's
+`embeddings_reused` counts the rest (see [file ingestion](file-ingestion.md#reusing-embeddings-across-updates)).
 
 ### Deletion is opt-in, previewed, and refused when the path looks wrong
 

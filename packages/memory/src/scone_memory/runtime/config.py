@@ -159,6 +159,10 @@ class Settings:
     derive: bool = False
     contextual_embeddings: bool = False
     table_context_embeddings: bool = False
+    #: SCONE_EMBEDDING_CACHE: unset embeds every chunk of every stored
+    #: record; "memory" keeps vectors for the process; a path keeps them in
+    #: a file every process that opens it shares (ingestion/embedding_cache.py).
+    embedding_cache: str | None = None
     demote_restated: bool = True
     many_valued: tuple[str, ...] = ()
     relation_inverse: tuple[str, ...] = ()
@@ -372,6 +376,7 @@ class Settings:
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             table_context_embeddings=env.get("SCONE_TABLE_CONTEXT_EMBEDDINGS") == "1",
+            embedding_cache=env.get("SCONE_EMBEDDING_CACHE") or None,
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
@@ -923,6 +928,8 @@ async def build_engine(settings: Settings) -> MemoryEngine:
     events = build_events(settings, documents)
     if hasattr(events, "open"):
         await events.open()
+    from ..ingestion.embedding_cache import build_embedding_cache
+
     engine = MemoryEngine(
         documents,
         build_vectors(settings, documents),
@@ -931,6 +938,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         record_queries=settings.events_queries == "text",
         contextual_embeddings=settings.contextual_embeddings,
         table_context_embeddings=settings.table_context_embeddings,
+        embedding_cache=build_embedding_cache(settings.embedding_cache),
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
         candidate_limit=settings.candidate_limit,
