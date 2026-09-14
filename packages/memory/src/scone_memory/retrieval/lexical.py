@@ -126,8 +126,20 @@ def tokenize(text: str) -> list[str]:
     return tokens
 
 
+def fold_diacritics(token: str) -> str:
+    """``token`` without its combining marks ("facturación" to "facturacion"),
+    so a query typed without accents finds the word, as the SQLite store's
+    own tokenizer already does; the tokenizer itself is unchanged, so no
+    persisted token or vector identity moves."""
+    if token.isascii():
+        return token
+    decomposed = unicodedata.normalize("NFD", token)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 class Bm25:
-    """Okapi BM25 over a mutable set of documents keyed by int id."""
+    """Okapi BM25 over a mutable set of documents keyed by int id; terms are
+    kept with their diacritics folded, matching the SQLite text lane."""
 
     def __init__(self, k1: float = 1.2, b: float = 0.75) -> None:
         self.k1 = k1
@@ -142,7 +154,7 @@ class Bm25:
     def add(self, doc_id: int, text: str) -> None:
         if doc_id in self._docs:
             self.remove(doc_id)
-        tokens = tokenize(text)
+        tokens = [fold_diacritics(token) for token in tokenize(text)]
         counts = Counter(tokens)
         self._docs[doc_id] = counts
         self._lengths[doc_id] = len(tokens)
@@ -159,24 +171,37 @@ class Bm25:
                 del self._df[term]
 
     def search(
-        self, query: str, limit: int, allowed: Iterable[int] | None = None
+        self, query: str, limit: int, allowed: Iterable[int] | None = None, prefixes: Iterable[str] = ()
     ) -> list[tuple[int, float]]:
-        terms = tokenize(query)
-        if not terms or not self._docs:
+        """Documents by BM25 over the query's terms; a prefix counts every
+        vocabulary term that starts with it as one term, so a word's family
+        ("bill" for billing, billed, bills) is one signal, not several."""
+        terms = [fold_diacritics(token) for token in tokenize(query)]
+        families = [(fold_diacritics(prefix), [term for term in self._df if term.startswith(fold_diacritics(prefix))])
+                    for prefix in prefixes]
+        families = [(prefix, members) for prefix, members in families if members]
+        # A query word its own family covers is scored once, through the
+        # family: "billing" asked with the prefix "bill" is one signal, not
+        # the word and then the family it belongs to.
+        covered = {term for term in terms if any(term.startswith(prefix) for prefix, _ in families)}
+        terms = [term for term in terms if term not in covered]
+        if (not terms and not families) or not self._docs:
             return []
         n = len(self._docs)
         avg_len = sum(self._lengths.values()) / n
+        family_df = {prefix: min(n, sum(self._df[member] for member in members)) for prefix, members in families}
         candidates = self._docs.keys() if allowed is None else [d for d in allowed if d in self._docs]
         scored: list[tuple[int, float]] = []
         for doc_id in candidates:
             counts = self._docs[doc_id]
             length = self._lengths[doc_id]
             score = 0.0
-            for term in terms:
-                tf = counts.get(term)
-                if not tf:
-                    continue
-                df = self._df[term]
+            weighed: list[tuple[int, int]] = [(counts[term], self._df[term]) for term in terms if counts.get(term)]
+            for prefix, members in families:
+                tf = sum(counts.get(member, 0) for member in members)
+                if tf:
+                    weighed.append((tf, family_df[prefix]))
+            for tf, df in weighed:
                 idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
                 denom = tf + self.k1 * (1 - self.b + self.b * length / avg_len)
                 score += idf * tf * (self.k1 + 1) / denom
