@@ -48,7 +48,8 @@ def test_a_community_over_a_quarter_of_the_graph_is_split_on_its_own_links():
     parts, fired = _guarded(graph, [lumped, *rest], 1.0)
     assert sorted(map(sorted, parts)) == sorted([sorted(f"a{n}" for n in range(12)), sorted(f"b{n}" for n in range(12)),
                                                  *rest])
-    assert fired == {"split_oversized": 1, "split_nested": 0, "unsplittable": 0}
+    # Each clique is itself over a quarter of this small graph, so each is looked at and kept whole.
+    assert fired == {"split_oversized": 1, "split_nested": 0, "unsplittable": 2}
 
 
 def test_a_small_graph_is_never_split_for_being_a_large_share_of_itself():
@@ -177,6 +178,33 @@ def test_a_hub_rejoining_a_community_the_guards_left_alone_is_a_member_once(monk
     assert sorted(members) == sorted(ids), "every entity is in exactly one community, once"
     [home] = [community for community in analysis.communities if ids["hub"] in community.members]
     assert sorted(labels[member] for member in home.members) == sorted([*(f"c{n}" for n in range(8)), "hub"])
+
+
+def test_a_piece_of_a_split_is_looked_at_again_until_none_splits(monkeypatch):
+    """Its own partition can leave a piece that is itself two modules: here
+    it gives two 30-cliques as one piece beside a third. The piece is
+    60 members holding two communities, so it is split in turn."""
+    import scone_memory.entities.analysis as module
+
+    left, right, other = clique("l", 30), clique("r", 30), clique("o", 30)
+    fringe = [edge for g in range(50) for edge in clique(f"x{g}n", 6)]
+    graph = adjacency(left + right + other + [("l0", "r0"), ("r1", "o0")] + fringe)
+    community = sorted({node for edge in left + right + other for node in edge})
+    pair = sorted({node for edge in left + right for node in edge})
+    real = module._partition
+
+    def coarse(inside, resolution):
+        if sorted(inside) == community:
+            return [pair, sorted({node for edge in other for node in edge})], 1
+        return real(inside, resolution)
+
+    monkeypatch.setattr(module, "_partition", coarse)
+    rest = [sorted({f"x{g}n{n}" for n in range(6)}) for g in range(50)]
+    assert len(community) * 4 < len(graph), "under the share, so only the nesting guard looks"
+    parts, fired = _guarded(graph, [community, *rest], 1.0)
+    halves = [sorted({node for edge in half for node in edge}) for half in (left, right)]
+    assert all(half in map(sorted, parts) for half in halves) and pair not in map(sorted, parts)
+    assert fired == {"split_oversized": 0, "split_nested": 2, "unsplittable": 0}
 
 
 def test_a_community_under_fifty_is_not_looked_at_for_nesting():
