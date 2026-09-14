@@ -886,7 +886,9 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
                     closed += retired.closed
                 unread_claims = unread_claims or retired.unread
             for claim in recorded:
-                if claim.predicate != DEFINES:
+                if claim.predicate != DEFINES or is_manifest(where):
+                    # A manifest declares a project, not something a call
+                    # could reach: `org.example:service` is no `service()`.
                     continue
                 qualified = claim.object.rsplit(":", 1)[-1]
                 simple = qualified.rsplit(".", 1)[-1]
