@@ -323,7 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     g = graph.add_parser("impact", help="what rests on the changes in a diff (git diff's output): the "
                                         "declarations its hunks touch, and everything here that depends on them")
     g.add_argument("diff", nargs="?", default="-", help="a unified diff file, or - for stdin (default)")
-    g.add_argument("--root", default=".", help="the tree the diff is against, to read the changed files (default .)")
+    g.add_argument("--root", default=".", help="the tree after the change (the diff's b side), where the changed files are read (default .)")
     g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
     g.add_argument("--limit", type=int, default=200, help="dependants to list (1 to 1000)")
     g = graph.add_parser("health", help="what in the graph wants attention, counted with examples")

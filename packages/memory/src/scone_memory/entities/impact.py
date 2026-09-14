@@ -4,9 +4,10 @@
 touches lines in many files, and the question people bring to it is the
 same one asked of the diff as a whole. This reads a unified diff -- what
 ``git diff`` writes -- finds what each hunk touches by re-reading the
-changed file at the root the diff is against with the declaration reader
-that cuts files into chunks, and asks the graph what rests on each
-touched thing, once, nearest first.
+changed file at the root, which holds the tree **after** the change
+(the diff's ``b`` side, whose line numbers the hunks give), with the
+declaration reader that cuts files into chunks, and asks the graph what
+rests on each touched thing, once, nearest first.
 
 What a hunk touches is named at two levels, because the graph holds
 edges at two levels: a declaration (``pkg/store.py:Shelf.keep``) for a
@@ -28,7 +29,7 @@ from typing import TYPE_CHECKING, Literal, Optional, Sequence
 
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declarations
-from .affected import MAX_HOPS, affected
+from .affected import MAX_HOPS, MAX_NAME, affected
 
 if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
@@ -42,7 +43,32 @@ MAX_DIFF_BYTES = 4_000_000
 #: Dependants listed in one answer; the rest are counted.
 MAX_LISTED = 1_000
 
-_HEADER = re.compile(r"^diff --git a/(?P<a>.+?) b/(?P<b>.+)$")
+_HEADER = re.compile(r'^diff --git (?P<a>"a/(?:[^"\\]|\\.)*"|a/.+?) (?P<b>"b/(?:[^"\\]|\\.)*"|b/.+)$')
+_OCTAL = re.compile(r"\\([0-7]{3})")
+_ESCAPES = {"n": "\n", "t": "\t", "\\": "\\", '"': '"', "a": "\a", "b": "\b", "f": "\f", "r": "\r", "v": "\v"}
+
+
+def _unquote(spelt: str) -> str:
+    """A path as git wrote it: a name with a non-ASCII or special
+    character comes quoted, with octal escapes for its bytes."""
+    if not (spelt.startswith('"') and spelt.endswith('"')):
+        return spelt
+    inner = spelt[1:-1]
+    raw = bytearray()
+    i = 0
+    while i < len(inner):
+        if inner[i] == "\\" and i + 1 < len(inner):
+            octal = _OCTAL.match(inner, i)
+            if octal:
+                raw.append(int(octal.group(1), 8))
+                i += 4
+                continue
+            raw.extend(_ESCAPES.get(inner[i + 1], inner[i + 1]).encode("utf-8"))
+            i += 2
+            continue
+        raw.extend(inner[i].encode("utf-8"))
+        i += 1
+    return raw.decode("utf-8", errors="replace")
 _HUNK = re.compile(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
 
 
@@ -77,17 +103,17 @@ def parse_diff(text: str) -> tuple[ChangedFile, ...]:
         header = _HEADER.match(line)
         if header:
             close()
-            path, removed, lines = header.group("b"), False, []
+            path, removed, lines = _unquote(header.group("b"))[2:], False, []
             continue
         if line.startswith("+++ "):
-            named = line[4:].split("\t", 1)[0]
+            named = _unquote(line[4:].split("\t", 1)[0])
             if named == "/dev/null":
                 removed = True
             elif named.startswith("b/") and path is None:
                 path = named[2:]
             continue
         if line.startswith("rename to ") and path is not None:
-            path = line[len("rename to "):]
+            path = _unquote(line[len("rename to "):])
             continue
         hunk = _HUNK.match(line)
         if hunk and path is not None:
@@ -110,9 +136,15 @@ class Touched:
     name: Optional[str]
     #: How the graph was asked: the label given to ``affected``.
     asked: str
-    status: Literal["found", "nothing", "unknown", "ambiguous"]
+    #: ``unasked``: a name longer than the graph takes, so nothing was asked.
+    status: Literal["found", "nothing", "unknown", "ambiguous", "unasked"]
     reached: int
     lines: tuple[int, int] = (0, 0)
+    #: Dependants the graph's own answer left out of its list, and whether
+    #: it stopped at its depth with more to follow -- a bound that bit
+    #: inside one answer is a bound that bit this one.
+    not_listed: int = 0
+    stopped_at_depth: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,6 +172,12 @@ class Impact:
     by_depth: dict[int, int] = field(default_factory=dict)
     #: Any answer whose read of the graph was itself truncated.
     partial_read: bool = False
+    #: Any answer that left dependants unlisted or stopped at its depth with
+    #: more to follow, so the union here is not the whole of what rests on
+    #: the change.
+    truncated: bool = False
+    #: Files the diff names outside the root, or by an absolute path; not read.
+    files_outside: int = 0
     mode: str = "current"
     at: str = ""
     why: str = ""
@@ -147,10 +185,12 @@ class Impact:
     def record(self) -> dict[str, object]:
         return {"files": self.files, "files_examined": self.files_examined, "files_removed": self.files_removed,
                 "files_unread": self.files_unread, "targets_not_asked": self.targets_not_asked,
-                "targets": [[t.path, t.name, t.asked, t.status, t.reached, list(t.lines)] for t in self.targets],
+                "targets": [[t.path, t.name, t.asked, t.status, t.reached, list(t.lines), t.not_listed, t.stopped_at_depth]
+                            for t in self.targets],
                 "reached": len(self.reached), "not_listed": self.not_listed,
                 "by_depth": {str(k): v for k, v in sorted(self.by_depth.items())},
-                "partial_read": self.partial_read, "mode": self.mode, "at": self.at, "why": self.why,
+                "partial_read": self.partial_read, "truncated": self.truncated, "files_outside": self.files_outside,
+                "mode": self.mode, "at": self.at, "why": self.why,
                 "entities": [[r.label, r.depth, r.through, r.via] for r in self.reached]}
 
 
@@ -196,21 +236,30 @@ async def impact(engine: "MemoryEngine", space: str, diff: str, *, root: str | P
         raise InvalidInput("max_files and max_targets are positive and within their bounds")
     changed = parse_diff(diff)
     base = Path(root)
+    if not base.is_dir():
+        raise InvalidInput(f"root {str(root)!r} is not a directory; it should hold the tree after the change")
+    resolved = base.resolve()
     asks: list[tuple[str, Optional[str], str, tuple[int, int]]] = []
-    removed = unread = 0
+    removed = unread = outside = 0
     for file in changed[:max_files]:
         target = base / file.path
+        if Path(file.path).is_absolute() or not target.resolve().is_relative_to(resolved):
+            # A diff names paths under its own tree; one that points
+            # elsewhere is not read, whatever it says it is.
+            outside += 1
+            continue
         if file.removed or not target.is_file():
             removed += 1
             names: list[tuple[Optional[str], tuple[int, int]]] = [(None, (0, 0))]
+        elif code_language(file.path) is None:
+            unread += 1
+            names = [(None, (0, 0))]
         else:
             try:
                 content = target.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 unread += 1
                 content = ""
-            if code_language(file.path) is None:
-                unread += 1
             names = list(_touched_names(content, file.path, file.lines)) if content else [(None, (0, 0))]
         for name, span in names:
             if name is not None:
@@ -221,15 +270,22 @@ async def impact(engine: "MemoryEngine", space: str, diff: str, *, root: str | P
     targets: list[Touched] = []
     best: dict[str, Reaches] = {}
     by_depth: dict[int, int] = {}
-    partial = False
+    partial = truncated = False
     mode, at = "current", ""
     for path, name, asked, span in asks[:max_targets]:
+        if len(asked.encode()) > MAX_NAME:
+            # The graph takes a name up to its bound; a longer one is
+            # listed as unasked rather than ending the whole answer.
+            targets.append(Touched(path, name, asked, "unasked", 0, span))
+            continue
         # The walk keeps its own bound so the shape of the answer is whole;
-        # ``limit`` cuts the list this answer writes, and says so.
+        # ``limit`` cuts the list this answer writes, and says so. What the
+        # walk itself left out is carried up, never dropped on the floor.
         blast = await affected(engine, space, asked, max_hops=max_hops)
         partial = partial or blast.partial_read
+        truncated = truncated or bool(blast.not_listed) or blast.stopped_at_depth
         mode, at = blast.mode, blast.at or at
-        targets.append(Touched(path, name, asked, blast.status, len(blast.reached), span))
+        targets.append(Touched(path, name, asked, blast.status, len(blast.reached), span, blast.not_listed, blast.stopped_at_depth))
         for dependant in blast.reached:
             kept = best.get(dependant.label)
             if kept is None or dependant.depth < kept.depth:
@@ -241,18 +297,25 @@ async def impact(engine: "MemoryEngine", space: str, diff: str, *, root: str | P
     listed = tuple(reached[:limit])
     found = sum(1 for t in targets if t.status == "found")
     unknown = sum(1 for t in targets if t.status == "unknown")
+    unasked = sum(1 for t in targets if t.status == "unasked")
     why = (f"{len(changed)} file(s) in the diff, {min(len(changed), max_files)} examined, "
            f"{len(targets)} thing(s) asked about ({found} with dependants here, {unknown} not in this graph); "
            f"{len(reached)} thing(s) rest on the change within {max_hops} hop(s)")
+    if outside:
+        why += f"; {outside} file(s) outside the root, not read"
+    if unasked:
+        why += f"; {unasked} name(s) longer than the graph takes, not asked"
     if len(changed) > max_files:
         why += f"; {len(changed) - max_files} file(s) not examined (max_files)"
     if len(asks) > max_targets:
         why += f"; {len(asks) - max_targets} thing(s) not asked about (max_targets)"
     if len(reached) > limit:
         why += f"; {len(reached) - limit} not listed (limit)"
+    if truncated:
+        why += "; an answer behind this one left dependants unlisted or stopped at its depth, so this is not the whole of it"
     why += ("; an empty answer means nothing in this graph rests on the change, not that nothing does"
             + ("; a read behind an answer was itself truncated" if partial else ""))
     return Impact(files=len(changed), files_examined=min(len(changed), max_files), files_removed=removed,
                   files_unread=unread, targets=tuple(targets), targets_not_asked=max(0, len(asks) - max_targets),
                   reached=listed, not_listed=max(0, len(reached) - limit), by_depth=by_depth,
-                  partial_read=partial, mode=mode, at=at, why=why)
+                  partial_read=partial, truncated=truncated, files_outside=outside, mode=mode, at=at, why=why)
