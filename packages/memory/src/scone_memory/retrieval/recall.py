@@ -232,6 +232,13 @@ async def recall(
         else:
             text_lane = await runtime.documents.search_text(space, text_query, depth, text_filter)
         latency["text"] = _ms(t0)
+        # A store that keeps a derived lexical index brings it up to date a
+        # bounded amount per query; what is still behind is said, since a
+        # passage not yet indexed is a passage this lane could not find.
+        backlog = getattr(runtime.documents, "lexical_backlog", None)
+        behind = backlog(space) if callable(backlog) else 0
+        if behind:
+            degraded.append(f"text: {behind} chunk(s) not yet in the lexical index; the text lane is behind")
     except Exception as e:  # noqa: BLE001
         degraded.append(f"text: {type(e).__name__}: {e}")
 

@@ -394,6 +394,8 @@ class SqliteDocumentStore:
         self.path = path
         self.conn = connect(path)
         self._holding = False
+        #: Per space, chunks the lexical index had not reached after the last text search.
+        self._lexical_behind: dict[str, int] = {}
 
     async def close(self) -> None:
         self.conn.close()
@@ -519,6 +521,11 @@ class SqliteDocumentStore:
     ) -> list[tuple[int, float]]:
         return await self.search_terms(space, query, limit, filter, prefixes=())
 
+    def lexical_backlog(self, space: str) -> int:
+        """Chunks of ``space`` written but not yet in the lexical index after
+        the last text search: what the text lane could not see then."""
+        return self._lexical_behind.get(space, 0)
+
     async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
                            prefixes: Sequence[str]) -> list[tuple[int, float]]:
         # The lane ranks our own tokens (see sqlite_lexical), so it agrees
@@ -526,7 +533,8 @@ class SqliteDocumentStore:
         match = lexical_match(query, prefixes)
         if match is None:
             return []
-        synchronize_lexical(self.conn, space)
+        _, behind = synchronize_lexical(self.conn, space)
+        self._lexical_behind[space] = behind
         sql = (
             "SELECT c.id AS id, bm25(chunk_lexical_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
             " FROM chunk_lexical_fts JOIN chunk_lexical cl ON cl.chunk_id = chunk_lexical_fts.rowid"
