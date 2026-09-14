@@ -92,7 +92,11 @@ def test_json_ld_is_linked_data(projection):
 def test_the_obsidian_vault_links_notes_with_safe_file_names(projection):
     vault = zipfile.ZipFile(io.BytesIO(export_graph(projection, "obsidian").body))
     names = vault.namelist()
-    assert all("/" not in name.removeprefix("entities/") and ".." not in name for name in names)
+    # Notes sit one level down, in entities/ or communities/; the rest is the index and the graph view's colours.
+    assert all(".." not in name for name in names)
+    assert all(name.count("/") == 1 for name in names if name.startswith(("entities/", "communities/")))
+    assert {name for name in names if not name.startswith(("entities/", "communities/"))} == {
+        "index.md", "graph.canvas", ".obsidian/graph.json"}
     alice = next(name for name in names if name.lower().startswith("entities/alice chen"))
     note = vault.read(alice).decode()
     assert "[[" in note and "works_at" in note and "May 2021" in note and "fact 1" in note
@@ -131,7 +135,8 @@ def test_names_that_clash_once_made_safe_get_their_own_notes_and_every_link_open
     notes = {name[len("entities/"):-len(".md")] for name in bundle.namelist() if name.startswith("entities/")}
     assert len(notes) == len(projection.entities) == 3
     links = set(re.findall(r"\[\[([^\]]+)\]\]", "\n".join(bundle.read(name).decode() for name in bundle.namelist())))
-    assert len(links) == 3 and links <= notes
+    entity_links = {link for link in links if not link.startswith("communities/")}
+    assert len(entity_links) == 3 and entity_links <= notes
 
 
 
