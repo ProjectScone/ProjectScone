@@ -237,6 +237,90 @@ def test_html_implied_cell_closure_stays_within_nearest_table() -> None:
     assert [segment.text for segment in doc.segments] == ['Intro', 'Visible item']
 
 
+def _mailbox_bytes() -> bytes:
+    first = EmailMessage()
+    first["Subject"] = "Harbour closing"
+    first["From"] = "ada@example.test"
+    first["Date"] = "Mon, 04 Nov 2024 09:00:00 +0000"
+    first.set_content("The harbour closes to sailing boats every November.\nFrom the mole you can see it.")
+    second = EmailMessage()
+    second["Subject"] = "Re: Harbour closing"
+    second["From"] = "bob@example.test"
+    second["Date"] = "Tue, 05 Nov 2024 10:00:00 +0000"
+    second.set_content("Plain reply")
+    second.add_alternative("<p>HTML reply</p><script>never run</script>", subtype="html")
+    second.add_attachment(b"attachment secret", maintype="text", subtype="plain", filename="secret.txt")
+    body_first = first.as_bytes().replace(b"\nFrom the mole", b"\n>From the mole")  # mbox quoting of a body line
+    return (b"From ada@example.test Mon Nov  4 09:00:00 2024\n" + body_first + b"\n"
+            b"From bob@example.test Tue Nov  5 10:00:00 2024\n" + second.as_bytes() + b"\n")
+
+
+def test_a_mailbox_reads_each_message_as_an_email_and_says_which_mail_a_passage_came_from() -> None:
+    doc = parse_text(_mailbox_bytes(), "inbox.mbox", DocumentLimits())
+    assert doc.format == "mbox" and doc.metadata == {"messages": "2", "messages_unread": "0", "attachments_skipped": "1"}
+    joined = "\n".join(s.text for s in doc.segments)
+    assert "Subject: Harbour closing" in joined and "Subject: Re: Harbour closing" in joined
+    assert "From the mole you can see it." in joined, "mbox quoting of a body line is undone"
+    assert ">From the mole" not in joined
+    assert "Plain reply" in joined and "HTML reply" in joined
+    assert "attachment secret" not in joined and "never run" not in joined
+    first = [s for s in doc.segments if s.locator.startswith("message:1/")]
+    second = [s for s in doc.segments if s.locator.startswith("message:2/")]
+    assert first and second and all(s.metadata["message"] == "1" for s in first)
+    assert all(s.metadata["from"] == "bob@example.test" and s.metadata["date"].startswith("Tue, 05 Nov 2024") for s in second)
+    assert any(s.locator.startswith("message:2/mime:1.1") and s.locator.endswith("/line:1") for s in second), \
+        "the same locators an .eml gets, under the message"
+
+
+def test_a_bare_message_saved_as_a_mailbox_is_one_message_and_the_bound_counts_the_rest(monkeypatch) -> None:
+    email = EmailMessage()
+    email["Subject"] = "alone"
+    email.set_content("one message, no From line")
+    doc = parse_text(email.as_bytes(), "one.mbox", DocumentLimits())
+    assert doc.metadata["messages"] == "1" and any("no From line" in s.text for s in doc.segments)
+    from scone_memory.ingestion.formats import text as text_formats
+
+    monkeypatch.setattr(text_formats, "MAX_MAILBOX_MESSAGES", 1)
+    doc = parse_text(_mailbox_bytes(), "inbox.mbox", DocumentLimits())
+    assert doc.metadata["messages"] == "1" and doc.metadata["messages_unread"] == "1"
+    assert not any(s.locator.startswith("message:2/") for s in doc.segments)
+
+
+def test_a_mailbox_with_a_malformed_message_names_it() -> None:
+    raw = b"From a@b Mon Jan 1 00:00:00 2024\nSubject: ok\n\nfine\n\nFrom c@d Mon Jan 1 00:00:00 2024\nContent-Type: text/plain; charset=not-a-charset\n\ncaf\xe9\n"
+    with pytest.raises(InvalidInput, match="mailbox message 2: "):
+        parse_text(raw, "inbox.mbox", DocumentLimits())
+
+
+def test_a_body_line_that_begins_with_from_is_not_a_message_and_a_bom_is_not_a_preamble() -> None:
+    raw = (b"\xef\xbb\xbfFrom alice@example.com Mon Jan  1 00:00:00 2024\nFrom: alice@example.com\nSubject: Notes\n\n"
+           b"Hello.\nFrom now on I will write more.\nBye.\n"
+           b"From bob@example.com Tue Jan  2 10:00:00 2024\nFrom: bob@example.com\nSubject: Second\n\nSecond body.\n")
+    doc = parse_text(raw, "inbox.mbox", DocumentLimits())
+    assert doc.metadata["messages"] == "2", "an unquoted body line is not an envelope line, and the BOM is not text before the first"
+    joined = "\n".join(s.text for s in doc.segments)
+    assert "From now on I will write more." in joined and "Bye." in joined
+    assert {s.metadata["message"] for s in doc.segments if "Second body" in s.text} == {"2"}
+
+
+def test_an_html_table_in_a_mail_carries_the_mails_metadata_and_a_bare_file_is_not_unquoted() -> None:
+    email = EmailMessage()
+    email["Subject"] = "Table"
+    email["From"] = "ada@example.test"
+    email.set_content("plain")
+    email.add_alternative("<table><caption>Costs</caption><tr><th>item</th><th>cost</th></tr><tr><td>rope</td><td>3</td></tr></table>",
+                          subtype="html")
+    raw = b"From ada@example.test Mon Nov  4 09:00:00 2024\n" + email.as_bytes() + b"\n"
+    doc = parse_text(raw, "inbox.mbox", DocumentLimits())
+    rows = [s for s in doc.segments if "table_locator" in s.metadata or s.locator.endswith("/caption")]
+    assert rows and all(s.metadata.get("message") == "1" and s.metadata.get("from") == "ada@example.test" for s in rows), \
+        "every segment, table rows and captions included, says which mail it came from"
+    bare = EmailMessage()
+    bare["Subject"] = "reply"
+    bare.set_content(">From my notes, the harbour closes in November.")
+    doc = parse_text(bare.as_bytes(), "one.mbox", DocumentLimits())
+    assert any(s.text == ">From my notes, the harbour closes in November." for s in doc.segments), \
+        "a file no mbox writer made was never quoted, so nothing is unquoted"
 def test_csv_rows_carry_their_cells_with_spans_and_the_column_names() -> None:
     import json
 

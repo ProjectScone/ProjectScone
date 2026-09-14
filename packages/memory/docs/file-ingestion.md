@@ -176,8 +176,8 @@ does not guarantee that every valid variant of a format is supported.
 Media readers must be registered explicitly on a `BuiltinDocumentParser`;
 the default HTTP route does not configure OCR or transcription providers.
 
-The local LlamaIndex reference also advertises HWP, PPTM and MBOX
-readers, which remain gaps. Table understanding, semantic chunking, layout
+The local LlamaIndex reference also advertises HWP and PPTM readers,
+which remain gaps. Table understanding, semantic chunking, layout
 reconstruction, directory synchronization and general connector ingestion
 also remain open. The [PDF OCR guide](pdf-ocr.md) describes separate OCR
 geometry, recognition limits and model-quality caveats.
@@ -475,7 +475,7 @@ Read provenance through
 `GET /v1/episodes/{episode_id}/document?chunk_id=...`. The API uses its
 authenticated space, write-role authorization and ingestion backpressure.
 HTTP indexing is synchronous and does not automatically create a durable
-workflow journal.
+workflow journal. A mailbox (`.mbox`) is read as one document of many messages: each message as an `.eml` is, its headers and text parts under `message:N/`, every segment carrying the message's number, date and sender so a passage recalled from a mailbox says which mail it came from; attachments are counted, not read, mbox `>From ` quoting is undone, a failure names the message it was in, and past 1,000 messages the rest are counted (`messages_unread`); the document's own limits (20,000 segments, 2 MB of text) refuse a mailbox whole before that, as they do an `.eml`. A message is opened only by an envelope line (`From sender Www Mmm dd hh:mm:ss yyyy`); a file not opened by one is read whole as one message.
 
 Parsers enforce input, extracted-text, segment, archive and execution limits.
 Office/ODF/EPUB ZIP members must use stored or deflated compression. Standalone
