@@ -3031,6 +3031,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `communities` | an SVG map of the graph by community: a circle per community sized by its members, a line between communities weighted by the links joining them | a graph too large to draw entity by entity |
 | `html` | one page: the drawing, search that moves the view to the entity chosen, a legend that shows or hides each community, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
 | `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate; what the graph names but never reads (`typing`, a package) hidden until the legend shows it, then drawn small; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
+| `tree` | one page: the graph's code as directories, files and declarations in folds, with a filter, expand and collapse all, and a panel of what the chosen node calls, imports and defines and what does each to it, each link naming its facts; it fetches nothing | finding a declaration by where it lives in a codebase read with `scone map --graph` |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
@@ -3043,6 +3044,19 @@ the view it shows without opening a zip or parsing XML:
 - `X-Scone-Status` and `X-Scone-As-Of`;
 - `X-Scone-Truncated`, true when the read was capped, so a partial
   export says so in the response as well as in the file.
+
+**The code tree** is built from what the code readers record: a file
+`defines` a declaration, a declaration defines a method, and files and
+declarations `import`, `call`, `inherit` and `depend on` one another. It
+places an entity only when a code relation holds it and its label is a
+path or a declaration qualified by one, so a prose name shaped like a
+file (`Node.js`) is not taken for one; the rest are counted as not in
+the tree. A file or declaration that only a call or an import names was
+not read where it is defined and is marked "not read". A chain of
+directories each holding only the next is one fold. At most 200 children
+are listed under one node and 50 links in one list, and the rest are
+counted where they were cut. A graph with no code gets a page that says
+so.
 
 How each format places values and escapes its own syntax:
 

@@ -56,9 +56,9 @@ if TYPE_CHECKING:
     from .usage import Usage
 
 ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid", "svg",
-                       "canvas", "html", "explorer", "communities"]
+                       "canvas", "html", "explorer", "communities", "tree"]
 EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
-                                            "mermaid", "svg", "canvas", "html", "explorer", "communities")
+                                            "mermaid", "svg", "canvas", "html", "explorer", "communities", "tree")
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -1567,10 +1567,23 @@ def _canvas(projection: EntityProjection, about: Mapping[str, object]) -> Export
     return Export(_encoded(_canvas_text(projection, about)), "application/json", "graph.canvas")
 
 
+def _code_tree(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """The graph's code as the tree of directories, files and declarations, as one page."""
+    from .code_tree import code_tree, tree_page
+
+    coverage = about.get("coverage")
+    reasons = coverage.get("reasons") if isinstance(coverage, Mapping) else None
+    notes = (f"projection {projection.digest[:12]} at revision {projection.revision}",
+             *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
+             *([f"read limited by {', '.join(map(str, reasons))}"] if isinstance(reasons, list) and reasons else []))
+    page = tree_page(code_tree(projection), projection.space, notes=notes, projection=projection.digest)
+    return Export(page.encode("utf-8", "backslashreplace"), "text/html", "code-tree.html")
+
+
 _WRITERS: dict[str, Callable[[EntityProjection, Mapping[str, object]], Export]] = {
     "json": _node_link, "graphml": _graphml, "gexf": _gexf, "cypher": _cypher, "csv": _csv, "jsonld": _json_ld,
     "obsidian": _obsidian, "wiki": _wiki, "mermaid": _mermaid, "svg": _svg, "canvas": _canvas, "html": _html,
-    "communities": _communities_map,
+    "communities": _communities_map, "tree": _code_tree,
 }
 
 
