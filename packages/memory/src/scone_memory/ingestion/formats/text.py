@@ -251,6 +251,9 @@ _SCOPE_BOUNDARIES = frozenset({'applet', 'caption', 'html', 'table', 'td', 'th',
                               'marquee', 'object', 'template'})
 
 
+_HEADINGS = frozenset({'h1', 'h2', 'h3', 'h4', 'h5', 'h6'})
+
+
 class _HTML(HTMLParser):
     def __init__(self, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None) -> None:
         super().__init__(convert_charrefs=True)
@@ -270,7 +273,9 @@ class _HTML(HTMLParser):
             text = re.sub(r'[ \t\r\f]+', ' ', text).strip(' \t\r\n\f')
         self.parts.clear()
         self.has_content = False
-        self.out.add(text, f'{self.prefix}line:{self.line}', self.metadata)
+        level = next((tag[1] for tag, _ in reversed(self.stack) if tag in _HEADINGS), None)
+        metadata = {**(self.metadata or {}), 'heading_level': level} if level else self.metadata
+        self.out.add(text, f'{self.prefix}line:{self.line}', metadata)
 
     def preformatted(self) -> bool:
         return any(tag == 'pre' for tag, _ in self.stack)

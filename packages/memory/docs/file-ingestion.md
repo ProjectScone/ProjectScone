@@ -123,6 +123,16 @@ module the graph's other files name.
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
 | DOC, PPT | Converted text locators | Explicit offline converter; macOS textutil also supports DOC; page/slide structure may be lost |
+A paragraph a document marks as a heading carries `heading_level` (1 to 9)
+in its segment's metadata, with its text unchanged. For DOCX, the level comes
+from the paragraph's own outline level, else from its style's (followed
+through the styles it is based on) or from a built-in style named `heading N`,
+whatever the style's id is in the document's language. For ODT it comes from
+`text:h` and its outline level, and for HTML from `h1` to `h6`. A DOCX without
+a readable styles part still reads, with levels only from paragraphs that carry
+their own outline level. The levels are recorded here so section boundaries can
+be cut from them; chunking does not yet use them.
+
 | PDF | Page locators, extraction method, configured OCR regions and engine | Native text by default; OCR requires an explicit parser |
 | Images | Frame/region locators and typed OCR geometry | Explicit `ImageDocumentParser` and OCR engine required |
 | Audio/video | Audio-stream timestamps | Explicit `MediaDocumentParser` and transcription provider required; video frames are not analyzed |
