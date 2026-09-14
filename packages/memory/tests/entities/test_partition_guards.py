@@ -117,6 +117,68 @@ def test_after_a_split_the_modularity_before_the_guards_is_given_beside_the_fina
     assert record["modularity_before_guards"] < analysis.modularity, "here the split was the better partition"
 
 
+def test_with_hubs_detached_both_modularities_are_measured_on_the_whole_graph(monkeypatch):
+    """Communities are found without the hubs, but the final modularity is
+    taken over the whole graph with each hub rejoined. The number before the
+    guards must be taken the same way, or the two are not comparable: here the
+    hub-less graph scores the lumped partition higher than the whole graph does."""
+    import scone_memory.entities.analysis as module
+
+    edges = (clique("a", 12) + clique("b", 12) + [("a0", "b0")] + clique("c", 4) + clique("d", 4)
+             + [("hub", f"a{n}") for n in range(12)] + [("hub", f"b{n}") for n in range(4)])
+    projection = project_entities("alpha", facts(edges), revision=1)
+    ids = {entity.label: entity.entity_id for entity in projection.entities}
+    real = module._partition
+    calls = []
+
+    def lumping(graph, resolution):
+        calls.append(len(graph))
+        if len(calls) == 1:
+            group = lambda prefixes, size: sorted(ids[f"{p}{n}"] for p in prefixes for n in range(size))
+            return [group("ab", 12), group("c", 4), group("d", 4)], 1
+        return real(graph, resolution)
+
+    monkeypatch.setattr(module, "_partition", lumping)
+    analysis = analyze_projection(projection, detach_hubs=95)
+    assert analysis.coverage.hubs_detached == 1 and analysis.coverage.split_oversized == 1
+    whole = adjacency([(ids[left], ids[right]) for left, right in edges])
+    lumped = {ids[f"{p}{n}"]: "ab" for p in "ab" for n in range(12)} | {ids["hub"]: "ab"}
+    lumped |= {ids[f"{p}{n}"]: p for p in "cd" for n in range(4)}
+    assert analysis.coverage.modularity_before_guards == pytest.approx(module._modularity(whole, lumped))
+    final = {member: community.community_id for community in analysis.communities for member in community.members}
+    assert analysis.modularity == pytest.approx(module._modularity(whole, final)), "the fixture's weights match the analysis"
+
+
+def test_a_hub_rejoining_a_community_the_guards_left_alone_is_a_member_once(monkeypatch):
+    """The partition before the guards and the one after share the communities
+    no guard touched; the hub is added to each partition, never twice to one."""
+    import scone_memory.entities.analysis as module
+
+    edges = (clique("a", 12) + clique("b", 12) + [("a0", "b0")] + clique("c", 8) + clique("d", 4)
+             + [("hub", f"c{n}") for n in range(8)] + [("hub", f"a{n}") for n in range(4)]
+             + [("hub", f"b{n}") for n in range(3)])
+    projection = project_entities("alpha", facts(edges), revision=1)
+    ids = {entity.label: entity.entity_id for entity in projection.entities}
+    labels = {entity_id: label for label, entity_id in ids.items()}
+    real = module._partition
+    calls = []
+
+    def lumping(graph, resolution):
+        calls.append(len(graph))
+        if len(calls) == 1:
+            group = lambda prefixes, size: sorted(ids[f"{p}{n}"] for p in prefixes for n in range(size))
+            return [group("ab", 12), group("c", 8), group("d", 4)], 1
+        return real(graph, resolution)
+
+    monkeypatch.setattr(module, "_partition", lumping)
+    analysis = analyze_projection(projection, detach_hubs=95)
+    assert analysis.coverage.hubs_detached == 1 and analysis.coverage.split_oversized == 1
+    members = [labels[member] for community in analysis.communities for member in community.members]
+    assert sorted(members) == sorted(ids), "every entity is in exactly one community, once"
+    [home] = [community for community in analysis.communities if ids["hub"] in community.members]
+    assert sorted(labels[member] for member in home.members) == sorted([*(f"c{n}" for n in range(8)), "hub"])
+
+
 def test_a_community_under_fifty_is_not_looked_at_for_nesting():
     path = [(f"p{n}", f"p{n + 1}") for n in range(44)]
     others = [(f"x{g}n{n}", f"x{g}n{m}") for g in range(50) for n in range(4) for m in range(n + 1, 4)]
