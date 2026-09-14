@@ -420,6 +420,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by-length", action="store_true",
                    help="store the corpus with the ordinary chunker instead of cutting at declarations")
 
+    p = sub.add_parser("bench-questions",
+                       help="write questions a corpus answers with the local model, anchored to quotes, "
+                            "or measure retrieval on the corpus with a set written before")
+    p.add_argument("root", help="a directory of text files (.md, .txt, .rst) and PDFs")
+    p.add_argument("--set", required=True, help="the question set file to write (--write) or to measure with")
+    p.add_argument("--write", action="store_true",
+                   help="write the set with the configured chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL)")
+    p.add_argument("--per-chunk", type=int, default=2, help="questions asked per chunk when writing (default 2)")
+    p.add_argument("--max-chunks", type=int, default=200, help="chunks sampled when writing (default 200)")
+    p.add_argument("--seed", type=int, default=42, help="the sample's seed (default 42)")
+    p.add_argument("--k", default="1,5,10", help="comma-separated k values when measuring (default 1,5,10)")
+    p.add_argument("--chunk-target", type=int, default=DEFAULT_CHUNK_TARGET,
+                   help=f"the chunk size the corpus is stored at (default {DEFAULT_CHUNK_TARGET})")
+
     p = sub.add_parser("tune",
                        help="measure retrieval settings against each other on a dataset, and say which to take")
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file")
@@ -890,6 +904,41 @@ async def filesystem_command(args: argparse.Namespace, engine: MemoryEngine, std
         return 0
     except (PathRefused, PathConflict) as refused:
         raise InvalidInput(str(refused)) from None
+
+
+async def bench_questions_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Write a question set for a corpus, or measure the corpus with one.
+    Its own in-process store; the configured model is used only to write."""
+    from .. import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from ..bench.questions import QuestionSet, measure, store_corpus, write_questions
+    from .config import build_chat
+
+    if not pathlib.Path(args.root).is_dir():
+        raise InvalidInput(f"{args.root} is not a directory of documents")
+    if args.chunk_target < 1:
+        raise InvalidInput("--chunk-target must be a positive number of characters")
+    try:
+        ks = tuple(int(part) for part in args.k.split(",") if part.strip())
+    except ValueError:
+        raise InvalidInput("--k must be comma-separated integers") from None
+    model = build_chat(settings) if args.write else None
+    if args.write and model is None:
+        raise InvalidInput("writing questions needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                chunk_target=args.chunk_target).open()
+    try:
+        stored = await store_corpus(engine, "corpus", args.root)
+        if model is not None:
+            written = await write_questions(engine, "corpus", model, corpus=args.root, model_name=settings.chat_model or "",
+                                            per_chunk=args.per_chunk, max_chunks=args.max_chunks, seed=args.seed)
+            written.save(args.set)
+            print(json.dumps({**written.as_payload(), "stored": stored}) if args.json else written.text(), file=out)
+            return 0
+        report = await measure(engine, "corpus", QuestionSet.load(args.set), ks=ks)
+        print(json.dumps({**report.as_payload(), "stored": stored}) if args.json else report.text(), file=out)
+        return 0
+    finally:
+        await engine.close()
 
 
 async def bench_code_command(args: argparse.Namespace, settings: Settings, out) -> int:
@@ -1900,9 +1949,10 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         serve(settings)  # same SQLite default as the other commands
         return 0
     if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "bench-route",
-                        "bench-parts", "calibrate", "tune"):
+                        "bench-parts", "bench-questions", "calibrate", "tune"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
+                   "bench-questions": bench_questions_command,
                    "bench-route": route_command, "bench-parts": parts_command,
                    "calibrate": calibrate_command, "tune": tune_command}[args.command]
         try:
