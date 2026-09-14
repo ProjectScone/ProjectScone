@@ -81,13 +81,13 @@ def test_the_delta_is_ours_minus_theirs_at_every_k():
     theirs = SideScores({1: 0.75, 3: 0.5}, {1: 0.5, 3: 0.5}, 0.4)
     delta = side_delta(ours, theirs)
     assert delta.recall_any == {1: -0.25, 3: 0.5} and delta.recall_all == {1: -0.25, 3: 0.25} and delta.mrr == pytest.approx(0.2)
-    assert delta.precision == {1: 0.0, 3: 0.0} and delta.ndcg == {1: 0.0, 3: 0.0}, "sides scored without them differ by nothing"
+    assert delta.precision == {} and delta.ndcg == {}, "sides scored without them carry no delta for them: a missing number is not a zero"
     with pytest.raises(ValueError):
         side_delta(ours, SideScores({1: 0.5}, {1: 0.5}, 0.5))
 
 
 def test_precision_and_ndcg_are_scored_beside_recall_and_carried_in_the_record():
-    from scone_memory.bench.comparative import Comparison, _scores, side_delta
+    from scone_memory.bench.comparative import Comparison, SideScores, _scores, side_delta
 
     rankings = [(["s1", "x", "s2"], {"s1", "s2"}), (["x", "y", "z"], {"s3"})]
     scores = _scores(rankings, [1, 3])
@@ -103,6 +103,17 @@ def test_precision_and_ndcg_are_scored_beside_recall_and_carried_in_the_record()
     record = report.record()
     assert record["sides"]["scone"]["precision"] == {"1": 0.5, "3": round(1 / 3, 4)}
     assert record["sides"]["scone"]["ndcg"]["1"] == 0.5 and record["delta"]["ndcg"] == {"1": 0.0, "3": 0.0}
+    with pytest.raises(ValueError, match="precision"):
+        side_delta(scores, SideScores(scores.recall_any, scores.recall_all, scores.mrr))
+    with pytest.raises(ValueError, match="ndcg"):
+        side_delta(scores, SideScores(scores.recall_any, scores.recall_all, scores.mrr, scores.precision, {1: 0.0}))
+
+
+def test_our_passages_fold_to_distinct_sessions_as_the_references_nodes_do():
+    from scone_memory.bench.comparative import distinct_sessions
+
+    assert distinct_sessions(["a", "a", "b", "a", "c", "", "d"], 3) == ("a", "b", "c"), "a session cut in three is one"
+    assert distinct_sessions([], 3) == () and distinct_sessions(["a"], 0) == ()
 
 
 
