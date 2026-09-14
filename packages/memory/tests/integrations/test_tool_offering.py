@@ -6,7 +6,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
-from scone_memory.integrations.tool_retrieval import MAX_TOOLS, ToolIndex
+from scone_memory.integrations.tool_offering import MAX_TOOLS, NAME_BONUS, ToolIndex
 from scone_memory.integrations.tools import MEMORY_TOOLS, ToolBox, ToolSpec
 
 pytestmark = pytest.mark.asyncio
@@ -48,6 +48,36 @@ async def test_a_selection_says_its_scores_and_basis_and_is_the_same_twice():
     blank = await tools.select("zzzz qqqq", limit=2, always=["search_memory"])
     assert blank.note and "not a ranking" in blank.note and blank.names[0] == "search_memory", \
         "a query nothing resembles is said to be one, not ranked by accident"
+    assert set(record["left_out_scores"]) == set(record["left_out"]) and all(item["named"] is False for item in record["offered"])
+
+
+class Orthogonal:
+    """An embedder whose vectors are what a test says, so the similarity
+    term can be told from the word term."""
+
+    id, dim = "orthogonal", 3
+
+    def __init__(self, vectors):
+        self.vectors = vectors
+
+    async def embed(self, texts):
+        return [list(self.vectors.get(text, [0.0, 0.0, 0.0])) for text in texts]  # unknown text resembles nothing
+
+
+async def test_the_vectors_count_apart_from_the_words_and_a_tool_named_whole_counts_most():
+    specs = [ToolSpec("weather", "the forecast for a place", {"type": "object", "properties": {}}),
+             ToolSpec("calendar", "what is on a day", {"type": "object", "properties": {}}),
+             ToolSpec("add", "put a number to another", {"type": "object", "properties": {}})]
+    vectors = {"weather: the forecast for a place": [1.0, 0.0, 0.0], "calendar: what is on a day": [0.0, 1.0, 0.0],
+               "add: put a number to another": [0.0, 0.0, 1.0], "rain tomorrow?": [0.9, 0.1, 0.0]}
+    tools = await ToolIndex.build(specs, Orthogonal(vectors))
+    by_vector = await tools.select("rain tomorrow?", limit=1)
+    assert by_vector.names == ("weather",) and by_vector.offered[0].similarity > 0.9 and by_vector.offered[0].words == ()
+    assert by_vector.left_out_scores[0][0] == "calendar" or by_vector.left_out_scores[1][0] == "calendar"
+    named = await tools.select("use calendar for the shipping address", limit=1)
+    assert named.names == ("calendar",) and named.offered[0].named is True and named.offered[0].score >= NAME_BONUS
+    assert "add" in named.left_out, "the `add` in `address` does not name the add tool"
+    assert "0.5 when the query names the tool whole" in named.record()["basis"]
 
 
 async def test_the_bounds_are_refused_plainly():
@@ -58,7 +88,7 @@ async def test_the_bounds_are_refused_plainly():
         await tools.select("q" * 2001)
     with pytest.raises(InvalidInput, match="limit"):
         await tools.select("q", limit=0)
-    with pytest.raises(InvalidInput, match="not in this index"):
+    with pytest.raises(InvalidInput, match="not among these tools"):
         await tools.select("q", always=["no_such_tool"])
     with pytest.raises(InvalidInput, match="distinct"):
         await ToolIndex.build([MEMORY_TOOLS[0], MEMORY_TOOLS[0]], HashEmbedder())
