@@ -258,17 +258,20 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="graph_affected",
         summary=("What rests on a symbol, module, file or package: everything that calls, imports, inherits, "
-                 "depends on or documents it, nearest first, through the code graph's recorded relations. "
-                 "Says how deep it walked, what it could not list, and when nothing here rests on the name."),
+                 "mixes in, depends on or develops with it, nearest first, through the code graph's recorded "
+                 "relations. Says how deep it walked, what it could not list, and when nothing here rests on "
+                 "the name."),
         parameters=_schema({
-            "name": {"type": "string", "minLength": 1, "maxLength": 512,
-                     "description": "The symbol (`pkg/mod.py:Class.method`), module (`pkg.mod`), file or package."},
+            "name": {"type": "string", "minLength": 1, "maxLength": 200,
+                     "description": "The symbol (`pkg/mod.py:Class.method`), module (`pkg.mod`), file or package, "
+                                    "up to 200 characters."},
             "max_hops": {"type": "integer", "minimum": 1, "maximum": 8,
                          "description": "Relationship steps to follow, 1 to 8. Defaults to 4."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
                       "description": "Entities to list, 1 to 1000. Defaults to 200."},
-            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
-                          "description": "Byte budget for the answer. Defaults to 16000."},
+            "max_bytes": {"type": "integer", "minimum": 1_024, "maximum": 64_000,
+                          "description": "Byte budget for the answer's record, 1024 to 64000: the record's own "
+                                         "framing takes most of a kilobyte. Defaults to 16000."},
         }, ["name"]),
     ),
     ToolSpec(
