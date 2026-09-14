@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 from ..core.errors import InvalidInput, SconeError
 from .code import BRACE_SUFFIXES, PYTHON_SUFFIXES
+from .code_resolution import file_resolver
 from .records import Record
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -129,6 +130,13 @@ class SyncReceipt:
     #: saying so would read as "nothing is gone" rather than "we did not
     #: look".
     checked_for_missing: bool = True
+    #: Extracted claims closed because a changed file no longer makes them
+    #: or a removed file made them. Only counted with the code graph on.
+    claims_closed: int = 0
+    #: Some claims of a replaced or removed file could not be examined --
+    #: more than one read returns, or a store that cannot read claims by
+    #: episode -- and may still stand.
+    claims_unread: bool = False
 
     @property
     def capped(self) -> bool:
@@ -144,7 +152,11 @@ class SyncReceipt:
                 "links": self.links, "special": self.special,
                 "forgotten": self.forgotten, "empty": self.empty, "cut": self.cut,
                 "listed_all": self.listed_all, "checked_for_missing": self.checked_for_missing,
-                "changes": [{"path": c.path, "what": c.what} for c in self.changes]}
+                "changes": [{"path": c.path, "what": c.what} for c in self.changes],
+                # Only when there is something to say, so a sync without the
+                # code graph reads exactly as it did.
+                **({"claims_closed": self.claims_closed} if self.claims_closed else {}),
+                **({"claims_unread": True} if self.claims_unread else {})}
 
     def text(self) -> str:
         did = "synced" if self.applied else "would sync"
@@ -161,6 +173,10 @@ class SyncReceipt:
         elif self.removed:
             lines.append(f"{self.removed} file(s) are gone from disk but not removed from memory; "
                          f"pass remove to forget them")
+        if self.claims_closed:
+            lines.append(f"{self.claims_closed} claim(s) closed that changed or removed files no longer make")
+        if self.claims_unread:
+            lines.append("some claims of a changed or removed file could not be examined and may still stand")
         if self.out_of_scope:
             lines.append(f"{self.out_of_scope} memory(ies) are out of scope for this run's "
                          f"suffixes and were left alone, not treated as gone")
@@ -188,6 +204,17 @@ class _Tally:
     cut: int = 0
     changes: list[Change] = field(default_factory=list)
     listed_all: bool = True
+    claims_closed: int = 0
+    claims_unread: bool = False
+
+    def claims(self, closed: Optional[int], unread: bool) -> None:
+        """What a replace or removal closed. None means the store could
+        not read the claims by episode: nothing closed, and said so."""
+        if closed is None:
+            self.claims_unread = True
+        else:
+            self.claims_closed += closed
+        self.claims_unread = self.claims_unread or unread
 
     def saw(self, path: str, what: str) -> None:
         if len(self.changes) < MAX_LISTED:
@@ -224,13 +251,24 @@ def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
 KEYS = "scone.sync/1"
 
 
-def _key(marker: str, path: str) -> str:
+def sync_key(marker: str, path: str) -> str:
     """The identity a synced file is stored under: its marker and its path.
 
     Length-prefixed rather than separated, because a marker and a path are
     both text a caller chose and any separator could appear in either.
+    ``map`` stores files under the same identity, so the two commands
+    recognise each other's memories of a file rather than adding a second.
     """
     return f"{KEYS}:{len(marker)}:{marker}/{path}"
+
+
+_key = sync_key
+
+
+def default_marker(root: str | pathlib.Path) -> str:
+    """The name a directory's memories are held under when none is given:
+    its absolute path."""
+    return str(pathlib.Path(root).resolve())
 
 
 def _files(root: pathlib.Path, suffixes: Sequence[str],
@@ -307,7 +345,7 @@ async def sync_directory(
         raise InvalidInput(f"the byte limit must be from 1 to 50000000, not {max_bytes}")
     if not suffixes:
         raise InvalidInput("a sync needs at least one suffix to look for")
-    name = marker if marker is not None else str(where.resolve())
+    name = marker if marker is not None else default_marker(where)
     if not name.strip():
         raise InvalidInput("a marker cannot be blank: it is what names this directory's memories")
 
@@ -325,6 +363,9 @@ async def sync_directory(
             f"without remove to see the plan, or delete the space if that is what you mean.")
 
     tally = _Tally()
+    # Relative imports are followed to files this tree holds: the ones
+    # walked now and the ones the marker already remembers.
+    resolve = file_resolver({*(path.relative_to(where).as_posix() for path in reading), *known})
     seen: set[str] = set()
     for path in reading:
         here = path.relative_to(where).as_posix()
@@ -356,9 +397,10 @@ async def sync_directory(
             # not mention. The marker's length goes in front so no marker
             # and path can be split two ways; a separator alone could be,
             # since both halves are text a caller chose.
-            await engine.replace(space, Record(content=text, kind="file", source=here,
-                                               dedup_key=_key(name, here),
-                                               metadata={"sync": name}))
+            done = await engine.replace(space, Record(content=text, kind="file", source=here,
+                                                      dedup_key=_key(name, here),
+                                                      metadata={"sync": name}), resolve=resolve)
+            tally.claims(done.claims_closed, done.claims_unread)
         setattr(tally, what, getattr(tally, what) + 1)
         tally.saw(here, what)
 
@@ -384,6 +426,11 @@ async def sync_directory(
         if apply and remove:
             await engine.forget(space, known[gone].episode_id)
             forgotten += 1
+            if engine.code_graph:
+                # The file is gone, so nothing it said is stated any more.
+                retired = await engine.close_unstated(space, known[gone].episode_id,
+                                                      reason=f"{gone} was removed", kind="source_removed")
+                tally.claims(retired.closed, retired.unread)
 
     receipt = SyncReceipt(
         root=str(where), marker=name, space=space, applied=apply, removing=remove,
@@ -392,7 +439,8 @@ async def sync_directory(
         out_of_scope=len(out_of_scope), unreadable=unreadable, links=links,
         special=special,
         empty=tally.empty, cut=tally.cut, changes=tuple(tally.changes),
-        listed_all=tally.listed_all, checked_for_missing=whole)
+        listed_all=tally.listed_all, checked_for_missing=whole,
+        claims_closed=tally.claims_closed, claims_unread=tally.claims_unread)
     if apply:
         # Only a sync that wrote can be a last success; a plan succeeded
         # at nothing and must not look like a completed sync.

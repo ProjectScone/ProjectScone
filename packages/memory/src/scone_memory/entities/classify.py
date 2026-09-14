@@ -101,8 +101,10 @@ _ENTITY_PREDICATES = frozenset("""works_at worked_at works_for worked_for employ
 #: `lives_in`, `married_to` -- and a code graph was being judged by it.
 #:
 #: The case of a code symbol is a convention of its language, not
-#: evidence about what it is.
-CODE_PREDICATES = frozenset("defines imports calls inherits mixes_in".split())
+#: evidence about what it is. A package a manifest names is one too:
+#: `pytest`, `@scope/pkg`, `github.com/gorilla/mux` are things a graph
+#: walks to, not values a project has.
+CODE_PREDICATES = frozenset("defines imports calls inherits mixes_in depends_on develops_with".split())
 
 _MONTHS = ("january|february|march|april|may|june|july|august|september|october|november|december"
            "|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec")

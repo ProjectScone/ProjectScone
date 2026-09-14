@@ -43,6 +43,7 @@ from . import file_documents, pdf_documents
 from .responses import LedgerJSONResponse
 
 if TYPE_CHECKING:
+    from ..providers.llm import ChatModel
     from ..providers.vision import VisionModel
     from ..agents.catalog import AgentCatalog
     from ..agents.plan_store import AgentPlanStore
@@ -281,6 +282,7 @@ def create_app(
     document_media: DocumentMedia | None = None,
     document_video: DocumentVideo | None = None,
     vision_factory: Callable[[], VisionModel | None] | None = None,
+    synthesis_factory: Callable[[], ChatModel | None] | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -290,7 +292,9 @@ def create_app(
     maps keys to read, write, review or full permissions; unspecified keys have
     full permission. ``filesystem`` is the policy the space's tree is served
     under; without one the tree is read only, and writing a note is refused
-    however the key is permitted. The independently installed Webapp owns
+    however the key is permitted. ``synthesis_factory`` gives the model the
+    synthesize route of ``/v1/answer`` writes with, or None; without one
+    that route is refused. The independently installed Webapp owns
     browser pages.
     """
     from ..filesystem import FilesystemPolicy
@@ -779,7 +783,7 @@ def create_app(
         now: Optional[str] = None,
         limit: int = Query(default=5, ge=1, le=50),
         route: Optional[str] = Query(default=None,
-                                     description="Insist on temporal, graph or recall instead of the rule."),
+                                     description="Insist on temporal, graph, recall or synthesize instead of the rule."),
         whole: bool = Query(False, description="Show each passage whole instead of its first 200 characters."),
         space: str = Depends(space_for),
     ) -> dict:
@@ -788,11 +792,15 @@ def create_app(
         about dates the ledger can ground is computed, a question the graph
         knows by name is answered from the claims, and anything else is an
         ordinary search. Naming a route overrides it, and the answer says
-        the route was asked for."""
+        the route was asked for. The synthesize route, which the rule never
+        chooses, reads up to ``limit`` passages and has the server's model
+        write cited sentences; it is refused when the server has no model."""
         from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
+        synthesis = synthesis_factory() if route == "synthesize" and synthesis_factory is not None else None
         return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
-                                      max_item_chars=0 if whole else DEFAULT_ITEM_CHARS)).record(space)
+                                      max_item_chars=0 if whole else DEFAULT_ITEM_CHARS,
+                                      synthesis=synthesis)).record(space)
 
     @app.get("/v1/recall/parts")
     async def get_recall_parts(
