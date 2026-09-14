@@ -686,8 +686,14 @@ repository is worse than no map.
 module's function, a method on a value whose type nobody stated — is
 left out rather than pointed at a name that might mean anything. A graph
 with edges nobody can check is worse than a smaller graph. What it does
-resolve: a bare name that is one of the file's own declarations, and
-`self.method` inside the class that defines it.
+resolve: a bare name that is one of the file's own declarations,
+`self.method` and `cls.method` inside the class that defines it, and a
+call through a class the file declares, `Shelf.keep()` or
+`Shelf.Label.print()`, when everything before the last name is a class
+declared there. A class brought in by an import is not followed that way:
+a file cannot tell an imported class from an imported object, so
+`from x import Y` then `Y.m()` stays unbound. Over this package's own
+source that added 15 call edges to 14,425.
 
 **Documents are in the graph too.** `map` reads `.md`, `.rst` and
 `.txt` files beside the code, and a document's links become claims the

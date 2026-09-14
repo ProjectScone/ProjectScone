@@ -400,6 +400,8 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     lines = content.split("\n")
     found: list[CodeClaim] = []
     named: dict[str, str] = {}
+    #: The qualified names of the classes this file declares.
+    classes: set[str] = set()
     imported: dict[str, tuple[str, Optional[str]]] = {}
 
     def at(line: int) -> tuple[str, int, int]:
@@ -425,6 +427,7 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                 named[name] = whole
                 say(owner, DEFINES, whole, child.lineno)
                 if isinstance(child, ast.ClassDef):
+                    classes.add(name)
                     for base in child.bases:
                         target = _base(base, path, named, imported)
                         if target:
@@ -464,7 +467,7 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                 walk(child, owner, inside)
 
     walk(tree, path, None)
-    _calls(tree, path, named, imported, say, _unbound)
+    _calls(tree, path, named, imported, say, _unbound, frozenset(classes))
     _meaning(content, path, "python", say)
     return tuple(found)
 
@@ -577,7 +580,7 @@ def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[st
 
 def _calls(tree: ast.AST, path: str, named: dict[str, str],
            imported: dict[str, tuple[str, Optional[str]]], say,
-           unbound: Optional[list[tuple[str, str]]] = None) -> None:
+           unbound: Optional[list[tuple[str, str]]] = None, classes: frozenset[str] = frozenset()) -> None:
     """Calls between things this file can see, and no others.
 
     A bare name is a call to this file's own declaration when it has one,
@@ -596,7 +599,7 @@ def _calls(tree: ast.AST, path: str, named: dict[str, str],
         for call in ast.walk(holder):
             if not isinstance(call, ast.Call):
                 continue
-            target = _target(call.func, inside, named, imported)
+            target = _target(call.func, inside, named, imported, classes)
             if target is None:
                 # Collected here rather than walked again elsewhere: a
                 # second copy of the name table is the one that drifts
@@ -648,7 +651,8 @@ def _qualified(holder: ast.AST, inside: Optional[str]) -> str:
 
 
 def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
-            imported: Optional[dict[str, tuple[str, Optional[str]]]] = None) -> Optional[str]:
+            imported: Optional[dict[str, tuple[str, Optional[str]]]] = None,
+            classes: frozenset[str] = frozenset()) -> Optional[str]:
     """What a call refers to, or nothing.
 
     The import table says which of two things a local name is, and the
@@ -660,6 +664,13 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
     declaration ``z`` in ``x``, and binding it would name something that
     need not exist -- the false-edge shape that cost the brace call graph
     its life.
+
+    A call through a class this file declares, ``Shelf.keep()`` or
+    ``Shelf.Label.print()``, is the method its whole spelling names, when
+    everything before the last name is a class declared here; ``cls`` in a
+    class is that class, as ``self`` is. An imported class is not followed
+    the same way: a file cannot tell an imported class from an imported
+    object, so ``from x import Y`` then ``Y.m()`` stays unbound.
     """
     if isinstance(func, ast.Name):
         here = named.get(func.id)
@@ -669,8 +680,13 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
         # `Store as Shelf` is Store: named where it was declared, which is
         # the rule `_base` already follows for an inherited name.
         return _joined(came[0], came[1]) if came is not None and came[1] is not None else None
+    if isinstance(func, ast.Attribute):
+        spelt = _spelling(func)
+        holder = spelt.rpartition(".")[0] if spelt is not None else ""
+        if holder in classes and spelt in named:
+            return named[spelt]
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-        if func.value.id == "self":
+        if func.value.id in ("self", "cls"):
             within = inside.split(".")[0] if inside else None
             return named.get(f"{within}.{func.attr}") if within else None
         came = imported.get(func.value.id) if imported else None
