@@ -82,10 +82,14 @@ _CLAUSE = re.compile(
     # Chinese and Japanese numbering, which needs no space before its text:
     # 第三条, 第2章, 一、, （二）, 1、. A numeral alone is not enough -- 第一次 is
     # "the first time" -- so the counter word or the mark after it is required.
+    # Every spelling holds a full-width mark or a CJK numeral, so ASCII text
+    # such as "(2024) Annual report" keeps the boundaries the Latin rule gives.
     r"|^ {0,3}(?:"
     r"第[0-9０-９一二三四五六七八九十百千零〇两]+[章节節条條款篇部编編项項回]"
     r"|[一二三四五六七八九十]+、"
-    r"|[（(][0-9０-９一二三四五六七八九十]+[）)]"
+    r"|（[0-9０-９一二三四五六七八九十]+[）)]"
+    r"|\([０-９一二三四五六七八九十]+[）)]"
+    r"|\([0-9]+）"
     r"|[0-9０-９]+、"
     r")(?=[ \t]*\S|[ \t]*$)")
 #: A question or an answer opening a pair.
