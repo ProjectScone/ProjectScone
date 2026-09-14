@@ -10,7 +10,10 @@ from __future__ import annotations
 import os
 import json as _json
 from types import TracebackType
-from typing import Iterator, Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Iterator, Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .conversations import ConversationClient
 
 import requests
 
@@ -111,6 +114,11 @@ class Scone:
     def agents(self, *, expected_space: str) -> AgentClient:
         """Create a typed agent client, checking space without changing authority."""
         return AgentClient(self, expected_space=expected_space)
+
+    def conversations(self, *, expected_space: str) -> "ConversationClient":
+        """Sessions and turns of the conversation service, bound to one space."""
+        from .conversations import ConversationClient
+        return ConversationClient(self, expected_space=expected_space)
 
     def video_documents(self, *, expected_space: str) -> VideoDocuments:
         """Read verified video evidence and explicitly interpret retained frames."""

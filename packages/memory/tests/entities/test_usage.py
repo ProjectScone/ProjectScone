@@ -172,6 +172,7 @@ async def test_a_failed_recall_says_it_returned_nothing():
 
     engine.vectors.search = broken
     engine.documents.search_text = broken
+    engine.documents.search_terms = broken
     with pytest.raises(RuntimeError):
         await engine.recall("alpha", "alice chen", history=True)
     usage = await recall_usage(engine, "alpha")
