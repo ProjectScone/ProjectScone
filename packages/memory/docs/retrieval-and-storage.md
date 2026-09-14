@@ -15,6 +15,23 @@ small recency term, capped at two chunks per episode. A lane that fails is
 named in `degraded` and the other lane still answers. `context_reduction`
 is the share of the space's bytes that were left behind.
 
+A recall narrowed by `conditions`, `kind`, `source_prefix`, `since` or
+`until` carries `narrowing` (`null` when nothing narrowed): per lane,
+whether the request was applied `in_store` (every row the lane holds was
+eligible) or `postfiltered` (the lane returned its best window and the
+request then removed what did not fit), how deep each lane looked
+(`text_window`, `vector_window`) and returned, how many candidates the
+filter removed (`postfiltered_out`), and `window_exhausted` -- the filter
+removed candidates while a post-filtered lane's window was full, so a
+memory that fits may lie deeper than the recall looked. An empty answer
+with that flag set is not "there is none". The in-process vector indexes
+evaluate conditions themselves; kind, source and date bounds live on the
+episode, which no vector row carries, so for those the vector lane is
+post-filtered from a window twenty-five times wider than an unnarrowed
+recall's, the same allowance the text lane has when its store cannot
+narrow. The CLI prints a note when the flag is set; the recall evidence
+event carries the same fields under `narrow`.
+
 `top_similarity` is the best cosine the vector lane saw for the query.
 With `SCONE_SIMILARITY_FLOOR` set (a cosine, e.g. `0.45`), a recall whose
 best hit falls below it, or that finds nothing, carries
@@ -248,6 +265,54 @@ says so: `shown` carries `per_item_chars`, `items_cut` and
 naming how many of how many were shortened and that `detail` holds them
 whole. `scone answer --whole`, `GET /v1/answer?whole=true` and
 `answer_question(..., max_item_chars=0)` show them whole instead.
+
+### Summary trees for long documents
+
+```bash
+scone summarize 42 --fan-in 6          # store the tree as notes beside the document
+scone summarize 42 --dry-run --json    # write it and show it, store nothing
+```
+
+A long document answers a broad question badly in chunks: "what does this
+report conclude?" is spread over forty passages, and the five that score
+best are five fragments. The leading frameworks build a tree of summaries
+at ingestion (RAPTOR: cluster, summarize, repeat) and index the summaries
+beside the leaves, so a broad question finds a summary and a narrow one
+finds a chunk; the summaries are the model's word. `summarize` builds that
+tree with the synthesizer above, so every sentence rests on a quote the
+framework found in the level below: level zero is the document's chunks in
+their order, each level above groups `--fan-in` adjacent nodes and writes
+one node from them, and a citation resolves downward to the chunk quotes it
+rests on. Adjacency is the grouping, not a clustering — a document's own
+order is a structure nobody has to guess at. A group the model wrote
+nothing about leaves no node and is counted; a lone remainder is carried
+up, not summarized from itself; a level nothing was written at stops the
+tree and says so; `--max-levels` (five at most) can leave the top level
+unjoined, and the record says so.
+
+The nodes are stored as notes the framework wrote, with the document's
+source and `#summary/<level>/<index>` as theirs (the index is the group's
+position at its level, so a group the model left empty leaves a gap rather
+than renaming what follows) and metadata saying what they are:
+`summary_of` (the episode), `summary_level`, `summary_index`,
+`summary_fan_in`, `summary_chunks` with `summary_first_chunk` and
+`summary_last_chunk`, `summary_model`, `summary_content_hash` of the
+document at the time, and `summary_detail`, the attachment the note links
+that holds the full account — every chunk under it, what it was written
+from, every sentence with its citations and quotes — since that account is
+longer than a metadata value may be. The ordinary lanes then retrieve a
+summary beside the chunks and a reader can see what a passage is. `GET
+/v1/episodes/{id}/summaries` lists a document's summaries top level first;
+`POST /v1/episodes/{id}/summaries` builds and stores the tree with the
+synthesis model, and without one it is refused. Building a tree again for
+the same episode replaces the tree that was there, whatever its shape (a
+different `fan_in`, a group the model left empty this time), so a document
+never holds two trees. A document that changes is a new episode, with no
+summaries until its own are built; the old episode's tree stays with it.
+Forgetting a document does not yet forget its summaries; they carry
+`summary_of`, so they can be found and forgotten by it. Not yet measured:
+coverage on broad questions with and without stored summaries waits for a
+run with the local model.
 
 ### Checking the rule instead of asserting it
 
@@ -682,6 +747,19 @@ This reads the structure the document already carries.
 MemoryEngine(store, index, embedder, structure_aware=True)
 ```
 
+That is the engine's rule for every record. One record can choose for
+itself: `remember(..., chunking="structure")`, `scone remember --chunking
+structure`, `"chunking": "structure"` on `POST /v1/episodes` and in each
+batch record (`length`, `code`, `structure` or `semantic`; unset keeps
+the rule). The receipt says which way was actually used -- `code` for a
+code source unless the record said otherwise -- and, for structure, the
+chunker's own counts (`at_boundary`, `by_size`, `over_target`, `capped`).
+The choice is kept on the episode's metadata under `chunking`, so a
+recovery after an interruption cuts the way the record asked; `code` on
+a source whose name does not say its language, a mode not on the list,
+or a metadata key that already says otherwise is refused before anything
+is stored.
+
 Built on `ingestion/structure.py`, which already finds headings, fenced
 code and pipe tables and is already used by retrieval and source
 inspection. Only what that parser deliberately leaves out is new:
@@ -736,6 +814,30 @@ unretrievable — and a heading above a table was separated from it. The
 invariant test that should have caught the first asserted exactly the
 right property and passed, because its fixture never contained the
 junction.
+
+## Embedding a chunk with the headings above it
+
+A chunk cut from a long document loses what the document said it was
+about: "within 30 days" under "## Refund policy" in "# Chapter 4" is,
+once cut, only "within 30 days". With `heading_context=True`
+(`SCONE_HEADING_CONTEXT=1`) each chunk's embedding input starts with the
+path of headings above it, outermost first, and a code chunk's starts
+with its file and the declarations it sits inside.
+
+- **Only what is embedded changes.** Stored text is untouched, so recall
+  still returns the exact excerpt.
+- **The path is bounded.** At most `MAX_HEADING_CONTEXT_BYTES`; a longer
+  path keeps its innermost headings, and the receipt counts the chunks it
+  was cut for.
+- **It is part of the vector writer's identity.** Vectors embedded with
+  headings and vectors embedded without them never answer one search
+  together: turning the setting on or off for an existing store reads as
+  a mismatch until the vectors are rebuilt.
+- **Off by default.** On the hash embedder, queries made of heading
+  titles found their chunk about twice as often and queries made of the
+  chunk's own words barely moved; the learned-embedder run has not been
+  done yet. Both halves and their limits are in
+  `bench-runs/heading-context-2026-09-13/results.md`.
 
 ## A recalled body, with the signature and imports that make it readable
 
@@ -797,6 +899,42 @@ A header longer than twelve lines is quoted to there, and says so —
 `clipped` on the holder, `shortened` on the receipt, and a note beside
 the name in the terminal. A bound that bit in silence is the fault this
 framework keeps making.
+
+## Where the question's words are in a passage
+
+A recalled passage says which lanes found it and how it ranked. It did
+not say where the matching words are, so a page drawing the passage had
+to tokenise it again, and got it wrong wherever its tokeniser differed
+from the lexical lane's: that lane folds case, normalises width, keeps a
+possessive with its word and reads scripts written without spaces as
+characters and pairs.
+
+```bash
+scone recall "crane repainted" --highlight
+# <score>  <date>  #<episode>  The harbour Crane was repainted in May.
+#       matched: Crane, repainted
+scone --json recall "crane repainted" --highlight   # adds "highlights"
+curl -H "authorization: Bearer $KEY" "$URL/v1/recall?q=crane+repainted&highlight=true"
+```
+
+`highlights` sits beside `items`, one entry per item in the same order,
+each with the question's `terms`, the `spans` (`start`, `end`, `term`)
+and `total`. The rules, each with a test:
+
+- **The lexical lane's own tokeniser decides.** The passage is read word
+  by word and a word is marked when its tokens include a query term, so
+  `CRANE` and `Alves's` are marked and a stopword in the question marks
+  nothing. No stemming is invented here: the lane does not stem, so
+  `repaint` does not mark `repainted`.
+- **Offsets are code points of the text as returned**, and the spans are
+  computed last, after windowing, merging, withholding and code context,
+  because a span is only true of the text it was measured on.
+- **In a script without spaces** the span is where the term's characters
+  stand inside the run, and the overlapping characters and pairs of one
+  query term merge into one region.
+- **The bound says it bit.** A passage keeps at most `MAX_HIGHLIGHTS`
+  spans; `total` counts all of them and `truncated` says some were not
+  listed.
 
 ## One passage instead of three fragments of it
 
@@ -987,6 +1125,40 @@ requests` lists the projects whose manifests declare it, through
 `depends_on`, beside the files that import it, and a test dependency's
 blast radius runs through `develops_with`.
 
+### What a diff reaches
+
+```bash
+git diff main...HEAD | scone graph impact --root .
+scone graph impact change.diff --root . --json
+```
+
+`graph affected` answers for one symbol; a pull request touches lines in
+many files, and the question people bring to it is the same one asked of
+the diff as a whole. `graph impact` reads a unified diff (what `git diff`
+writes, quoted paths included), re-reads each changed file at `--root` —
+the tree **after** the change, the diff's `b` side, whose line numbers the
+hunks give — with the declaration reader that cuts files into chunks, and
+names what every hunk touches at two
+levels, because the graph holds edges at two levels: the declaration under
+the changed lines (`pkg/store.py:Shelf.keep`), for calls the graph bound to
+it, and the file, spelt as its path and, for Python, as the module an
+import names (`pkg.store`). A change outside every declaration — an import
+line, a constant — touches the file alone; a file the root no longer holds
+is taken as removed and asked about as a file. Each thing touched is listed
+with what the graph was asked and what it said (`found`, `nothing`,
+`unknown` for a file this graph was never given), and everything that rests
+on the change follows once, nearest first, with the fewest hops from
+anything touched and the name it was reached through. Bounds on files
+examined, things asked about and dependants listed are each disclosed when
+they bite; so is a bound that bit inside one of the graph's own answers (a
+list it cut, a depth it stopped at), a name longer than the graph takes, a
+file the diff names outside the root, and a root that is not a directory;
+and an empty answer means nothing *in this graph* rests on the
+change. The module spelling is a second question asked, not a link
+asserted: where a file and the module that names it are joined only at
+ingestion (`scone map` supplies the resolver; `remember()` does not), the
+answer says which spelling found what.
+
 ### Claims read from files hold side by side
 
 A ledger predicate holds one value at a time unless configured
@@ -1097,6 +1269,37 @@ interesting one: asked in a person's words, two in five questions do not
 return the function's own definition. That is an embedder question, not a
 chunker one, and it is where the next gain is.
 
+### Questions your own corpus answers
+
+```bash
+SCONE_CHAT_URL=http://127.0.0.1:11434/v1 SCONE_CHAT_MODEL=gemma4-e4b-ctx8k \
+  scone bench-questions docs/ --set docs-questions.json --write
+scone bench-questions docs/ --set docs-questions.json --k 1,5,10
+```
+
+LongMemEval-S measures conversations and `bench-code` measures functions;
+nothing measured retrieval on a corpus of your own. `bench-questions --write`
+stores every text file (`.md`, `.txt`, `.rst`) and PDF under a directory in
+its own in-process store, shows a sample of the chunks to the configured
+local model (at most `--max-chunks`, sampled by `--seed`; the set says how
+many chunks there were), and asks it for `--per-chunk` questions each with
+the sentence that answers it. A question is kept only when that sentence is
+in the chunk the model was shown, word for word (whitespace aside); one
+whose quote is invented is dropped and counted, as is a reply that is not
+the JSON asked for, a call that failed, and a chunk too long to show. Every
+kept question can therefore be checked by anyone holding the text.
+
+Measuring needs no model and no chunk ids: the same root is stored again,
+every question is asked, and a returned passage that holds the quote is a
+hit — `quote in top k`, MRR, and `source in top k` for questions whose
+chunk came from a file. Because the truth is a quote and not a chunk id,
+one set measures the corpus stored with a different chunk size, store or
+embedder, as long as the text is the same; that is what makes it a bench
+for ingestion changes (a PDF read in a different order, a chunker cut at
+different places) and not only for retrieval settings. The set is a JSON
+file with a version, so a saved set is refused by a reader that does not
+know its shape.
+
 ## Choosing settings by measuring them
 
 ```bash
@@ -1110,6 +1313,119 @@ found. It varies three things and holds everything else at whatever the
 environment says, so what it measures is the difference between the
 settings and nothing else: `SCONE_RECALL_CANDIDATES`,
 `SCONE_DEMOTE_RESTATED`, `SCONE_CONTEXTUAL_EMBEDDINGS`.
+
+### The context lane: found by what it is under
+
+A chunk under the heading "Refunds" in a document titled "Billing
+rules" need not say either word, and a query about billing refunds then
+misses it in the text lane, which finds the words a passage has and
+only those. With `SCONE_CONTEXT_LANE=1` (`MemoryEngine(...,
+context_lane=True)`) each chunk's context is derived at ingestion with
+no model — the headings enclosing it, the document's title (its top
+heading, or a short first line that does not read as a sentence) and
+the words of the source's name — keeping only what the chunk itself
+lacks, and indexed **beside** its text, never in it. Stored text and
+offsets do not change. At recall the same query the text lane got is
+searched over that index as a third lane and fused by rank at twice the
+weight of the others; `lanes.context` on each item says where the lane
+placed it.
+
+The weight is measured, not guessed. Rank fusion is flat, so a lane
+that finds what the others cannot needs weight to be heard at all: on
+the `under-v1` benchmark (`testing.context_lane_benchmark`: twenty
+passages under a heading whose words they never say, eight distractors
+each repeating the question's words) the passage reached the top five
+in 0 of 20 cases without the lane, and with it in 0 at weight 0.5, 1 at
+1.0 and 13 at 2.0 — where the distractor also lost first place in 13
+cases. The entity lane made the same choice for the same reason. The
+cost is on the record too: a passage under the words can now come
+before one that merely says them, which is what the benchmark's
+question wants and a literal search would not. A document's frequent
+words were tried as context and left out: spread over every chunk they
+make the lane fire on mentions rather than on structure.
+
+The words are bounded — at most 32 per chunk, headings first, then
+title, then source words, the rest counted as omitted — and the lane is
+honest about where it is not: the SQLite and in-memory stores keep the
+index, and an engine with the lane on over a store that does not
+reports `context lane: not kept by …` in `degraded` rather than
+pretending the lane ran.
+
+### The vector lane's voice in fusion
+
+Reciprocal rank fusion gives every lane the same voice. That is right
+when both lanes know something the other does not, and wrong when one
+is a weak echo of the other: an embedder whose vectors are hashed
+tokens ranks by word overlap, badly, and its confident wrong picks can
+outvote the text lane's right ones. Measured on LongMemEval-S with that
+embedder, the text lane alone was ahead of the fused ranking.
+`SCONE_VECTOR_WEIGHT` (`MemoryEngine(..., vector_weight=)`) is the
+vector lane's weight against the text lane's 1.0 — a number above 0 and
+at most 4, 1.0 by default — and every recall event records
+`fusion_weights`, so a ranking can always be read back to the voices
+that made it. Change it only on a number: the pull request that added it
+carries the measurement.
+
+### Both stores agree on every script
+
+Two stores that answer the same query differently are a bug a reader
+cannot see. The in-memory lane cuts an unspaced run — a Japanese or
+Thai phrase — into character grams and finds a part of it; SQLite's
+built-in tokenizer kept the run as one token and could not. The SQLite
+text lane now ranks our own tokens: a derived table holds each chunk's
+terms exactly as the lexical tokenizer makes them, diacritics folded as
+the in-memory lane folds them, searched through an FTS5 shadow that
+splits only on the spaces between them. It is versioned by the
+tokenizer and the Unicode data it ran under and rebuilt whole when
+either changes — lazily, so an old database opens at once and each
+space pays as it is read — and triggers keep it current on write and
+delete. A parity test pins that Japanese, Chinese, Thai, Korean and
+accented Latin queries find their passage through the text lane in
+both stores.
+
+### A word's family by prefix
+
+"bills", "billing" and "billed" are one word to a reader and three to the
+text lane. The usual answer is a stemmer over the index, and it is the
+wrong one here: it rewrites what every store holds, ties the tokenizer's
+version to a set of language rules, and puts a guess ("policies" and
+"police" as one) where a reader cannot see it. `SCONE_LEXICAL_STEMS=1`
+(`MemoryEngine(..., lexical_stems=True)`) does less: a query term that
+ends in a known English suffix also searches as a prefix of its stem —
+`bill*` for "billing", `invoic*` for "invoices" — so the family is found,
+the index is untouched, and the result's `prefixes` says which prefixes
+were added and whether the store could take them (`applied`; the SQLite
+and in-memory stores can, and a family counts as one term in the score,
+not several). A language the rules do not know, a short word, a number,
+is left exactly as it was. The rules keep a stem of at least three
+letters after a strong suffix and four after a plural or a final "e", do
+not strip a plural after "s", "u" or "i", and reduce a doubled consonant
+except where English keeps it. Measured on LongMemEval-S before it was
+a flag; the numbers are on the pull request that added it.
+
+### Synonyms the caller wrote down
+
+The lexical lane finds the words a passage has, and only those. A
+passage that says "automobile" is invisible to a query about a "car"
+unless somebody wrote down that in this corpus the two are one word.
+`SCONE_SYNONYMS=./synonyms.txt` names that list — one group per line,
+terms separated by commas, `#` for comments — and `MemoryEngine(...,
+synonyms=Synonyms(groups))` gives it in code. A query term that is in a
+group adds the group's other members to the **text lane's** query; the
+vector lane's query stays as written, because an embedder already knows
+what it knows about the two words and padding its input with a list
+would move the vector in ways nobody measured. The lanes are fused by
+rank, so a passage found only through an added word competes on rank,
+never on a score the addition inflated.
+
+No model proposes a synonym here, and nothing is guessed: matching uses
+the lane's own tokenizer, so case, possessives and stopwords are treated
+exactly as the index treats them, a phrase matches as a phrase, and the
+result's `expansion` says which terms matched and which words were
+added (`matched`, `added`, `offered`, `capped`; the recall event carries
+the counts). The list is bounded — 2,000 groups of up to 16 terms of up
+to 64 characters, at most 12 words added to one query, the rest left
+out with `capped: true` — and a list over a bound is refused, not cut.
 
 The rule for choosing is stated rather than implied: the setting that
 answered most wins; a tie goes to the quicker; and a change that only

@@ -87,8 +87,11 @@ def _matches(episode: Episode, scope: TextFilter) -> bool:
 
 
 class _Builder:
-    def __init__(self, documents: EvidenceDocuments, space: str, scope: TextFilter, exclude_session_id: str | None = None) -> None:
+    def __init__(self, documents: EvidenceDocuments, space: str, scope: TextFilter, exclude_session_id: str | None = None,
+                 admit_turn_ids: frozenset[str] = frozenset()) -> None:
         self.exclude_session_id = exclude_session_id
+        #: Same-session turns admitted anyway: they have left the model's window.
+        self.admit_turn_ids = admit_turn_ids
         self.documents = documents
         self.space = space
         self.scope = scope
@@ -124,7 +127,8 @@ class _Builder:
             self.graph.provenance_missing += 1
             result: tuple[Episode | None, str] = (None, "missing")
         elif (not _matches(episode, self.scope) or (self.exclude_session_id is not None
-                and (episode.metadata.get("session_id") == self.exclude_session_id or episode.source == self.exclude_session_id))):
+                and (episode.metadata.get("session_id") == self.exclude_session_id or episode.source == self.exclude_session_id)
+                and episode.metadata.get("turn_id") not in self.admit_turn_ids)):
             self.notice("Some retained evidence is outside the query scope and is not shown.")
             result = (None, "out_of_scope")
         else:
@@ -155,7 +159,8 @@ class _Builder:
 
 async def build_query_evidence_graph(documents: EvidenceDocuments, space: str, query: str,
                                      result: RecallResult, *, scope: TextFilter | None = None,
-                                     exclude_session_id: str | None = None) -> QueryEvidenceGraph:
+                                     exclude_session_id: str | None = None,
+                                     admit_turn_ids: frozenset[str] = frozenset()) -> QueryEvidenceGraph:
     """Read at most 24 chunks, 16 facts, 40 sources, and 49 stored links.
 
     The extra link detects truncation. Unsupported backends are explicit;
@@ -164,7 +169,7 @@ async def build_query_evidence_graph(documents: EvidenceDocuments, space: str, q
     belongs in a model prompt; it is an inspection artifact for the user.
     """
     check_space(space)
-    builder = _Builder(documents, space, scope or TextFilter(), exclude_session_id)
+    builder = _Builder(documents, space, scope or TextFilter(), exclude_session_id, admit_turn_ids)
     graph = builder.graph
     builder.node(EvidenceNode(id="query:current", kind="query", label=query[:PREVIEW_CHARS],
                               data={"event_id": result.event_id}))

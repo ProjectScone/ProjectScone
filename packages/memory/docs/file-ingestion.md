@@ -736,3 +736,26 @@ a temporary verification outage refuses the result without replaying work.
 
 The capability `documents.jobs` is advertised only when configured. The existing
 synchronous `/v1/documents` endpoint remains available.
+
+### Languages read from their syntax tree
+
+The Python reader walks Python's own tree and the brace reader finds
+the headers a brace family shares (JavaScript, TypeScript, Go, Rust,
+Java, C, C#, Kotlin, Swift, PHP and their kin — TypeScript and
+JavaScript also through a grammar when `scone-memory[code-graph]` is
+installed). Ruby, Lua, Perl, fish, shell and languages like them were
+neither, and a file in one of them was prose that happened to contain
+code: no declaration names on its chunks, no cuts at its definitions.
+With the optional `scone-memory[code-languages]` extra (one grammar
+pack) a file with a suffix the reader knows — `.rb`, `.rake`, `.lua`,
+`.sh`, `.bash`, `.zsh`, `.pl`, `.pm`, `.fish` — is read from
+its syntax tree by the one convention the grammars share: a definition
+node carries its name in a field called `name`. Declarations are named
+by everything that holds them (`Cart.total`), carry their byte and line
+spans, cut the chunks as the other readers' do, and name a recalled
+chunk in `declaration`. What the grammar does not name is not a
+declaration here; a language whose grammar names things another way
+(Kotlin's and Elixir's do) keeps the reader it had, and a brace-family
+file (PHP, Swift, Scala) keeps the brace reader. Without the extra
+nothing changes. The code graph's claims (imports, calls) are not read
+from these trees yet; that is the next step on this lane.
