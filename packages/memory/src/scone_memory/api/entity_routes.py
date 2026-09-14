@@ -249,6 +249,9 @@ class AnalysisCoverage(BaseModel):
     levels: int
     #: The modularity resolution the communities were found at.
     resolution: float = 1.0
+    #: Entities named but never read, kept out of the partition and the
+    #: central ranking and attached to the community that names each most.
+    external_entities: int = 0
 
 
 class Groupings(BaseModel):
@@ -304,7 +307,8 @@ def _groupings(analysis: GraphAnalysis, view: dict[str, object]) -> dict[str, ob
                          "members": [member for member in community.members if member in shown]}
                         for community in analysis.communities if any(member in shown for member in community.members)],
         "importance": [{"entity_id": item.entity_id, "community_id": item.community_id, "degree": item.degree,
-                        "pagerank": item.pagerank, "betweenness": item.betweenness, "participation": item.participation}
+                        "pagerank": item.pagerank, "betweenness": item.betweenness, "participation": item.participation,
+                        "external": item.external}
                        for item in analysis.importance if item.entity_id in shown],
         "coverage": analysis.coverage.record(),
     }
