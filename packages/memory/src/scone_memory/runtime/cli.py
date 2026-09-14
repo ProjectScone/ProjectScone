@@ -23,6 +23,7 @@ import pathlib
 import posixpath
 import asyncio
 import json
+from datetime import datetime, timezone
 import os
 import sys
 import stat
@@ -30,7 +31,7 @@ from typing import Mapping, Optional, Sequence
 
 from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Record
-from ..core.errors import InvalidInput, SconeError
+from ..core.errors import InvalidInput, NotFound, SconeError
 from ..retrieval.filters import read_conditions
 from ..ingestion.chunker import DEFAULT_TARGET as DEFAULT_CHUNK_TARGET
 
@@ -77,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--key", dest="dedup_key", help="identity across writes: the same key again is a duplicate, not a second record")
     p.add_argument("--replace", action="store_true", help="with --key: changed content replaces the record the key names")
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
+    p.add_argument("--chunking", choices=("length", "code", "structure", "semantic"),
+                   help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
     p = sub.add_parser("when", help="a question about dates answered by computation, with its working")
@@ -97,11 +100,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source-prefix", help="only episodes whose source starts with this text (literal)")
     p.add_argument("--since", help="only episodes that happened at or after this instant")
     p.add_argument("--until", help="only episodes that happened at or before this instant")
+    p.add_argument("--infer", action="store_true",
+                   help="read the question's own words for a scope (a date, a kind of memory, tags, a place) and "
+                        "search with it where no filter was given; what was read and applied is printed")
     p.add_argument("--candidate-limit", type=int,
                    help="how many candidates each lane fetches before fusion (1 to 1000)")
     p.add_argument("--no-rerank", action="store_true", help="skip the configured reranker for this search")
     p.add_argument("--graph-boost", action="store_true",
                    help="add the entity lane: passages naming what the question is about, or one relation away")
+    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
+                   help="fuse the lanes by rank (default) or by each lane's scores scaled to its own range")
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each")
@@ -114,6 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--code-context", action="store_true",
                    help="for a passage of code, also quote the signature it sits inside and the "
                         "imports of its file; the passage itself is not changed")
+    p.add_argument("--highlight", action="store_true",
+                   help="say which words of each passage the lexical lane matched; with --json, "
+                        "the code-point spans of each, beside the items")
     p.add_argument("--parts", action="store_true",
                    help="search each part of a multi-part question and give every part a turn "
                         "(measured to change nothing on LongMemEval; off by default)")
@@ -154,6 +165,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="show the impact and remove nothing")
     p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
                    help="exclude: take the claims only this source supported out of recall, reversibly (default keep)")
+
+    p = sub.add_parser("forget-matching", help="forget every source a filter selects: previews unless --apply")
+    p.add_argument("--source-prefix", help="sources whose name starts with this text")
+    p.add_argument("--tag", action="append", default=[], help="a tag every selected source carries, repeatable")
+    p.add_argument("--conditions", help='metadata filter as JSON, e.g. {"field": "sync", "is": "old"}')
+    p.add_argument("--kind", help="only episodes of this kind")
+    p.add_argument("--limit", type=int, default=100, help="episodes one pass forgets (1 to 1000, default 100)")
+    p.add_argument("--apply", action="store_true", help="forget; needs --selection from a preview")
+    p.add_argument("--selection", help="the selection digest a preview printed")
+    p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
+                   help="exclude: take the claims only these sources supported out of recall, reversibly")
 
     p = sub.add_parser("facts", help="list facts")
     p.add_argument("--all", action="store_true", help="include closed facts")
@@ -227,6 +249,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("export", help="dump the space as JSON lines to stdout")
     p.add_argument("--include-attachments", action="store_true",
                    help="include verified linked evidence bytes using archive profile 2")
+    p = sub.add_parser("import-url", help="fetch a page by URL and read it as the document its media type says it is "
+                                          "(needs SCONE_URL_IMPORT=1; private hosts need SCONE_URL_IMPORT_PRIVATE=1)")
+    p.add_argument("url", help="an http or https URL")
+
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
     p.add_argument("--resurrect", action="store_true", help="store content this space forgot on purpose; the tombstone stays")
@@ -255,6 +281,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them "
                         "before scoring, to measure what that changes")
+    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
+                   help="fuse recall's lanes by rank (default) or by score, to measure what that changes")
     p.add_argument("--window", type=int, default=0, metavar="BYTES",
                    help="widen every returned passage by this many bytes either side before "
                         "scoring, to measure what that changes")
@@ -320,6 +348,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
     g.add_argument("--limit", type=int, default=200, help="entities to list (1 to 1000)")
     g.add_argument("--max-bytes", type=int, default=16000, help="byte budget for the answer")
+    g = graph.add_parser("impact", help="what rests on the changes in a diff (git diff's output): the "
+                                        "declarations its hunks touch, and everything here that depends on them")
+    g.add_argument("diff", nargs="?", default="-", help="a unified diff file, or - for stdin (default)")
+    g.add_argument("--root", default=".", help="the tree after the change (the diff's b side), where the changed files are read (default .)")
+    g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
+    g.add_argument("--limit", type=int, default=200, help="dependants to list (1 to 1000)")
     g = graph.add_parser("health", help="what in the graph wants attention, counted with examples")
     g.add_argument("--limit", type=int, default=None, help="examples shown for each concern")
     g.add_argument("--max-bytes", type=int, default=None)
@@ -330,7 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
-                                                               "mermaid", "svg", "canvas", "html"])
+                                                               "mermaid", "svg", "canvas", "html", "explorer"])
     g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
     p = sub.add_parser("calibrate",
                        help="measure the floor this engine abstains by, on questions with and without an answer")
@@ -371,12 +405,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--marker", help="the name these memories are held under; defaults to the "
                                     "directory's absolute path, so rename it with this")
     p.add_argument("--suffix", action="append", default=[],
-                   help="only files with this suffix, repeatable; defaults to code and prose")
+                   help="only files with this suffix, repeatable (plus package manifests when any suffix is code); "
+                        "defaults to code and prose")
     p.add_argument("--apply", action="store_true", help="actually write; without it this is a plan")
     p.add_argument("--remove", action="store_true",
                    help="also forget memories whose file is gone from disk (destructive; needs --apply)")
     p.add_argument("--limit", type=int, default=100_000, help="files to read (1 to 100000)")
     p.add_argument("--max-bytes", type=int, default=1_000_000, help="bytes read from one file")
+    p.add_argument("--no-ignore", action="store_true",
+                   help="read the tree whole; by default what its .gitignore and .sconeignore files exclude is left unread")
 
     p = sub.add_parser("map", help="remember every source file under a directory as it is now -- a changed file "
                                     "updates its memory -- and optionally what each says")
@@ -388,6 +425,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-bytes", type=int, default=400_000, help="bytes of one file to read (default 400000)")
     p.add_argument("--include-sensitive", action="store_true",
                    help="take a source that screens as a credential anyway; off, it is withheld and named")
+    p.add_argument("--no-ignore", action="store_true",
+                   help="read the tree whole; by default what its .gitignore and .sconeignore files exclude is left unread")
+    p.add_argument("--watch", action="store_true",
+                   help="keep mapping: after the pass, read the tree again every --every seconds and record what "
+                        "changed, until interrupted or --rounds passes are done")
+    p.add_argument("--every", type=float, default=5.0, help="seconds between passes under --watch (default 5)")
+    p.add_argument("--rounds", type=int, default=0, help="passes to make under --watch, 0 for until interrupted (default 0)")
 
     p = sub.add_parser("fs", help="the space as a tree: ls, cat, find and write a note")
     tree = p.add_subparsers(dest="fs_command", required=True)
@@ -419,6 +463,26 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"the chunk size the corpus is stored at (default {DEFAULT_CHUNK_TARGET})")
     p.add_argument("--by-length", action="store_true",
                    help="store the corpus with the ordinary chunker instead of cutting at declarations")
+
+    p = sub.add_parser("summarize", help="write a document's summary tree with the configured chat model "
+                                         "(SCONE_CHAT_URL, SCONE_CHAT_MODEL) and store it as notes beside the document")
+    p.add_argument("episode_id", type=int, help="the episode to summarize")
+    p.add_argument("--fan-in", type=int, default=6, help="nodes one summary is written from (2 to 24, default 6)")
+    p.add_argument("--max-levels", type=int, default=5, help="levels above the chunks (1 to 5, default 5)")
+    p.add_argument("--dry-run", action="store_true", help="write the tree and print it without storing it")
+    p = sub.add_parser("bench-questions",
+                       help="write questions a corpus answers with the local model, anchored to quotes, "
+                            "or measure retrieval on the corpus with a set written before")
+    p.add_argument("root", help="a directory of text files (.md, .txt, .rst) and PDFs")
+    p.add_argument("--set", required=True, help="the question set file to write (--write) or to measure with")
+    p.add_argument("--write", action="store_true",
+                   help="write the set with the configured chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL)")
+    p.add_argument("--per-chunk", type=int, default=2, help="questions asked per chunk when writing (default 2)")
+    p.add_argument("--max-chunks", type=int, default=200, help="chunks sampled when writing (default 200)")
+    p.add_argument("--seed", type=int, default=42, help="the sample's seed (default 42)")
+    p.add_argument("--k", default="1,5,10", help="comma-separated k values when measuring (default 1,5,10)")
+    p.add_argument("--chunk-target", type=int, default=DEFAULT_CHUNK_TARGET,
+                   help=f"the chunk size the corpus is stored at (default {DEFAULT_CHUNK_TARGET})")
 
     p = sub.add_parser("tune",
                        help="measure retrieval settings against each other on a dataset, and say which to take")
@@ -652,7 +716,7 @@ async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> i
     chosen = {"suffixes": tuple(args.suffix)} if args.suffix else {}
     done = await sync_directory(engine, args.space, args.directory, marker=args.marker,
                                 apply=args.apply, remove=args.remove, limit=args.limit,
-                                max_bytes=args.max_bytes, **chosen)
+                                max_bytes=args.max_bytes, ignore=not args.no_ignore, **chosen)
     if args.json:
         print(json.dumps(done.record()), file=out)
         return 0
@@ -669,16 +733,50 @@ async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> i
 
 
 async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
+    """One pass over the tree, or under --watch pass after pass: the graph
+    follows the files as they change, each pass a receipt of its own. A
+    pass re-reads every file and replaces only what changed, so a quiet
+    tree costs a read and a hash per file and writes nothing."""
+    if not args.watch:
+        return await map_pass(args, engine, out)
+    if args.every < 0.1 or args.rounds < 0:
+        raise InvalidInput("--every is at least 0.1 seconds and --rounds is 0 or more")
+    rounds = 0
+    code = 0
+    # What the last pass saw, so the next can forget what is gone.
+    watched: dict[str, set[str]] = {}
+    try:
+        while True:
+            rounds += 1
+            stamp = datetime.now(timezone.utc).strftime("%H:%M:%S") + "Z"
+            if getattr(args, "json", False):
+                print(_ledger_json({"pass": rounds, "at": stamp}, indent=None), file=out)
+            else:
+                print(f"pass {rounds} at {stamp}", file=out)
+            code = await map_pass(args, engine, out, watched=watched)
+            if code != 0 or (args.rounds and rounds >= args.rounds):
+                return code
+            await asyncio.sleep(args.every)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Under asyncio.run a Ctrl-C reaches the sleeping task as a
+        # cancellation; either way the watch ends with its last receipt.
+        print(f"watch ended after {rounds} pass(es)", file=out)
+        return code
+
+
+async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched: dict[str, set[str]] | None = None) -> int:
     """Remember every source file under a directory, stored under the path
     it was read from. With --graph, also record what each file says about
     itself. What was read and what was not is said: a map that quietly
     skipped half a repository is worse than no map."""
     from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
+    from ..ingestion.doc_graph import DOC_SUFFIXES
     from ..ingestion.manifests import is_manifest
+    from ..ingestion.schema_claims import is_schema
     from ..ingestion.records import Record
     from ..ingestion.code_resolution import file_resolver
     from ..ingestion.sync import default_marker, sync_key
-    from ..ingestion.code_graph import DEFINES, record_claims, unresolved_call_sites
+    from ..ingestion.code_graph import DEFINES, code_claims, record_claims, unresolved_call_sites
     from ..ingestion.sensitive import screen
     from ..ingestion.code_resolution import REACHABLE_DEPTH, unmistakable, resolve_across_files
 
@@ -693,8 +791,18 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     # is about a repository's own `.git`, and a root reached through a
     # dot-segment would otherwise skip its entire tree and report nothing
     # read -- exactly the quietly-skipped map this command warns about.
+    # What the tree's own ignore files exclude is left unread and counted:
+    # a repository's node_modules is not the repository.
+    from ..ingestion.ignore import Ignore, walk_files
+
+    rules = None if args.no_ignore else Ignore.load(root)
+    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES)
+                        or is_manifest(path.name), ignore=rules)
+    found = list(walked.files)
     found = [path for path in sorted(root.rglob("*"))
-             if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES) or is_manifest(path.name))
+             if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES)
+                                    or is_manifest(path.relative_to(root).as_posix()))
+             if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES) or is_manifest(path.name) or is_schema(path.name))
              and not any(part.startswith(".") or part == "__pycache__"
                          for part in path.relative_to(root).parts)]
     # Resolution belongs here, because this is what knows which files
@@ -705,6 +813,9 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
     updated, closed, unread_claims = 0, 0, False
+    # Chunks whose vector the embedding cache answered: what a second map
+    # of a tree with one changed line does not pay the embedder for.
+    reused_vectors = 0
     # A map is of the tree as it is. A file is held under the identity
     # `sync` uses for it, so a changed file updates its memory rather
     # than adding a second, and the two commands recognise each other's.
@@ -721,6 +832,12 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     declared: dict[str, list[str]] = {}
     sites: list[tuple[str, str]] = []
     episode_of: dict[str, int] = {}
+    # What a document pointed at that nothing here answers to, and what
+    # two files would: said, never guessed at, like an unbound call.
+    unresolved_links: set[str] = set()
+    ambiguous_links: set[str] = set()
+    outside_links = 0
+    long_lines = 0
     for path in found[: args.limit]:
         raw = path.read_bytes()
         cut += len(raw) > args.max_bytes
@@ -741,8 +858,23 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         added = done.added
         if done.outcome == "duplicate":
             again += 1
+            if args.graph:
+                # Unchanged, so nothing is recorded again -- but what it
+                # declares and calls is still part of this tree, and a
+                # call in a changed file must still find it.
+                for claim in code_claims(text, where, language=code_language(where), resolve=resolve):
+                    if claim.predicate != DEFINES:
+                        continue
+                    qualified = claim.object.rsplit(":", 1)[-1]
+                    simple = qualified.rsplit(".", 1)[-1]
+                    if qualified.count(".") <= REACHABLE_DEPTH and unmistakable(simple):
+                        declared.setdefault(simple, []).append(claim.object)
+                for caller, spelt in unresolved_call_sites(text, where, language=code_language(where)):
+                    sites.append((caller, spelt))
+                    episode_of.setdefault(caller, added.episode_id)
             continue
         read += 1
+        reused_vectors += added.embeddings_reused
         updated += done.outcome == "updated"
         if done.claims_closed is None:
             unread_claims = True
@@ -769,7 +901,9 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
                     closed += retired.closed
                 unread_claims = unread_claims or retired.unread
             for claim in recorded:
-                if claim.predicate != DEFINES:
+                if claim.predicate != DEFINES or is_manifest(where):
+                    # A manifest declares a project, not something a call
+                    # could reach: `org.example:service` is no `service()`.
                     continue
                 qualified = claim.object.rsplit(":", 1)[-1]
                 simple = qualified.rsplit(".", 1)[-1]
@@ -784,22 +918,61 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
             # is only visible here.
             unbound.update(name for _, name in
                            unresolved_call_sites(text, where, language=code_language(where)))
+            if is_document(where):
+                links = doc_links(text, where, resolve=resolve)
+                unresolved_links.update(links.unresolved)
+                ambiguous_links.update(links.ambiguous)
+                outside_links += links.outside
+                long_lines += links.long_lines
             # A file with nothing to say and a file this cannot read are
             # different things, and a count that adds them together tells
             # a reader neither.
-            if said == 0 and code_language(where) is not None:
+            if said == 0 and is_document(where):
+                # A document has no parse failure: nothing to say is
+                # nothing to say.
+                quiet += 1
+            elif said == 0 and code_language(where) is not None:
                 if declarations(text, language=code_language(where)) or _parses(text):
                     quiet += 1
                 else:
                     unread += 1
+    # Under --watch, a file the last pass saw and this one did not is gone:
+    # its memory is forgotten and its claims closed, as sync does.
+    removed = 0
+    if watched is not None:
+        for gone in sorted(watched.get("seen", set()) - seen):
+            try:
+                episode = await engine.episode_by_key(args.space, sync_key(marker, gone))
+            except NotFound:
+                continue
+            await engine.forget(args.space, episode.episode_id, with_claims="exclude")
+            removed += 1
+        watched["seen"] = set(seen)
     # Reported, never asserted. See `code_resolution`: a single matching
     # declaration is a candidate, not evidence, and sampling said so.
     settled = resolve_across_files(sites, declared) if args.graph else None
     parts = [f"{read} file(s) read"]
     if updated:
         parts.append(f"{updated} updated")
+    if removed:
+        parts.append(f"{removed} gone since the last pass, forgotten")
     if again:
         parts.append(f"{again} already here")
+    if walked.ignored_files or walked.ignored_directories:
+        parts.append(f"{walked.ignored_files} file(s) and {walked.ignored_directories} directory(ies) left unread by "
+                     f"{', '.join(rules.files) if rules is not None and rules.files else 'the ignore rules'}"
+                     " (pass --no-ignore to read them)")
+    if walked.unreadable:
+        parts.append(f"{walked.unreadable} directory(ies) could not be read")
+    if walked.links:
+        parts.append(f"{walked.links} symbolic link(s) left alone: what a link points at is outside the root")
+    if rules is not None and rules.truncated:
+        parts.append("the ignore rules were read only as far as the bound allows, so this map may have read "
+                     "what the tree said not to")
+    if rules is not None and rules.unusable:
+        parts.append(f"{len(rules.unusable)} ignore pattern(s) could not be read and were passed over")
+    if reused_vectors:
+        parts.append(f"{reused_vectors} chunk embedding(s) reused, unchanged since last stored")
     if args.graph:
         parts.append(f"{claims} claim(s)")
         if closed:
@@ -812,6 +985,11 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
             parts.append(f"{unread} could not be read")
         if unbound:
             parts.append(f"{len(unbound)} call(s) left unbound")
+        if unresolved_links or ambiguous_links or outside_links:
+            parts.append(f"documents: {len(unresolved_links)} link(s) to files not read, {len(ambiguous_links)} that "
+                         f"two files would answer, {outside_links} outside the tree")
+        if long_lines:
+            parts.append(f"{long_lines} document line(s) too long to read for links")
         if settled is not None and (settled.edges or settled.ambiguous or settled.unknown):
             # What the blind spot is made of. "Unbound" alone says how
             # much was missed; this says how much of it could even be
@@ -826,9 +1004,16 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         parts.append(f"{len(withheld)} withheld as sensitive: "
                      + ", ".join(where for where, _ in sorted(withheld)))
     if getattr(args, "json", False):
-        print(_ledger_json({"read": read, "updated": updated, "deduplicated": again, "claims": claims,
+        print(_ledger_json({"read": read, "updated": updated, "removed": removed, "deduplicated": again, "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
+                            "ignored": walked.ignored_files, "ignored_directories": walked.ignored_directories,
+                            "ignore_files": list(rules.files) if rules is not None else [],
+                            "ignore_truncated": rules.truncated if rules is not None else False,
+                            "ignore_unusable": list(rules.unusable) if rules is not None else [],
+                            "unreadable_directories": walked.unreadable, "links": walked.links,
+                            "unresolved_links": sorted(unresolved_links), "ambiguous_links": sorted(ambiguous_links),
+                            "outside_links": outside_links, "long_document_lines": long_lines,
                             "withheld": [{"path": where, "reason": reason}
                                          for where, reason in sorted(withheld)],
                             # Candidates, not claims: nothing here was written
@@ -892,6 +1077,41 @@ async def filesystem_command(args: argparse.Namespace, engine: MemoryEngine, std
         raise InvalidInput(str(refused)) from None
 
 
+async def bench_questions_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Write a question set for a corpus, or measure the corpus with one.
+    Its own in-process store; the configured model is used only to write."""
+    from .. import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from ..bench.questions import QuestionSet, measure, store_corpus, write_questions
+    from .config import build_chat
+
+    if not pathlib.Path(args.root).is_dir():
+        raise InvalidInput(f"{args.root} is not a directory of documents")
+    if args.chunk_target < 1:
+        raise InvalidInput("--chunk-target must be a positive number of characters")
+    try:
+        ks = tuple(int(part) for part in args.k.split(",") if part.strip())
+    except ValueError:
+        raise InvalidInput("--k must be comma-separated integers") from None
+    model = build_chat(settings) if args.write else None
+    if args.write and model is None:
+        raise InvalidInput("writing questions needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                chunk_target=args.chunk_target).open()
+    try:
+        stored = await store_corpus(engine, "corpus", args.root)
+        if model is not None:
+            written = await write_questions(engine, "corpus", model, corpus=args.root, model_name=settings.chat_model or "",
+                                            per_chunk=args.per_chunk, max_chunks=args.max_chunks, seed=args.seed)
+            written.save(args.set)
+            print(json.dumps({**written.as_payload(), "stored": stored}) if args.json else written.text(), file=out)
+            return 0
+        report = await measure(engine, "corpus", QuestionSet.load(args.set), ks=ks)
+        print(json.dumps({**report.as_payload(), "stored": stored}) if args.json else report.text(), file=out)
+        return 0
+    finally:
+        await engine.close()
+
+
 async def bench_code_command(args: argparse.Namespace, settings: Settings, out) -> int:
     """Measure code retrieval on a corpus of files. Its own in-process
     store, so the configured one is neither read nor written."""
@@ -951,7 +1171,8 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
 
     report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
                              dataset=str(args.dataset), progress=progress, history=args.history,
-                             cross_queries=args.cross_queries, merge=args.merge, window=args.window)
+                             cross_queries=args.cross_queries, merge=args.merge, window=args.window,
+                             fusion=args.fusion)
     if not args.json:
         print("", file=sys.stderr)
     if args.out:
@@ -1102,7 +1323,7 @@ def _ledger_json(value: object, indent: int | None = 2) -> str:
     return json.dumps(value, ensure_ascii=False, indent=indent).encode("utf-8", "backslashreplace").decode("utf-8")
 
 
-async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
+async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, stdin=None) -> int:
     """The graph subcommands, on the same projection as the HTTP routes.
     Each reads the clock once, so what it shows and the instant it says it
     was read at agree. Exits 1 when a name is ambiguous or unknown."""
@@ -1236,6 +1457,26 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         print(_ledger_json(found_pairs.record(space, status="current", as_of=when)) if getattr(args, "json", False)
               else found_pairs.text, file=out)
         return 0
+    if command == "impact":
+        from ..entities.impact import impact
+
+        try:
+            text = read_source(args.diff, stdin if stdin is not None else sys.stdin)
+        except (OSError, UnicodeDecodeError) as error:
+            raise InvalidInput(f"cannot read a diff from {args.diff}: {error}") from error
+        result = await impact(engine, space, text, root=args.root, max_hops=args.max_hops, limit=args.limit)
+        if args.json:
+            print(json.dumps(result.record()), file=out)
+            return 0
+        print(result.why, file=out)
+        for touched in result.targets:
+            where = f" (lines {touched.lines[0]}-{touched.lines[1]})" if touched.name else ""
+            print(f"  touched  {touched.asked}{where}: {touched.status}, {touched.reached} rest on it", file=out)
+        for reach in result.reached:
+            print(f"  {reach.depth}  {reach.label}  ({reach.through} {reach.via})", file=out)
+        if result.by_depth:
+            print("reached: " + ", ".join(f"{count} at {depth} hop(s)" for depth, count in sorted(result.by_depth.items())), file=out)
+        return 0
     if command == "affected":
         from ..entities.affected import affected
 
@@ -1325,6 +1566,40 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
     if args.command == "graph":
         return await graph_command(args, engine, out)
+    if args.command == "import-url":
+        from ..ingestion.web import WebLimits, ingest_url
+
+        if settings is None or not settings.url_import:
+            raise InvalidInput("URL import is off; start with SCONE_URL_IMPORT=1 to fetch pages")
+        imported = await ingest_url(engine, space, args.url, limits=WebLimits(allow_private=settings.url_import_private))
+        if args.json:
+            emit(imported.record())
+        else:
+            print(f"imported {imported.url} as {imported.document.format} ({imported.bytes} bytes, "
+                  f"{imported.document.segments} segment(s)) into episode {imported.document.added.episode_id}", file=out)
+        return 0
+    if args.command == "summarize":
+        from .config import build_chat
+        from ..retrieval.summary_tree import build_summary_tree
+
+        model = build_chat(settings) if settings is not None else None
+        if model is None:
+            raise InvalidInput("summarize needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+        tree = await build_summary_tree(engine, model, space, args.episode_id, fan_in=args.fan_in,
+                                        max_levels=args.max_levels, store=not args.dry_run,
+                                        model_name=settings.chat_model or "")
+        if args.json:
+            emit(tree.record())
+            return 0
+        print(f"{tree.chunks} chunk(s), {len(tree.nodes)} summary node(s) over {tree.levels} level(s)"
+              f"{' (unjoined)' if tree.unjoined else ''}, {tree.model_calls} model call(s)"
+              f"{', stored' if tree.stored else ', not stored'}", file=out)
+        for reason in tree.reasons:
+            print(f"  {reason}", file=out)
+        if tree.root is not None:
+            print(tree.root.text, file=out)
+        return 0
+        return await graph_command(args, engine, out, stdin)
 
     if args.command == "sync-directory":
         from .directory_cli import run_directory_sync
@@ -1357,7 +1632,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     space, raw, kind=args.kind, source=args.source, tags=args.tag,
                     created_at=args.created_at, metadata=metadata,
                     attachment_ids=[attachment.attachment_id] if attachment else [],
-                    dedup_key=args.dedup_key, replace=args.replace,
+                    dedup_key=args.dedup_key, replace=args.replace, chunking=args.chunking,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)
@@ -1434,11 +1709,26 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             for lane in {lane for part in parted.per_part for lane in part.degraded}:
                 print(f"degraded: {lane}", file=sys.stderr)
             return 0
+        inferred = None
+        if args.infer:
+            from datetime import datetime, timezone
+
+            from ..retrieval.hints import apply_scope, infer_scope
+
+            asked_scope = infer_scope(args.query, now=datetime.now(timezone.utc))
+            known_tags = await engine.tags(space) if asked_scope.tags else None
+            searched = apply_scope(asked_scope, since=args.since, until=args.until, kind=args.kind, tags=list(args.tag),
+                                   source_prefix=args.source_prefix, known_tags=known_tags)
+            args.since, args.until, args.kind = searched.since, searched.until, searched.kind
+            args.source_prefix, args.tag = searched.source_prefix, list(searched.tags)
+            inferred = searched.record(asked_scope)
+            inferred_rows: list[dict[str, str]] = [r.record() for r in searched.applied]
+            withheld_rows: list[str] = [f"{r.filter}={r.value} ({r.words}): {why}" for r, why in searched.withheld]
         result = await engine.recall(
             space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
-            rerank=not args.no_rerank, graph_boost=args.graph_boost,
+            rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
         )
         kept = None
         opened = None
@@ -1483,11 +1773,21 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             result = result.model_copy(update={"items": list(inside.items)})
         if args.json:
             said = result.model_dump() | {"context_reduction": result.context_reduction}
+            if args.highlight:
+                from ..retrieval.highlights import highlights
+
+                said["highlights"] = [marks.model_dump() for marks in highlights(result.items, args.query)]
             emit(said | ({"merged": _staged(joined.record())} if joined else {})
                       | ({"widened": _staged(opened.record())} if opened else {})
                       | ({"withheld": _staged(kept.record())} if kept else {})
-                      | ({"code_context": _staged(inside.record())} if inside else {}))
+                      | ({"code_context": _staged(inside.record())} if inside else {})
+                      | ({"inferred": inferred} if inferred is not None else {}))
             return 0
+        if inferred is not None:
+            print("inferred: " + (", ".join(f"{r['filter']}={r['value']} ({r['words']})" for r in inferred_rows) if inferred_rows
+                                  else "nothing applied"), file=out)
+            for row in withheld_rows:
+                print(f"withheld: {row}", file=out)
         if kept is not None:
             print(kept.why, file=out)
         if opened is not None:
@@ -1512,11 +1812,24 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         for f in result.history:
             until = f.valid_until[:10] if f.valid_until else "?"
             print(f"was   {f.subject} {f.predicate} {f.object}  ({f.valid_from[:10]} to {until}; {f.closed_reason})", file=out)
-        for item in result.items:
+        marked = None
+        if args.highlight:
+            from ..retrieval.highlights import highlights
+
+            marked = highlights(result.items, args.query)
+        for position, item in enumerate(result.items):
             sim = f" sim={item.similarity:.2f}" if item.similarity is not None else ""
             print(f"{item.score:.2f}{sim}  {item.created_at[:10]}  #{item.episode_id}  {item.text.strip()[:200]}", file=out)
+            if marked is not None:
+                words = list(dict.fromkeys(item.text[span.start:span.end] for span in marked[position].spans))
+                more = " and more" if marked[position].truncated else ""
+                print(f"      matched: {', '.join(words) or 'no word of the question'}{more}", file=out)
         for d in result.degraded:
             print(f"degraded: {d}", file=sys.stderr)
+        if result.narrowing is not None and result.narrowing.window_exhausted:
+            n = result.narrowing
+            print(f"note: the narrowing removed {n.postfiltered_out} candidate(s) and a lane's window of "
+                  f"{max(n.vector_window, n.text_window)} was full when it did; memories that fit may lie deeper", file=out)
         if result.low_confidence:
             top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)
@@ -1598,6 +1911,27 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             return 2
         receipt = await engine.delete_space(space)
         emit({"deleted": space, **receipt.model_dump()}) if args.json else print(f"deleted space {space}: {space_line(receipt)}", file=out)
+        return 0
+
+    if args.command == "forget-matching":
+        conditions = json.loads(args.conditions) if args.conditions else None
+        bulk = await engine.forget_matching(space, source_prefix=args.source_prefix, tags=args.tag,
+                                              conditions=conditions, kind=args.kind, limit=args.limit, apply=args.apply,
+                                              selection=args.selection, with_claims=args.with_claims)
+        if args.json:
+            emit(bulk.model_dump())
+            return 0
+        verb = "forgot" if bulk.applied else "would forget"
+        count = len(bulk.forgotten) if bulk.applied else len(bulk.episode_ids)
+        print(f"{verb} {count} of {bulk.matched} matching source(s): {bulk.chunks} chunk(s), "
+              f"{bulk.attachments_released} attachment(s) released, {bulk.facts_citing} claim(s) and "
+              f"{bulk.links_citing} link(s) cite them", file=out)
+        if bulk.pass_limited:
+            print(f"the pass limit of {args.limit} bit; run again for the rest", file=out)
+        if not bulk.selection_complete:
+            print("the walk stopped before reading every source; more may match", file=out)
+        if not bulk.applied:
+            print(f"to forget exactly these, run again with --apply --selection {bulk.selection}", file=out)
         return 0
 
     if args.command == "forget":
@@ -1900,9 +2234,10 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         serve(settings)  # same SQLite default as the other commands
         return 0
     if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "bench-route",
-                        "bench-parts", "calibrate", "tune"):
+                        "bench-parts", "bench-questions", "calibrate", "tune"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
+                   "bench-questions": bench_questions_command,
                    "bench-route": route_command, "bench-parts": parts_command,
                    "calibrate": calibrate_command, "tune": tune_command}[args.command]
         try:
@@ -1926,6 +2261,8 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
     except SconeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":

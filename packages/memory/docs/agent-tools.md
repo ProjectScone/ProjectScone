@@ -14,11 +14,11 @@ For explicit native callback suspension and restart, see
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same fourteen contracts: `search_memory`, `add_memory`, `read_profile`,
+render the same fifteen contracts: `search_memory`, `add_memory`, `read_profile`,
 `trace_memory`, the eight entity-graph reads `graph_context`,
 `explain_entity`, `connect_entities`, `graph_schema`, `graph_match`,
 `graph_overview`, `graph_changes` and `find_duplicates`, the graph's own
-`graph_health`, and the computed `temporal_answer`. Hosts can
+`graph_health` and `graph_affected`, and the computed `temporal_answer`. Hosts can
 allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
@@ -46,8 +46,9 @@ not certified. Source text remains untrusted data for the receiving model.
 
 The graph reads are the ones the MCP server offers as `memory_graph_context`,
 `memory_entity`, `memory_connections`, `memory_graph_schema`,
-`memory_graph_match`, `memory_graph_overview`, `memory_graph_changes` and
-`memory_entity_duplicates`, beside the computed `memory_temporal_answer`:
+`memory_graph_match`, `memory_graph_overview`, `memory_graph_changes`,
+`memory_entity_duplicates`, `memory_graph_health` and
+`memory_graph_affected`, beside the computed `memory_temporal_answer`:
 
 - `list_path`, `read_path` and `search_paths` walk the space's tree:
   `/episodes`, `/facts`, `/entities` and `/notes`. Listing and reading
@@ -118,6 +119,13 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
   on nothing, kinds that disagree or are missing, entities nothing links
   to, predicates used once, and names that may be one thing. It is the
   `/v1/graph/health` JSON, and changes nothing.
+- `graph_affected` says what rests on a symbol, module, file or package:
+  everything that calls, imports, inherits, mixes in, depends on or
+  develops with it, nearest first, with how deep it walked (`max_hops`,
+  1 to 8), what it could not list (`limit` 1 to 1000, `max_bytes` 1,024
+  to 64,000 for the record) and when nothing here rests on the name. A
+  name is at most 200 characters; an ambiguous one is refused with its
+  candidates. It is the `scone graph affected` JSON.
 - `temporal_answer` answers a question about dates by computation: how long
   between two events, how long ago one was, which came first, what order
   they were in. Each event is grounded to a passage and the day it records,
@@ -162,6 +170,38 @@ ineligible seeds return empty evidence; timeouts, changed revisions, and store
 failures return an unavailable result without partial quotes. Direct adapter
 writes require adapter transaction discipline. Coverage describes this seed's
 bounded neighborhood, never completeness of an answer to an arbitrary query.
+
+## Offering a few tools of many
+
+A host with eighteen tools puts eighteen schemas in front of the model
+on every turn; a host with two hundred cannot, and a model shown two
+hundred chooses worse than one shown eight. `ToolBox.offer(query,
+limit=8, always=(...))` chooses the tools a turn needs the way the
+reference framework's object index retrieves tools: each tool is
+embedded once as its name and its sentence with the engine's embedder,
+the query the same way, and the closest are offered, with a word of the
+query that is in a tool's name or sentence counting too (up to 0.2 per
+word against a perfect vector match of 1.0, by how few tools share the
+word; the lexical lane's stopwords count for nothing) and a tool named
+whole in the query (`search_memory`) given 0.5 on top. Under the hash
+embedder the vectors are the words too, so "search memory for …" offers
+`search_memory`; under a model embedder a tool the vectors put clearly
+closer can still come first. The `always` tools come first whatever
+the query, and past `limit` if there are more of them than that. The
+selection says each offered tool's score, similarity, matched words and
+whether it was named, the score of every tool left out, the embedder,
+and, when no tool scored above nothing, that the order beyond the
+always-on tools is not a ranking (`record()`); `box.openai(selection.names)`
+/ `box.anthropic(selection.names)` render just those. An offer is a
+suggestion to the host, never a gate: `run` runs any tool the toolbox
+holds.
+
+```python
+box = ToolBox(engine, "default")
+chosen = await box.offer("what is connected to Acme in the graph?", limit=6, always=["search_memory"])
+schema = box.openai(chosen.names)        # six schemas, search_memory first
+print(chosen.record()["left_out"])       # the tools not offered, so a host can see why
+```
 
 ## Scoped read tools
 

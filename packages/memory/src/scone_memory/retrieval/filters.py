@@ -15,7 +15,14 @@ silently stop filtering:
 
 An absent key satisfies nothing, negation included. A memory with no
 priority is not a memory of priority zero, and "not a draft" must not
-quietly match every memory that has no status at all.
+quietly match every memory that has no status at all. The one exception
+is asked for by name: `absent` is the test a missing key answers, and
+its negation is exactly `present`.
+
+Text compares exactly unless a condition says `fold`, and then both
+sides are compared under Unicode case folding, so "Straße" is "STRASSE"
+and a Kelvin sign is a k. SQLite can fold only ASCII, so for any value
+outside it the clause keeps the row and the second pass decides.
 
 Values are stored as text, so "10" sorts before "9". A numeric test
 parses both sides first, and a value that is not a number fails the
@@ -38,10 +45,15 @@ MAX_CONDITIONS = 200
 MAX_DEPTH = 8
 
 #: The tests a condition can make, and what each does to one value.
-TESTS = ("is", "has", "in", "above", "below", "at_least", "at_most", "present")
+TESTS = ("is", "has", "in", "above", "below", "at_least", "at_most", "present", "absent")
+#: The tests `fold` applies to: the ones that compare text.
+FOLDABLE = frozenset({"is", "has", "in"})
+#: A stored value holding anything outside printable ASCII, which SQLite's
+#: lower() does not fold. Such a row is kept for the second pass.
+BEYOND_ASCII = "*[^ -~]*"
 #: The tests SQLite can make exactly. The rest narrow generously and are
 #: settled by a second pass in Python.
-EXACT = frozenset({"is", "has", "in", "present"})
+EXACT = frozenset({"is", "has", "in", "present", "absent"})
 #: Anything outside this cannot be part of a number, so a value holding
 #: one is not one, whatever CAST would make of it.
 NOT_A_NUMBER = "*[^0-9.eE+-]*"
@@ -74,9 +86,14 @@ class Condition:
     test: str
     value: object
     negate: bool = False
+    #: Compare text under Unicode case folding.
+    fold: bool = False
 
     def matches(self, metadata: Mapping[str, str]) -> bool:
         found = metadata.get(self.field)
+        if self.test == "absent":
+            # The one test a missing key answers; negated, it is present.
+            return (found is None) != self.negate
         if found is None:
             # Absent satisfies nothing, and inverting nothing is still
             # nothing: a key that was never recorded cannot answer.
@@ -87,12 +104,15 @@ class Condition:
         if self.test == "present":
             return True
         if self.test == "is":
-            return found == self.value
+            assert isinstance(self.value, str)
+            return found.casefold() == self.value.casefold() if self.fold else found == self.value
         if self.test == "has":
             assert isinstance(self.value, str)
-            return self.value in found
+            return self.value.casefold() in found.casefold() if self.fold else self.value in found
         if self.test == "in":
             assert isinstance(self.value, Collection)
+            if self.fold:
+                return found.casefold() in {str(item).casefold() for item in self.value}
             return found in self.value
         number = _stored_number(found)
         if number is None:
@@ -118,16 +138,35 @@ class Condition:
         Being generous costs a row that the second pass then drops. Being
         strict loses a memory that should have been found, and nothing
         later can put it back, so every choice here leans the first way."""
+        if self.test == "absent":
+            present, key = self._exists(column, "", [])
+            return (present, key) if self.negate else (f"NOT {present}", key)
         here, params = self._test(column)
         if not self.negate:
             return here, params
         present, key = self._exists(column, "", [])
-        if self.test in EXACT:
+        if self.test in EXACT and not self.fold:
             # The test is exact, so its opposite is too. The key still has
             # to be there: absent answers nothing, either way round.
             return f"(NOT {here} AND {present})", [*params, *key]
         # A generous test negated would be strict. Ask only for the key.
         return present, key
+
+    def _folded(self, column: str) -> tuple[str, list[object]]:
+        """Generous by construction: an ASCII comparison under lower(), or
+        any stored value beyond ASCII, which the second pass folds properly.
+        A query value beyond ASCII cannot be folded here at all, so only the
+        key is asked for."""
+        wanted = [self.value] if isinstance(self.value, str) else list(self.value)  # type: ignore[call-overload]
+        if not all(str(item).isascii() for item in wanted):
+            return self._exists(column, "", [])
+        folded = [str(item).lower() for item in wanted]
+        if self.test == "is":
+            return self._exists(column, " AND (lower(f.value) = ? OR f.value GLOB ?)", [folded[0], BEYOND_ASCII])
+        if self.test == "has":
+            return self._exists(column, " AND (instr(lower(f.value), ?) > 0 OR f.value GLOB ?)", [folded[0], BEYOND_ASCII])
+        slots = ", ".join("?" for _ in folded)
+        return self._exists(column, f" AND (lower(f.value) IN ({slots}) OR f.value GLOB ?)", [*folded, BEYOND_ASCII])
 
     def _exists(self, column: str, check: str, params: list[object]) -> tuple[str, list[object]]:
         return (f"EXISTS (SELECT 1 FROM json_each({column}) AS f"
@@ -136,6 +175,8 @@ class Condition:
     def _test(self, column: str) -> tuple[str, list[object]]:
         if self.test == "present":
             return self._exists(column, "", [])
+        if self.fold:
+            return self._folded(column)
         if self.test == "is":
             return self._exists(column, " AND f.value = ?", [self.value])
         if self.test == "has":
@@ -249,19 +290,24 @@ def _condition(spec: Mapping) -> Condition:
     if not isinstance(field, str) or not METADATA_KEY.match(field):
         raise InvalidInput("a condition needs a field naming a metadata key")
     named = [test for test in TESTS if test in spec]
-    if len(named) != 1 or set(spec) - {"field", "not", *named}:
+    if len(named) != 1 or set(spec) - {"field", "not", "fold", *named}:
         raise InvalidInput(f"a condition makes exactly one test of its field, one of: {', '.join(TESTS)}")
     test, value = named[0], spec[named[0]]
     negate = spec.get("not", False)
     if not isinstance(negate, bool):
         raise InvalidInput("not must be true or false")
-    return Condition(field=field, test=test, value=_value(test, field, value), negate=negate)
+    fold = spec.get("fold", False)
+    if not isinstance(fold, bool):
+        raise InvalidInput("fold must be true or false")
+    if fold and test not in FOLDABLE:
+        raise InvalidInput(f"fold compares text, so it goes with is, has or in, not {test}")
+    return Condition(field=field, test=test, value=_value(test, field, value), negate=negate, fold=fold)
 
 
 def _value(test: str, field: str, value: object) -> object:
-    if test == "present":
+    if test in ("present", "absent"):
         if value is not True:
-            raise InvalidInput(f"present is a question, so {field}'s present must be true")
+            raise InvalidInput(f"{test} is a question, so {field}'s {test} must be true")
         return True
     if test in ("is", "has"):
         if not isinstance(value, str):
