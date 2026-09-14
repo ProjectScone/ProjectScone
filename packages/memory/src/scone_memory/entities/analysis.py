@@ -16,6 +16,7 @@ merely share a label. Weights are the number of facts behind each pair.
 
 from __future__ import annotations
 
+import math
 from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 import hashlib
@@ -23,7 +24,15 @@ from typing import Literal
 
 from .project import Entity, EntityProjection
 
-ANALYSIS_VERSION = "scone.analysis/1"
+ANALYSIS_VERSION = "scone.analysis/2"
+#: A community over this share of the analysed graph is re-partitioned on its own links...
+_MAX_SHARE = 0.25
+#: ...once it has at least this many members, so a small graph is never split for being small.
+_MIN_SPLIT = 10
+#: A community of at least _NESTED_MIN members is re-partitioned on its own links when that
+#: partition reaches this modularity: it holds communities of its own.
+_NESTED_MODULARITY = 0.3
+_NESTED_MIN = 50
 _EXACT_BETWEENNESS = 500
 _SAMPLED_SOURCES = 64
 _MAX_LEVELS = 10
@@ -103,6 +112,22 @@ class AnalysisCoverage:
     #: of the partition and the central ranking, attached to the community
     #: of what names them most, and listed apart.
     external_entities: int = 0
+    #: Communities over a quarter of the graph split on their own links.
+    split_oversized: int = 0
+    #: Large communities holding communities of their own, split on their own links.
+    split_nested: int = 0
+    #: Communities a guard looked at whose own partition was one piece, or (for a
+    #: large one) too weak to be structure, kept whole.
+    unsplittable: int = 0
+    #: With ``detach_hubs``: the degree percentile above which entities were
+    #: left out while communities were found, and how many were.
+    detach_hubs: float | None = None
+    hubs_detached: int = 0
+    #: When a guard split a community: the modularity of the partition before
+    #: it did, beside the final one. Finer communities often score lower on
+    #: modularity over the whole graph, and a reader weighing them should see
+    #: both. None when no guard split anything.
+    modularity_before_guards: float | None = None
 
     def record(self) -> dict[str, object]:
         """What the analysis covered, for a caller to show beside its scores:
@@ -111,7 +136,11 @@ class AnalysisCoverage:
                 "isolated_entities": self.isolated_entities, "truncated": self.truncated,
                 "reasons": list(self.reasons), "betweenness": self.betweenness,
                 "betweenness_estimated": self.betweenness != "exact", "levels": self.levels,
-                "resolution": self.resolution, "external_entities": self.external_entities}
+                "resolution": self.resolution, "external_entities": self.external_entities,
+                "split_oversized": self.split_oversized,
+                "split_nested": self.split_nested, "unsplittable": self.unsplittable,
+                "detach_hubs": self.detach_hubs, "hubs_detached": self.hubs_detached,
+                "modularity_before_guards": self.modularity_before_guards}
 
 
 @dataclass(frozen=True)
@@ -231,6 +260,49 @@ def _partition(graph: Adjacency, resolution: float) -> tuple[list[list[str]], in
     return sorted(parts, key=lambda part: (-len(part), part[0])), levels
 
 
+def _induced(graph: Adjacency, members: list[str]) -> Adjacency:
+    inside = set(members)
+    return {node: {other: weight for other, weight in graph[node].items() if other in inside} for node in members}
+
+
+def _guarded(graph: Adjacency, parts: list[list[str]], resolution: float) -> tuple[list[list[str]], dict[str, int]]:
+    """``parts`` with two kinds of community re-partitioned on their own links, at the same resolution.
+
+    - One over a quarter of ``graph`` (and at least ``_MIN_SPLIT`` members) is
+      split into whatever pieces its own links give, since a map by community
+      draws it as one blob.
+    - One of at least ``_NESTED_MIN`` members is split when its own partition
+      reaches ``_NESTED_MODULARITY``: modularity over a large graph merges
+      small modules into one community, and this one holds several.
+
+    The share of member pairs linked is not the test for the second: in a
+    sparse graph it falls with size, about 2/n, so it fires on nearly every
+    large community whatever its structure. The resolution is never raised to
+    force a split, because high enough it cuts a tight clique. A community a
+    guard looked at and kept whole is counted, so a guard never reads as
+    having found structure it did not."""
+    fired = {"split_oversized": 0, "split_nested": 0, "unsplittable": 0}
+    largest = max(_MIN_SPLIT, len(graph) * _MAX_SHARE)
+    guarded: list[list[str]] = []
+    for part in parts:
+        oversized = len(part) > largest
+        if not oversized and len(part) < _NESTED_MIN:
+            guarded.append(part)
+            continue
+        inside = _induced(graph, part)
+        pieces, _ = _partition(inside, resolution)
+        strong = len(pieces) > 1 and _modularity(
+            inside, {node: str(index) for index, piece in enumerate(pieces) for node in piece}, resolution
+        ) >= _NESTED_MODULARITY
+        if len(pieces) < 2 or not (oversized or strong):
+            fired["unsplittable"] += 1
+            guarded.append(part)
+            continue
+        fired["split_oversized" if oversized else "split_nested"] += 1
+        guarded.extend(pieces)
+    return sorted(guarded, key=lambda part: (-len(part), part[0])), fired
+
+
 def _modularity(graph: Adjacency, membership: dict[str, str], resolution: float = 1.0) -> float:
     total = sum(sum(neighbours.values()) for neighbours in graph.values())
     if total == 0:
@@ -313,27 +385,36 @@ def _community_id(members: list[str]) -> str:
 #: Analyses kept by projection digest and resolution: one is the same for an
 #: unchanged graph, and the work grows with the graph.
 _KEPT = 8
-_ANALYSES: OrderedDict[tuple[str, float], GraphAnalysis] = OrderedDict()
+_ANALYSES: OrderedDict[tuple[str, float, float | None], GraphAnalysis] = OrderedDict()
 
 
-def cached_analysis(projection: EntityProjection, resolution: float = 1.0) -> GraphAnalysis:
-    """The projection's analysis, computed once per digest and resolution."""
-    key = (projection.digest, float(resolution))
+def cached_analysis(projection: EntityProjection, resolution: float = 1.0,
+                    detach_hubs: float | None = None) -> GraphAnalysis:
+    """The projection's analysis, computed once per digest, resolution and hub percentile."""
+    key = (projection.digest, float(resolution), detach_hubs)
     if key in _ANALYSES:
         _ANALYSES.move_to_end(key)
         return _ANALYSES[key]
-    found = _ANALYSES[key] = analyze_projection(projection, resolution=resolution)
+    found = _ANALYSES[key] = analyze_projection(projection, resolution=resolution, detach_hubs=detach_hubs)
     while len(_ANALYSES) > _KEPT:
         _ANALYSES.popitem(last=False)
     return found
 
 
 def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_000,
-                       max_surprises: int = 20, max_suggestions: int = 10, resolution: float = 1.0) -> GraphAnalysis:
+                       max_surprises: int = 20, max_suggestions: int = 10, resolution: float = 1.0,
+                       detach_hubs: float | None = None) -> GraphAnalysis:
     """``resolution`` sets how fine the communities are: above 1 favours
-    smaller ones, below 1 larger ones, as in modularity with a resolution."""
+    smaller ones, below 1 larger ones, as in modularity with a resolution.
+
+    ``detach_hubs``, a degree percentile from 50 to 100, leaves the entities
+    linked to more neighbours than that out while communities are found, so
+    an entity everything touches does not pull unrelated groups into one;
+    each then joins the community most of its link weight goes to."""
     if not resolution > 0:
         raise ValueError("resolution must be positive")
+    if detach_hubs is not None and (not isinstance(detach_hubs, (int, float)) or not 50 <= detach_hubs <= 100):
+        raise ValueError("detach_hubs is a degree percentile from 50 to 100")
     entities = {entity.entity_id: entity for entity in projection.entities}
     pairs: dict[tuple[str, str], int] = defaultdict(int)
     for relation in projection.relations:
@@ -362,7 +443,32 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
     external = external_entities(projection) & kept
     own: Adjacency = {node: {other: weight for other, weight in graph[node].items() if other not in external}
                       for node in graph if node not in external}
-    parts, levels = _partition(own, resolution)
+    # Hubs are the graph's own entities with the most links to each other:
+    # an external is already out of the partition, and what a file imports
+    # from outside pulls no two of its communities together.
+    hubs: set[str] = set()
+    if detach_hubs is not None and own:
+        degrees = sorted(len(neighbours) for neighbours in own.values())
+        cut = degrees[max(0, math.ceil(len(degrees) * detach_hubs / 100) - 1)]  # nearest-rank percentile
+        hubs = {node for node, neighbours in own.items() if len(neighbours) > cut}
+    without = {node: {other: weight for other, weight in neighbours.items() if other not in hubs}
+               for node, neighbours in own.items() if node not in hubs}
+    parts, levels = _partition(without, resolution)
+    found = parts
+    parts, fired = _guarded(without, parts, resolution)
+    before = (_modularity(without, {node: str(index) for index, part in enumerate(found) for node in part}, resolution)
+              if fired["split_oversized"] or fired["split_nested"] else None)
+    for hub in sorted(hubs):
+        index_of = {node: index for index, part in enumerate(parts) for node in part}
+        pull: Counter[int] = Counter()
+        for other, weight in own[hub].items():
+            if other in index_of:
+                pull[index_of[other]] += weight
+        if pull:
+            parts[min(pull, key=lambda index: (-pull[index], index))].append(hub)
+        else:
+            parts.append([hub])
+    parts = sorted((sorted(part) for part in parts), key=lambda part: (-len(part), part[0]))
     membership = {node: _community_id(part) for part in parts for node in part}
     # An external belongs, for reading, with the community that names it
     # most (by the weight of what names it; a tie to the smaller id). One
@@ -490,4 +596,5 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         tuple(communities), tuple(importance), surprising,
         tuple(suggestions[:max_suggestions]),
         AnalysisCoverage(len(strength), len(kept), len(isolated), bool(reasons), tuple(reasons), method, levels,
-                         resolution, len(external)), external=frozenset(external))
+                         resolution, len(external), fired["split_oversized"], fired["split_nested"],
+                         fired["unsplittable"], detach_hubs, len(hubs), before), external=frozenset(external))

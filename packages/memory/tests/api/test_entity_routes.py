@@ -173,7 +173,7 @@ async def teams():
 def test_the_report_names_communities_central_entities_and_surprises(teams):
     client, bridge = teams
     report = client.get("/v1/graph/report", headers=auth()).json()
-    assert report["analysis"]["version"] == "scone.analysis/1" and report["analysis"]["modularity"] > 0.3
+    assert report["analysis"]["version"] == "scone.analysis/2" and report["analysis"]["modularity"] > 0.3
     assert len(report["communities"]) == 2 and all(c["label"] for c in report["communities"])
     assert report["surprising_connections"][0]["fact_ids"] == [bridge.fact_id]
     assert {e["key"] for e in report["central_entities"][:2]} <= {"dev", "eli", "ana", "ben", "cho", "fay", "gus", "hal"}
@@ -196,7 +196,7 @@ def test_groupings_are_computed_and_kept_apart_from_recorded_relations(teams):
     assert "groupings" not in plain
     view = client.get("/v1/graph/knowledge", params={"groupings": "true", "limit": 6}, headers=auth()).json()
     groupings = view["groupings"]
-    assert groupings["basis"] == "computed" and groupings["method"] == "scone.analysis/1"
+    assert groupings["basis"] == "computed" and groupings["method"] == "scone.analysis/2"
     shown = {entity["id"] for entity in view["entities"]}
     assert set(groupings["membership"]) == shown
     assert {item["entity_id"] for item in groupings["importance"]} == shown
@@ -204,7 +204,9 @@ def test_groupings_are_computed_and_kept_apart_from_recorded_relations(teams):
     assert groupings["coverage"] == {"entities_total": 8, "entities_analysed": 8, "isolated_entities": 0,
                                      "truncated": False, "reasons": [], "betweenness": "exact",
                                      "betweenness_estimated": False, "levels": groupings["coverage"]["levels"],
-                                     "resolution": 1.0, "external_entities": 0}
+                                     "resolution": 1.0, "external_entities": 0, "split_oversized": 0,
+                                     "split_nested": 0, "unsplittable": 0, "detach_hubs": None,
+                                     "hubs_detached": 0, "modularity_before_guards": None}
 
 
 async def test_estimated_betweenness_is_disclosed_wherever_it_is_shown():
