@@ -104,3 +104,21 @@ def test_a_deep_outline_of_long_titles_fits_a_metadata_value_keeping_the_innermo
     document = asyncio.run(BuiltinDocumentParser().parse(with_outline(build), "deep.pdf"))
     section = document.segments[0].metadata["section"]
     assert len(section.encode()) <= 4096 and section.startswith("… > ") and section.endswith("7" + "章" * 255)
+
+
+def test_ocr_keeps_the_outline_status_beside_the_sections_it_keeps():
+    pytest.importorskip("pypdfium2")
+    import asyncio
+
+    from scone_memory.ingestion.pdf_ocr import OcrPdfOptions, OcrPdfParser
+
+    from .test_pdf_ocr import ObservedOcr
+
+    parsed = asyncio.run(OcrPdfParser(ObservedOcr(), options=OcrPdfOptions(mode="all_pages")).parse(
+        with_outline(chapters), PdfLimits()))
+    assert parsed.pages[2].section == ("Chapter 2", "Refunds") and parsed.outline == "read"
+
+
+def test_the_parser_identity_says_when_sections_came_from_bookmarks():
+    assert extract(with_outline(chapters), PdfLimits()).parser.endswith("+outline-v1")
+    assert "outline" not in extract(pdf_bytes(pages=PAGES), PdfLimits()).parser
