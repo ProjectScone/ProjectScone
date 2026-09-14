@@ -28,6 +28,7 @@
     SCONE_EMBED_CACHE          local: model cache dir, optional
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
+    SCONE_HEADING_CONTEXT=1        embed each chunk with the headings above it, or its file and declarations (off by default)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
     SCONE_RELATION_INVERSE=works_at:employs   which predicates are the other side of which
@@ -169,6 +170,7 @@ class Settings:
     distill_accept_at: Optional[float] = None
     derive: bool = False
     contextual_embeddings: bool = False
+    heading_context: bool = False
     table_context_embeddings: bool = False
     demote_restated: bool = True
     context_lane: bool = False
@@ -388,6 +390,7 @@ class Settings:
             derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
+            heading_context=env.get("SCONE_HEADING_CONTEXT") == "1",
             table_context_embeddings=env.get("SCONE_TABLE_CONTEXT_EMBEDDINGS") == "1",
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
@@ -789,6 +792,7 @@ async def build_in_process_engine(settings: Settings, embedder):
     return await MemoryEngine(
         InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
         contextual_embeddings=settings.contextual_embeddings,
+        heading_context=settings.heading_context,
         table_context_embeddings=settings.table_context_embeddings,
         similarity_floor=settings.similarity_floor,
         demote_restated=settings.demote_restated,
@@ -980,6 +984,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         events=events,
         record_queries=settings.events_queries == "text",
         contextual_embeddings=settings.contextual_embeddings,
+        heading_context=settings.heading_context,
         table_context_embeddings=settings.table_context_embeddings,
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,

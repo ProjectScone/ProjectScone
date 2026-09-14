@@ -767,6 +767,30 @@ invariant test that should have caught the first asserted exactly the
 right property and passed, because its fixture never contained the
 junction.
 
+## Embedding a chunk with the headings above it
+
+A chunk cut from a long document loses what the document said it was
+about: "within 30 days" under "## Refund policy" in "# Chapter 4" is,
+once cut, only "within 30 days". With `heading_context=True`
+(`SCONE_HEADING_CONTEXT=1`) each chunk's embedding input starts with the
+path of headings above it, outermost first, and a code chunk's starts
+with its file and the declarations it sits inside.
+
+- **Only what is embedded changes.** Stored text is untouched, so recall
+  still returns the exact excerpt.
+- **The path is bounded.** At most `MAX_HEADING_CONTEXT_BYTES`; a longer
+  path keeps its innermost headings, and the receipt counts the chunks it
+  was cut for.
+- **It is part of the vector writer's identity.** Vectors embedded with
+  headings and vectors embedded without them never answer one search
+  together: turning the setting on or off for an existing store reads as
+  a mismatch until the vectors are rebuilt.
+- **Off by default.** On the hash embedder, queries made of heading
+  titles found their chunk about twice as often and queries made of the
+  chunk's own words barely moved; the learned-embedder run has not been
+  done yet. Both halves and their limits are in
+  `bench-runs/heading-context-2026-09-13/results.md`.
+
 ## A recalled body, with the signature and imports that make it readable
 
 A chunk of code already says which declaration it came from —
