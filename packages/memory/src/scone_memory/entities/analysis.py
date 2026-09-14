@@ -34,13 +34,18 @@ _DAMPING = 0.85
 
 @dataclass(frozen=True)
 class Community:
+    """``members`` holds the graph's own members and, after them, the
+    externals attached for reading; the link counts and cohesion are of
+    the own members alone, since an attached external is not a tie the
+    partition made."""
+
     community_id: str
     label: str
     members: tuple[str, ...]
     top_entities: tuple[str, ...]
     internal_links: int
     boundary_links: int
-    #: Share of member pairs that are directly linked; None for one member.
+    #: Share of own-member pairs that are directly linked; None for one member.
     cohesion: float | None
     kinds: tuple[tuple[str, int], ...]
     predicates: tuple[tuple[str, int], ...]
@@ -359,16 +364,25 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
                       for node in graph if node not in external}
     parts, levels = _partition(own, resolution)
     membership = {node: _community_id(part) for part in parts for node in part}
-    # An external belongs, for reading, with what names it most.
-    for node in sorted(external):
-        namers = {other: weight for other, weight in graph[node].items() if other in membership}
-        if namers:
-            membership[node] = membership[max(namers, key=lambda other: (namers[other], other))]
+    # An external belongs, for reading, with the community that names it
+    # most (by the weight of what names it; a tie to the smaller id). One
+    # whose namers were all cut by the entity budget stands alone, as any
+    # linkless node did before.
     attached: dict[str, list[str]] = defaultdict(list)
+    alone: list[list[str]] = []
     for node in sorted(external):
-        if node in membership:
+        naming: Counter[str] = Counter()
+        for other, weight in graph[node].items():
+            if other in membership and other not in external:
+                naming[membership[other]] += weight
+        if naming:
+            membership[node] = min(naming, key=lambda community: (-naming[community], community))
             attached[membership[node]].append(node)
-    parts = [[*part, *attached[membership[part[0]]]] for part in parts]
+        else:
+            membership[node] = _community_id([node])
+            alone.append([node])
+    parts = [[*part, *attached[membership[part[0]]]] for part in parts] + alone
+    parts.sort(key=lambda part: (-len(part), part[0]))
     rank = _pagerank(graph)
     between, method = _betweenness(graph)
     predicates_by_node: dict[str, Counter[str]] = defaultdict(Counter)
@@ -378,19 +392,23 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
 
     communities = []
     for part in parts:
-        inside = set(part)
-        internal = sum(1 for node in part for neighbour in graph[node] if neighbour in inside) // 2
-        boundary = sum(1 for node in part for neighbour in graph[node] if neighbour not in inside)
+        # Links are counted among the graph's own members: an attached
+        # external is not a tie the partition made, and `typing` imported
+        # from two communities is not a link between them.
+        members = [node for node in part if node not in external] or list(part)
+        inside = set(members)
+        internal = sum(1 for node in members for neighbour in graph[node] if neighbour in inside) // 2
+        boundary = sum(1 for node in members for neighbour in graph[node]
+                       if neighbour not in inside and neighbour not in external)
         local = {node: sum(weight for neighbour, weight in graph[node].items() if neighbour in inside) for node in part}
         # Named by the graph's own members: a community is not called `typing`.
-        top = sorted((node for node in part if node not in external),
-                     key=lambda node: (-local[node], -rank.get(node, 0.0), node))[:3] or sorted(part)[:3]
+        top = sorted(members, key=lambda node: (-local[node], -rank.get(node, 0.0), node))[:3]
         kinds: Counter[str] = Counter(str(entities[node].kind) for node in part if entities[node].kind)
         predicates = sum((predicates_by_node[node] for node in part), Counter())
         communities.append(Community(
             membership[part[0]], " · ".join(entities[node].label for node in top), tuple(part), tuple(top),
             internal, boundary,
-            _round(2 * internal / (len(part) * (len(part) - 1))) if len(part) > 1 else None,
+            _round(2 * internal / (len(members) * (len(members) - 1))) if len(members) > 1 else None,
             tuple(sorted(kinds.items(), key=lambda item: (-item[1], item[0]))),
             tuple(sorted(predicates.items(), key=lambda item: (-item[1], item[0]))[:5])))
 
@@ -398,15 +416,21 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
     for node in graph:
         spread: Counter[str] = Counter()
         for neighbour, weight in graph[node].items():
-            spread[membership[neighbour]] += weight
+            # What an entity imports from outside the graph spreads it
+            # across nothing: only ties to the graph's own count.
+            if neighbour not in external:
+                spread[membership[neighbour]] += weight
         total = sum(spread.values())
-        participation = 1 - sum((value / total) ** 2 for value in spread.values()) if total else 0.0
+        participation = (1 - sum((value / total) ** 2 for value in spread.values())
+                         if total and node not in external else 0.0)
         importance.append(Importance(node, membership[node], len(graph[node]), strength[node], rank[node],
                                      between[node], _round(participation), node in external))
     importance.sort(key=lambda item: (-item.pagerank, item.entity_id))
 
     between_communities: Counter[tuple[str, str]] = Counter()
     for (left, right) in pairs:
+        if left in external or right in external:
+            continue
         if left in kept and right in kept and membership[left] != membership[right]:
             ends = sorted((membership[left], membership[right]))
             between_communities[(ends[0], ends[1])] += 1
@@ -442,6 +466,7 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         crossing = [relation for relation in projection.relations
                     if item.entity_id in (relation.subject_id, relation.object_id)
                     and relation.subject_id in kept and relation.object_id in kept
+                    and relation.object_id not in external
                     and membership[relation.subject_id] != membership[relation.object_id]]
         suggestions.append(Suggestion(
             "bridge", f"What role does {entities[item.entity_id].label} play between "

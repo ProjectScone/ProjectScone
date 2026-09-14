@@ -204,7 +204,7 @@ def test_groupings_are_computed_and_kept_apart_from_recorded_relations(teams):
     assert groupings["coverage"] == {"entities_total": 8, "entities_analysed": 8, "isolated_entities": 0,
                                      "truncated": False, "reasons": [], "betweenness": "exact",
                                      "betweenness_estimated": False, "levels": groupings["coverage"]["levels"],
-                                     "resolution": 1.0}
+                                     "resolution": 1.0, "external_entities": 0}
 
 
 async def test_estimated_betweenness_is_disclosed_wherever_it_is_shown():
