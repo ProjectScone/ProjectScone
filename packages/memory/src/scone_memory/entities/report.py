@@ -48,8 +48,14 @@ def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta:
     entities = {entity.entity_id: entity for entity in projection.entities}
     communities = {community.community_id: community for community in analysis.communities}
     hubs = _hubs(analysis, exclude_hubs)
-    ranked = [item for item in analysis.importance if item.entity_id not in hubs][:central]
-    bridging = sorted((item for item in analysis.importance if item.degree >= 2 and item.participation > 0.3),
+    # The graph's own things lead; what it only names (`typing`, a package,
+    # a cited record) is listed apart, by how much names it.
+    ranked = [item for item in analysis.importance if item.entity_id not in hubs and not item.external][:central]
+    external = sorted((item for item in analysis.importance if item.external),
+                      key=lambda item: (-item.degree, -item.weight, entities[item.entity_id].label.casefold(),
+                                        item.entity_id))[:central]
+    bridging = sorted((item for item in analysis.importance
+                       if item.degree >= 2 and item.participation > 0.3 and not item.external),
                       key=lambda item: (-item.participation, -item.betweenness, item.entity_id))[:10]
     return {
         "schema_version": REPORT_SCHEMA_VERSION, "space": projection.space, "projection": dict(meta),
@@ -60,7 +66,8 @@ def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta:
                      "basis": "computed", "coverage": analysis.coverage.record()},
         "summary": {"entities": len(projection.entities), "relations": len(projection.relations),
                     "attributes": len(projection.attributes), "communities": len(analysis.communities),
-                    "isolated_entities": analysis.coverage.isolated_entities},
+                    "isolated_entities": analysis.coverage.isolated_entities,
+                    "external_entities": analysis.coverage.external_entities},
         "communities": [{
             "id": community.community_id, "label": community.label, "size": len(community.members),
             "central": [_name(entities, member) for member in community.top_entities],
@@ -75,6 +82,10 @@ def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta:
             "betweenness": item.betweenness, "participation": item.participation} for item in ranked],
         "hubs_excluded": [{**_name(entities, item.entity_id), "degree": item.degree, "pagerank": item.pagerank}
                           for item in analysis.importance if item.entity_id in hubs],
+        "external_dependencies": [{
+            **_name(entities, item.entity_id), "named_by": item.degree, "weight": item.weight,
+            "community_id": item.community_id, "community": communities[item.community_id].label}
+            for item in external],
         "bridging_entities": [{
             **_name(entities, item.entity_id), "community_id": item.community_id,
             "participation": item.participation, "betweenness": item.betweenness} for item in bridging],
@@ -177,6 +188,9 @@ def render_markdown(report: Mapping[str, Any]) -> str:
              f"- {summary['communities']} communities (modularity {analysis['modularity']}, "
              f"resolution {analysis.get('resolution', 1.0):g}), "
              f"{summary['isolated_entities']} entities known only by their values"]
+    if summary.get("external_entities"):
+        lines.append(f"- {summary['external_entities']} entities named but never read (imported modules, packages, "
+                     f"cited records) are kept out of the communities and the central ranking, and listed apart")
     if analysis.get("exclude_hubs") is not None:
         lines.append(f"- Central entities leave out entities whose links are above the "
                      f"{analysis['exclude_hubs']:g}th percentile; they are listed under Hubs left out of the ranking")
@@ -202,6 +216,11 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         lines += ["", "## Hubs left out of the ranking", ""]
         lines += [f"- {literal(hub['label'])}: {hub['degree']} links, PageRank {hub['pagerank']}"
                   for hub in report.get("hubs_excluded") or []] or ["None: no entity is above that percentile."]
+    if report.get("external_dependencies"):
+        lines += ["", "## Named but never read", "", "What the graph leans on without holding it: by how many things name it.", "",
+                  "| Entity | Named by | Attached to |", "| --- | --- | --- |"]
+        lines += [f"| {literal(item['label'])} | {item['named_by']} | {literal(item['community'])} |"
+                  for item in report["external_dependencies"]]
     lines += ["", "## Surprising connections", ""]
     for surprise in report["surprising_connections"] or []:
         lines.append(f"- **{literal(surprise['subject']['label'])}** {literal(surprise['predicate'])} "

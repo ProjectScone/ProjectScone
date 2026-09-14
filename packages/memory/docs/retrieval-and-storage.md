@@ -1869,6 +1869,24 @@ Two parameters tune the analysis:
   everything links to otherwise leads every ranking. Excluded hubs stay
   in their communities.
 
+**What the graph names and never reads is kept apart, without asking.**
+In a code graph every file imports `typing`, so `typing` was the most
+central entity of the codebase, the strongest tie between any two
+communities, a "surprising connection" from each, and the middle of
+every drawing; `pydantic.BaseModel`, `json` and a cited `ADR-12` were
+close behind. An entity that is the object of `imports`, `depends_on`,
+`develops_with`, `cites`, `uses_type` or `references` and the subject of
+nothing at all is *external*: named here, read nowhere here (a module of
+the codebase is imported too, but it also defines its own things, so it
+is the graph's own). Externals are left out of the community partition
+(so modularity is the codebase's), attached for reading to the community
+that names each most, kept out of the central ranking, bridging entities
+and surprising connections, and listed apart under `external_dependencies`
+("Named but never read" in the Markdown), by how many things name them.
+The drawing spends its room on the graph's own entities first. The
+coverage says how many were set apart (`external_entities`); a graph of
+people and places has none.
+
 The report echoes both under `analysis`, and `analysis.coverage` carries
 `resolution`.
 
