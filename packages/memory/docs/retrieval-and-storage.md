@@ -683,6 +683,30 @@ with edges nobody can check is worse than a smaller graph. What it does
 resolve: a bare name that is one of the file's own declarations, and
 `self.method` inside the class that defines it.
 
+**Documents are in the graph too.** `map` reads `.md`, `.rst` and
+`.txt` files beside the code, and a document's links become claims the
+way a file's imports do: a link to a file the walk read (`[text](./x.md)`,
+`[[Title]]`, a reStructuredText `:doc:` or `<target>`_, a path in
+backticks such as `` `src/pkg/engine.py` ``) is `references` from the
+document to that file, one per pair however often the page links it, and
+a decision record or standard it names (`ADR-12`, `RFC 7231`) is `cites`,
+the same node the code's comments cite (a record does not cite itself).
+A link that leads outside the tree is counted, not claimed. A link to a
+file the walk did not read is unresolved and `map`'s receipt names it
+(`unresolved_links`), never guessed at; a bare name or wikilink title
+that two files would answer binds to neither and is named apart
+(`ambiguous_links`); a link that says where it is (`./x.md`, `../x.md`)
+is followed only there. Links inside fenced code blocks are examples and
+are skipped; a badge inside a link leaves the link it wraps. A document
+past the line bound, a line past 4,000 characters, or claims past the
+cap are not read further, and the result says which bound bit. Because
+`references` is one of the predicates `graph affected` follows, "what
+rests on this module" answers with its callers **and the pages that
+describe it** — the ones that go stale when it changes — and through
+them the pages that link those. A tree mapped before this reader gains
+its documents' claims as their files change, or on a map with the
+documents touched: an unchanged file is not read again.
+
 Because they are claims, everything else already works on them. "What
 calls this?" is `graph match` over `calls`; the path from one function to
 another is `graph path`; and a vocabulary that says `defines` is the
