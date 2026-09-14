@@ -107,3 +107,111 @@ async def test_names_are_withheld_over_http_and_on_the_command_line():
     assert answer.status_code == 200 and "Alice Chen" not in json.dumps(body["items"]) + json.dumps(body["facts"])
     assert body["withheld"]["names_known"]["person"] >= 1
     assert code == 0 and "Alice Chen" not in out.getvalue()
+
+
+def item_of(text: str):
+    from scone_memory.core.models import RecallItem
+
+    return RecallItem(chunk_id=1, episode_id=1, text=text, score=1.0, created_at=DAY)
+
+
+def test_a_longer_name_of_another_kind_is_withheld_before_a_shorter_one_inside_it():
+    held = withhold([item_of("Paris Hilton arrived in Paris.")], kinds=["place", "person"],
+                    names={"place": ("Paris",), "person": ("Paris Hilton",)})
+    assert held.items[0].text == "[withheld: person] arrived in [withheld: place]."
+    assert held.by_kind == {"person": 1, "place": 1}
+
+
+def test_a_name_in_a_script_written_without_spaces_is_found_inside_the_sentence():
+    held = withhold([item_of("田中太郎さんが来た。")], kinds=["person"], names={"person": ("田中太郎",)})
+    assert held.items[0].text == "[withheld: person]さんが来た。"
+    latin = withhold([item_of("Tanakaville")], kinds=["person"], names={"person": ("Tanaka",)})
+    assert latin.items[0].text == "Tanakaville", "a Latin name still needs its word boundary"
+
+
+def test_the_reason_a_fact_was_closed_is_scanned_too():
+    from scone_memory.core.models import Fact
+
+    fact = Fact(fact_id=1, space="default", subject="lease", predicate="held_by", object="the tenant",
+                valid_from=DAY, valid_until="2025-01-01T00:00:00Z", closed_reason="Alice Chen took over the lease")
+    held = withhold([], facts=[fact], kinds=["person"], names={"person": ("Alice Chen",)})
+    assert held.facts[0].closed_reason == "[withheld: person] took over the lease"
+
+
+async def test_names_come_from_the_graph_at_the_moment_the_recall_asks_about_and_a_capped_read_is_said():
+    import scone_memory.retrieval.withhold as module
+    from scone_memory.retrieval.withhold import names_for
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        await engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from="2030-01-01T00:00:00Z")
+        now = await names_for(engine, "default", ["person"])
+        then = await names_for(engine, "default", ["person"], as_of="2031-01-01T00:00:00Z")
+    finally:
+        await engine.close()
+    assert now is not None and then is not None
+    assert "alice chen" not in {n.lower() for n in now.names["person"]}
+    assert "alice chen" in {n.lower() for n in then.names["person"]} and then.capped is False
+
+    capped = module.NamesRead(names={"person": ("Alice Chen",)}, capped=True)
+    held = withhold([item_of("Alice Chen called.")], kinds=["person"], names=capped.names, names_capped=capped.capped)
+    assert "graph read was capped" in held.why
+
+
+async def test_the_command_line_refuses_withholding_with_the_entity_lane_as_the_route_does():
+    from scone_memory.runtime.cli import build_parser, run
+
+    engine = await engine_with_names()
+    try:
+        with pytest.raises(InvalidInput, match="graph-boost"):
+            await run(build_parser().parse_args(["recall", "who joined", "--withhold", "person", "--graph-boost"]),
+                      engine, io.StringIO(""), io.StringIO())
+    finally:
+        await engine.close()
+
+
+def test_an_address_holding_a_name_is_withheld_whole_as_an_address():
+    held = withhold([item_of("Write to info@acme.example about Acme.")], kinds=["organisation", "email"],
+                    names={"organisation": ("Acme",)})
+    assert held.items[0].text == "Write to [withheld: email] about [withheld: organisation]."
+
+
+def test_a_name_in_an_unspaced_script_is_found_after_other_characters_of_that_script():
+    held = withhold([item_of("昨日田中太郎さんが来た。")], kinds=["person"], names={"person": ("田中太郎",)})
+    assert held.items[0].text == "昨日[withheld: person]さんが来た。"
+
+
+async def test_a_capped_read_of_the_graph_is_reported_by_the_names_it_gives(monkeypatch):
+    import scone_memory.entities.read as reading
+    from scone_memory.retrieval.withhold import names_for
+
+    engine = await engine_with_names()
+    real = reading.load_projection
+
+    async def capped(*args, **kwargs):
+        projection, coverage = await real(*args, **kwargs)
+        return projection, {**coverage, "reasons": ["facts_cut 5"]}
+
+    try:
+        whole = await names_for(engine, "default", ["person"])
+        monkeypatch.setattr(reading, "load_projection", capped)
+        cut = await names_for(engine, "default", ["person"])
+    finally:
+        await engine.close()
+    assert whole.capped is False and cut.capped is True
+
+
+async def test_the_route_reads_names_at_the_moment_the_recall_asks_about():
+    from scone_memory.api import create_app
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        await engine.remember("default", "Alice Chen will lead the crane survey.")
+        await engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from="2030-01-01T00:00:00Z")
+        with TestClient(create_app(engine, {"key": "default"})) as client:
+            later = client.get("/v1/recall", params={"q": "crane survey lead", "withhold": "person",
+                                                     "as_of": "2031-01-01T00:00:00Z"},
+                               headers={"authorization": "Bearer key"}).json()
+    finally:
+        await engine.close()
+    assert later["withheld"]["names_known"]["person"] >= 1 and "Alice Chen" not in json.dumps(later["items"])

@@ -993,7 +993,7 @@ def create_app(
             tag_list = list(searched.tags)
             inferred = searched.record(asked_scope)
         policy: tuple[str, ...] = ()
-        names: Optional[dict[str, tuple[str, ...]]] = None
+        names_read = None
         if withhold_kinds:
             from ..retrieval.withhold import chosen_kinds, names_for
 
@@ -1002,7 +1002,7 @@ def create_app(
             # searching first spends the work -- and logs a recall event
             # -- for an answer nobody receives.
             policy = chosen_kinds(tuple(k.strip() for k in withhold_kinds.split(",") if k.strip()))
-            names = await names_for(engine, space, policy)
+            names_read = await names_for(engine, space, policy, as_of=as_of)
             # Withholding covers the items and the facts. The expansions
             # below build their own structures, which it does not reach,
             # so asking for both is refused rather than answered with a
@@ -1049,7 +1049,8 @@ def create_app(
             from ..retrieval.withhold import withhold
 
             kept = withhold(result.items, facts=list(result.facts) + list(result.history),
-                            kinds=policy, names=names)
+                            kinds=policy, names=names_read.names if names_read else None,
+                            names_capped=bool(names_read and names_read.capped))
             result = result.model_copy(update={
                 "items": list(kept.items),
                 "facts": list(kept.facts[:len(result.facts)]),
