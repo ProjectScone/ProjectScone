@@ -212,6 +212,10 @@ MAX_HEADING_CONTEXT_BYTES = 256
 #: part of the vector writer's identity, so change it whenever that rule, or
 #: the bound above, changes what a chunk is embedded with.
 HEADING_CONTEXT_VERSION = "heading-path-v2"
+#: How many records' headings one runtime keeps for reuse. Recovery and a
+#: vector rebuild use one runtime for a whole pass; past this the oldest is
+#: dropped, which costs another read of its manifest, never a heading.
+HEADINGS_READ_MAX = 256
 
 
 async def headings_of(runtime: IngestionRuntime, episode: NewEpisode | None) -> tuple[Heading, ...] | None:
@@ -219,9 +223,13 @@ async def headings_of(runtime: IngestionRuntime, episode: NewEpisode | None) -> 
     if episode is None or runtime.document_headings is None:
         return None
     key = (episode.space, episode.content_hash)
-    if key not in runtime.headings_read:
-        runtime.headings_read[key] = await runtime.document_headings(episode)
-    return runtime.headings_read[key]
+    if key in runtime.headings_read:
+        return runtime.headings_read[key]
+    found = await runtime.document_headings(episode)
+    while len(runtime.headings_read) >= HEADINGS_READ_MAX:
+        del runtime.headings_read[next(iter(runtime.headings_read))]
+    runtime.headings_read[key] = found
+    return found
 
 
 def context_lines(content: str, source: str | None, spans: Sequence[tuple[int, int]],
