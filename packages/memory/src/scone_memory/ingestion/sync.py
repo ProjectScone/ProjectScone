@@ -88,7 +88,8 @@ class SyncReceipt:
     space: str
     applied: bool
     removing: bool
-    #: Files under the root matching the suffixes. What is there.
+    #: Files under the root matching the suffixes, or package manifests
+    #: when any suffix is code. What is there.
     files_found: int = 0
     #: Files this sync actually read, which is fewer when capped. What we
     #: looked at, which is never reported as what is there.
@@ -106,9 +107,9 @@ class SyncReceipt:
     #: Symbolic links under the root, which are counted and not followed:
     #: what one points at is outside the root the caller named.
     links: int = 0
-    #: Things matching the suffixes that are not ordinary files -- named
-    #: pipes, sockets, devices. Counted and never opened: reading one can
-    #: block forever.
+    #: Things matching the suffixes (or named as a manifest) that are not
+    #: ordinary files -- named pipes, sockets, devices. Counted and never
+    #: opened: reading one can block forever.
     special: int = 0
     #: Directories under the root this sync could not read. Each one hides
     #: an unknown number of files, so a run with any of these cannot say
@@ -182,7 +183,7 @@ class SyncReceipt:
             lines.append(f"{self.out_of_scope} memory(ies) are out of scope for this run's "
                          f"suffixes and were left alone, not treated as gone")
         if self.special:
-            lines.append(f"{self.special} path(s) matching the suffixes are not ordinary files "
+            lines.append(f"{self.special} path(s) matching the suffixes or named as a manifest are not ordinary files "
                          f"and were not opened")
         if self.links:
             lines.append(f"{self.links} symbolic link(s) were left alone: what a link points at "
@@ -250,7 +251,9 @@ def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
         return False
     if here.suffix.lower() in wanted:
         return True
-    return bool(wanted & _CODE_SUFFIXES) and is_manifest(here.name)
+    # By its path below the root, so `requirements/test.txt` is the
+    # manifest `is_manifest` says it is, wherever the sync started.
+    return bool(wanted & _CODE_SUFFIXES) and is_manifest(here.as_posix())
 
 
 #: The namespace every key this writes begins with. A space is shared —

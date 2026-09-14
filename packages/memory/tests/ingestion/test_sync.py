@@ -504,5 +504,11 @@ async def test_a_sync_of_code_reads_the_projects_manifests_and_a_sync_of_notes_d
         # is out of scope, not missing: nothing is forgotten for a flag.
         narrowed = await sync_directory(engine, "default", tmp_path, suffixes=(".md",), apply=True, remove=True)
         assert narrowed.removed == 0 and narrowed.forgotten == 0 and narrowed.out_of_scope == 3
+        # A sync of code alone reads the manifests too: the rule is about
+        # code, not about the default suffixes.
+        tree(tmp_path, **{"requirements/test.txt": "pytest>=8\n", ".venv/lib/pyproject.toml": "[project]\nname = 'vendored'\n"})
+        code = await sync_directory(engine, "default", tmp_path, suffixes=(".py",), marker="code", apply=True)
+        assert code.files_found == 4, "app.py, both manifests, and requirements/test.txt by its path; not the one under .venv"
+        assert ("requirements/test.txt", "depends_on", "pytest") in {(f.subject, f.predicate, f.object) for f in await engine.facts("default")}
     finally:
         await engine.close()

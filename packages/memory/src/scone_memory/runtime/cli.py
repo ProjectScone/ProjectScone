@@ -371,7 +371,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--marker", help="the name these memories are held under; defaults to the "
                                     "directory's absolute path, so rename it with this")
     p.add_argument("--suffix", action="append", default=[],
-                   help="only files with this suffix, repeatable; defaults to code and prose")
+                   help="only files with this suffix, repeatable (plus package manifests when any suffix is code); "
+                        "defaults to code and prose")
     p.add_argument("--apply", action="store_true", help="actually write; without it this is a plan")
     p.add_argument("--remove", action="store_true",
                    help="also forget memories whose file is gone from disk (destructive; needs --apply)")
@@ -694,7 +695,8 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     # dot-segment would otherwise skip its entire tree and report nothing
     # read -- exactly the quietly-skipped map this command warns about.
     found = [path for path in sorted(root.rglob("*"))
-             if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES) or is_manifest(path.name))
+             if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES)
+                                    or is_manifest(path.relative_to(root).as_posix()))
              and not any(part.startswith(".") or part == "__pycache__"
                          for part in path.relative_to(root).parts)]
     # Resolution belongs here, because this is what knows which files
