@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -81,6 +81,8 @@ class SynthesisLimits(BaseModel):
     max_sentences: int = Field(default=24, ge=1, le=100)
     #: Seconds for the whole synthesis, every model call included.
     timeout_s: float = Field(default=120.0, ge=0.1, le=600, allow_inf_nan=False)
+    #: Passages a widened synthesis may read: the hits' whole sessions, cut at the byte budget and this count.
+    max_widened: int = Field(default=200, ge=1, le=1000)
 
 
 @dataclass(frozen=True)
@@ -157,6 +159,8 @@ class Synthesis:
     reasons: tuple[str, ...]
     #: The quotes were checked against their passages; the sentences were not checked against anything.
     verified_accuracy: Literal[False] = False
+    #: When the hits' sessions were read whole: sessions, hits, bytes left out and whether the budget bit.
+    widening: Optional[dict[str, object]] = None
 
     def text(self) -> str:
         lines = []
@@ -181,6 +185,7 @@ class Synthesis:
                         "notes_returned": r.notes_returned, "notes_kept": r.notes_kept, "status": r.status}
                        for r in self.rounds],
             "model_calls": self.model_calls, "reasons": list(self.reasons), "verified_accuracy": False,
+            "widening": self.widening,
         }
 
 
@@ -427,13 +432,71 @@ def passages_from_recall(items: Sequence[RecallItem]) -> tuple[Passage, ...]:
                  for item in items if item.text.strip())
 
 
+@dataclass(frozen=True)
+class Widened:
+    """The hits' sessions read whole, in the hits' order, under a byte budget."""
+
+    passages: tuple[Passage, ...]
+    sessions: int
+    hits: int
+    omitted_bytes: int
+    truncated: bool
+
+    def record(self) -> dict[str, object]:
+        return {"sessions": self.sessions, "hits": self.hits, "omitted_bytes": self.omitted_bytes,
+                "truncated": self.truncated}
+
+
+async def widened_passages(engine: "MemoryEngine", space: str, items: Sequence[RecallItem], *,
+                           max_bytes: int) -> Widened:
+    """Every chunk of every episode the hits name, episodes in the hits' order, chunks in theirs.
+
+    Recall credits a session when one slice of it matches; the slice that
+    matches the question's words is often not the one that holds the
+    fact. Reading the session whole, bounded by bytes, is how a
+    synthesizer sees what a reader would. Bytes past the budget are
+    counted, not read."""
+    if type(max_bytes) is not int or not 1 <= max_bytes <= 1_000_000:
+        raise InvalidInput("max_bytes must be from 1 to 1,000,000")
+    sources: dict[int, Optional[str]] = {}
+    for item in items:
+        sources.setdefault(item.episode_id, item.source)
+    passages: list[Passage] = []
+    used = 0
+    omitted = 0
+    for episode_id, source in sources.items():
+        for chunk in await engine.documents.chunks_of(space, episode_id):
+            if not chunk.text.strip():
+                continue
+            size = len(chunk.text.encode("utf-8"))
+            if used + size > max_bytes:
+                omitted += size
+                continue
+            used += size
+            passages.append(Passage(f"chunk:{chunk.chunk_id}", chunk.text, source, chunk.created_at))
+    return Widened(tuple(passages), len(sources), len(items), omitted, omitted > 0)
+
+
 async def synthesize(engine: "MemoryEngine", model: ChatModel, space: str, question: str, *,
                      limits: Optional[SynthesisLimits] = None, as_of: Optional[str] = None,
                      tags: Sequence[str] = (), where: Mapping[str, str] | None = None, kind: Optional[str] = None,
                      source_prefix: Optional[str] = None, since: Optional[str] = None,
-                     until: Optional[str] = None) -> Synthesis:
-    """Recall up to ``limits.max_passages`` passages for ``question`` and synthesize over them."""
+                     until: Optional[str] = None, widen_bytes: Optional[int] = None) -> Synthesis:
+    """Recall up to ``limits.max_passages`` passages for ``question`` and synthesize over them.
+
+    With ``widen_bytes`` the hits' sessions are read whole under that
+    budget (and ``limits.max_widened`` passages), and the record says
+    what widening did."""
     limits = limits or SynthesisLimits()
     found = await engine.recall(space, question, limit=limits.max_passages, as_of=as_of, tags=tags, where=where,
                                 kind=kind, source_prefix=source_prefix, since=since, until=until)
-    return await synthesize_passages(model, question, passages_from_recall(found.items), limits=limits)
+    if widen_bytes is None:
+        return await synthesize_passages(model, question, passages_from_recall(found.items), limits=limits)
+    widened = await widened_passages(engine, space, found.items, max_bytes=widen_bytes)
+    passages = widened.passages
+    truncated = widened.truncated
+    if len(passages) > limits.max_widened:
+        passages, truncated = passages[:limits.max_widened], True
+    made = await synthesize_passages(model, question, passages,
+                                     limits=limits.model_copy(update={"max_passages": max(1, limits.max_widened)}))
+    return replace(made, widening={**widened.record(), "truncated": truncated})

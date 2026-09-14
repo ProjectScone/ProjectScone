@@ -262,3 +262,39 @@ async def test_the_engine_path_recalls_and_cites_chunks():
         chunk_id = int(citation.passage_id.removeprefix("chunk:"))
         assert citation.quote in recalled[chunk_id]
     assert result.passages_given == 3
+
+
+async def test_widening_hands_the_synthesizer_whole_sessions_in_rank_order_under_a_byte_budget():
+    from scone_memory.retrieval.synthesis import widened_passages
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=60).open()
+    long_session = "We talked about groceries. " * 3 + "I spent around $120 at Walmart last Saturday. " + "Then recipes. " * 4
+    await engine.remember("s", long_session, source="session-a")
+    await engine.remember("s", "The shed roof needs work before winter; nothing about shopping.", source="session-b")
+    found = await engine.recall("s", "groceries", limit=1)
+    assert len(found.items) == 1 and "$120" not in found.items[0].text, "the matching slice is not the fact-bearing one"
+    widened = await widened_passages(engine, "s", found.items, max_bytes=100_000)
+    texts = [p.text for p in widened.passages]
+    assert any("$120 at Walmart" in text for text in texts), "the session's other chunks come along"
+    assert all(p.source == "session-a" for p in widened.passages) and widened.sessions == 1
+    starts = [p.text for p in widened.passages]
+    assert starts == [c.text for c in await engine.documents.chunks_of("s", found.items[0].episode_id)], "in order"
+    assert widened.omitted_bytes == 0 and widened.truncated is False
+    capped = await widened_passages(engine, "s", found.items, max_bytes=100)
+    assert capped.truncated and capped.omitted_bytes > 0 and len(capped.passages) < len(widened.passages)
+    assert sum(len(p.text.encode()) for p in capped.passages) <= 100
+
+
+async def test_synthesize_can_widen_and_the_record_says_so():
+    from scone_memory.retrieval.synthesis import synthesize
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=60).open()
+    await engine.remember("s", "We talked about groceries. " * 3 + "I spent around $120 at Walmart last Saturday. " + "Then recipes. " * 4,
+                          source="session-a")
+    model = CitingChat()
+    made = await synthesize(engine, model, "s", "groceries", limits=SynthesisLimits(max_passages=1), widen_bytes=100_000)
+    assert made.passages_given > 1, "one hit, but the whole session was read"
+    assert any("$120" in c.quote or "$120" in s.text for s in made.sentences for c in s.citations) or made.passages_given >= 3
+    assert made.widening == {"sessions": 1, "hits": 1, "omitted_bytes": 0, "truncated": False}
+    plain = await synthesize(engine, CitingChat(), "s", "groceries", limits=SynthesisLimits(max_passages=1))
+    assert plain.passages_given == 1 and plain.widening is None
