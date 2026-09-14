@@ -1,12 +1,13 @@
 """Host-selected OCR with bounded, per-import PDF extraction choices."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.util import find_spec
 import json
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from ..core.errors import InvalidInput
 from ..ocr.layout import ReadingMode
@@ -21,18 +22,36 @@ class PdfOcrSelection(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
     mode: Literal['missing_text', 'all_pages']
     reading_order: ReadingMode
+    #: One of the languages the host offers, as Tesseract names installed data (``deu``,
+    #: ``jpn+eng``). Unset reads with the host's own language, as every request did before.
+    language: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_]{1,32}(\+[A-Za-z0-9_]{1,32}){0,7}$')
+
+    @model_serializer(mode='wrap')
+    def _omit_unset_language(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # A selection that names no language keeps the identity every existing import and job has.
+        result: dict[str, object] = handler(self)
+        if self.language is None:
+            result.pop('language', None)
+        return result
 
 
 @dataclass(frozen=True)
 class DocumentOcr:
-    """Trusted host recognizer; clients can select extraction behavior only."""
+    """Trusted host recognizer; clients can select extraction behavior, and a language from the
+    ones the host offers, only."""
     engine: OcrEngine = field(repr=False)
     dpi: int = 150
+    #: The languages a request may choose, besides the engine's own.
+    languages: tuple[str, ...] = ()
+    #: How the host reads one of those languages.
+    engine_for: Callable[[str], OcrEngine] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         OcrPdfOptions(dpi=self.dpi)
         if not callable(getattr(self.engine, 'recognize', None)):
             raise ValueError('document OCR requires a recognizer')
+        if self.languages and self.engine_for is None:
+            raise ValueError('document OCR that offers languages must say how to read them')
 
     def available(self) -> bool:
         return find_spec('pypdf') is not None and find_spec('pypdfium2') is not None
@@ -41,8 +60,14 @@ class DocumentOcr:
         choice = PdfOcrSelection.model_validate(selection.model_dump())
         if not self.available():
             raise InvalidInput('document OCR requires the installed pdf-ocr extra')
+        engine = self.engine
+        if choice.language is not None:
+            if choice.language not in self.languages or self.engine_for is None:
+                offered = ', '.join(self.languages) or 'none'
+                raise InvalidInput(f'OCR language {choice.language!r} is not offered by this server; offered: {offered}')
+            engine = self.engine_for(choice.language)
         options = OcrPdfOptions(mode=choice.mode, reading_order=choice.reading_order, dpi=self.dpi)
-        return SelectedDocumentOcr(BuiltinDocumentParser(pdf_parser=OcrPdfParser(self.engine, options=options)),
+        return SelectedDocumentOcr(BuiltinDocumentParser(pdf_parser=OcrPdfParser(engine, options=options)),
                                    choice, self.dpi)
 
 
@@ -73,4 +98,5 @@ class SelectedDocumentOcr:
 def ocr_choices(config: DocumentOcr | None) -> dict[str, object]:
     return {'available': config is not None and config.available(),
             'modes': ['missing_text', 'all_pages'],
-            'reading_orders': ['provider', 'columns_ltr', 'columns_rtl']}
+            'reading_orders': ['provider', 'columns_ltr', 'columns_rtl'],
+            **({'languages': list(config.languages)} if config is not None and config.languages else {})}
