@@ -67,6 +67,8 @@
     SCONE_DISTILL_BATCH                episodes per pass per space (default 20)
     SCONE_DISTILL_ACCEPT_AT            confidence at or above which extractions enter the ledger
     SCONE_DERIVE       1 | 0          run the derivation pass after extraction (default 0; needs the chat model)
+    SCONE_URL_IMPORT   1 | 0          let POST /v1/documents/from-url and `scone import-url` fetch a page (default 0)
+    SCONE_URL_IMPORT_PRIVATE 1 | 0    also fetch hosts on private, loopback or link-local addresses (default 0)
                                        directly; unset = every extraction is proposed for review
     SCONE_MCP_PROPOSE_BELOW            confidence below which a fact submitted over MCP is parked for
                                        review; unset = every submitted fact is a ledger claim, which
@@ -169,6 +171,11 @@ class Settings:
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
     derive: bool = False
+    #: Whether POST /v1/documents/from-url and `scone import-url` may fetch a page; off by default,
+    #: because a server that fetches whatever URL it is told to fetches its own network.
+    url_import: bool = False
+    #: Whether a host resolving to a private, loopback or link-local address may be fetched (a lab).
+    url_import_private: bool = False
     contextual_embeddings: bool = False
     heading_context: bool = False
     table_context_embeddings: bool = False
@@ -388,6 +395,8 @@ class Settings:
             distill_interval_s=float(env.get("SCONE_DISTILL_INTERVAL_S", "30")),
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
             derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
+            url_import=parse_flag("SCONE_URL_IMPORT", env.get("SCONE_URL_IMPORT")),
+            url_import_private=parse_flag("SCONE_URL_IMPORT_PRIVATE", env.get("SCONE_URL_IMPORT_PRIVATE")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             heading_context=env.get("SCONE_HEADING_CONTEXT") == "1",
