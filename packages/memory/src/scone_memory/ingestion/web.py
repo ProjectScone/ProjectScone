@@ -9,7 +9,10 @@ rules, each with a test:
   server that fetches whatever URL it is given will fetch its own
   metadata service, its database, or the neighbour on its subnet; every
   address a hostname resolves to must be global, at every redirect, or
-  the fetch is refused. ``allow_private`` is for a lab and says so.
+  the fetch is refused, and the connection is made to the address that
+  was checked rather than to the name again, so a name that changes its
+  answer between the check and the connection gains nothing.
+  ``allow_private`` is for a lab and says so.
 - **Bounded in bytes, time and hops.** A page is read up to ``max_bytes``
   and refused past it rather than cut; a redirect chain longer than
   ``max_redirects`` is refused; the whole fetch has a deadline.
@@ -27,12 +30,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 import ipaddress
 import socket
+import ssl
 from typing import Optional, Sequence
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -78,10 +81,14 @@ def _refuse(url: str, why: str) -> InvalidInput:
     return InvalidInput(f"URL import refused for {url!r}: {why}")
 
 
-def check_url(url: str, *, allow_private: bool = False) -> str:
-    """The URL, when it is one this reader will fetch: http or https, a
-    hostname with no credentials in it, and every address the hostname
-    resolves to on the public internet unless ``allow_private``."""
+def check_url(url: str, *, allow_private: bool = False) -> tuple[str, str, int, str]:
+    """The URL, when it is one this reader will fetch, with the address it
+    will be fetched at: http or https, a hostname with no credentials in
+    it, and every address the hostname resolves to on the public internet
+    unless ``allow_private``. Returns (url, address, port, hostname); the
+    connection is made to that address, not to the name again, so a name
+    that answers differently between the check and the connection gains
+    nothing by it."""
     if not isinstance(url, str) or len(url) > 4096:
         raise InvalidInput("a URL is a string of at most 4096 characters")
     parts = urlsplit(url.strip())
@@ -91,9 +98,9 @@ def check_url(url: str, *, allow_private: bool = False) -> str:
         raise _refuse(url, "no host")
     if parts.username or parts.password:
         raise _refuse(url, "credentials in a URL are not sent")
+    port = parts.port or (443 if parts.scheme == "https" else 80)
     try:
-        addresses = {str(info[4][0]) for info in socket.getaddrinfo(parts.hostname, parts.port or (443 if parts.scheme == "https" else 80),
-                                                              proto=socket.IPPROTO_TCP)}
+        addresses = [str(info[4][0]) for info in socket.getaddrinfo(parts.hostname, port, proto=socket.IPPROTO_TCP)]
     except socket.gaierror as error:
         raise _refuse(url, f"host does not resolve ({error})") from error
     if not addresses:
@@ -103,49 +110,66 @@ def check_url(url: str, *, allow_private: bool = False) -> str:
         if not allow_private and not parsed.is_global:
             raise _refuse(url, f"{parts.hostname} resolves to {address}, which is not on the public internet; "
                                f"a private, loopback or link-local address is fetched only with allow_private")
-    return parts.geturl()
+    return parts.geturl(), addresses[0], port, parts.hostname
 
 
-class _Redirects(HTTPRedirectHandler):
-    """Every hop checked as the first URL was, and counted."""
-
-    def __init__(self, limits: WebLimits, followed: list[str]) -> None:
-        super().__init__()
-        self.limits = limits
-        self.followed = followed
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        if len(self.followed) >= self.limits.max_redirects:
-            raise _refuse(req.full_url, f"more than {self.limits.max_redirects} redirect(s)")
-        checked = check_url(newurl, allow_private=self.limits.allow_private)
-        self.followed.append(checked)
-        return super().redirect_request(req, fp, code, msg, headers, checked)
+def _connect(scheme: str, address: str, port: int, hostname: str, timeout: float) -> HTTPConnection:
+    """A connection to the address that was checked. For https the
+    certificate is still checked against the hostname, so pinning the
+    address costs nothing in what the server must prove."""
+    sock = socket.create_connection((address, port), timeout=timeout)
+    if scheme == "https":
+        sock = ssl.create_default_context().wrap_socket(sock, server_hostname=hostname)
+        connection: HTTPConnection = HTTPSConnection(hostname, port, timeout=timeout)
+    else:
+        connection = HTTPConnection(hostname, port, timeout=timeout)
+    connection.sock = sock
+    return connection
 
 
 def _fetch(url: str, limits: WebLimits) -> FetchedPage:
-    checked = check_url(url, allow_private=limits.allow_private)
+    checked, address, port, hostname = check_url(url, allow_private=limits.allow_private)
     followed: list[str] = []
-    opener = build_opener(_Redirects(limits, followed))
-    request = Request(checked, headers={"User-Agent": USER_AGENT, "Accept": ", ".join(READ_AS)})
-    try:
-        with opener.open(request, timeout=limits.timeout_seconds) as response:
+    current = checked
+    while True:
+        parts = urlsplit(current)
+        path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        try:
+            connection = _connect(parts.scheme, address, port, hostname, limits.timeout_seconds)
+        except (OSError, ssl.SSLError) as error:
+            raise _refuse(url, f"connection failed ({error})") from error
+        try:
+            connection.request("GET", path, headers={"Host": parts.netloc, "User-Agent": USER_AGENT,
+                                                     "Accept": ", ".join(READ_AS), "Connection": "close"})
+            response = connection.getresponse()
+            if response.status in (301, 302, 303, 307, 308):
+                location = response.getheader("Location")
+                if not location:
+                    raise _refuse(url, f"the server redirected ({response.status}) without saying where")
+                if len(followed) >= limits.max_redirects:
+                    raise _refuse(url, f"more than {limits.max_redirects} redirect(s)")
+                current, address, port, hostname = check_url(urljoin(current, location), allow_private=limits.allow_private)
+                followed.append(current)
+                continue
+            if response.status != 200:
+                raise _refuse(url, f"the server answered {response.status}")
             media_type = (response.headers.get_content_type() or "").lower()
             if media_type not in READ_AS:
                 raise _refuse(url, f"media type {media_type or 'unknown'!r} is not one the document lane reads")
-            declared = response.headers.get("Content-Length")
+            declared = response.getheader("Content-Length")
             if declared and declared.isdigit() and int(declared) > limits.max_bytes:
                 raise _refuse(url, f"{declared} bytes declared, over the bound of {limits.max_bytes}")
             data = response.read(limits.max_bytes + 1)
             if len(data) > limits.max_bytes:
                 raise _refuse(url, f"more than {limits.max_bytes} bytes; refused rather than cut")
-            return FetchedPage(checked, response.geturl(), media_type, response.status, datetime.now(timezone.utc).isoformat(),
+            return FetchedPage(checked, current, media_type, response.status, datetime.now(timezone.utc).isoformat(),
                                data, tuple(followed))
-    except HTTPError as error:
-        raise _refuse(url, f"the server answered {error.code}") from error
-    except (URLError, TimeoutError, OSError, ValueError) as error:
-        if isinstance(error, InvalidInput):
-            raise
-        raise _refuse(url, f"fetch failed ({error})") from error
+        except (HTTPException, OSError, ssl.SSLError) as error:
+            if isinstance(error, InvalidInput):
+                raise
+            raise _refuse(url, f"fetch failed ({error})") from error
+        finally:
+            connection.close()
 
 
 async def fetch_page(url: str, limits: Optional[WebLimits] = None) -> FetchedPage:
