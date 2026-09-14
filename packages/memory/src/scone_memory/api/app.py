@@ -477,7 +477,7 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.sentence_window": True, "recall.compress": True, "recall.code_context": True,
+            "recall.window": True, "recall.sentence_window": True, "recall.compress": True, "recall.merge": True, "recall.code_context": True,
             "recall.highlights": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
@@ -959,6 +959,12 @@ def create_app(
             description="What window counts. With sentences, each passage grows to the whole "
                         "sentences it touches and then this many more either side (at most 20); "
                         "0 completes only the sentences it touches."),
+        merge: bool = Query(default=False,
+                            description="Join neighbouring chunks of one episode into the passage holding "
+                                        "them, and say which chunks went in and what share was retrieved."),
+        merge_min_share: float = Query(default=0.0, ge=0, le=1,
+                                       description="Leave a merge as fragments when retrieved chunks "
+                                                   "cover less than this share of its bytes."),
         compress: Optional[float] = Query(
             default=None, ge=0, le=1,
             description="Cut what a sentence window added back to at most this share of its "
@@ -1040,6 +1046,14 @@ def create_app(
                     "withhold cannot be combined with code_context: code context quotes the "
                     "file again after withholding, which would hand back what was withheld; "
                     "ask for one or the other")
+        if merge_min_share and not merge:
+            raise InvalidInput("merge_min_share is a floor under a merge; ask for merge with it")
+        if merge and compress is not None:
+            # A merged passage is reported under its best chunk, so the
+            # other retrieved chunks inside it would not be pinned, and
+            # compression could cut the very text that was retrieved.
+            raise InvalidInput("merge cannot be combined with compress: a merged passage is reported under "
+                               "one chunk, so compress would not keep the others it holds; ask for one")
         if compress is not None and window_unit != "sentences":
             # Checked before the search. Without a window of sentences
             # there is nothing compress may cut, and an answer returned
@@ -1064,6 +1078,16 @@ def create_app(
             result = result.model_copy(update={
                 "items": list(opened.items),
                 "returned_bytes": sum(len(one.text.encode()) for one in opened.items)})
+        joined = None
+        if merge:
+            from ..retrieval.merging import merge_neighbours
+
+            # After any window and before withholding, so withholding scans
+            # the text a merge reads between the fragments it joins.
+            joined = await merge_neighbours(engine, space, result.items, min_share=merge_min_share)
+            result = result.model_copy(update={
+                "items": list(joined.items),
+                "returned_bytes": sum(len(one.text.encode()) for one in joined.items)})
         cut = None
         if compress is not None:
             from ..retrieval.compress import compress as compress_passages
@@ -1113,6 +1137,8 @@ def create_app(
                                     "surfaces": list(kept.surfaces), "why": kept.why}
         if opened is not None:
             response["widened"] = staged(opened.record())
+        if joined is not None:
+            response["merged"] = staged(joined.record())
         if cut is not None:
             response["compressed"] = cut.record()
         if result.rerank is not None:

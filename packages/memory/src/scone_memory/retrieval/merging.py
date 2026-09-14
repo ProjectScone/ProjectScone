@@ -92,6 +92,8 @@ class Merged:
     #: Episodes the store would not answer for, which is not a finding
     #: that they are absent. Their fragments stand unjoined.
     unread: int = 0
+    max_merged: int = MAX_MERGED
+    min_share: float = 0.0
     why: str = ""
 
     def record(self) -> dict[str, object]:
@@ -100,6 +102,7 @@ class Merged:
                 "not_read": self.not_read, "why": self.why,
                 "from_chunks": {str(k): list(v) for k, v in self.from_chunks.items()},
                 "shares": {str(k): v for k, v in self.shares.items()},
+                "rules": {"max_merged": self.max_merged, "min_share": self.min_share, "measured": False},
                 "items": [item.model_dump() for item in self.items]}
 
 
@@ -210,7 +213,8 @@ async def merge_neighbours(
         why += (f"; {unread} episode(s) could not be read, so their fragments stand unjoined -- "
                 f"that is a failure to merge, not a finding that there was nothing to merge")
     return Merged(items=tuple(kept), merged=merged, absorbed=absorbed, from_chunks=from_chunks, too_far=far,
-                  shares=shares, too_sparse=sparse, gone=vanished, unread=unread, not_read=unbudgeted, why=why)
+                  shares=shares, too_sparse=sparse, gone=vanished, unread=unread, not_read=unbudgeted,
+                  max_merged=max_merged, min_share=float(min_share), why=why)
 
 
 def _clusters(group: Sequence[RecallItem], max_merged: int) -> list[list[RecallItem]]:
