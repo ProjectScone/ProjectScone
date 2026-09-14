@@ -909,9 +909,23 @@ def create_app(
                                                       "the budget the caller already set."),
         graph_boost: bool = Query(default=False, description="Add the entity lane: passages naming the question's "
                                                               "entities or their neighbours in the knowledge graph."),
+        infer: bool = Query(default=False, description="Read the question's own words for a scope -- a date, a kind "
+                                                        "of memory, tags, a place -- and search with it where no filter "
+                                                        "was set by hand; the answer says what was read and applied."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
+        inferred: dict[str, object] | None = None
+        if infer:
+            from datetime import datetime, timezone
+
+            from ..retrieval.hints import apply_scope, infer_scope
+
+            asked_scope = infer_scope(q, now=datetime.now(timezone.utc))
+            searched = apply_scope(asked_scope, since=since, until=until, kind=kind, tags=tag_list, source_prefix=source_prefix)
+            since, until, kind, source_prefix = searched.since, searched.until, searched.kind, searched.source_prefix
+            tag_list = list(searched.tags)
+            inferred = searched.record(asked_scope)
         policy: tuple[str, ...] = ()
         if withhold_kinds:
             from ..retrieval.withhold import chosen_kinds
@@ -1001,6 +1015,8 @@ def create_app(
             response["widened"] = staged(opened.record())
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
+        if inferred is not None:
+            response["inferred"] = inferred
         if graph_boost:
             response["entities"] = [entity.model_dump(mode="json") for entity in result.entities]
         if evidence_graph or graph_analysis or structural_context or multi_hop:
