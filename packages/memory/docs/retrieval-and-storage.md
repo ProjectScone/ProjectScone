@@ -3176,7 +3176,9 @@ How each format places values and escapes its own syntax:
     (`person`, `organisation`, `place`, `project`, `product`, `event`,
     `concept`), a white node with a border in the drawings' colours. An
     entity of unknown kind is left plain. Kind names are fixed words, not
-    stored text.
+    stored text. The palette means something different here: in the SVG,
+    the page and the canvas a colour is a community, and in this chart a
+    border colour is a kind; the subgraphs already show the communities.
   - The subgraphs and classes count toward the 45,000 units like every
     other line.
   - A name, and a community's name, is a quoted label, in which `"`, `#`, `<`, `>`, `&`, `` ` ``
