@@ -864,6 +864,16 @@ def test_the_graph_exports_as_the_whole_graph_on_one_page(seeded):
     assert "projection " + page.headers["X-Scone-Projection-Digest"][:12] in body, "the page says which projection it holds"
 
 
+def test_the_graph_exports_as_a_map_of_its_communities(seeded):
+    import xml.etree.ElementTree as ElementTree
+
+    client, _ = seeded
+    mapped = client.get("/v1/graph/export", params={"format": "communities"}, headers=auth())
+    assert mapped.status_code == 200 and mapped.headers["content-type"].startswith("image/svg+xml")
+    assert 'filename="graph-communities.svg"' in mapped.headers["content-disposition"]
+    desc = ElementTree.fromstring(mapped.content).find("{http://www.w3.org/2000/svg}desc").text
+    assert desc.startswith(f"projection {mapped.headers['x-scone-projection-digest'][:12]} ")
+
 
 def test_the_graph_says_what_changed_between_two_moments(seeded):
     client, works = seeded
