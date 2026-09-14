@@ -446,6 +446,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by-length", action="store_true",
                    help="store the corpus with the ordinary chunker instead of cutting at declarations")
 
+    p = sub.add_parser("summarize", help="write a document's summary tree with the configured chat model "
+                                         "(SCONE_CHAT_URL, SCONE_CHAT_MODEL) and store it as notes beside the document")
+    p.add_argument("episode_id", type=int, help="the episode to summarize")
+    p.add_argument("--fan-in", type=int, default=6, help="nodes one summary is written from (2 to 24, default 6)")
+    p.add_argument("--max-levels", type=int, default=5, help="levels above the chunks (1 to 5, default 5)")
+    p.add_argument("--dry-run", action="store_true", help="write the tree and print it without storing it")
     p = sub.add_parser("bench-questions",
                        help="write questions a corpus answers with the local model, anchored to quotes, "
                             "or measure retrieval on the corpus with a set written before")
@@ -1420,6 +1426,28 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     space = args.space
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
     if args.command == "graph":
+        return await graph_command(args, engine, out)
+    if args.command == "summarize":
+        from .config import build_chat
+        from ..retrieval.summary_tree import build_summary_tree
+
+        model = build_chat(settings) if settings is not None else None
+        if model is None:
+            raise InvalidInput("summarize needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+        tree = await build_summary_tree(engine, model, space, args.episode_id, fan_in=args.fan_in,
+                                        max_levels=args.max_levels, store=not args.dry_run,
+                                        model_name=settings.chat_model or "")
+        if args.json:
+            emit(tree.record())
+            return 0
+        print(f"{tree.chunks} chunk(s), {len(tree.nodes)} summary node(s) over {tree.levels} level(s)"
+              f"{' (unjoined)' if tree.unjoined else ''}, {tree.model_calls} model call(s)"
+              f"{', stored' if tree.stored else ', not stored'}", file=out)
+        for reason in tree.reasons:
+            print(f"  {reason}", file=out)
+        if tree.root is not None:
+            print(tree.root.text, file=out)
+        return 0
         return await graph_command(args, engine, out, stdin)
 
     if args.command == "sync-directory":
