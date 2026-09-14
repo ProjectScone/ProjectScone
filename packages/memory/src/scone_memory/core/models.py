@@ -450,6 +450,13 @@ class RecallResult(BaseModel):
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
     space_bytes: int = 0
+    #: What the caller's synonym list added to the text lane's query, when
+    #: a term matched: ``matched``, ``added``, ``offered``, ``capped``. None
+    #: when no list is configured or nothing in the query was on it.
+    expansion: Optional[dict[str, object]] = None
+    #: With stem prefixes on: the prefixes added to the text lane's query
+    #: (``added``) and whether the store could take them (``applied``).
+    prefixes: Optional[dict[str, object]] = None
 
     @property
     def context_reduction(self) -> float:
@@ -474,6 +481,14 @@ class Added(BaseModel):
     replaced: Optional[ForgetReceipt] = None
     #: Why nothing was stored, for a failed record. None for the rest.
     reason: Optional[str] = None
+    #: How a stored record was cut -- the way actually used, which is
+    #: ``code`` for a code source unless the record said otherwise -- and,
+    #: when it was cut at its structure, the chunker's own counts: what
+    #: landed on a boundary, what was split by size, whether a unit ran
+    #: over the target and whether the unit bound bit. None on a receipt
+    #: that stored nothing.
+    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
+    structure: Optional[dict[str, object]] = None
 
 
 class Status(BaseModel):
