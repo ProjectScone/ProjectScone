@@ -465,6 +465,23 @@ class PhraseTrace(BaseModel):
     why: str = ""
 
 
+class DiversityTrace(BaseModel):
+    """What diversity did to one recall's order."""
+
+    weight: float
+    #: Candidates the places were filled from, after any phrases.
+    candidates: int = 0
+    #: Candidates past the budget, left in relevance order after the rest.
+    not_diversified: int = 0
+    #: Where the likeness came from: "index" (stored vectors), "embedded"
+    #: (the candidates embedded once), or "unavailable" (neither; order kept).
+    vectors: str = "index"
+    #: Of the first ``limit`` candidates before the per-episode cap, how many
+    #: are not the ones relevance alone put there.
+    replaced: int = 0
+    why: str = ""
+
+
 class RecallResult(BaseModel):
     #: Id of the evidence event recorded for this recall, when an event
     #: log is attached; feedback refers to it.
@@ -500,6 +517,8 @@ class RecallResult(BaseModel):
     lanes: list[str] = Field(default_factory=list)
     #: With ``require`` or ``exclude``: what the phrases dropped. None otherwise.
     phrases: Optional[PhraseTrace] = None
+    #: With ``diversity``: how the order was changed. None otherwise.
+    diversity: Optional[DiversityTrace] = None
     #: With ``graph_boost``: the entities the entity lane searched for.
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0

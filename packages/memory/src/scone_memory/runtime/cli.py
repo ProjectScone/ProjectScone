@@ -119,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="a phrase every returned passage must hold, as whole words; repeatable")
     p.add_argument("--exclude", action="append", default=[], metavar="PHRASE",
                    help="a phrase no returned passage may hold; repeatable")
+    p.add_argument("--diversity", type=float, metavar="WEIGHT",
+                   help="fill the answer's places by relevance less likeness to those above, weighted 0 to 1")
     p.add_argument("--lanes", metavar="LANES",
                    help="the lanes to run, comma separated: vector, text, or both (the default); "
                         "a lane not named is not run")
@@ -1773,7 +1775,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
             **({"lanes": [lane.strip() for lane in args.lanes.split(",") if lane.strip()]} if args.lanes else {}),
-            require=args.require, exclude=args.exclude,
+            require=args.require, exclude=args.exclude, diversity=args.diversity,
         )
         kept = None
         opened = None

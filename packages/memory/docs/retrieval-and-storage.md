@@ -81,6 +81,25 @@ A phrase both required and excluded, one with no word to match, more than
 20 phrases or one over 200 characters is refused. Advertised as
 `recall.phrases`.
 
+`diversity`, a weight from 0 to 1 (CLI `--diversity`), keeps near-copies
+of one passage from taking several places. Fusion ranks by relevance
+alone, so three restatements of a note can fill three of five places.
+With `diversity` the places are filled one at a time, each by the
+candidate whose relevance (its fused score over the best one's) times
+`1 - weight`, less `weight` times its greatest cosine to a passage
+already placed, is highest: maximal marginal relevance, over the fused
+candidates rather than one vector lane. `0` keeps the relevance order.
+The likeness is read from the index's stored vectors where the index can
+give them back (in memory and SQLite), and otherwise every candidate is
+embedded once so all likenesses are on one scale; `diversity.vectors`
+says which. `diversity.replaced` counts the first `limit` places, before
+the per-episode cap, that relevance alone would have filled differently.
+Only the first 200 candidates are compared and only twice the limit's
+places are filled this way; the rest keep relevance order and are
+counted. It runs after any phrases and is refused beside an active
+reranker, which would set the order again. Unmeasured. Advertised as
+`recall.diversity`.
+
 `history=true` (CLI `--history`) adds, for every matched fact, the closed
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.

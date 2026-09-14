@@ -477,7 +477,7 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.code_context": True, "recall.highlights": True, "recall.lanes": True, "recall.phrases": True,
+            "recall.window": True, "recall.code_context": True, "recall.highlights": True, "recall.lanes": True, "recall.phrases": True, "recall.diversity": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -973,6 +973,10 @@ def create_app(
         require: list[str] = Query(default=[], description="A phrase every returned passage must hold, as whole "
                                                             "words; repeat for more. Checked before the limit."),
         exclude: list[str] = Query(default=[], description="A phrase no returned passage may hold; repeat for more."),
+        diversity: Optional[float] = Query(default=None, ge=0, le=1,
+                                           description="Fill the answer's places by relevance less likeness to "
+                                                       "passages already placed, weighted from 0 to 1, so "
+                                                       "near-copies do not take several. Unmeasured."),
         lanes: Optional[str] = Query(default=None,
                                      description="The lanes to run, comma separated: vector, text, or both "
                                                  "(the default). A lane not named is not run; the answer's "
@@ -1038,7 +1042,7 @@ def create_app(
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
             **({"lanes": [lane.strip() for lane in lanes.split(",") if lane.strip()]} if lanes is not None else {}),
-            require=require, exclude=exclude,
+            require=require, exclude=exclude, diversity=diversity,
         )
         opened = None
         if window:
@@ -1075,6 +1079,7 @@ def create_app(
             "narrowing": result.narrowing.model_dump() if result.narrowing is not None else None,
             "lanes": result.lanes,
             **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
+            **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),
