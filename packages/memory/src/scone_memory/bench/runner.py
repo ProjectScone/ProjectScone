@@ -6,12 +6,16 @@ import platform
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Coroutine, Callable, Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Coroutine, Callable, Iterable, Optional, Sequence
 
 from . import metrics as bench_metrics
 
 from ..memory.engine import MemoryEngine, Record
 from ..core.models import RecallItem
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..retrieval.query_transforms import Transformed
 
 
 @dataclass(frozen=True)
@@ -128,6 +132,10 @@ class ItemResult:
     #: unless something distilled facts into the item's space first.
     facts: int = 0
     history_facts: int = 0
+    #: When the run transformed questions: the query actually searched,
+    #: and whether the transform was applied to it or the question stood.
+    query: Optional[str] = None
+    transformed: Optional[bool] = None
 
     def any_at(self, k: int) -> bool:
         seen = set(self.retrieved_sessions[:k])
@@ -270,6 +278,9 @@ class RunReport:
     #: them, since the Rust harness reports only those two. Defaults so a
     #: saved run from before this field still loads.
     recall_share: dict[int, float] = field(default_factory=dict)
+    #: How recall fused its lanes for this run. Recorded for the same
+    #: reason as merge and window; defaults so older saved runs still load.
+    fusion: str = "rank"
 
     def as_dict(self, with_items: bool = True) -> dict:
         d = asdict(self)
@@ -299,6 +310,8 @@ async def run(
     cross_queries: bool = False,
     merge: bool = False,
     window: int = 0,
+    fusion: str = "rank",
+    transform: Optional[Callable[[str], "Coroutine[object, object, Transformed]"]] = None,
 ) -> RunReport:
     """``make_engine`` returns a fresh engine (or an awaitable of one) per
     item, so an item's memory never leaks into the next. ``limit`` is the
@@ -314,7 +327,12 @@ async def run(
     episodes came back, so it cannot change session recall at the recall
     limit -- but it compacts the list, so an episode below the cut can
     move above it, and recall at a k smaller than the limit can change in
-    either direction. That is the thing worth measuring."""
+    either direction. That is the thing worth measuring.
+
+    ``transform`` restates each question before recall (see
+    ``retrieval.query_transforms``); the item records the query searched
+    and whether the transform was applied, so the same items measure a
+    transform against the questions as asked."""
     import asyncio
     from datetime import datetime, timezone
 
@@ -349,7 +367,18 @@ async def run(
                 ))
             await engine.remember_many(space, records)
             t0 = time.perf_counter()
-            pack = await engine.recall(space, item.question, limit=k_max, history=history)
+            # Only when asked for: engines built before the option, and test
+            # stand-ins, take recall without it.
+            if fusion == "rank":
+                pack = await engine.recall(space, item.question, limit=k_max, history=history)
+            else:
+                pack = await engine.recall(space, item.question, limit=k_max, history=history, fusion=fusion)
+            question = item.question
+            if transform is not None:
+                asked = await transform(item.question)
+                question = asked.query
+                result.query, result.transformed = asked.query, asked.applied
+            pack = await engine.recall(space, question, limit=k_max, history=history)
             if window:
                 from ..retrieval.window import widen
 
@@ -430,7 +459,7 @@ async def run(
     latencies = [r.recall_ms for r in results if r.error is None]
     return RunReport(
         dataset=dataset, items=len(results), scored=denom, include_abstention=include_abstention,
-        merge=merge, window=window, ks=list(ks),
+        merge=merge, window=window, fusion=fusion, ks=list(ks),
         recall_any=recall_any, recall_all=recall_all, recall_share=recall_share, by_type=by_type,
         mrr=mean_reciprocal, precision=precision, ndcg=ndcg,
         mean_average_precision=average_precision, hit_rate=hits,

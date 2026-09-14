@@ -26,7 +26,9 @@ from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, EvidenceCandidate, EvidenceDecision
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.computation import ComputeMemoryArgs, ComputationError
+from ..retrieval.table_query import TableQueryError
 from .compute_memory import compute_memory
+from .table_tool import ListTablesArgs, QueryTableToolArgs, TableToolError, list_tables, query_table_tool
 from .relations import _claim, trace_memory
 from .read_memory import ReadMemoryArgs, ReadMemoryError, read_memory
 
@@ -75,10 +77,14 @@ class ScopedMemoryTools:
 
     def __init__(self, memory: MemoryEngine, space: str, *, scope: RecallScope,
                  exclude_session_id: str | None = None, timeout_s: float = 2.0,
-                 max_result_bytes: int = 64000, enable_computation: bool = False) -> None:
+                 max_result_bytes: int = 64000, enable_computation: bool = False,
+                 enable_tables: bool = False) -> None:
         if type(enable_computation) is not bool:
             raise ValueError("enable_computation must be a boolean")
+        if type(enable_tables) is not bool:
+            raise ValueError("enable_tables must be a boolean")
         self._compute = enable_computation
+        self._tables = enable_tables
         check_space(space)
         if not isinstance(scope, RecallScope):
             raise ValueError("scope must be RecallScope")
@@ -149,6 +155,13 @@ class ScopedMemoryTools:
             schemas.append({"name":"compute_memory",
                 "description":"Calculate sum, product, difference, ratio or comparison from exact unique decimal quotes in retrieved chunks. Count/compare_counts count selected nonoverlapping quote spans only. No expressions or unit conversion. Operand meaning and list completeness are not verified. Use left minus/divided by right for difference/ratio.",
                 "input_schema":ComputeMemoryArgs.model_json_schema()})
+        if self._tables:
+            schemas.append({"name": "list_tables",
+                "description": "List the tables an ingested document (episode) declares: name, columns, row count. Use before query_table when the document may hold more than one table or the column names are unknown.",
+                "input_schema": ListTablesArgs.model_json_schema()})
+            schemas.append({"name": "query_table",
+                "description": "Answer one structured question over a document's table from its own cells, exactly: count, sum, average, min, max or rows, after where conditions (==, !=, contains on text or numbers; >, <, >=, <= on numbers). Every cell used is quoted. What a column means and its units are not verified.",
+                "input_schema": QueryTableToolArgs.model_json_schema()})
         return schemas
 
     def openai(self) -> list[dict[str, object]]:
@@ -198,12 +211,20 @@ class ScopedMemoryTools:
                              "output_omitted_count": omitted, "reasons": list(result.reasons)}}
 
     async def run(self, name: str, arguments: Mapping[str, object]) -> dict[str, object]:
-        if name not in ("search_memory", "trace_memory", "read_memory") and not (name == "compute_memory" and self._compute):
+        offered = {"search_memory", "trace_memory", "read_memory"}
+        if self._compute:
+            offered.add("compute_memory")
+        if self._tables:
+            offered.update(("list_tables", "query_table"))
+        if name not in offered:
             return _unavailable("unknown_tool")
         try:
             args = (_Search.model_validate(arguments) if name == "search_memory" else
                     _Trace.model_validate(arguments) if name == "trace_memory" else
-                    ComputeMemoryArgs.model_validate(arguments) if name == "compute_memory" else ReadMemoryArgs.model_validate(arguments))
+                    ComputeMemoryArgs.model_validate(arguments) if name == "compute_memory" else
+                    ListTablesArgs.model_validate(arguments) if name == "list_tables" else
+                    QueryTableToolArgs.model_validate(arguments, strict=False) if name == "query_table" else
+                    ReadMemoryArgs.model_validate(arguments))
         except (TypeError, ValueError):
             return _unavailable("invalid_arguments")
         deadline = time.monotonic() + self._timeout
@@ -216,6 +237,11 @@ class ScopedMemoryTools:
                         self._scope, self._excluded, self._timeout))
                 elif isinstance(args, ReadMemoryArgs):
                     result = await asyncio.create_task(read_memory(self._memory, self._space, args, self._scope, self._excluded))
+                elif isinstance(args, QueryTableToolArgs):
+                    result = await asyncio.create_task(query_table_tool(self._memory, self._space, args, self._scope,
+                                                                        self._excluded, self._timeout))
+                elif isinstance(args, ListTablesArgs):
+                    result = await asyncio.create_task(list_tables(self._memory, self._space, args, self._scope, self._excluded))
                 else:
                     result = {"ok": True, **await asyncio.create_task(trace_memory(self._memory, self._space, args.seed_fact_id,
                         max_hops=args.max_hops, scope=self._scope, exclude_session_id=self._excluded))}
@@ -229,7 +255,7 @@ class ScopedMemoryTools:
                 return result
         except asyncio.CancelledError:
             raise
-        except (ReadMemoryError, ComputationError) as error:
+        except (ReadMemoryError, ComputationError, TableToolError, TableQueryError) as error:
             return _unavailable(error.reason)
         except TimeoutError:
             return _unavailable("timeout")
