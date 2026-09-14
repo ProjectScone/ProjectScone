@@ -486,7 +486,8 @@ def test_mermaid_is_a_flowchart_of_entities_and_the_relations_between_them():
     text = mermaid()
     lines = text.splitlines()
     assert lines[0].startswith("%% ") and lines[1] == "flowchart LR"
-    nodes = dict(re.findall(r'^  (n\d+)\["([^"]*)"\]$', text, re.M))
+    # A node in a community's subgraph is indented one level further.
+    nodes = dict(re.findall(r'^(?:  |    )(n\d+)\["([^"]*)"\]$', text, re.M))
     edges = re.findall(r'^  (n\d+) -->\|"([^"]*)"\| (n\d+)$', text, re.M)
     assert "alice chen" in nodes.values() and len(edges) == len(project_entities("alpha", LEDGER, revision=1).relations)
     assert all("(fact" in label for _, label, _ in edges)
@@ -495,7 +496,7 @@ def test_mermaid_is_a_flowchart_of_entities_and_the_relations_between_them():
 
 def test_mermaid_text_cannot_close_a_label_or_start_markup():
     text = mermaid([fact(1, 'eve "x"] --> evil["y', "knows", "Bob <b>#1</b>")])
-    labels = re.findall(r'\["([^"]*)"\]', text)
+    labels = re.findall(r'^\s+n\d+\["([^"]*)"\]$', text, re.M)
     assert len(labels) == 2 and all('"' not in label and "<" not in label for label in labels)
     assert any("#quot;" in label for label in labels) and any("#35;1" in label for label in labels)
     assert text.count("-->") == 1, "one relation, one arrow: a name cannot add an edge"
@@ -504,7 +505,7 @@ def test_mermaid_text_cannot_close_a_label_or_start_markup():
 def test_mermaid_shows_the_most_connected_and_counts_the_rest():
     ledger = [fact(n, f"worker {n:03d}", "works_at", "zenith corp") for n in range(1, 80)]
     text = mermaid(ledger)
-    assert len(re.findall(r'^  n\d+\[', text, re.M)) == 60 and '  n1["zenith corp"]' in text
+    assert len(re.findall(r'^\s+n\d+\[', text, re.M)) == 60 and re.search(r'^\s+n1\["zenith corp"\]$', text, re.M)
     assert text.splitlines()[0].endswith("20 entities and 20 relations left out of the chart; values are not drawn")
 
 
@@ -981,3 +982,80 @@ def test_html_code_hides_communities_and_moves_the_view_to_a_chosen_entity(proje
     for needle in ("data-from-group", "data-to-group", "indeterminate", "function centre(", "function choose("):
         assert needle in code, needle
     assert "textContent" in code and "innerHTML" not in code
+
+
+def _subgraphs(text):
+    """Each subgraph's id, label and the node ids declared inside it, and the nodes declared outside any."""
+    found, outside, current = {}, [], None
+    for line in text.splitlines():
+        opened = re.fullmatch(r'  subgraph (c\d+)\["([^"]*)"\]', line)
+        if opened:
+            current = opened.group(1)
+            found[current] = (opened.group(2), [])
+        elif line == "  end":
+            current = None
+        elif node := re.fullmatch(r'\s+(n\d+)\["[^"]*"\]', line):
+            (found[current][1] if current else outside).append(node.group(1))
+    return found, outside
+
+
+def test_mermaid_groups_the_drawn_entities_of_each_community_in_a_subgraph():
+    from scone_memory.entities.analysis import cached_analysis
+
+    projection = _two_communities()
+    text = export_graph(projection, "mermaid").body.decode()
+    groups, outside = _subgraphs(text)
+    ids = dict(re.findall(r'^\s+(n\d+)\["([^"]*)"\]$', text, re.M))
+    label_of = {entity.entity_id: entity.label for entity in projection.entities}
+    expected = {tuple(sorted(label_of[member] for member in community.members))
+                for community in cached_analysis(projection).communities if len(community.members) > 1}
+    assert {tuple(sorted(ids[node] for node in members)) for _, members in groups.values()} == expected
+    assert len(groups) == 2 and outside == [node for node, label in ids.items() if label == "Lone Star"], \
+        "an entity alone in its community is drawn outside any subgraph"
+    labels = {community.label for community in cached_analysis(projection).communities}
+    assert {label for label, _ in groups.values()} <= labels
+    assert text.count("  subgraph ") == text.count("\n  end\n") == 2
+    edges = re.findall(r'^  (n\d+) -->\|"[^"]*"\| (n\d+)$', text, re.M)
+    assert len(edges) == len(projection.relations), "relations still run between the grouped nodes"
+
+
+def test_mermaid_subgraph_labels_are_text():
+    text = mermaid([fact(1, 'eve "x"] --> evil["y', "knows", "Bob <b>#1</b>"),
+                    fact(2, "Bob <b>#1</b>", "knows", 'eve "x"] --> evil["y')])
+    groups, _ = _subgraphs(text)
+    assert len(groups) == 1
+    [(label, members)] = groups.values()
+    assert '"' not in label and "<" not in label and len(members) == 2
+    assert text.count("-->") == 2
+
+
+def test_mermaid_styles_each_entity_by_its_kind():
+    from scone_memory.entities.kinds import EntityKind
+    from typing import get_args
+
+    projection = _two_communities()
+    text = export_graph(projection, "mermaid").body.decode()
+    ids = dict(re.findall(r'^\s+(n\d+)\["([^"]*)"\]$', text, re.M))
+    kind_of = {entity.label: entity.kind for entity in projection.entities}
+    styles = dict(re.findall(r"^  classDef (\w+) (.+)$", text, re.M))
+    classes = {kind: members.split(",") for members, kind in re.findall(r"^  class ([n\d,]+) (\w+)$", text, re.M)}
+    drawn_kinds = {kind for kind in kind_of.values() if kind is not None}
+    assert set(styles) == set(classes) == drawn_kinds and drawn_kinds <= set(get_args(EntityKind))
+    assert len(drawn_kinds) >= 2 and len(set(styles.values())) == len(styles), "each kind looks different"
+    for kind, members in classes.items():
+        assert sorted(ids[node] for node in members) == sorted(
+            label for label, of in kind_of.items() if of == kind and label in ids.values())
+    assert all(kind_of[label] is None for node, label in ids.items() if not any(node in m for m in classes.values()))
+
+
+def test_mermaid_draws_an_entity_outside_any_subgraph_when_the_chart_cut_the_rest_of_its_community():
+    # 70 workers fill the chart after their employer; Porto's two residents
+    # sort last and are cut, so Porto is drawn without another of its community.
+    ledger = [fact(n, f"worker {n:02d}", "works_at", "Zenith Corp") for n in range(1, 71)]
+    ledger += [fact(71, "zz resident 1", "lives_in", "Porto"), fact(72, "zz resident 2", "lives_in", "Porto")]
+    text = mermaid(ledger)
+    groups, outside = _subgraphs(text)
+    ids = dict(re.findall(r'^\s+(n\d+)\["([^"]*)"\]$', text, re.M))
+    assert len(ids) == 60 and "zz resident 1" not in ids.values()
+    assert [ids[node] for node in outside] == ["Porto"]
+    assert len(groups) == 1 and "Porto" not in [ids[node] for node in next(iter(groups.values()))[1]]

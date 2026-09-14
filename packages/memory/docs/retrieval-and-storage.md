@@ -3025,7 +3025,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `jsonld` | JSON-LD linked data | RDF tooling |
 | `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` and `graph.canvas`, a canvas of the notes | Obsidian and other note tools |
 | `wiki` | zip of `index.md`, one article per topic and one per entity, in plain Markdown links | agents reading instead of the raw ledger |
-| `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them | GitHub, Markdown viewers, docs |
+| `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them, grouped by community and styled by kind | GitHub, Markdown viewers, docs |
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
 | `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
 | `html` | one page: the drawing, search that moves the view to the entity chosen, a legend that shows or hides each community, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
@@ -3166,7 +3166,20 @@ How each format places values and escapes its own syntax:
   view the chart draws, what the read left out, what the chart left
   out, and that values are not drawn.
   - Node ids are the chart's own (`n1`, `n2`, ...).
-  - A name is a quoted label, in which `"`, `#`, `<`, `>`, `&`, `` ` ``
+  - Entities of one community drawn together sit in a subgraph named for
+    the community (`c1`, `c2`, ..., largest first), from the same
+    analysis the drawings box them by. An entity drawn without another of
+    its community, because it has none or the chart cut the rest, sits
+    outside any subgraph. Relations run between nodes as before, across
+    subgraphs included.
+  - Each entity is styled by its kind: a class named for the kind
+    (`person`, `organisation`, `place`, `project`, `product`, `event`,
+    `concept`), a white node with a border in the drawings' colours. An
+    entity of unknown kind is left plain. Kind names are fixed words, not
+    stored text.
+  - The subgraphs and classes count toward the 45,000 units like every
+    other line.
+  - A name, and a community's name, is a quoted label, in which `"`, `#`, `<`, `>`, `&`, `` ` ``
     and `|` are written as Mermaid entity codes. No stored text can
     close a label or add an edge.
 - **Cypher** writes `(:Entity)`, `(:Value)`, `[:RELATES]` and
