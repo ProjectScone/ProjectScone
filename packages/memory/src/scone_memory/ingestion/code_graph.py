@@ -71,6 +71,8 @@ INHERITS = "inherits"
 #: these -- calling them inheritance described a relation the language
 #: does not have.
 MIXES_IN = "mixes_in"
+#: The types a declaration's signature or annotations name: what it takes, returns or holds.
+USES_TYPE = "uses_type"
 #: Why the code is the way it is, in the words of whoever wrote it.
 NOTES = "notes"
 #: What is known to be wrong with it. A different question from why it
@@ -465,6 +467,7 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
 
     walk(tree, path, None)
     _calls(tree, path, named, imported, say, _unbound)
+    _type_references(tree, path, named, imported, say)
     _meaning(content, path, "python", say)
     return tuple(found)
 
@@ -612,6 +615,119 @@ def _calls(tree: ast.AST, path: str, named: dict[str, str],
                         unbound.append((whole, spelt))
             elif target != whole:
                 say(whole, CALLS, target, call.lineno)
+
+
+#: Annotations longer than this are not parsed as forward references.
+_MAX_QUOTED = 256
+
+
+def _type_references(tree: ast.AST, path: str, named: dict[str, str],
+                     imported: dict[str, tuple[str, Optional[str]]], say) -> None:
+    """The types each function's parameters, return and annotated locals name, and each
+    class's annotated attributes, once per declaration and type.
+
+    Only types this graph can place: a class this file declares, a name imported out of a
+    project module, or a name in a project module imported whole. The standard library is
+    left out as noise, and so is a local function named in an annotation."""
+    classes = {qualified for node, qualified, _ in _declared(tree, None, None) if isinstance(node, ast.ClassDef)}
+    project = {module: first for module, first in imported.values()}
+
+    def resolve(node: ast.AST, inside: Optional[str]) -> Optional[str]:
+        if isinstance(node, ast.Name):
+            # A name in a class body means that class's own member first, as Python reads it there.
+            scoped = f"{inside}.{node.id}" if inside else None
+            if scoped is not None and scoped in classes:
+                return named[scoped]
+            if node.id in classes:
+                return named[node.id]
+            came = imported.get(node.id)
+            if came is not None and came[1] is not None and not _standard(came[0]):
+                return _joined(came[0], came[1])
+            return None
+        if isinstance(node, ast.Attribute):
+            spelt = _spelling(node)
+            if spelt is None:
+                return None
+            if spelt in classes:
+                return named[spelt]
+            head = spelt.split(".")[0]
+            came = imported.get(head)
+            if came is not None and came[1] is None and not _standard(came[0]):
+                return _joined(came[0], spelt.split(".", 1)[1])
+        return None
+
+    def names(annotation: Optional[ast.AST], inside: Optional[str] = None) -> list[str]:
+        found: list[str] = []
+        if annotation is None:
+            return found
+        for node in ast.walk(annotation):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) <= _MAX_QUOTED:
+                try:
+                    quoted = ast.parse(node.value, mode="eval")
+                except SyntaxError:
+                    continue
+                found.extend(names(quoted.body, inside))
+            elif isinstance(node, (ast.Name, ast.Attribute)):
+                target = resolve(node, inside)
+                if target is not None:
+                    found.append(target)
+        return found
+
+    def signature(function: ast.FunctionDef | ast.AsyncFunctionDef, inside: Optional[str]) -> list[tuple[str, int]]:
+        arguments = function.args
+        every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                 *([arguments.vararg] if arguments.vararg else []), *([arguments.kwarg] if arguments.kwarg else [])]
+        found = [(target, function.lineno) for argument in every for target in names(argument.annotation, inside)]
+        found += [(target, function.lineno) for target in names(function.returns, inside)]
+        for node in _own_body(function):
+            if isinstance(node, ast.AnnAssign):
+                found += [(target, node.lineno) for target in names(node.annotation, inside)]
+        return found
+
+    said: set[tuple[str, str]] = set()
+
+    def record(subject: str, found: list[tuple[str, int]]) -> None:
+        for target, line in found:
+            if target != subject and (subject, target) not in said:
+                said.add((subject, target))
+                say(subject, USES_TYPE, target, line)
+
+    for node, qualified, holder_class in _declared(tree, None, None):
+        if isinstance(node, ast.ClassDef):
+            record(f"{path}:{qualified}", [(target, child.lineno) for child in node.body
+                                            if isinstance(child, ast.AnnAssign)
+                                            for target in names(child.annotation, qualified)])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            record(f"{path}:{qualified}", signature(node, holder_class))
+
+
+def _declared(node: ast.AST, inside: Optional[str], holder_class: Optional[str]):
+    """Every function and class, qualified exactly as ``defines`` names it, with the class
+    that most closely holds it."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            qualified = f"{inside}.{child.name}" if inside else child.name
+            yield child, qualified, holder_class
+            yield from _declared(child, qualified, qualified if isinstance(child, ast.ClassDef) else holder_class)
+        else:
+            yield from _declared(child, inside, holder_class)
+
+
+def _own_body(function: ast.AST):
+    """A function's statements, not those of the functions and classes written inside it."""
+    stack = list(ast.iter_child_nodes(function))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _standard(module: str) -> bool:
+    import sys
+
+    return module.split(".")[0] in sys.stdlib_module_names or module == "__future__"
 
 
 def _spelling(func: ast.AST) -> Optional[str]:
