@@ -201,6 +201,23 @@ class ContextIndex(Protocol):
     async def search_context(self, space: str, query: str, limit: int, filter: "TextFilter") -> list[tuple[int, float]]: ...
 
 
+@runtime_checkable
+class PrefixSearch(Protocol):
+    """A document store whose text lane can search a term's family by prefix
+    (``bill*``) beside whole terms. Optional: ``prefix_search(store)`` says
+    whether a store has it, and a recall says whether prefixes applied."""
+
+    prefix_terms: bool
+
+    async def search_terms(self, space: str, query: str, limit: int, filter: "TextFilter", *,
+                           prefixes: Sequence[str]) -> list[tuple[int, float]]: ...
+
+
+def prefix_search(store: object) -> Optional[PrefixSearch]:
+    """``store`` as a prefix search when its text lane takes prefixes, else None."""
+    return store if getattr(store, "prefix_terms", False) and isinstance(store, PrefixSearch) else None
+
+
 def context_index(store: object) -> Optional[ContextIndex]:
     """``store`` as a context index when it keeps one, else None."""
     return store if getattr(store, "context_lane", False) and isinstance(store, ContextIndex) else None

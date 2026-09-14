@@ -190,7 +190,13 @@ class MemoryEngine:
         table_context_embeddings: bool = False,
         synonyms: "Synonyms | None" = None,
         context_lane: bool = False,
+        lexical_stems: bool = False,
     ) -> None:
+        if type(lexical_stems) is not bool:
+            raise InvalidInput("lexical_stems must be a boolean")
+        #: Whether a query term's family (bills, billing, billed) is searched
+        #: by stem prefix in the text lane; the index is untouched.
+        self.lexical_stems = lexical_stems
         if type(context_lane) is not bool:
             raise InvalidInput("context_lane must be a boolean")
         #: Whether what each chunk is under is indexed beside its text and
@@ -961,6 +967,7 @@ class MemoryEngine:
             vector_block=self.vector_block,
             synonyms=self.synonyms,
             context_lane=self.context_lane,
+            lexical_stems=self.lexical_stems,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,

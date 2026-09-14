@@ -249,11 +249,17 @@ class InMemoryDocumentStore:
     narrows_metadata = True
     #: This store keeps a context index beside chunk text (see ContextIndex).
     context_lane = True
+    #: This store can search a term's family by prefix (see PrefixSearch).
+    prefix_terms = True
 
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
         return self._bm25[space].search(query, limit, self._allowed(space, filter))
+
+    async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
+                           prefixes: Sequence[str]) -> list[tuple[int, float]]:
+        return self._bm25[space].search(query, limit, self._allowed(space, filter), prefixes)
 
     async def index_context(self, space: str, chunk_id: int, text: str) -> None:
         self._context[space].remove(chunk_id)
