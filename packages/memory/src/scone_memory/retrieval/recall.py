@@ -15,11 +15,21 @@ from typing import TYPE_CHECKING, Optional
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
 from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, RerankTrace
-from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter
+from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
 from . import fact_recall, fusion, supersession
 from .entity_lane import ENTITY_WEIGHT, entity_lane
+
+#: The context lane's share of a fused rank. Rank fusion is flat, so a lane
+#: that finds what the others cannot needs weight to be heard at all: on
+#: the ``under-v1`` benchmark (testing.context_lane_benchmark, twenty
+#: passages under a heading whose words they never say, eight distractors
+#: each repeating the question) the tail chunk reached the top five in 0
+#: of 20 cases at 0.5, 1 at 1.0 and 13 at 2.0. The entity lane made the
+#: same choice for the same reason. The cost is on the record too: a
+#: passage under the words can now come before one that merely says them.
+CONTEXT_WEIGHT = 2.0
 from .episode_scope import episode_fits
 from .filters import parse_filter
 if TYPE_CHECKING:
@@ -65,6 +75,8 @@ class RecallRuntime:
     vector_block: str | None = None
     #: The caller's synonym list, applied to the text lane's query only.
     synonyms: "Synonyms | None" = None
+    #: Whether the words a chunk is under are searched as a lane of their own.
+    context_lane: bool = False
 
 
 def _ms(since: float) -> float:
@@ -163,6 +175,7 @@ async def recall(
         "contextual_embeddings": runtime.contextual_embeddings,
         "synonyms": (None if expansion is None
                      else {"matched": len(expansion.matched), "added": len(expansion.added), "capped": expansion.capped}),
+        "context_lane": runtime.context_lane,
         "similarity_floor": runtime.similarity_floor,
         "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
                    "conditions": dict(conditions) if conditions is not None else None,
@@ -208,6 +221,26 @@ async def recall(
         latency["text"] = _ms(t0)
     except Exception as e:  # noqa: BLE001
         degraded.append(f"text: {type(e).__name__}: {e}")
+
+    # The context lane: what each passage is under, searched with the same
+    # query the text lane got, fused at a lower weight so a passage that
+    # says the words comes before one that is only under them.
+    context_hits: list[tuple[int, float]] = []
+    if runtime.context_lane:
+        keeper = context_index(runtime.documents)
+        if keeper is None:
+            degraded.append(f"context lane: not kept by the {runtime.documents.name} document store")
+        else:
+            try:
+                t0 = time.perf_counter()
+                context_hits = await keeper.search_context(
+                    space, text_query, depth,
+                    TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                               kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
+                )
+                latency["context"] = _ms(t0)
+            except Exception as e:  # noqa: BLE001
+                degraded.append(f"context lane: {type(e).__name__}: {e}")
 
     if candidate_limit is not None or active_reranker is not None:
         text_lane = text_lane[:depth]
@@ -255,10 +288,17 @@ async def recall(
         "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
         "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
     }
+    lanes: list[list[tuple[int, float]]] = [vector_lane, text_lane]
+    weights = [1.0, 1.0]
     if graph_boost:
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
-    fused = (fusion.rrf([vector_lane, text_lane, entity_hits], weights=[1.0, 1.0, ENTITY_WEIGHT]) if graph_boost
-             else fusion.rrf([vector_lane, text_lane]))
+        lanes.append(entity_hits)
+        weights.append(ENTITY_WEIGHT)
+    if runtime.context_lane:
+        ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
+        lanes.append(context_hits)
+        weights.append(CONTEXT_WEIGHT)
+    fused = fusion.rrf(lanes, weights=weights)
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
     now = runtime.clock()
     items = [

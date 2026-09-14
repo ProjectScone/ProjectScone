@@ -36,6 +36,8 @@
     SCONE_ABSTENTION_POLICY        a policy file from `scone calibrate`: the measured floor to abstain by
     SCONE_SYNONYMS                 a file of synonym groups, one per line, comma-separated; the text lane's
                                    query gains the other members of every group a query term is in
+    SCONE_CONTEXT_LANE=1           index what each chunk is under (headings, title, source name, document
+                                   terms) beside its text and search it as a lane of its own (off by default)
     SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
     SCONE_PROFILE_WITHOUT          predicates a profile never shows
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
@@ -162,6 +164,7 @@ class Settings:
     contextual_embeddings: bool = False
     table_context_embeddings: bool = False
     demote_restated: bool = True
+    context_lane: bool = False
     many_valued: tuple[str, ...] = ()
     relation_inverse: tuple[str, ...] = ()
     relation_symmetric: tuple[str, ...] = ()
@@ -379,6 +382,7 @@ class Settings:
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
+            context_lane=parse_flag("SCONE_CONTEXT_LANE", env.get("SCONE_CONTEXT_LANE")),
             relation_inverse=tuple(item.strip() for item in env.get("SCONE_RELATION_INVERSE", "").split(",")
                                    if item.strip()),
             relation_symmetric=tuple(item.strip() for item in env.get("SCONE_RELATION_SYMMETRIC", "").split(",")
@@ -691,7 +695,7 @@ def build_vectors(settings: Settings, documents=None):
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
 ENGINE_SETTINGS = ("contextual_embeddings", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
-                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued")
+                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy", "synonyms")
 #: Settings carried into an engine through a policy they build.
@@ -782,6 +786,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
         synonyms=build_synonyms(settings),
+        context_lane=settings.context_lane,
         profile_policy=build_profile_policy(settings),
     ).open()
 
@@ -958,6 +963,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
         synonyms=build_synonyms(settings),
+        context_lane=settings.context_lane,
         profile_policy=build_profile_policy(settings),
         blobs=blobs,
     )

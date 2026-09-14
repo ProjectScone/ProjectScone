@@ -61,6 +61,8 @@ class InMemoryDocumentStore:
         self._fact_ids = count(1)
         self._link_ids = count(1)
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
+        #: The context lane: what each chunk is under, indexed beside its text.
+        self._context: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
         #: Fact writes per space, only ever growing: the ledger stamp.
         self._fact_writes: dict[str, int] = defaultdict(int)
@@ -198,6 +200,7 @@ class InMemoryDocumentStore:
         removed = [c.chunk_id for c in self._chunks.values() if c.space == space and c.episode_id == episode_id]
         for chunk_id in removed:
             self._bm25[space].remove(chunk_id)
+            self._context[space].remove(chunk_id)
             del self._chunks[chunk_id]
         self._chunks_by_episode.pop((space, episode_id), None)
         if episode is not None:
@@ -244,19 +247,26 @@ class InMemoryDocumentStore:
     #: This store applies a metadata filter itself, so the lanes
     #: do not have to be widened to compensate for it.
     narrows_metadata = True
+    #: This store keeps a context index beside chunk text (see ContextIndex).
+    context_lane = True
 
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
-        allowed = None
+        return self._bm25[space].search(query, limit, self._allowed(space, filter))
+
+    async def index_context(self, space: str, chunk_id: int, text: str) -> None:
+        self._context[space].remove(chunk_id)
+        self._context[space].add(chunk_id, text)
+
+    async def search_context(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        return self._context[space].search(query, limit, self._allowed(space, filter))
+
+    def _allowed(self, space: str, filter: TextFilter) -> list[int] | None:
         if (filter.as_of or filter.tags or filter.where or filter.conditions
                 or any(value is not None for value in (filter.kind, filter.source_prefix, filter.since, filter.until))):
-            allowed = [
-                c.chunk_id
-                for c in self._chunks.values()
-                if c.space == space and self._passes(c, filter)
-            ]
-        return self._bm25[space].search(query, limit, allowed)
+            return [c.chunk_id for c in self._chunks.values() if c.space == space and self._passes(c, filter)]
+        return None
 
     def _passes(self, chunk: Chunk, filter: TextFilter) -> bool:
         if filter.as_of and not is_before_or_at(chunk.created_at, filter.as_of):

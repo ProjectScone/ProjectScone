@@ -1050,6 +1050,43 @@ environment says, so what it measures is the difference between the
 settings and nothing else: `SCONE_RECALL_CANDIDATES`,
 `SCONE_DEMOTE_RESTATED`, `SCONE_CONTEXTUAL_EMBEDDINGS`.
 
+### The context lane: found by what it is under
+
+A chunk under the heading "Refunds" in a document titled "Billing
+rules" need not say either word, and a query about billing refunds then
+misses it in the text lane, which finds the words a passage has and
+only those. With `SCONE_CONTEXT_LANE=1` (`MemoryEngine(...,
+context_lane=True)`) each chunk's context is derived at ingestion with
+no model — the headings enclosing it, the document's title (its top
+heading, or a short first line that does not read as a sentence) and
+the words of the source's name — keeping only what the chunk itself
+lacks, and indexed **beside** its text, never in it. Stored text and
+offsets do not change. At recall the same query the text lane got is
+searched over that index as a third lane and fused by rank at twice the
+weight of the others; `lanes.context` on each item says where the lane
+placed it.
+
+The weight is measured, not guessed. Rank fusion is flat, so a lane
+that finds what the others cannot needs weight to be heard at all: on
+the `under-v1` benchmark (`testing.context_lane_benchmark`: twenty
+passages under a heading whose words they never say, eight distractors
+each repeating the question's words) the passage reached the top five
+in 0 of 20 cases without the lane, and with it in 0 at weight 0.5, 1 at
+1.0 and 13 at 2.0 — where the distractor also lost first place in 13
+cases. The entity lane made the same choice for the same reason. The
+cost is on the record too: a passage under the words can now come
+before one that merely says them, which is what the benchmark's
+question wants and a literal search would not. A document's frequent
+words were tried as context and left out: spread over every chunk they
+make the lane fire on mentions rather than on structure.
+
+The words are bounded — at most 32 per chunk, headings first, then
+title, then source words, the rest counted as omitted — and the lane is
+honest about where it is not: the SQLite and in-memory stores keep the
+index, and an engine with the lane on over a store that does not
+reports `context lane: not kept by …` in `degraded` rather than
+pretending the lane ran.
+
 ### Synonyms the caller wrote down
 
 The lexical lane finds the words a passage has, and only those. A

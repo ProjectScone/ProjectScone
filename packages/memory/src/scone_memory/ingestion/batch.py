@@ -100,6 +100,10 @@ class IngestionRuntime:
     #: -- its sentences are embedded to find the boundaries.
     semantic_aware: bool = False
     context_inputs: Callable[[NewEpisode, Sequence[tuple[int, int]]], Awaitable[list[str]]] | None = None
+    #: Whether each chunk's context -- what it is under and does not say --
+    #: is indexed beside its text for the context lane. Stored text is
+    #: never changed by it; a store without the index is left alone.
+    context_lane: bool = False
     # With an episode id, verification also repairs its original/manifest links.
     verify_visual: Callable[[str, Record, int | None], Awaitable[None]] | None = None
 
@@ -325,6 +329,10 @@ async def write_batch(
                     for i, ((a, b), text) in enumerate(zip(pending.spans, pending.texts))
                 ]
             )
+            if chunks and runtime.context_lane:
+                from .context_terms import index_episode_context
+
+                await index_episode_context(runtime.documents, space, pending.new, chunks)
             if chunks:
                 await runtime.vectors.upsert([
                     VectorPoint(
