@@ -34,6 +34,15 @@
     SCONE_RELATION_SYMMETRIC=married_to       which read the same both ways
     SCONE_RELATION_TRANSITIVE=part_of         which carry through
     SCONE_ABSTENTION_POLICY        a policy file from `scone calibrate`: the measured floor to abstain by
+    SCONE_SYNONYMS                 a file of synonym groups, one per line, comma-separated; the text lane's
+                                   query gains the other members of every group a query term is in
+    SCONE_CONTEXT_LANE=1           index what each chunk is under (headings, title, source name, document
+                                   terms) beside its text and search it as a lane of its own (off by default)
+    SCONE_LEXICAL_STEMS=0          turn off the text lane's stem-prefix families (bill* for billing); on by
+                                   default, measured; the index is untouched either way
+    SCONE_VECTOR_WEIGHT=0.5        the vector lane's voice in rank fusion against the text lane's 1.0 (a number
+                                   above 0 and at most 4); unset, a hashed-token embedder gets 0.25 and any
+                                   other embedder 1.0, measured
     SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
     SCONE_PROFILE_WITHOUT          predicates a profile never shows
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
@@ -160,11 +169,16 @@ class Settings:
     contextual_embeddings: bool = False
     table_context_embeddings: bool = False
     demote_restated: bool = True
+    context_lane: bool = False
+    lexical_stems: bool = True
+    vector_weight: Optional[float] = None
     many_valued: tuple[str, ...] = ()
     relation_inverse: tuple[str, ...] = ()
     relation_symmetric: tuple[str, ...] = ()
     relation_transitive: tuple[str, ...] = ()
     abstention_policy: str | None = None
+    #: A synonym file for the lexical lane, read when an engine is built.
+    synonyms: str | None = None
     profile_predicates: tuple[str, ...] = ()
     profile_without: tuple[str, ...] = ()
     similarity_floor: Optional[float] = None
@@ -375,6 +389,10 @@ class Settings:
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
+            context_lane=parse_flag("SCONE_CONTEXT_LANE", env.get("SCONE_CONTEXT_LANE")),
+            lexical_stems=(parse_flag("SCONE_LEXICAL_STEMS", env["SCONE_LEXICAL_STEMS"])
+                           if env.get("SCONE_LEXICAL_STEMS") else True),
+            vector_weight=_vector_weight(env.get("SCONE_VECTOR_WEIGHT")),
             relation_inverse=tuple(item.strip() for item in env.get("SCONE_RELATION_INVERSE", "").split(",")
                                    if item.strip()),
             relation_symmetric=tuple(item.strip() for item in env.get("SCONE_RELATION_SYMMETRIC", "").split(",")
@@ -382,6 +400,7 @@ class Settings:
             relation_transitive=tuple(item.strip() for item in env.get("SCONE_RELATION_TRANSITIVE", "").split(",")
                                       if item.strip()),
             abstention_policy=env.get("SCONE_ABSTENTION_POLICY") or None,
+            synonyms=env.get("SCONE_SYNONYMS") or None,
             profile_predicates=tuple(item.strip() for item in env.get("SCONE_PROFILE_PREDICATES", "").split(",")
                                      if item.strip()),
             profile_without=tuple(item.strip() for item in env.get("SCONE_PROFILE_WITHOUT", "").split(",")
@@ -525,6 +544,16 @@ def build_abstention(settings: Settings):
     from ..retrieval.abstention import AbstentionPolicy
 
     return AbstentionPolicy.read(settings.abstention_policy) if settings.abstention_policy else None
+
+
+def build_synonyms(settings: Settings):
+    """The caller's synonym list for the text lane, or None when no file is named.
+
+    Read when the engine is built, so a missing or malformed file stops
+    the process at startup rather than the first query."""
+    from ..retrieval.synonyms import Synonyms
+
+    return Synonyms.from_file(settings.synonyms) if settings.synonyms else None
 
 
 def build_embedder(settings: Settings):
@@ -676,9 +705,10 @@ def build_vectors(settings: Settings, documents=None):
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
 ENGINE_SETTINGS = ("contextual_embeddings", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
-                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued")
+                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "lexical_stems",
+                   "vector_weight")
 #: Settings carried into an engine that are read from a file, not a value.
-FILE_SETTINGS = ("abstention_policy",)
+FILE_SETTINGS = ("abstention_policy", "synonyms")
 #: Settings carried into an engine through a policy they build.
 POLICY_SETTINGS = ("profile_predicates", "profile_without")
 
@@ -766,6 +796,10 @@ async def build_in_process_engine(settings: Settings, embedder):
         many_valued=settings.many_valued,
         relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
+        synonyms=build_synonyms(settings),
+        context_lane=settings.context_lane,
+        lexical_stems=settings.lexical_stems,
+        vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
     ).open()
 
@@ -820,6 +854,18 @@ def build_worker(engine: MemoryEngine, settings: Settings, spaces):
         deriver = Deriver(engine, chat)
     return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s,
                                batch=settings.distill_batch, retention=settings.retention, deriver=deriver)
+
+
+def _vector_weight(raw: Optional[str]) -> Optional[float]:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise InvalidInput("SCONE_VECTOR_WEIGHT must be a number above 0 and at most 4") from None
+    if not 0 < value <= 4 or value != value:
+        raise InvalidInput("SCONE_VECTOR_WEIGHT must be a number above 0 and at most 4")
+    return value
 
 
 def parse_flag(name: str, raw: Optional[str]) -> bool:
@@ -941,6 +987,10 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         many_valued=settings.many_valued,
         relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
+        synonyms=build_synonyms(settings),
+        context_lane=settings.context_lane,
+        lexical_stems=settings.lexical_stems,
+        vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
         blobs=blobs,
     )

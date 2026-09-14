@@ -39,6 +39,7 @@ async def ordered(engine, count=6):
         ids.append((await engine.documents.chunks_of("alpha", episode.episode_id))[0].chunk_id)
     engine.vectors.search = AsyncMock(side_effect=lambda space, query, limit, *args: [(cid, 0.9 - i / 100) for i, cid in enumerate(ids[:limit])])
     engine.documents.search_text = AsyncMock(return_value=[])
+    engine.documents.search_terms = AsyncMock(return_value=[])
     return ids
 
 
