@@ -334,6 +334,40 @@ older flattened workbooks. General worksheet header inference, merged layouts
 outside declared tables, number-format rendering, XLS/XLSB table structure and
 spreadsheet image/chart interpretation remain separate gaps.
 
+## Import a page by URL
+
+```bash
+SCONE_URL_IMPORT=1 scone import-url https://example.org/report.html
+curl -X POST http://127.0.0.1:7437/v1/documents/from-url -H "Authorization: Bearer $KEY" \
+  -d '{"url": "https://example.org/report.html"}'
+```
+
+The document lane reads what a caller hands it; this fetches the page
+itself and reads it as the document its media type says it is (HTML,
+plain text, Markdown, JSON, CSV or PDF, by the same readers as an
+uploaded file). The bytes fetched are retained as the original, the text
+is indexed, and the episode says where it came from: `document_url`,
+`document_final_url` after redirects, `document_media_type` and
+`document_fetched_at`. The same bytes read the same way are the same
+document, so importing a page again does not duplicate it.
+
+It is off unless the server is started with `SCONE_URL_IMPORT=1`, because
+a server that fetches whatever URL it is told to will fetch its own
+metadata service, its database, or the neighbour on its subnet. When on,
+three rules hold, each with a test: every address a hostname resolves to
+must be on the public internet, at the first URL and at every redirect,
+and the connection is made to the address that was checked rather than to
+the name again, so a name that changes its answer between the check and
+the connection gains nothing (`SCONE_URL_IMPORT_PRIVATE=1`, or
+`WebLimits(allow_private=True)` in code, is for a lab and says so); a page
+is read up to `max_bytes`
+(10 MiB by default) and refused past it rather than cut, a redirect chain
+past `max_redirects` (5) is refused, and the fetch has a deadline; a media
+type the document lane does not read is refused, not guessed at. Only
+`http` and `https` are fetched, and a URL carrying credentials is not
+sent. `scone import-url --json` prints the record: episode, URLs, media
+type, bytes, redirects, format and segment count.
+
 ## Durable extraction checkpoints
 
 `DocumentIngestionWorkflow` reuses the shared encrypted workflow journal:

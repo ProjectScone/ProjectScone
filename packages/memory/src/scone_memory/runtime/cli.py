@@ -245,6 +245,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("export", help="dump the space as JSON lines to stdout")
     p.add_argument("--include-attachments", action="store_true",
                    help="include verified linked evidence bytes using archive profile 2")
+    p = sub.add_parser("import-url", help="fetch a page by URL and read it as the document its media type says it is "
+                                          "(needs SCONE_URL_IMPORT=1; private hosts need SCONE_URL_IMPORT_PRIVATE=1)")
+    p.add_argument("url", help="an http or https URL")
+
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
     p.add_argument("--resurrect", action="store_true", help="store content this space forgot on purpose; the tombstone stays")
@@ -1427,6 +1431,18 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
     if args.command == "graph":
         return await graph_command(args, engine, out)
+    if args.command == "import-url":
+        from ..ingestion.web import WebLimits, ingest_url
+
+        if settings is None or not settings.url_import:
+            raise InvalidInput("URL import is off; start with SCONE_URL_IMPORT=1 to fetch pages")
+        imported = await ingest_url(engine, space, args.url, limits=WebLimits(allow_private=settings.url_import_private))
+        if args.json:
+            emit(imported.record())
+        else:
+            print(f"imported {imported.url} as {imported.document.format} ({imported.bytes} bytes, "
+                  f"{imported.document.segments} segment(s)) into episode {imported.document.added.episode_id}", file=out)
+        return 0
     if args.command == "summarize":
         from .config import build_chat
         from ..retrieval.summary_tree import build_summary_tree
