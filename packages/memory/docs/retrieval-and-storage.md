@@ -1061,6 +1061,52 @@ Opt-in, because it is not yet measured. It changes the shape of an answer
 for certain; whether it changes what is *found* is a question for the
 bench, and until that number exists this does not become the default.
 
+## The passage around a precise hit
+
+Merging needs two hits in one episode. The commoner case is one: a
+sentence matches exactly, and the answer is in the sentence after it. A
+window returns each hit with the episode's own text around it, read at
+retrieval from the byte span every chunk carries.
+
+```bash
+scone recall "rust jib slew grease" --window 200                         # 200 bytes either side
+scone recall "rust jib slew grease" --window 1 --window-unit sentences   # one whole sentence either side
+```
+
+Over HTTP, `GET /v1/recall?window=1&window_unit=sentences`; the response's
+`widened` receipt says what was done.
+
+The leading framework builds its sentence window at ingestion: one
+sentence per node, the neighbours stored beside it, and a re-index to
+change the size. Here the unit and the count are the caller's, per
+request, and nothing is re-embedded.
+
+- **A window is quoted, never assembled.** Its text is the episode's
+  bytes between two offsets, both on character boundaries.
+- **Counted in bytes**, both edges land wherever the count does.
+- **Counted in sentences**, the hit first grows to the whole sentences it
+  touches, then by `window` whole sentences either side (at most 20), so
+  both edges sit on sentence boundaries. With `window=0` it only
+  completes the sentences it touches. A hit that is only the space
+  between sentences takes the sentence after it. The window always holds
+  the whole hit.
+  - A sentence ends at `.`, `!` or `?`, with any closing quote or
+    bracket, followed by space or the end. It does not end at an initial
+    (`J. Anderson`), a title (`Dr. Okafor`) or a stop followed by a
+    lower-case word (`i.e. before`), the rules the semantic chunker cuts
+    by. It also ends at a CJK full stop (`。！？`), which needs no space
+    after it, and at a blank line, so a heading or list item with no stop
+    is a sentence of its own.
+- **A window cut short says so.** `clipped` counts windows that met the
+  start or end of the episode. `capped` counts sentence windows stopped at
+  the 100,000-byte reach inside an over-long sentence. `aligned` counts
+  byte windows moved off a partial character. The `why` line says each in
+  words.
+- **A source confirmed gone is dropped, not served**, and one that could
+  not be read stands as it was and is counted.
+
+Advertised as `recall.window` and `recall.sentence_window`.
+
 ## What a codebase says about itself beyond who calls whom
 
 Call edges are not a code graph. Two questions people actually ask are
