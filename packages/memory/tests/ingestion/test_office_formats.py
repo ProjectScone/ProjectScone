@@ -234,9 +234,34 @@ def test_slides_family_reads_as_a_presentation(extension: str) -> None:
     assert result.format == extension and 'macros' not in result.metadata
 
 
-def test_the_capability_listing_and_source_scan_name_every_office_family_member() -> None:
-    from scone_memory.ingestion.formats.office import OFFICE_EXTENSIONS, OFFICE_FAMILIES
-    from scone_memory.ingestion.source_scan import default_extensions
+FAMILY_MEMBERS = {'docx', 'docm', 'dotx', 'dotm', 'xlsx', 'xlsm', 'xltx', 'xltm',
+                  'pptx', 'pptm', 'potx', 'potm', 'ppsx', 'ppsm'}
 
-    members = set().union(*OFFICE_FAMILIES.values())
-    assert members <= OFFICE_EXTENSIONS and {'.' + member for member in members} <= set(default_extensions())
+
+def test_the_capability_listing_the_source_scan_and_the_media_types_name_every_office_family_member() -> None:
+    from scone_memory.ingestion.files import FILE_MEDIA_TYPES
+    from scone_memory.ingestion.formats.capabilities import document_formats
+    from scone_memory.ingestion.formats.office import OFFICE_FAMILIES
+    from scone_memory.ingestion.source_scan import default_extensions
+    from scone_memory.memory.engine import ATTACHMENT_TYPES
+
+    assert set().union(*OFFICE_FAMILIES.values()) == FAMILY_MEMBERS
+    dotted = {'.' + member for member in FAMILY_MEMBERS}
+    assert dotted <= set(document_formats()), "the capability listing names every member"
+    assert dotted <= set(default_extensions()), "a directory scan reads every member"
+    assert dotted <= set(FILE_MEDIA_TYPES), "every member has a media type"
+    assert set(FILE_MEDIA_TYPES.values()) <= set(ATTACHMENT_TYPES), "every document media type is one the engine attaches"
+
+
+async def test_a_macro_enabled_document_is_ingested_end_to_end_under_its_own_media_type() -> None:
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.ingestion.files import ingest_document
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        ingested = await ingest_document(memory, 'docs', docx('Quarterly memo'), filename='memo.docm')
+        assert ingested.format == 'docm' and ingested.original.media_type == 'application/vnd.ms-word.document.macroEnabled.12'
+        episode = await memory.episode('docs', ingested.added.episode_id)
+        assert 'Quarterly memo' in episode.content and episode.metadata['document_format'] == 'docm'
+    finally:
+        await memory.close()
