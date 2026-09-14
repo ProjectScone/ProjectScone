@@ -8,9 +8,9 @@ import pytest
 
 from scone_memory.core.errors import InvalidInput
 from scone_memory.ingestion import chat_exports as chat
-from scone_memory.ingestion.chat_exports import (ChatMessage, Transcript, import_transcript, read_discord,
-                                                  read_slack_day, read_slack_export, read_telegram,
-                                                  read_transcript, read_whatsapp, sessions)
+from scone_memory.ingestion.chat_exports import (ChatMessage, Transcript, import_transcript, ingest_chat_export,
+                                                  message_identity, read_discord, read_slack_day, read_slack_export,
+                                                  read_telegram, read_transcript, read_whatsapp, sessions)
 
 ANDROID = """12/03/2024, 14:05 - Messages and calls are end-to-end encrypted. No one outside of this chat can read them.
 12/03/2024, 14:05 - Alice: Hello Bob
@@ -36,6 +36,46 @@ def test_whatsapp_android_lines_open_messages_and_lines_in_no_shape_continue_the
     assert found.media_only_messages == 2 and found.attachments_skipped == 1, "the omitted media and the deletion notice; only the media was a file"
     assert found.unparsed_lines == 0
     assert len({m.key for m in found.messages}) == 3
+
+
+def test_whatsapp_meridians_with_dots_and_spaces_are_clock_times_not_speakers():
+    spanish = ("[12/3/24, 2:05:33 p. m.] Alice: buenas tardes\n"
+               "[12/3/24, 9:05:33 a. m.] Alice: buenos días\n"
+               "13/3/24, 11:59 p.m. - Bob: casi medianoche\n")
+    found = read_whatsapp(spanish, chat="es")
+    assert [(m.sender, m.sent_at) for m in found.messages] == [
+        ("Alice", "2024-03-12T14:05:33.000Z"), ("Alice", "2024-03-12T09:05:33.000Z"), ("Bob", "2024-03-13T23:59:00.000Z")]
+    assert found.system_messages == 0 and len({m.sender for m in found.messages}) == 2
+
+
+def test_whatsapp_attachment_lines_are_counted_and_the_caption_is_the_message():
+    text = ("[12/03/2024, 14:05:33] Alice: \u200e<attached: 00000042-PHOTO-2024-03-12-14-05-33.jpg>\n"
+            "12/03/2024, 14:06 - Bob: IMG-20240312-WA0001.jpg (file attached)\nlook at this\n"
+            "12/03/2024, 14:07 - Bob: plain words\n")
+    found = read_whatsapp(text, chat="x")
+    assert [m.text for m in found.messages] == ["look at this", "plain words"], "the file's name is not what was said"
+    assert found.attachments_skipped == 2 and found.media_only_messages == 1
+    assert not any("attached" in m.text for m in found.messages)
+
+
+def test_whatsapp_senders_with_quotes_are_kept_and_iso_dates_decide_themselves():
+    found = read_whatsapp('12/03/2024, 14:05 - Jo "Jojo" Smith: hi\n', chat="x")
+    assert [m.sender for m in found.messages] == ['Jo "Jojo" Smith']
+    iso = read_whatsapp("2024-03-12, 14:05 - Alice: hi\n2024-03-13, 09:00 - Bob: yo\n", chat="x")
+    assert iso.date_order == "year-first" and iso.messages[1].sent_at == "2024-03-13T09:00:00.000Z"
+    told = read_whatsapp("01/02/2024, 10:00 - Alice: hi\n", chat="x", date_order="month-first")
+    assert told.date_order == "month-first" and told.date_order_told and told.messages[0].sent_at == "2024-01-02T10:00:00.000Z"
+    with pytest.raises(InvalidInput, match="writes its dates day-first, not month-first"):
+        read_whatsapp("13/02/2024, 10:00 - Alice: hi\n", chat="x", date_order="month-first")
+
+
+def test_whatsapp_lines_that_continue_a_system_line_or_a_dropped_header_are_not_unparsed():
+    text = ("12/03/2024, 14:05 - Alice changed the group description to:\nWe plant on Fridays.\nBring gloves.\n"
+            "31/02/2024, 10:00 - Alice: no such day\nstill part of it\n"
+            "12/03/2024, 14:06 - Bob: hello\n")
+    found = read_whatsapp(text, chat="x")
+    assert found.system_messages == 1 and found.unparsed_lines == 1, "the impossible header is counted once; its lines belong to it"
+    assert [m.text for m in found.messages] == ["hello"]
 
 
 def test_whatsapp_ios_shape_with_direction_marks_and_meridian_reads_month_first_when_the_file_says_so():
@@ -79,6 +119,11 @@ def test_the_message_bound_leaves_the_rest_counted(monkeypatch):
     telegram = read_telegram({"name": "g", "type": "private_group", "messages": [
         {"id": i, "type": "message", "date": "2024-03-12T10:00:00", "from": "A", "text": f"m{i}"} for i in range(4)]})
     assert len(telegram.messages) == 2 and telegram.messages_unread == 2
+    discord = read_discord({"guild": {}, "channel": {"name": "c"}, "messages": [
+        {"id": str(i), "type": "Default", "timestamp": "2024-03-12T10:00:00+00:00", "content": f"m{i}", "author": {"name": "a"}} for i in range(3)]})
+    assert len(discord.messages) == 2 and discord.messages_unread == 1
+    slack = read_slack_day([{"type": "message", "user": "U1", "text": f"m{i}", "ts": f"171023760{i}.000100"} for i in range(5)], channel="c")
+    assert len(slack.messages) == 2 and slack.messages_unread == 3
 
 
 def test_telegram_result_json_reads_entity_lists_service_messages_and_replies():
@@ -96,6 +141,9 @@ def test_telegram_result_json_reads_entity_lists_service_messages_and_replies():
     assert found.messages[1].sent_at == "2024-03-12T09:02:00.000Z" and found.messages[1].reply_to == "2", "a naive date is read in the caller's zone"
     assert found.media_only_messages == 1 and found.attachments_skipped == 1 and found.time_zone == "+01:00"
     assert [m.key for m in found.messages] == ["2", "3"]
+    voice = read_telegram({"name": "g", "type": "private_group", "messages": [
+        {"id": 9, "type": "message", "date": "2024-03-12T10:03:00", "from": "Bob", "file": "voice_messages/1.ogg", "media_type": "voice_message", "text": ""}]})
+    assert voice.attachments_skipped == 1, "one file, however many keys describe it"
 
 
 def test_discord_export_reads_replies_and_counts_joins_and_attachments():
@@ -163,10 +211,23 @@ def test_read_transcript_decides_by_suffix_and_shape_and_refuses_the_rest():
     discord = json.dumps({"guild": {"name": "G"}, "channel": {"name": "c"}, "messages": []}).encode()
     assert read_transcript(discord, "c.json").platform == "discord"
     assert read_transcript(json.dumps(SLACK_DAY).encode(), "2024-03-12.json", chat="deploys").platform == "slack"
+    shared = io.BytesIO()
+    with zipfile.ZipFile(shared, "w") as archive:
+        archive.writestr("_chat.txt", ANDROID)
+        archive.writestr("00000042-PHOTO.jpg", b"not read")
+    ios = read_transcript(shared.getvalue(), "WhatsApp Chat - Team.zip")
+    assert ios.platform == "whatsapp" and ios.chat == "WhatsApp Chat - Team" and len(ios.messages) == 3
+    with pytest.raises(InvalidInput, match="at most 200"):
+        read_transcript(ANDROID.encode(), "t.txt", chat="x" * 201)
     with pytest.raises(InvalidInput, match="neither a Telegram"):
         read_transcript(b'{"items": [1, 2, 3]}', "data.json")
     with pytest.raises(InvalidInput, match="neither a Telegram"):
         read_transcript(b'{"messages": [], "hello": 1}', "data.json")
+    empty = io.BytesIO()
+    with zipfile.ZipFile(empty, "w") as archive:
+        archive.writestr("readme.md", "nothing")
+    with pytest.raises(InvalidInput, match="neither a WhatsApp export .* nor a Slack export"):
+        read_transcript(empty.getvalue(), "x.zip")
     with pytest.raises(InvalidInput, match="must be a WhatsApp"):
         read_transcript(b"a,b\n1,2\n", "table.csv")
     with pytest.raises(InvalidInput, match="not well-formed JSON"):
@@ -210,6 +271,53 @@ async def test_import_stores_one_dated_keyed_conversation_episode_per_message_an
         await import_transcript(engine, "chat", first, metadata={"speaker": "me"})
     with pytest.raises(InvalidInput, match="at most 9 caller metadata keys"):
         await import_transcript(engine, "chat", first, metadata={f"k{i}": "v" for i in range(10)})
+    with pytest.raises(InvalidInput, match="metadata key must match"):
+        await import_transcript(engine, "chat", first, metadata={"User": "mark"})
+
+
+async def test_slack_messages_are_keyed_by_channel_so_a_grown_export_adds_only_the_new_channel(engine):
+    def export(channels):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("users.json", "[]")
+            for channel in channels:
+                archive.writestr(f"{channel}/2024-03-12.json", json.dumps(SLACK_DAY))
+        return buffer.getvalue()
+    one = read_slack_export(export(["deploys"]))
+    two = read_slack_export(export(["deploys", "random"]))
+    assert one.chat == "deploys" and two.chat == "2 channels"
+    assert message_identity(one, one.messages[0]) == message_identity(two, two.messages[0]) == "chat:slack:deploys:1710237660.000200"
+    first = await import_transcript(engine, "chat", one)
+    second = await import_transcript(engine, "chat", two)
+    assert (first.stored, second.stored, second.duplicates) == (2, 2, 2), "the channel already imported is known; the new one is stored"
+
+
+async def test_an_engine_failure_part_way_leaves_the_earlier_batches_stored_and_a_second_import_finishes(engine, monkeypatch):
+    monkeypatch.setattr(chat, "IMPORT_BATCH", 1)
+    transcript = read_whatsapp(ANDROID, chat="Team")
+    real = engine.remember_many
+    calls = 0
+    async def flaky(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("embedder went away")
+        return await real(*args, **kwargs)
+    monkeypatch.setattr(engine, "remember_many", flaky)
+    with pytest.raises(RuntimeError, match="embedder went away"):
+        await import_transcript(engine, "chat", transcript)
+    monkeypatch.setattr(engine, "remember_many", real)
+    receipt = await import_transcript(engine, "chat", transcript)
+    assert (receipt.stored, receipt.duplicates) == (2, 1), "the batch stored before the failure is known; the rest are stored now"
+
+
+async def test_ingest_refuses_a_whatsapp_file_whose_date_order_nobody_decided_until_told(engine):
+    data = b"01/02/2024, 10:00 - Alice: hi\n03/04/2024, 10:00 - Bob: yo\n"
+    with pytest.raises(InvalidInput, match="decides whether its dates are day-first or month-first"):
+        await ingest_chat_export(engine, "chat", data, filename="quiet.txt")
+    receipt = await ingest_chat_export(engine, "chat", data, filename="quiet.txt", date_order="month-first")
+    assert receipt.stored == 2 and receipt.date_order == "month-first" and receipt.date_order_told
+    assert receipt.first_at == "2024-01-02T10:00:00.000Z"
 
 
 async def test_a_message_the_engine_refuses_is_counted_failed_with_its_reason_and_the_rest_stored(engine):

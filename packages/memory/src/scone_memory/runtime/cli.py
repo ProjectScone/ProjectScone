@@ -83,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("file", help="WhatsApp .txt, Telegram result.json, Discord .json, or a Slack .zip export or day .json")
     p.add_argument("--chat", help="the chat's name in every memory; default: the file's name, or what the export says")
     p.add_argument("--time-zone", help="zone of clock times the export writes without one (WhatsApp, Telegram): an IANA name or +HH:MM; default UTC, and the receipt says so")
+    p.add_argument("--date-order", choices=["day-first", "month-first"],
+                   help="how a WhatsApp export writes its dates, when no line of the file decides it")
     p.add_argument("--gap-hours", type=float, default=6.0, help="silence that ends a session (default 6)")
     p.add_argument("--meta", action="append", default=[], help="key=value scope on every message, repeatable")
 
@@ -1342,15 +1344,17 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
         from ..ingestion.chat_exports import ingest_chat_export
 
-        if args.gap_hours < 0:
+        import math
+
+        if not math.isfinite(args.gap_hours) or args.gap_hours < 0:
             raise InvalidInput("--gap-hours must be zero or more")
         try:
             export = pathlib.Path(args.file).read_bytes()
         except OSError as exc:
             raise InvalidInput(f"cannot read {args.file}: {exc.strerror or exc}") from None
         imported = await ingest_chat_export(engine, space, export, filename=pathlib.Path(args.file).name, chat=args.chat,
-                                           time_zone=args.time_zone, gap_seconds=int(args.gap_hours * 3600),
-                                           metadata=parse_pairs(args.meta, "--meta"))
+                                           time_zone=args.time_zone, date_order=args.date_order,
+                                           gap_seconds=int(args.gap_hours * 3600), metadata=parse_pairs(args.meta, "--meta"))
         if args.json:
             emit({k: v for k, v in asdict(imported).items() if k != "episode_ids"} | {"episodes": len(imported.episode_ids)})
         else:
@@ -1363,11 +1367,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                        (imported.messages_unread, "message(s) past the bound")]
             if any(count for count, _ in tallies):
                 print("counted, not stored: " + ", ".join(f"{count} {what}" for count, what in tallies if count), file=out)
-            if imported.date_order == "undecidable":
-                print("dates read day-first: no line in the file decides the order; pass a month-first file's dates through --chat and check", file=out)
+            if imported.date_order_told:
+                print(f"dates read {imported.date_order} as told; the file itself did not decide", file=out)
             if imported.time_zone:
                 print(f"clock times read in {imported.time_zone}", file=out)
-        return 0
+        return 1 if imported.failed and not imported.stored and not imported.duplicates else 0
 
     if args.command == "remember":
         if args.image is not None and args.jsonl:

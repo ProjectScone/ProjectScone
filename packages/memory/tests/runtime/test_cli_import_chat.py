@@ -42,6 +42,20 @@ def test_import_chat_stores_messages_and_reports_the_rest(tmp_path):
     assert "imported 0 of 2 messages" in output.getvalue() and "2 already known" in output.getvalue()
 
 
+def test_import_chat_exits_nonzero_when_nothing_was_stored_and_names_the_reason(tmp_path):
+    export = tmp_path / "long.txt"
+    export.write_text("13/03/2024, 14:05 - Alice: " + "x" * 2_000_100 + "\n", encoding="utf-8")
+    env = environment(tmp_path)
+    output = io.StringIO()
+    assert main(["--space", "chats", "import-chat", str(export)], env=env, out=output) == 1
+    assert "imported 0 of 1 messages" in output.getvalue() and "1 refused (content exceeds" in output.getvalue()
+    quiet = tmp_path / "quiet.txt"
+    quiet.write_text("01/02/2024, 10:00 - Alice: hi\n", encoding="utf-8")
+    output = io.StringIO()
+    assert main(["--space", "chats", "import-chat", str(quiet), "--date-order", "month-first"], env=env, out=output) == 0
+    assert "dates read month-first as told; the file itself did not decide" in output.getvalue()
+
+
 def test_import_chat_refuses_what_it_cannot_read(tmp_path, capsys):
     env = environment(tmp_path)
     table = tmp_path / "table.csv"
@@ -50,3 +64,9 @@ def test_import_chat_refuses_what_it_cannot_read(tmp_path, capsys):
     assert "must be a WhatsApp .txt" in capsys.readouterr().err
     assert main(["--space", "chats", "import-chat", str(tmp_path / "missing.txt")], env=env, out=io.StringIO()) == 2
     assert "cannot read" in capsys.readouterr().err
+    quiet = tmp_path / "quiet.txt"
+    quiet.write_text("01/02/2024, 10:00 - Alice: hi\n", encoding="utf-8")
+    assert main(["--space", "chats", "import-chat", str(quiet)], env=env, out=io.StringIO()) == 2
+    assert "say which with date_order" in capsys.readouterr().err
+    assert main(["--space", "chats", "import-chat", str(quiet), "--date-order", "day-first", "--gap-hours", "nan"], env=env, out=io.StringIO()) == 2
+    assert "--gap-hours must be zero or more" in capsys.readouterr().err
