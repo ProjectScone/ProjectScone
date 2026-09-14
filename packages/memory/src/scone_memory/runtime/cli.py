@@ -814,6 +814,13 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
                      " (pass --no-ignore to read them)")
     if walked.unreadable:
         parts.append(f"{walked.unreadable} directory(ies) could not be read")
+    if walked.links:
+        parts.append(f"{walked.links} symbolic link(s) left alone: what a link points at is outside the root")
+    if rules is not None and rules.truncated:
+        parts.append("the ignore rules were read only as far as the bound allows, so this map may have read "
+                     "what the tree said not to")
+    if rules is not None and rules.unusable:
+        parts.append(f"{len(rules.unusable)} ignore pattern(s) could not be read and were passed over")
     if args.graph:
         parts.append(f"{claims} claim(s)")
         if closed:
@@ -845,6 +852,8 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
                             "unread": unread, "unbound_calls": sorted(unbound),
                             "ignored": walked.ignored_files, "ignored_directories": walked.ignored_directories,
                             "ignore_files": list(rules.files) if rules is not None else [],
+                            "ignore_truncated": rules.truncated if rules is not None else False,
+                            "ignore_unusable": list(rules.unusable) if rules is not None else [],
                             "unreadable_directories": walked.unreadable, "links": walked.links,
                             "withheld": [{"path": where, "reason": reason}
                                          for where, reason in sorted(withheld)],

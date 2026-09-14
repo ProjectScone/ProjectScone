@@ -88,7 +88,8 @@ class SyncReceipt:
     space: str
     applied: bool
     removing: bool
-    #: Files under the root matching the suffixes. What is there.
+    #: Files under the root matching the suffixes and not excluded by the
+    #: ignore rules. What is there to read.
     files_found: int = 0
     #: Files this sync actually read, which is fewer when capped. What we
     #: looked at, which is never reported as what is there.
@@ -103,6 +104,15 @@ class SyncReceipt:
     ignored_directories: int = 0
     #: The ignore files read, relative to the root, in reading order.
     ignore_files: tuple[str, ...] = ()
+    #: An ignore file or pattern past the bound was left unread, so the
+    #: tree's exclusions are not all known, and this run may have read
+    #: what the tree said not to.
+    ignore_truncated: bool = False
+    #: Patterns that could not be read as one, passed over and named.
+    ignore_unusable: tuple[str, ...] = ()
+    #: Memories the marker holds for files that are on disk but that the
+    #: ignore rules now exclude. Not missing: left alone, and counted.
+    ignored_memories: int = 0
     #: Episodes the marker holds whose file is no longer on disk. Only
     #: meaningful when ``checked_for_missing``: a walk that stopped at the
     #: file cap did not see the whole directory, so it cannot tell a file
@@ -157,7 +167,8 @@ class SyncReceipt:
                 "capped": self.capped, "added": self.added, "updated": self.updated,
                 "unchanged": self.unchanged, "removed": self.removed,
                 "ignored": self.ignored, "ignored_directories": self.ignored_directories,
-                "ignore_files": list(self.ignore_files),
+                "ignore_files": list(self.ignore_files), "ignore_truncated": self.ignore_truncated,
+                "ignore_unusable": list(self.ignore_unusable), "ignored_memories": self.ignored_memories,
                 "out_of_scope": self.out_of_scope, "unreadable": self.unreadable,
                 "links": self.links, "special": self.special,
                 "forgotten": self.forgotten, "empty": self.empty, "cut": self.cut,
@@ -176,6 +187,15 @@ class SyncReceipt:
         if self.ignored or self.ignored_directories:
             lines.append(f"{self.ignored} file(s) and {self.ignored_directories} directory(ies) left unread by "
                          f"{', '.join(self.ignore_files) or 'the ignore rules'}; pass --no-ignore to read them")
+        if self.ignored_memories:
+            lines.append(f"{self.ignored_memories} memory(ies) are for files the ignore rules now exclude; they were "
+                         f"left alone, neither read nor removed")
+        if self.ignore_truncated:
+            lines.append("the ignore rules were read only as far as the bound allows; some of the tree's exclusions "
+                         "were not read, so this run may have read what the tree said not to")
+        if self.ignore_unusable:
+            lines.append(f"{len(self.ignore_unusable)} ignore pattern(s) could not be read and were passed over: "
+                         + "; ".join(self.ignore_unusable[:5]))
         if self.unreadable:
             lines.append(f"{self.unreadable} directory(ies) under the root could not be read, so "
                          f"this run cannot say what is gone and forgot nothing")
@@ -443,8 +463,14 @@ async def sync_directory(
     whole = len(reading) == there and not unreadable
     wanted = _wanted(suffixes)
     out_of_scope = [path for path in known if not _in_scope(pathlib.PurePosixPath(path), wanted)]
+    # A memory for a file the ignore rules now exclude is not for a file
+    # that is gone: the rules narrowed the walk, as a flag would, and a
+    # narrowed walk is not a deleted file.
+    ignored_memories = ([path for path in known if path not in seen and path not in set(out_of_scope)
+                         and rules.ignored(path, directory=False)] if rules is not None else [])
     missing = ([path for path in known
-                if path not in seen and path not in set(out_of_scope)] if whole else [])
+                if path not in seen and path not in set(out_of_scope) and path not in set(ignored_memories)]
+               if whole else [])
     forgotten = 0
     for gone in missing:
         tally.saw(gone, "missing")
@@ -461,6 +487,8 @@ async def sync_directory(
         root=str(where), marker=name, space=space, applied=apply, removing=remove,
         files_found=there, files_read=len(reading), added=tally.added, updated=tally.updated,
         ignored=skipped, ignored_directories=pruned, ignore_files=rules.files if rules is not None else (),
+        ignore_truncated=rules.truncated if rules is not None else False,
+        ignore_unusable=rules.unusable if rules is not None else (), ignored_memories=len(ignored_memories),
         unchanged=tally.unchanged, removed=len(missing), forgotten=forgotten,
         out_of_scope=len(out_of_scope), unreadable=unreadable, links=links,
         special=special,

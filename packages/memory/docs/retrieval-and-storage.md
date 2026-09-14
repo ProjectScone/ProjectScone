@@ -1212,10 +1212,19 @@ a shallower one's. A `.sconeignore` in any directory is read after the
 `.gitignore` beside it and can only exclude more: what `.gitignore`
 excludes stays excluded whatever it says, and a file under an excluded
 directory is never re-included, as in git. The receipt says what the
-rules did (`ignored`, `ignored_directories`, `ignore_files`), at most
-500 files and 20,000 patterns are read and the record says when that
-bound bit, and `--no-ignore` reads the tree whole. Dot directories and
-`__pycache__` are never walked, rules or no rules.
+rules did (`ignored`, `ignored_directories`, `ignore_files`); at most
+500 files and 20,000 patterns are read, and when that bound bit the
+receipt says so (`ignore_truncated`), since a run past it may have read
+what the tree said not to; a pattern that cannot be read is passed over
+and named (`ignore_unusable`). A memory `sync` holds for a file the rules
+now exclude is not a file that is gone: it is left alone, neither read
+nor removed, and counted (`ignored_memories`). `--no-ignore` reads the
+tree whole. Dot-named directories and files and `__pycache__` are never
+walked, rules or no rules, and a symbolic link is left alone and counted
+(`links`): what it points at is outside the root. One thing that is
+git's and not here: git matches case-insensitively where
+`core.ignorecase` is set, as it is on a Mac's default file system; these
+rules match as written.
 
 ### Deletion is opt-in, previewed, and refused when the path looks wrong
 
