@@ -388,6 +388,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
     p.add_argument("--limit", type=int, help="only the first N questions")
 
+    p = sub.add_parser("bench-beir", help="measure retrieval on a BEIR dataset directory: graded nDCG, recall, "
+                                           "precision and reciprocal rank, on its own in-process memory")
+    p.add_argument("directory", help="a BEIR dataset: corpus.jsonl, queries.jsonl, qrels/<split>.tsv")
+    p.add_argument("--split", default="test", help="the qrels file to score against (default test)")
+    p.add_argument("--k", default="1,3,10", help="the cut-offs, comma separated (default 1,3,10)")
+    p.add_argument("--queries", type=int, help="run this many judged queries, chosen by --seed")
+    p.add_argument("--seed", type=int, default=0, help="which queries --queries chooses")
+    p.add_argument("--max-documents", type=int,
+                   help="store at most this many documents, every judged one kept; the report says it was cut")
     p = sub.add_parser("bench-parts",
                        help="measure what splitting multi-part questions changes, paired (no model called)")
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file")
@@ -659,6 +668,22 @@ async def parts_command(args: argparse.Namespace, settings: Settings, out) -> in
         raise InvalidInput(f"--k must be from 1 to 100, not {args.k}")
     scored = await run_parts_bench(args.dataset, limit=args.limit, k=args.k)
     print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
+    return 0
+
+
+async def beir_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Score retrieval on a BEIR directory. Its own in-process memory, so the
+    configured store is neither read nor written."""
+    from ..bench.beir import load_beir, run_beir, sampled
+
+    try:
+        ks = [int(part) for part in args.k.split(",") if part.strip()]
+    except ValueError:
+        raise InvalidInput(f"--k is whole numbers separated by commas, not {args.k!r}") from None
+    data = load_beir(args.directory, split=args.split)
+    report = await run_beir(sampled(data, queries=args.queries, seed=args.seed, max_documents=args.max_documents),
+                            ks=ks)
+    print(json.dumps(report.record()) if args.json else report.text(), file=out)
     return 0
 
 
@@ -2270,11 +2295,11 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         serve(settings)  # same SQLite default as the other commands
         return 0
     if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "bench-route",
-                        "bench-parts", "bench-questions", "calibrate", "tune"):
+                        "bench-parts", "bench-questions", "bench-beir", "calibrate", "tune"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
                    "bench-questions": bench_questions_command,
-                   "bench-route": route_command, "bench-parts": parts_command,
+                   "bench-route": route_command, "bench-parts": parts_command, "bench-beir": beir_command,
                    "calibrate": calibrate_command, "tune": tune_command}[args.command]
         try:
             return asyncio.run(command(args, settings, out or sys.stdout))
