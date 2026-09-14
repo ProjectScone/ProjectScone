@@ -166,3 +166,11 @@ def test_the_cut_ends_at_a_word_within_the_limit():
     assert fitted_query("x" * (MAX_QUERY + 5)) == "x" * MAX_QUERY, "one long token is cut where the limit falls"
     assert fitted_query("short query") == "short query"
     assert fitted_query("a" * MAX_QUERY) == "a" * MAX_QUERY
+
+
+def test_a_set_with_no_judged_query_is_refused_rather_than_scored_zero(tmp_path):
+    """Every judgement names a document or a query the files do not hold, so
+    there is nothing to score; a report of zeros would read as a measurement."""
+    data = load_beir(write(tmp_path, qrels=[("q1", "d99", 1), ("q9", "d1", 1)]))
+    with pytest.raises(InvalidInput, match="no query is judged"):
+        sampled(data)
