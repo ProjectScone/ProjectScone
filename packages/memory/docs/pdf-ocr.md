@@ -39,7 +39,9 @@ for item in recall.items:
 ## Coverage and geometry
 
 The default `missing_text` mode preserves native text and only recognizes pages
-without extractable text. A page with a short text layer over a scan is therefore
+without extractable text, or whose text layer is unreadable: mostly private-use
+code points, `(cid:N)` runs, replacement characters or control bytes, the way a
+font without a usable Unicode map extracts. A page with a short text layer over a scan is therefore
 not automatically recognized. Choose `all_pages` explicitly to replace all native
 text with OCR; this mode reads page metadata without extracting discarded text.
 The default text-only `PypdfParser` still requires an existing text layer.

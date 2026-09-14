@@ -20,6 +20,7 @@ from ..ocr.types import OcrEngine, OcrResult
 from ..ocr.layout import ReadingMode, OrderedRegions, order_columns
 from .extraction_checkpoint import ExtractionCheckpoints
 from .pdf import ParsedPdf, PdfLimits, PdfPage, PdfTextRegion, PypdfParser, validate_pdf
+from .text_layer import unreadable
 
 
 logger = logging.getLogger(__name__)
@@ -190,9 +191,12 @@ class OcrPdfParser:
             elif saved_binding != encoded_binding:
                 raise InvalidInput('PDF OCR checkpoints do not match this extraction')
         recognized: dict[int, OcrResult] = {}
-        text_bytes = len(parsed.text.encode())
+        encoded = parsed.text.encode()
+        text_bytes = len(encoded)
         for page in parsed.pages:
-            if page.empty or self.options.mode == 'all_pages':
+            # A text layer no reader can use is missing text too, though the page is not empty.
+            if (page.empty or self.options.mode == 'all_pages'
+                    or unreadable(encoded[page.start:page.end].decode('utf-8'))):
                 key = f'ocr-page:{page.number}'
                 cached = checkpoints.get(key) if checkpoints is not None else None
                 if cached is None:
