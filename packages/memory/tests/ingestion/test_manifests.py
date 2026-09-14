@@ -430,3 +430,140 @@ pytest = "*"
     assert said(claims) == [("Pipfile", DEPENDS_ON, "requests"), ("Pipfile", DEPENDS_ON, "beautiful-soup4"),
                             ("Pipfile", DEVELOPS_WITH, "pytest")]
     assert {c.object: c.first_line for c in claims}["pytest"] == 9
+
+
+def test_a_pom_cites_its_own_artifact_not_the_parents_and_never_a_managed_line():
+    content = """<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <parent>
+    <artifactId>service-parent</artifactId>
+    <groupId>org.example</groupId>
+  </parent>
+  <artifactId>service</artifactId>
+  <dependencyManagement><dependencies>
+    <dependency><groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>33.0</version></dependency>
+  </dependencies></dependencyManagement>
+  <dependencies>
+    <dependency><groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId></dependency>
+    <dependency><groupId>${project.groupId}</groupId><artifactId>shop-core</artifactId></dependency>
+    <dependency><groupId>${jackson.groupId}</groupId><artifactId>jackson-core</artifactId></dependency>
+  </dependencies>
+  <build><plugins>
+    <plugin><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin>
+  </plugins></build>
+</project>
+"""
+    claims = manifest_claims(content, "pom.xml")
+    lines = {(c.predicate, c.object): c.first_line for c in claims}
+    assert lines[(DEFINES, "org.example:service")] == 6, "its own artifactId, not service-parent on line 3"
+    assert lines[(DEPENDS_ON, "com.google.guava:guava")] == 14, "the declaring line, not the managed one on line 9"
+    assert lines[(DEPENDS_ON, "org.example:shop-core")] == 15, "${project.groupId} is the project's group, as Maven reads it"
+    assert (DEPENDS_ON, "${jackson.groupid}:jackson-core") not in lines and not any("jackson" in o for _, o in lines), \
+        "a placeholder this reader cannot see is left out, not guessed"
+    assert lines[(DEVELOPS_WITH, "org.apache.maven.plugins:maven-compiler-plugin")] == 19, "a plugin without a group is Maven's own"
+
+
+def test_an_xml_manifest_the_lines_cannot_place_cites_its_section_or_nothing():
+    prefixed = """<m:project xmlns:m="http://maven.apache.org/POM/4.0.0">
+  <m:groupId>g</m:groupId>
+  <m:artifactId>a</m:artifactId>
+  <m:dependencies>
+    <m:dependency><m:groupId>x</m:groupId><m:artifactId>
+      y
+    </m:artifactId></m:dependency>
+  </m:dependencies>
+</m:project>
+"""
+    claims = manifest_claims(prefixed, "pom.xml")
+    assert said(claims, DEFINES) == [("pom.xml", DEFINES, "g:a")] and claims[0].first_line == 3, "a prefixed tag is the tag"
+    assert said(claims, DEPENDS_ON) == [], "an artifact split over lines has no line to cite, so nothing is claimed"
+    project = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Acme.Api</AssemblyName>
+    <PackageId>acme.api.client</PackageId>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include='Serilog' Version='3.1.1' />
+    <PackageReference
+        Include="Polly"
+        Version="8.0" />
+    <PackageReference Update="xunit" Version="2.6.1" />
+  </ItemGroup>
+</Project>
+"""
+    claims = manifest_claims(project, "App.csproj")
+    lines = {(c.predicate, c.object): (c.first_line, c.quote) for c in claims}
+    assert lines[(DEFINES, "acme.api.client")] == (4, "<PackageId>acme.api.client</PackageId>"), "the tag the name came from"
+    assert lines[(DEPENDS_ON, "serilog")][0] == 7, "single quotes are quotes"
+    assert lines[(DEPENDS_ON, "polly")][0] == 9, "an Include on its own line is found"
+    assert (DEPENDS_ON, "xunit") not in lines, "Update= changes an inherited reference; it declares none"
+
+
+def test_gradle_reads_plugins_only_in_their_block_and_every_coordinate_on_a_line():
+    content = """plugins {
+    id 'java'
+}
+publishing { publications { mavenJava { pom { developers { developer {
+    id 'jdoe'
+} } } } } }
+dependencies {
+    implementation 'a:b:1', 'c:d:2'
+    /* implementation 'com.old:lib:1.0'
+       testImplementation 'e:f:3' */
+    runtimeOnly("g:h:4")
+}
+"""
+    claims = manifest_claims(content, "build.gradle")
+    assert said(claims) == [("build.gradle", DEVELOPS_WITH, "java"), ("build.gradle", DEPENDS_ON, "a:b"),
+                            ("build.gradle", DEPENDS_ON, "c:d"), ("build.gradle", DEPENDS_ON, "g:h")], \
+        "a developer's id is not a plugin; a block comment is not a dependency; a second coordinate on a line is"
+
+
+def test_a_gemfile_clause_inside_a_group_does_not_end_the_group():
+    content = """group :development, :test do
+  if RUBY_VERSION >= '3.0'
+    gem 'debug'
+  end
+  gem 'rubocop'
+  %w[a b].each do |name|
+    gem name
+  end
+  gem 'pry'
+end
+group(:test) do
+  gem('minitest')
+end
+gem 'sidekiq', group: %i[test]
+=begin
+gem 'commented'
+=end
+gem 'rails'
+"""
+    claims = manifest_claims(content, "Gemfile")
+    assert said(claims, DEVELOPS_WITH) == [("Gemfile", DEVELOPS_WITH, "debug"), ("Gemfile", DEVELOPS_WITH, "rubocop"),
+                                           ("Gemfile", DEVELOPS_WITH, "pry"), ("Gemfile", DEVELOPS_WITH, "minitest"),
+                                           ("Gemfile", DEVELOPS_WITH, "sidekiq")]
+    assert said(claims, DEPENDS_ON) == [("Gemfile", DEPENDS_ON, "rails")]
+
+
+@pytest.mark.asyncio
+async def test_a_manifests_project_name_is_not_a_declaration_a_call_could_reach(tmp_path):
+    import io
+    import json
+
+    from scone_memory.runtime.cli import build_parser, run
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "pom.xml").write_text("<project><groupId>org.example</groupId><artifactId>service</artifactId></project>\n",
+                                  encoding="utf-8")
+    (root / "app.py").write_text("def go(x):\n    return x.service()\n", encoding="utf-8")
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--json", "map", str(root), "--graph"]), engine, io.StringIO(""), out)
+    receipt = json.loads(out.getvalue())
+    assert code == 0 and receipt["unconfirmed_call_candidates"] == [], "`org.example:service` is no `service()`"
+    assert "x.service" in receipt["unbound_calls"], "the call is still said to be unbound"
+    await engine.close()

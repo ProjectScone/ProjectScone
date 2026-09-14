@@ -987,7 +987,13 @@ and each manifest's line says what it asked for. The subject is the
 project's declared name where it has one, else the manifest's path. A Go
 `// indirect` requirement is left out: it is what a dependency needs, not
 what the module declares. A renamed Cargo dependency is the crate it names,
-not the alias. `pom.xml` is not read.
+not the alias. A Maven coordinate spelt with `${project.groupId}` or
+`${project.artifactId}` is read as Maven reads it, and a plugin without a
+group is Maven's own; any other placeholder is left out rather than
+guessed. Left unread, by design: Maven's `<dependencyManagement>`,
+`<pluginManagement>` and `<profiles>`, a Gradle `platform(...)` or
+version-catalog reference, a Gemfile's `gemspec`, and
+`Directory.Build.props`/`Directory.Packages.props`.
 
 Dependency names are not bound to import names. They differ often
 enough (`beautifulsoup4` and `bs4`, `Pillow` and `PIL`) that binding them
