@@ -74,8 +74,21 @@ each with its own extraction manifest and deduplication identity.
 
 Configured PDF OCR and image readers retain typed `DocumentTextRegion` values
 on each segment. Each region includes its recognized text, normalized box,
-recognizer score, block/line identifiers and half-open `start`/`end` offsets
-in the **segment's UTF-8 bytes**. `coordinate_space` identifies the displayed
+recognizer score, block/line identifiers (and a `paragraph` number when the
+engine reports one) and half-open `start`/`end` offsets in the **segment's
+UTF-8 bytes**.
+
+Recognized words are kept as the lines and paragraphs they were read in:
+words on a line are joined by a space, lines by a line break and paragraphs
+by a blank line. An image read by an engine that reports its layout, as
+Tesseract does, is one segment per paragraph (`frame:N/paragraph:M`, with the
+paragraph's box, block and word count in its metadata), each word a region
+spanning its own bytes. Before this, every Tesseract word was its own
+segment, so two short paragraphs were stored as 31 one-word paragraphs. An
+engine that reports no block, paragraph or line is read as before, one
+segment per region (`frame:N/region:M`). A PDF page recognized by OCR puts
+the same breaks in its page text, and its parser identity ends
+`scone-ocr-v2`. `coordinate_space` identifies the displayed
 page or image frame with a top-left origin. PDF dimensions in segment metadata
 still describe the unrotated media box; apply the recorded rotation when
 displaying it. Recognition scores are not factual confidence.
