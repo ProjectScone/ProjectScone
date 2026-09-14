@@ -207,8 +207,11 @@ require (
     ("pyproject.toml", True), ("packages/memory/PyProject.toml", True), ("requirements.txt", True),
     ("api/requirements-dev.txt", True), ("requirements/test.txt", True), ("package.json", True),
     ("crates/core/Cargo.toml", True), ("go.mod", True),
+    ("pom.xml", True), ("app/build.gradle", True), ("app/build.gradle.kts", True), ("Gemfile", True),
+    ("composer.json", True), ("Pipfile", True), ("src/App/App.csproj", True), ("Lib.fsproj", True),
     ("notes.toml", False), ("tsconfig.json", False), ("go.sum", False), ("requirements.md", False),
-    ("package-lock.json", False), ("", False),
+    ("package-lock.json", False), ("Gemfile.lock", False), ("settings.gradle", False), ("composer.lock", False),
+    ("App.csproj.user", False), ("", False),
 ])
 def test_a_manifest_is_known_by_its_name_wherever_it_sits(path, expected):
     assert is_manifest(path) is expected
@@ -219,6 +222,11 @@ def test_a_manifest_is_known_by_its_name_wherever_it_sits(path, expected):
     ("package.json", '{"name": "x", "dependencies": ['),
     ("package.json", '["not", "an", "object"]'),
     ("Cargo.toml", "[dependencies]\nserde = 1"),
+    ("pom.xml", "<project><dependencies>"), ("pom.xml", "<notes/>"), ("composer.json", "[1, 2]"),
+    ("pom.xml", '<!DOCTYPE project [<!ENTITY x SYSTEM "file:///etc/passwd">]><project><artifactId>&x;</artifactId></project>'),
+    ("pom.xml", '<!DOCTYPE lol [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;&a;">]><project><groupId>g</groupId><artifactId>&b;</artifactId></project>'),
+    ("App.csproj", '<?xml version="1.0"?><!DOCTYPE Project SYSTEM "http://example.org/p.dtd"><Project/>'),
+    ("App.csproj", "<Project><ItemGroup>"), ("Pipfile", "[packages\nx = '*'"),
 ])
 def test_a_manifest_that_does_not_parse_claims_nothing_and_never_raises(path, content):
     assert manifest_claims(content, path) == ()
@@ -257,3 +265,305 @@ async def test_a_remembered_manifest_is_recorded_as_extracted_quoted_claims():
         assert requests.grounded is True
     finally:
         await engine.close()
+
+
+POM = """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1</version>
+  </parent>
+  <artifactId>Service</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.17.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"""
+
+
+def test_a_maven_pom_reads_coordinates_scopes_and_plugins_under_the_parents_group():
+    claims = manifest_claims(POM, "service/pom.xml")
+    assert said(claims, DEFINES) == [("service/pom.xml", DEFINES, "org.example:service")], "the group is the parent's"
+    assert said(claims, DEPENDS_ON) == [("org.example:service", DEPENDS_ON, "com.fasterxml.jackson.core:jackson-databind"),
+                                        ("org.example:service", DEPENDS_ON, "org.slf4j:slf4j-api")]
+    assert said(claims, DEVELOPS_WITH) == [("org.example:service", DEVELOPS_WITH, "org.junit.jupiter:junit-jupiter"),
+                                           ("org.example:service", DEVELOPS_WITH, "org.apache.maven.plugins:maven-surefire-plugin")]
+    by_object = {c.object: c for c in claims}
+    assert by_object["org.junit.jupiter:junit-jupiter"].quote == "<artifactId>junit-jupiter</artifactId>"
+    assert by_object["org.junit.jupiter:junit-jupiter"].first_line == 18
+    assert POM.encode()[by_object["org.slf4j:slf4j-api"].start:by_object["org.slf4j:slf4j-api"].end].decode().strip() \
+        == "<artifactId>slf4j-api</artifactId>"
+
+
+def test_a_gradle_build_reads_groovy_and_kotlin_configurations_and_plugins():
+    groovy = """plugins {
+    id 'java'
+    id "org.springframework.boot" version "3.2.0"
+}
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web:3.2.0'
+    api group: 'com.google.guava', name: 'guava', version: '33.0'  // not a coordinate string
+    runtimeOnly "org.postgresql:postgresql"
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10' // tests
+    annotationProcessor 'org.projectlombok:lombok:1.18'
+    implementation project(':lib')
+}
+"""
+    claims = manifest_claims(groovy, "app/build.gradle")
+    assert said(claims, DEPENDS_ON) == [("app/build.gradle", DEPENDS_ON, "org.springframework.boot:spring-boot-starter-web"),
+                                        ("app/build.gradle", DEPENDS_ON, "org.postgresql:postgresql")]
+    assert said(claims, DEVELOPS_WITH) == [("app/build.gradle", DEVELOPS_WITH, "java"),
+                                           ("app/build.gradle", DEVELOPS_WITH, "org.springframework.boot"),
+                                           ("app/build.gradle", DEVELOPS_WITH, "org.junit.jupiter:junit-jupiter"),
+                                           ("app/build.gradle", DEVELOPS_WITH, "org.projectlombok:lombok")], \
+        "a map-style or project dependency is not guessed at"
+    kotlin = 'dependencies {\n    implementation("io.ktor:ktor-server-core:2.3.0")\n    testImplementation(kotlin("test"))\n}\n'
+    assert said(manifest_claims(kotlin, "build.gradle.kts")) == [("build.gradle.kts", DEPENDS_ON, "io.ktor:ktor-server-core")]
+
+
+def test_a_gemfile_reads_groups_by_block_and_inline():
+    content = """source 'https://rubygems.org'
+gem 'rails', '~> 7.1'
+gem "pg"
+gem 'rspec-rails', group: :test
+group :development, :test do
+  gem 'rubocop'
+  gem 'pry'
+end
+group :production do
+  gem 'puma'
+end
+platforms :ruby do
+  gem 'nokogiri'
+end
+# gem 'commented-out'
+"""
+    claims = manifest_claims(content, "Gemfile")
+    assert said(claims, DEPENDS_ON) == [("Gemfile", DEPENDS_ON, "rails"), ("Gemfile", DEPENDS_ON, "pg"),
+                                        ("Gemfile", DEPENDS_ON, "puma"), ("Gemfile", DEPENDS_ON, "nokogiri")]
+    assert said(claims, DEVELOPS_WITH) == [("Gemfile", DEVELOPS_WITH, "rspec-rails"), ("Gemfile", DEVELOPS_WITH, "rubocop"),
+                                           ("Gemfile", DEVELOPS_WITH, "pry")]
+    assert {c.object: c.first_line for c in claims}["pry"] == 7
+
+
+def test_a_composer_manifest_separates_require_from_require_dev_and_skips_the_platform():
+    content = """{
+  "name": "Acme/Shop",
+  "require": {
+    "php": ">=8.2",
+    "ext-json": "*",
+    "laravel/framework": "^11.0",
+    "guzzlehttp/guzzle": "^7.8"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11"
+  }
+}
+"""
+    claims = manifest_claims(content, "composer.json")
+    assert said(claims, DEFINES) == [("composer.json", DEFINES, "acme/shop")]
+    assert said(claims, DEPENDS_ON) == [("acme/shop", DEPENDS_ON, "laravel/framework"), ("acme/shop", DEPENDS_ON, "guzzlehttp/guzzle")]
+    assert said(claims, DEVELOPS_WITH) == [("acme/shop", DEVELOPS_WITH, "phpunit/phpunit")]
+    assert {c.object: c.first_line for c in claims}["guzzlehttp/guzzle"] == 7
+
+
+def test_a_dotnet_project_reads_package_references_and_marks_private_assets_as_build_time():
+    content = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Acme.Api</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="xunit" Version="2.6.1" />
+    <PackageReference Include="StyleCop.Analyzers" Version="1.2.0" PrivateAssets="all" />
+    <PackageReference Include="SourceGen">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <ProjectReference Include="..\\Lib\\Lib.csproj" />
+  </ItemGroup>
+</Project>
+"""
+    claims = manifest_claims(content, "src/Api/Api.csproj")
+    assert said(claims, DEFINES) == [("src/Api/Api.csproj", DEFINES, "acme.api")]
+    assert said(claims, DEPENDS_ON) == [("acme.api", DEPENDS_ON, "newtonsoft.json"), ("acme.api", DEPENDS_ON, "xunit")]
+    assert said(claims, DEVELOPS_WITH) == [("acme.api", DEVELOPS_WITH, "stylecop.analyzers"), ("acme.api", DEVELOPS_WITH, "sourcegen")]
+    assert {c.object: c.first_line for c in claims}["sourcegen"] == 10, "a project reference names a file this cannot place"
+
+
+def test_a_pipfile_reads_packages_and_dev_packages():
+    content = """[[source]]
+url = "https://pypi.org/simple"
+
+[packages]
+requests = "*"
+Beautiful_Soup4 = {version = ">=4"}
+
+[dev-packages]
+pytest = "*"
+"""
+    claims = manifest_claims(content, "Pipfile")
+    assert said(claims) == [("Pipfile", DEPENDS_ON, "requests"), ("Pipfile", DEPENDS_ON, "beautiful-soup4"),
+                            ("Pipfile", DEVELOPS_WITH, "pytest")]
+    assert {c.object: c.first_line for c in claims}["pytest"] == 9
+
+
+def test_a_pom_cites_its_own_artifact_not_the_parents_and_never_a_managed_line():
+    content = """<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <parent>
+    <artifactId>service-parent</artifactId>
+    <groupId>org.example</groupId>
+  </parent>
+  <artifactId>service</artifactId>
+  <dependencyManagement><dependencies>
+    <dependency><groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>33.0</version></dependency>
+  </dependencies></dependencyManagement>
+  <dependencies>
+    <dependency><groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId></dependency>
+    <dependency><groupId>${project.groupId}</groupId><artifactId>shop-core</artifactId></dependency>
+    <dependency><groupId>${jackson.groupId}</groupId><artifactId>jackson-core</artifactId></dependency>
+  </dependencies>
+  <build><plugins>
+    <plugin><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin>
+  </plugins></build>
+</project>
+"""
+    claims = manifest_claims(content, "pom.xml")
+    lines = {(c.predicate, c.object): c.first_line for c in claims}
+    assert lines[(DEFINES, "org.example:service")] == 6, "its own artifactId, not service-parent on line 3"
+    assert lines[(DEPENDS_ON, "com.google.guava:guava")] == 14, "the declaring line, not the managed one on line 9"
+    assert lines[(DEPENDS_ON, "org.example:shop-core")] == 15, "${project.groupId} is the project's group, as Maven reads it"
+    assert (DEPENDS_ON, "${jackson.groupid}:jackson-core") not in lines and not any("jackson" in o for _, o in lines), \
+        "a placeholder this reader cannot see is left out, not guessed"
+    assert lines[(DEVELOPS_WITH, "org.apache.maven.plugins:maven-compiler-plugin")] == 19, "a plugin without a group is Maven's own"
+
+
+def test_an_xml_manifest_the_lines_cannot_place_cites_its_section_or_nothing():
+    prefixed = """<m:project xmlns:m="http://maven.apache.org/POM/4.0.0">
+  <m:groupId>g</m:groupId>
+  <m:artifactId>a</m:artifactId>
+  <m:dependencies>
+    <m:dependency><m:groupId>x</m:groupId><m:artifactId>
+      y
+    </m:artifactId></m:dependency>
+  </m:dependencies>
+</m:project>
+"""
+    claims = manifest_claims(prefixed, "pom.xml")
+    assert said(claims, DEFINES) == [("pom.xml", DEFINES, "g:a")] and claims[0].first_line == 3, "a prefixed tag is the tag"
+    assert said(claims, DEPENDS_ON) == [], "an artifact split over lines has no line to cite, so nothing is claimed"
+    project = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Acme.Api</AssemblyName>
+    <PackageId>acme.api.client</PackageId>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include='Serilog' Version='3.1.1' />
+    <PackageReference
+        Include="Polly"
+        Version="8.0" />
+    <PackageReference Update="xunit" Version="2.6.1" />
+  </ItemGroup>
+</Project>
+"""
+    claims = manifest_claims(project, "App.csproj")
+    lines = {(c.predicate, c.object): (c.first_line, c.quote) for c in claims}
+    assert lines[(DEFINES, "acme.api.client")] == (4, "<PackageId>acme.api.client</PackageId>"), "the tag the name came from"
+    assert lines[(DEPENDS_ON, "serilog")][0] == 7, "single quotes are quotes"
+    assert lines[(DEPENDS_ON, "polly")][0] == 9, "an Include on its own line is found"
+    assert (DEPENDS_ON, "xunit") not in lines, "Update= changes an inherited reference; it declares none"
+
+
+def test_gradle_reads_plugins_only_in_their_block_and_every_coordinate_on_a_line():
+    content = """plugins {
+    id 'java'
+}
+publishing { publications { mavenJava { pom { developers { developer {
+    id 'jdoe'
+} } } } } }
+dependencies {
+    implementation 'a:b:1', 'c:d:2'
+    /* implementation 'com.old:lib:1.0'
+       testImplementation 'e:f:3' */
+    runtimeOnly("g:h:4")
+}
+"""
+    claims = manifest_claims(content, "build.gradle")
+    assert said(claims) == [("build.gradle", DEVELOPS_WITH, "java"), ("build.gradle", DEPENDS_ON, "a:b"),
+                            ("build.gradle", DEPENDS_ON, "c:d"), ("build.gradle", DEPENDS_ON, "g:h")], \
+        "a developer's id is not a plugin; a block comment is not a dependency; a second coordinate on a line is"
+
+
+def test_a_gemfile_clause_inside_a_group_does_not_end_the_group():
+    content = """group :development, :test do
+  if RUBY_VERSION >= '3.0'
+    gem 'debug'
+  end
+  gem 'rubocop'
+  %w[a b].each do |name|
+    gem name
+  end
+  gem 'pry'
+end
+group(:test) do
+  gem('minitest')
+end
+gem 'sidekiq', group: %i[test]
+=begin
+gem 'commented'
+=end
+gem 'rails'
+"""
+    claims = manifest_claims(content, "Gemfile")
+    assert said(claims, DEVELOPS_WITH) == [("Gemfile", DEVELOPS_WITH, "debug"), ("Gemfile", DEVELOPS_WITH, "rubocop"),
+                                           ("Gemfile", DEVELOPS_WITH, "pry"), ("Gemfile", DEVELOPS_WITH, "minitest"),
+                                           ("Gemfile", DEVELOPS_WITH, "sidekiq")]
+    assert said(claims, DEPENDS_ON) == [("Gemfile", DEPENDS_ON, "rails")]
+
+
+@pytest.mark.asyncio
+async def test_a_manifests_project_name_is_not_a_declaration_a_call_could_reach(tmp_path):
+    import io
+    import json
+
+    from scone_memory.runtime.cli import build_parser, run
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "pom.xml").write_text("<project><groupId>org.example</groupId><artifactId>service</artifactId></project>\n",
+                                  encoding="utf-8")
+    (root / "app.py").write_text("def go(x):\n    return x.service()\n", encoding="utf-8")
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--json", "map", str(root), "--graph"]), engine, io.StringIO(""), out)
+    receipt = json.loads(out.getvalue())
+    assert code == 0 and receipt["unconfirmed_call_candidates"] == [], "`org.example:service` is no `service()`"
+    assert "x.service" in receipt["unbound_calls"], "the call is still said to be unbound"
+    await engine.close()

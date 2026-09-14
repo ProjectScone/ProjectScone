@@ -113,6 +113,10 @@ class SyncReceipt:
     #: Memories the marker holds for files that are on disk but that the
     #: ignore rules now exclude. Not missing: left alone, and counted.
     ignored_memories: int = 0
+    #: Chunks of the added and updated files whose vector came from the
+    #: embedding cache: text stored before under the same embedder. Zero
+    #: without a cache, and on a plan.
+    embeddings_reused: int = 0
     #: Episodes the marker holds whose file is no longer on disk. Only
     #: meaningful when ``checked_for_missing``: a walk that stopped at the
     #: file cap did not see the whole directory, so it cannot tell a file
@@ -169,6 +173,7 @@ class SyncReceipt:
                 "ignored": self.ignored, "ignored_directories": self.ignored_directories,
                 "ignore_files": list(self.ignore_files), "ignore_truncated": self.ignore_truncated,
                 "ignore_unusable": list(self.ignore_unusable), "ignored_memories": self.ignored_memories,
+                "unchanged": self.unchanged, "embeddings_reused": self.embeddings_reused, "removed": self.removed,
                 "out_of_scope": self.out_of_scope, "unreadable": self.unreadable,
                 "links": self.links, "special": self.special,
                 "forgotten": self.forgotten, "empty": self.empty, "cut": self.cut,
@@ -196,6 +201,8 @@ class SyncReceipt:
         if self.ignore_unusable:
             lines.append(f"{len(self.ignore_unusable)} ignore pattern(s) could not be read and were passed over: "
                          + "; ".join(self.ignore_unusable[:5]))
+                 + f"; {self.added} added, {self.updated} updated, {self.unchanged} unchanged"
+                 + (f"; {self.embeddings_reused} chunk embedding(s) reused" if self.embeddings_reused else "")]
         if self.unreadable:
             lines.append(f"{self.unreadable} directory(ies) under the root could not be read, so "
                          f"this run cannot say what is gone and forgot nothing")
@@ -235,6 +242,9 @@ class _Tally:
     unchanged: int = 0
     empty: int = 0
     cut: int = 0
+    #: Chunks of added and updated files whose vector the embedding cache
+    #: answered: what this run did not pay the embedder for.
+    embeddings_reused: int = 0
     changes: list[Change] = field(default_factory=list)
     listed_all: bool = True
     claims_closed: int = 0
@@ -446,6 +456,7 @@ async def sync_directory(
                                                       dedup_key=_key(name, here),
                                                       metadata={"sync": name}), resolve=resolve)
             tally.claims(done.claims_closed, done.claims_unread)
+            tally.embeddings_reused += done.added.embeddings_reused
         setattr(tally, what, getattr(tally, what) + 1)
         tally.saw(here, what)
 
@@ -489,6 +500,7 @@ async def sync_directory(
         ignored=skipped, ignored_directories=pruned, ignore_files=rules.files if rules is not None else (),
         ignore_truncated=rules.truncated if rules is not None else False,
         ignore_unusable=rules.unusable if rules is not None else (), ignored_memories=len(ignored_memories),
+        embeddings_reused=tally.embeddings_reused,
         unchanged=tally.unchanged, removed=len(missing), forgotten=forgotten,
         out_of_scope=len(out_of_scope), unreadable=unreadable, links=links,
         special=special,
