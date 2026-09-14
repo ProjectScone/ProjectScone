@@ -101,9 +101,9 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
-| DOCX | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
-| XLSX | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
-| PPTX | Slides, table text and notes | No rendered Office layout or macro execution |
+| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
+| XLSX, and XLSM, XLTX, XLTM | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
+| PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
@@ -111,6 +111,14 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 | PDF | Page locators, extraction method, configured OCR regions and engine | Native text by default; OCR requires an explicit parser |
 | Images | Frame/region locators and typed OCR geometry | Explicit `ImageDocumentParser` and OCR engine required |
 | Audio/video | Audio-stream timestamps | Explicit `MediaDocumentParser` and transcription provider required; video frames are not analyzed |
+
+The macro-enabled, template and slideshow variants of Word, Excel and
+PowerPoint files are the same package as the plain one with another content
+type on its main part, and are read alike, under their own extension
+(`document_format` says `docm`). Macros a package carries are neither run nor
+read; a document that carried them says so in its metadata (`macros:
+present, not read`), so a search over a folder of macro-enabled files can
+tell which ones held code.
 
 OpenDocument extraction uses current content: `text:tracked-changes` revision
 history and `office:change-info` metadata are omitted. Current text, including
