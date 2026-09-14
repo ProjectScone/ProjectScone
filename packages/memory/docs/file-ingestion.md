@@ -147,8 +147,8 @@ level. A style is followed through at most 16 styles it is based on. A paragraph
 whose style's chain runs longer, or round in a circle, carries
 `heading_level_unresolved: style_chain` instead of a level. Headings inside
 text boxes keep their level; headings inside table cells become part of their
-row's text and carry none. The levels are recorded so section boundaries can be cut from them;
-chunking does not yet use them.
+row's text and carry none. Structure chunking cuts at these headings, and the heading path embeds
+each chunk under them (see retrieval-and-storage.md).
 
 OpenDocument extraction uses current content: `text:tracked-changes` revision
 history and `office:change-info` metadata are omitted. Current text, including

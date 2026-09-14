@@ -710,6 +710,7 @@ class MemoryEngine:
         return self._table_context_embeddings
 
     def _ingestion_runtime(self, embedding_checkpoint: EmbeddingCheckpoint | None = None) -> ingestion_batch.IngestionRuntime:
+        from ..ingestion.document_outline import document_headings
         context_inputs = None
         if self.table_context_embeddings:
             from ..ingestion.table_context import embedding_inputs
@@ -722,6 +723,7 @@ class MemoryEngine:
             semantic_aware=self.semantic_aware, heading_context=self.heading_context,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
             context_lane=self.context_lane,
+            document_headings=partial(document_headings, blobs=self.blobs),
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
