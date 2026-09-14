@@ -878,3 +878,106 @@ def test_explorer_pins_its_policy_to_the_bytes_it_emits_and_its_script_parses(pr
     checked = subprocess.run([node, "-e", "new Function(process.argv[1])", code], capture_output=True, text=True, timeout=30)
     assert checked.returncode == 0, checked.stderr
     assert "Object.create(null)" in code and "pointerleave" in code and "settle()" in code
+
+
+def _two_communities():
+    triples = [(f"worker {n}", "works_at", "Acme") for n in range(3)] + [
+        (f"resident {n}", "lives_in", "Porto") for n in range(3)] + [
+        ("worker 0", "lives_in", "Porto"), ("worker 1", "knows", "Worker 1"), ("Lone Star", "is_a", "Lone Star")]
+    return project_entities("alpha", [fact(n + 1, *triple) for n, triple in enumerate(triples)], revision=1)
+
+
+def _drawing_of(body: bytes):
+    """The page's drawing, parsed as the SVG it is."""
+    text = body.decode("utf-8")
+    start = text.index("<svg", text.index('id="drawing"'))
+    return ElementTree.fromstring(text[start:text.index("</svg>", start) + len("</svg>")])
+
+
+def _legend(body: bytes):
+    """Each legend row: its community, its checkbox, its swatch's classes and its text."""
+    from html.parser import HTMLParser
+
+    class Legend(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.rows, self.row, self.all = [], None, None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "li" and "data-group" in attrs:
+                self.row = {"group": attrs["data-group"], "checkbox": None, "swatch": None, "text": ""}
+                self.rows.append(self.row)
+            elif tag == "input" and attrs.get("id") == "legend-all":
+                self.all = attrs
+            elif self.row is not None and tag == "input":
+                self.row["checkbox"] = attrs
+            elif self.row is not None and tag == "span" and "swatch" in attrs.get("class", "").split():
+                self.row["swatch"] = attrs["class"].split()
+
+        def handle_endtag(self, tag):
+            if tag == "li":
+                self.row = None
+
+        def handle_data(self, data):
+            if self.row is not None:
+                self.row["text"] += data
+
+    legend = Legend()
+    legend.feed(body.decode("utf-8"))
+    return legend
+
+
+def test_html_legend_lists_each_drawn_community_with_its_colour_and_what_is_drawn_of_it():
+    body = export_graph(_two_communities(), "html").body
+    root, legend = _drawing_of(body), _legend(body)
+    boxes = root.find(f"{SVG}g[@class='communities']")
+    communities = boxes.findall(f"{SVG}rect")
+    assert len(communities) == 3, "two communities and the entity with no relation to another"
+    assert [row["group"] for row in legend.rows] == [rect.get("data-group") for rect in communities]
+    style = body.decode("utf-8").split("<style>", 1)[1].split("</style>", 1)[0]
+    for row, community in zip(legend.rows, communities):
+        rect = community
+        [title] = [text for text in boxes.findall(f"{SVG}text") if text.get("data-group") == row["group"]]
+        [colour_class] = [name for name in row["swatch"] if re.fullmatch(r"c\d+", name)]
+        rule = re.search(r"\.swatch\." + colour_class + r"\s*\{\s*background:\s*(#[0-9A-Fa-f]{6})", style)
+        assert rule and rule.group(1) == rect.get("fill"), "the swatch is the colour of the community's box"
+        drawn = sum(1 for group in root.iter(f"{SVG}g")
+                    if group.get("data-entity") and group.get("data-group") == row["group"])
+        label, count = row["text"].strip().rsplit(" ", 2)[0].strip(), " ".join(row["text"].split()[-2:])
+        assert label == title.text and count == f"{drawn} drawn", row["text"]
+        assert row["checkbox"]["type"] == "checkbox" and "checked" in row["checkbox"]
+        assert row["checkbox"]["data-group"] == row["group"]
+    assert legend.all is not None and legend.all["type"] == "checkbox" and "checked" in legend.all
+    assert len({row["checkbox"]["id"] for row in legend.rows}) == len(legend.rows), "controls keep stable ids"
+
+
+def test_html_drawing_marks_what_hiding_a_community_must_hide():
+    projection = _two_communities()
+    body = export_graph(projection, "html").body
+    root, data = _drawing_of(body), json.loads(_page(body).data["graph-data"])
+    group_of = {group.get("data-entity"): group.get("data-group") for group in root.iter(f"{SVG}g")
+                if group.get("data-entity")}
+    assert set(group_of) == {entity.entity_id for entity in projection.entities} and all(group_of.values())
+    assert {node["id"]: node["group"] for node in data["nodes"]} == group_of
+    drawn = {element.get("data-relation"): element for element in root.iter()
+             if element.get("data-relation") is not None}
+    assert set(drawn) == {edge["id"] for edge in data["edges"]}, "a loop is found by its relation too"
+    loops = [edge for edge in data["edges"] if edge["source"] == edge["target"]]
+    assert len(loops) == 2
+    for edge in data["edges"]:
+        element = drawn[edge["id"]]
+        assert element.get("data-from-group") == group_of[edge["source"]]
+        assert element.get("data-to-group") == group_of[edge["target"]]
+
+
+def test_html_code_hides_communities_and_moves_the_view_to_a_chosen_entity(projection):
+    page = _page(export_graph(projection, "html").body)
+    code = page.data["graph-code"]
+    tags = [(tag, attrs) for tag, attrs in page.tags]
+    assert ("ul", {"id": "matches", "aria-label": "Matching entities"}) in tags
+    # Hiding is by community on every mark that belongs to it; choosing an
+    # entity reveals its community and centres the view on it.
+    for needle in ("data-from-group", "data-to-group", "indeterminate", "function centre(", "function choose("):
+        assert needle in code, needle
+    assert "textContent" in code and "innerHTML" not in code
