@@ -986,6 +986,7 @@ def create_app(
             "top_similarity": result.top_similarity,
             "low_confidence": result.low_confidence,
             "degraded": result.degraded,
+            "narrowing": result.narrowing.model_dump() if result.narrowing is not None else None,
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),

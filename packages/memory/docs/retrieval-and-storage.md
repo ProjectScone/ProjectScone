@@ -15,6 +15,23 @@ small recency term, capped at two chunks per episode. A lane that fails is
 named in `degraded` and the other lane still answers. `context_reduction`
 is the share of the space's bytes that were left behind.
 
+A recall narrowed by `conditions`, `kind`, `source_prefix`, `since` or
+`until` carries `narrowing` (`null` when nothing narrowed): per lane,
+whether the request was applied `in_store` (every row the lane holds was
+eligible) or `postfiltered` (the lane returned its best window and the
+request then removed what did not fit), how deep each lane looked
+(`text_window`, `vector_window`) and returned, how many candidates the
+filter removed (`postfiltered_out`), and `window_exhausted` -- the filter
+removed candidates while a post-filtered lane's window was full, so a
+memory that fits may lie deeper than the recall looked. An empty answer
+with that flag set is not "there is none". The in-process vector indexes
+evaluate conditions themselves; kind, source and date bounds live on the
+episode, which no vector row carries, so for those the vector lane is
+post-filtered from a window twenty-five times wider than an unnarrowed
+recall's, the same allowance the text lane has when its store cannot
+narrow. The CLI prints a note when the flag is set; the recall evidence
+event carries the same fields under `narrow`.
+
 `top_similarity` is the best cosine the vector lane saw for the query.
 With `SCONE_SIMILARITY_FLOOR` set (a cosine, e.g. `0.45`), a recall whose
 best hit falls below it, or that finds nothing, carries

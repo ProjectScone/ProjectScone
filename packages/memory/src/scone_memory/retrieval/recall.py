@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 import math
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import Mapping, Optional, Protocol, Sequence, TYPE_CHECKING, cast
 
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
@@ -31,12 +31,21 @@ from .entity_lane import ENTITY_WEIGHT, entity_lane
 #: passage under the words can now come before one that merely says them.
 CONTEXT_WEIGHT = 2.0
 from .episode_scope import episode_fits
-from .filters import parse_filter
+from .filters import Filter, parse_filter
 if TYPE_CHECKING:
     from .synonyms import Synonyms
     from ..entities.project import EntityProjection
 from .reranking import (Reranker, RerankCandidate, candidate_is_retained,
     rerank_candidates, validate_candidate_limit, validate_rerank_options)
+
+class _ConditionNarrowing(Protocol):
+    """An index that evaluates metadata conditions itself; checked by its
+    ``narrows_conditions`` attribute before this is assumed."""
+
+    async def search(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
+                     tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None,
+                     conditions: Optional[Filter] = None) -> list[tuple[int, float]]: ...
+
 
 LANE_DEPTH = 4
 UNFILTERED_DEPTH = 25
@@ -169,9 +178,17 @@ async def recall(
     # which the filter may then reject, and the search comes back
     # empty while the memory that answers it sits outside the window.
     in_store = narrow_by is None or bool(getattr(runtime.documents, "narrows_metadata", False))
-    narrowing = (kind is not None or source_prefix is not None or since_at is not None
-                 or until_at is not None or narrow_by is not None)
+    # The vector lane holds no episode: kind, source and date bounds are
+    # post-filtered for it, and a condition is too unless the index says
+    # it evaluates conditions itself. A lane that is post-filtered looks
+    # deeper, and the result says how deep and whether that was enough.
+    vector_narrows_conditions = bool(getattr(runtime.vectors, "narrows_conditions", False))
+    episode_bound = kind is not None or source_prefix is not None or since_at is not None or until_at is not None
+    vector_postfiltered = episode_bound or (narrow_by is not None and not vector_narrows_conditions)
+    narrowing = episode_bound or narrow_by is not None
     depth = candidate_limit if candidate_limit is not None else limit * LANE_DEPTH * (1 if in_store else UNFILTERED_DEPTH)
+    vector_depth = (candidate_limit if candidate_limit is not None
+                    else limit * LANE_DEPTH * (UNFILTERED_DEPTH if vector_postfiltered else 1))
     degraded: list[str] = []
     started = time.perf_counter()
     latency: dict[str, float] = {}
@@ -205,7 +222,11 @@ async def recall(
             width = len(qvec)
             latency["embed"] = _ms(t0)
             t0 = time.perf_counter()
-            vector_lane = await runtime.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
+            if narrow_by is not None and vector_narrows_conditions:
+                vector_lane = await cast(_ConditionNarrowing, runtime.vectors).search(
+                    space, qvec, vector_depth, boundary, clean_tags, clean_where, conditions=narrow_by)
+            else:
+                vector_lane = await runtime.vectors.search(space, qvec, vector_depth, boundary, clean_tags, clean_where)
             latency["vector"] = _ms(t0)
         except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
             degraded.append(f"vectors: {type(e).__name__}: {e}")
@@ -220,7 +241,7 @@ async def recall(
             f"about another's")
 
     if candidate_limit is not None or active_reranker is not None:
-        vector_lane = vector_lane[:depth]
+        vector_lane = vector_lane[:vector_depth]
 
     text_lane: list[tuple[int, float]] = []
     try:
@@ -333,9 +354,11 @@ async def recall(
     if active_reranker is None:
         items = capped_items
     episodes: dict[int, Episode] = {}
+    postfiltered_out = 0
     if narrowing:
         # Read every candidate's episode and keep the ones that fit,
         # before the limit is applied; the window is the lanes' depth.
+        before_narrowing = len(items)
         for item in items:
             eid = chunks[item.chunk_id].episode_id
             if eid not in episodes:
@@ -347,6 +370,7 @@ async def recall(
             if (episode := episodes.get(chunks[item.chunk_id].episode_id)) is not None
             and episode_fits(episode, kind, source_prefix, since_at, until_at, narrow_by)
         ]
+        postfiltered_out = before_narrowing - len(items)
     scope = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
                        kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
     if active_reranker is not None:
@@ -468,12 +492,32 @@ async def recall(
             runtime.documents, space, result_items, boundary or now, degraded=degraded)
     previous = await fact_recall.history_for(runtime.documents, space, facts, boundary or now, scope=fact_scope) if history else []
     counts = await runtime.documents.counts(space)
+    narrowing_report: Optional[Narrowing] = None
+    if narrowing:
+        text_ran = not any(d.startswith("text:") for d in degraded)
+        narrowing_report = Narrowing(
+            conditions=narrow_by is not None, kind_or_source_or_dates=episode_bound,
+            text_lane="off" if not text_ran else ("in_store" if in_store else "postfiltered"),
+            vector_lane="off" if not vector_ran else ("postfiltered" if vector_postfiltered else "in_store"),
+            text_window=depth, vector_window=vector_depth,
+            text_returned=len(text_lane), vector_returned=len(vector_lane),
+            postfiltered_out=postfiltered_out,
+            # The bound bit: the filter removed candidates and a lane that
+            # is post-filtered had returned its whole window.
+            window_exhausted=postfiltered_out > 0 and (
+                (vector_ran and vector_postfiltered and len(vector_lane) >= vector_depth)
+                or (text_ran and not in_store and len(text_lane) >= depth)),
+        )
+        # Beside the request's own `narrow`, never merged into it: that
+        # payload is what the caller asked for, this is what the lanes did.
+        evidence["narrowing"] = narrowing_report.model_dump()
     result = RecallResult(
         items=result_items,
         rerank=rerank_trace,
         facts=facts,
         history=previous,
         degraded=degraded,
+        narrowing=narrowing_report,
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,

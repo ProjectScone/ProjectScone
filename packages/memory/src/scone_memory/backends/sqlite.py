@@ -19,6 +19,10 @@ from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import AsyncIterator, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
 
 from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
@@ -1020,6 +1024,10 @@ class SqliteDocumentStore:
 
 class SqliteVectorIndex:
     name = "sqlite"
+    #: Metadata conditions are evaluated here, against the row's own
+    #: metadata, so a condition reaches every stored vector rather than
+    #: the best few a post-filter then thins.
+    narrows_conditions = True
 
     def __init__(self, path: str | Path = "~/.scone-memory/memory.db") -> None:
         self.path = path
@@ -1065,13 +1073,14 @@ class SqliteVectorIndex:
         as_of: Optional[str] = None,
         tags: tuple[str, ...] = (),
         where: Mapping[str, str] | None = None,
+        conditions: "Filter | None" = None,
     ) -> list[tuple[int, float]]:
         validate_vector(vector, self.dim)
-        return self._scored(space, vector, limit, as_of, tags, where)
+        return self._scored(space, vector, limit, as_of, tags, where, conditions)
 
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
-                        writer: str) -> list[tuple[int, float]]:
+                        writer: str, conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         """Search only if the record vouches for ``writer``, in one read snapshot.
 
         WAL gives a read transaction one consistent view, so a write that
@@ -1086,12 +1095,13 @@ class SqliteVectorIndex:
             if not vouches(record, writer, self._holds_vectors()):
                 raise VectorsNotComparable(
                     f"stored vectors are recorded as {record[0] if record else 'unrecorded'}, not {writer}")
-            return self._scored(space, vector, limit, as_of, tags, where)
+            return self._scored(space, vector, limit, as_of, tags, where, conditions)
         finally:
             self.conn.commit()
 
     def _scored(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str],
-                tags: tuple[str, ...], where: Mapping[str, str] | None) -> list[tuple[int, float]]:
+                tags: tuple[str, ...], where: Mapping[str, str] | None,
+                conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         sql = "SELECT chunk_id, tags, metadata, vector FROM vectors WHERE space = ?"
         params: list[object] = [space]
         if as_of:
@@ -1103,9 +1113,11 @@ class SqliteVectorIndex:
         for row in self.conn.execute(sql, params):
             if tags and not set(tags) <= set(json.loads(row["tags"])):
                 continue
-            if where:
+            if where or conditions is not None:
                 meta = json.loads(row["metadata"])
-                if any(meta.get(k) != v for k, v in where.items()):
+                if where and any(meta.get(k) != v for k, v in where.items()):
+                    continue
+                if conditions is not None and not conditions.matches(meta):
                     continue
             stored = array("f")
             stored.frombytes(row["vector"])
