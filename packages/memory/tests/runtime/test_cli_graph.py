@@ -684,3 +684,24 @@ async def test_map_watch_lets_a_changed_caller_find_an_unchanged_declaration(tmp
     assert second["unconfirmed_call_candidates"] == first["unconfirmed_call_candidates"], \
         "the unchanged file's declaration still binds the changed caller's call"
     await memory.close()
+
+
+async def test_merge_records_a_decision_the_graph_honours_and_close_parts_the_names():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    await engine.assert_fact("default", "dr. alice chen", "leads", "Robotics Lab", valid_from=DAY)
+    code, text = await graph(engine, "merge", "Dr. Alice Chen", "alice chen", "--reason", "one badge")
+    assert code == 0 and "merged: dr. alice chen into alice chen" in text
+    code, text = await graph(engine, "duplicates")
+    assert code == 0 and "pair: alice chen" not in text
+    [event] = await engine.events.query("default", kind="entity_merge", limit=3)
+    assert event.payload["actor"].startswith("cli:") and event.payload["reason"] == "one badge"
+    code, text = await graph(engine, "merges", "--json")
+    assert code == 0 and [item["alias_key"] for item in json.loads(text)["merges"]] == ["dr. alice chen"]
+    code, text = await graph(engine, "unmerge", "dr. alice chen", "--reason", "two people")
+    assert code == 0 and "unmerged: dr. alice chen" in text
+    code, text = await graph(engine, "merges")
+    assert code == 0 and "no merges in force" in text
+    with pytest.raises(InvalidInput, match="reason"):
+        await graph(engine, "merge", "dr. alice chen", "alice chen", "--reason", " ")

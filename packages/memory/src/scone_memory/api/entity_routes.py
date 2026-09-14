@@ -18,7 +18,7 @@ from typing import Callable, Literal, Optional
 
 from fastapi import Depends, FastAPI, Path, Query, Request
 from fastapi.responses import PlainTextResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import InvalidInput
 from ..core.timeutil import format_rfc3339, parse_rfc3339
@@ -45,6 +45,7 @@ from ..entities.report import render_markdown, report_record
 from ..entities.service import ProjectionBuilding
 from ..entities.usage import recall_usage
 from ..entities.view import SeedRefused, StatusMode, WalkDirection, walk_seeds, entity_listing, entity_record, knowledge_view, projection_meta, support
+from ..core.models import Fact
 from ..memory.engine import MemoryEngine
 from .responses import LedgerJSONResponse
 
@@ -348,7 +349,28 @@ def _names(projection: EntityProjection) -> dict[str, dict[str, str]]:
             for entity in projection.entities}
 
 
+class MergeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    alias: str = Field(min_length=1, max_length=200)
+    into: str = Field(min_length=1, max_length=200)
+    reason: str
+
+
+class UnmergeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    alias: str = Field(min_length=1, max_length=200)
+    reason: str
+
+
+def _decision(fact: Fact) -> dict[str, object]:
+    return {"fact_id": fact.fact_id, "alias": fact.subject, "into": fact.object, "status": fact.status,
+            "valid_from": fact.valid_from, "valid_until": fact.valid_until, "closed_reason": fact.closed_reason}
+
+
 def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[..., object],
+                        actor_for: Callable[..., str] = lambda: "anonymous",
                         synthesis_factory: Callable[[], object] | None = None) -> None:
     @app.exception_handler(ProjectionBuilding)
     async def _building(_: Request, error: ProjectionBuilding) -> LedgerJSONResponse:
@@ -646,6 +668,33 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         found = await likely_duplicates(engine, space, limit=limit, min_score=min_score, status=status, as_of=when,
                                         max_bytes=max_bytes)
         return found.record(space, status=status, as_of=when)
+
+    @app.post("/v1/entities/merges")
+    async def post_merge(body: MergeBody, space: str = Depends(space_for),
+                         actor: str = Depends(actor_for)) -> dict[str, object]:
+        """Record that ``alias`` names the entity ``into`` names. A review
+        decision: every graph view treats the two as one from now on."""
+        return _decision(await engine.merge_entities(space, body.alias, body.into, reason=body.reason, actor=actor))
+
+    @app.post("/v1/entities/merges/close")
+    async def post_merge_close(body: UnmergeBody, space: str = Depends(space_for),
+                               actor: str = Depends(actor_for)) -> dict[str, object]:
+        """Close the merge in force for ``alias``; the names part from now."""
+        return _decision(await engine.unmerge_entities(space, body.alias, reason=body.reason, actor=actor))
+
+    @app.get("/v1/entities/merges")
+    async def get_merges(status: StatusMode = "current", as_of: Optional[str] = None,
+                         space: str = Depends(space_for)) -> dict[str, object]:
+        """The merge decisions the view at ``as_of`` applies, in the order
+        they were recorded, with any it refused and why."""
+        when = _moment(engine, as_of)
+        projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
+        complete, read = _read(coverage)
+        return {"merges": [{"fact_id": item.fact_id, "alias_key": item.alias_key, "alias_id": item.alias_id,
+                            "named_key": item.named_key, "into_key": item.into_key, "into_id": item.into_id,
+                            "outcome": item.outcome} for item in projection.merges],
+                "projection": projection_meta(projection), "filters": {"status": status, "as_of": when},
+                "complete": complete, "coverage": read}
 
     @app.get("/v1/entities/resolve")
     async def get_resolved(
