@@ -18,7 +18,12 @@ least recently used past that, and its record says how many it dropped.
 Disclosed: every stored record says how many of its chunks came from the
 cache (``Added.embeddings_reused``), and a cache says what it holds.
 Nothing here is evidence -- a vector read back is checked for width and
-finiteness, and a row that fails is treated as absent and removed.
+finiteness, and a row that fails is treated as absent and removed -- and
+nothing here may refuse a write: a cache that fails (a full disk, a
+damaged file, a locked database) is a miss, counted in its record, and
+the embedder answers as if there were no cache. A rebuild of the stored
+vectors (``reembed_vectors``) clears the cache first, since a model can
+change behind an id that did not.
 """
 
 from __future__ import annotations
@@ -27,19 +32,29 @@ from array import array
 from collections import OrderedDict
 import hashlib
 import json
+import logging
 import math
 import sqlite3
 from pathlib import Path
-from typing import Mapping, Protocol, Sequence
+from typing import Mapping, Optional, Protocol, Sequence
 
 from ..core.errors import InvalidInput
 
 #: The key's version. Changing what is embedded for a text (a prefix, a
 #: normalisation) without changing the embedder's id must change this.
 KEY_VERSION = "embedding-chunk-v1"
-#: Vectors a cache holds by default before it drops the least recently
-#: used. At 768 doubles a vector, this is about 120 MB on disk.
+#: Vectors a file cache holds by default before it drops the least
+#: recently used. At 768 doubles a vector, this is about 120 MB on disk.
 MAX_ENTRIES = 20_000
+#: Vectors an in-memory cache holds by default. A Python list of floats
+#: is about four times the packed size, so the bound is a quarter of the
+#: file's for about the same memory.
+MAX_MEMORY_ENTRIES = 5_000
+#: Rows a file cache writes before it evicts, so one large batch cannot
+#: leave the file far past its bound.
+_KEEP_SLICE = 1_000
+
+_log = logging.getLogger(__name__)
 
 
 def cache_key(embedder_id: str, dim: int, text: str) -> str:
@@ -49,20 +64,49 @@ def cache_key(embedder_id: str, dim: int, text: str) -> str:
 
 
 def _sound(vector: Sequence[float], dim: int) -> bool:
-    return len(vector) == dim and dim > 0 and all(isinstance(v, float) and math.isfinite(v) for v in vector)
+    """A vector of the width, finite throughout. Integer components are
+    accepted as the pipeline's own validator accepts them."""
+    return (len(vector) == dim and dim > 0
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in vector))
 
 
 class EmbeddingCache(Protocol):
     """Where vectors wait to be reused. ``take`` returns the vectors it
-    holds for the keys given, and counts them as reused; ``keep`` stores
-    vectors the embedder just returned; ``record`` says what it holds and
-    what it did."""
+    holds for the keys given, and counts each key asked as reused; ``keep``
+    stores vectors the embedder just returned; ``clear`` empties it;
+    ``failed`` is told of a failure the pipeline swallowed; ``record``
+    says what it holds and what it did; ``close`` releases what it holds
+    open."""
 
     def take(self, keys: Sequence[str], dim: int) -> dict[str, list[float]]: ...
 
     def keep(self, vectors: Mapping[str, Sequence[float]], dim: int) -> None: ...
 
+    def clear(self) -> None: ...
+
+    def failed(self, doing: str, error: BaseException) -> None: ...
+
     def record(self) -> dict[str, object]: ...
+
+    async def close(self) -> None: ...
+
+
+class _Counted:
+    """What both caches count: served, kept, dropped and failed."""
+
+    name = ""
+    reused = kept = evicted = failures = 0
+    last_failure: Optional[str] = None
+    closed = False
+
+    def failed(self, doing: str, error: BaseException) -> None:
+        self.failures += 1
+        self.last_failure = f"{doing}: {type(error).__name__}: {error}"
+        _log.warning("embedding cache %s failed while %s: %s: %s", self.name, doing, type(error).__name__, error)
+
+    def _counts(self) -> dict[str, object]:
+        return {"reused": self.reused, "kept": self.kept, "evicted": self.evicted, "failures": self.failures,
+                "last_failure": self.last_failure}
 
 
 def _bound(max_entries: int) -> int:
@@ -71,15 +115,14 @@ def _bound(max_entries: int) -> int:
     return max_entries
 
 
-class InMemoryEmbeddingCache:
+class InMemoryEmbeddingCache(_Counted):
     """For one process: the least recently used vector goes first."""
 
     name = "memory"
 
-    def __init__(self, max_entries: int = MAX_ENTRIES) -> None:
+    def __init__(self, max_entries: int = MAX_MEMORY_ENTRIES) -> None:
         self.max_entries = _bound(max_entries)
         self._held: OrderedDict[str, list[float]] = OrderedDict()
-        self.reused = self.kept = self.evicted = 0
 
     def take(self, keys: Sequence[str], dim: int) -> dict[str, list[float]]:
         found: dict[str, list[float]] = {}
@@ -92,42 +135,55 @@ class InMemoryEmbeddingCache:
                 continue
             self._held.move_to_end(key)
             found[key] = list(vector)
-        self.reused += len(found)
+        # Counted per key asked, so two chunks of one text are two served.
+        self.reused += sum(1 for key in keys if key in found)
         return found
 
     def keep(self, vectors: Mapping[str, Sequence[float]], dim: int) -> None:
         for key, vector in vectors.items():
             if not _sound(vector, dim):
                 raise InvalidInput("an embedding cache keeps only finite vectors of the embedder's width")
-            self._held[key] = list(vector)
+            self._held[key] = [float(v) for v in vector]
             self._held.move_to_end(key)
             self.kept += 1
-        while len(self._held) > self.max_entries:
-            self._held.popitem(last=False)
-            self.evicted += 1
+            # Evicted as it goes: the bound holds through a keep, not
+            # only after one.
+            while len(self._held) > self.max_entries:
+                self._held.popitem(last=False)
+                self.evicted += 1
+
+    def clear(self) -> None:
+        self._held.clear()
 
     def record(self) -> dict[str, object]:
-        return {"store": self.name, "entries": len(self._held), "max_entries": self.max_entries,
-                "reused": self.reused, "kept": self.kept, "evicted": self.evicted}
+        return {"store": self.name, "entries": len(self._held), "max_entries": self.max_entries, **self._counts()}
+
+    async def close(self) -> None:
+        self.closed = True
+        self._held.clear()
 
 
-class SqliteEmbeddingCache:
+class SqliteEmbeddingCache(_Counted):
     """For every process that opens the same file: a `sync` run tomorrow
     reuses what today's embedded. One table, vectors as packed doubles,
-    a use counter that orders eviction."""
+    a use counter that orders eviction. Reading updates the counter, so
+    the file must be writable; on one that is not, every take fails and
+    is counted as a miss."""
 
     name = "sqlite"
 
     def __init__(self, path: str | Path, max_entries: int = MAX_ENTRIES) -> None:
         self.max_entries = _bound(max_entries)
-        self.path = str(path)
-        self._conn = sqlite3.connect(str(Path(self.path).expanduser()) if self.path != ":memory:" else self.path)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("CREATE TABLE IF NOT EXISTS vectors ("
-                           "key TEXT PRIMARY KEY, dim INTEGER NOT NULL, vector BLOB NOT NULL, used INTEGER NOT NULL)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS vectors_used ON vectors(used)")
-        self._conn.commit()
-        self.reused = self.kept = self.evicted = 0
+        self.path = str(Path(str(path)).expanduser()) if str(path) != ":memory:" else ":memory:"
+        try:
+            self._conn = sqlite3.connect(self.path)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("CREATE TABLE IF NOT EXISTS vectors ("
+                               "key TEXT PRIMARY KEY, dim INTEGER NOT NULL, vector BLOB NOT NULL, used INTEGER NOT NULL)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS vectors_used ON vectors(used)")
+            self._conn.commit()
+        except sqlite3.Error as error:
+            raise InvalidInput(f"SCONE_EMBEDDING_CACHE: cannot open {self.path}: {error}") from None
 
     def _tick(self) -> int:
         row = self._conn.execute("SELECT COALESCE(MAX(used), 0) FROM vectors").fetchone()
@@ -160,7 +216,7 @@ class SqliteEmbeddingCache:
         if found:
             self._conn.executemany("UPDATE vectors SET used = ? WHERE key = ?", [(now, key) for key in found])
         self._conn.commit()
-        self.reused += len(found)
+        self.reused += sum(1 for key in keys if key in found)
         return found
 
     def keep(self, vectors: Mapping[str, Sequence[float]], dim: int) -> None:
@@ -171,32 +227,42 @@ class SqliteEmbeddingCache:
         for key, vector in vectors.items():
             if not _sound(vector, dim):
                 raise InvalidInput("an embedding cache keeps only finite vectors of the embedder's width")
-            rows.append((key, dim, array("d", vector).tobytes(), now))
-        self._conn.executemany("INSERT OR REPLACE INTO vectors (key, dim, vector, used) VALUES (?, ?, ?, ?)", rows)
-        self.kept += len(rows)
-        held = int(self._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0])
-        over = held - self.max_entries
-        if over > 0:
-            self._conn.execute("DELETE FROM vectors WHERE key IN "
-                               "(SELECT key FROM vectors ORDER BY used ASC, key ASC LIMIT ?)", (over,))
-            self.evicted += over
+            rows.append((key, dim, array("d", (float(v) for v in vector)).tobytes(), now))
+        # Written a slice at a time and evicted after each, so the file
+        # never holds more than a slice past its bound.
+        for start in range(0, len(rows), _KEEP_SLICE):
+            self._conn.executemany("INSERT OR REPLACE INTO vectors (key, dim, vector, used) VALUES (?, ?, ?, ?)",
+                                   rows[start:start + _KEEP_SLICE])
+            self.kept += len(rows[start:start + _KEEP_SLICE])
+            held = int(self._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0])
+            over = held - self.max_entries
+            if over > 0:
+                self._conn.execute("DELETE FROM vectors WHERE key IN "
+                                   "(SELECT key FROM vectors ORDER BY used ASC, key ASC LIMIT ?)", (over,))
+                self.evicted += over
+            self._conn.commit()
+
+    def clear(self) -> None:
+        self._conn.execute("DELETE FROM vectors")
         self._conn.commit()
 
     def record(self) -> dict[str, object]:
         held = int(self._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0])
-        return {"store": self.name, "path": self.path, "entries": held, "max_entries": self.max_entries,
-                "reused": self.reused, "kept": self.kept, "evicted": self.evicted}
+        return {"store": self.name, "path": self.path, "entries": held, "max_entries": self.max_entries, **self._counts()}
 
-    def close(self) -> None:
-        self._conn.close()
+    async def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._conn.close()
 
 
-def build_embedding_cache(setting: str | None, *, max_entries: int = MAX_ENTRIES) -> EmbeddingCache | None:
-    """``SCONE_EMBEDDING_CACHE``: unset for none, ``memory`` for one that
-    lives with the process, otherwise the path of a file shared by every
-    process that opens it."""
-    if setting is None or not setting.strip():
+def build_embedding_cache(setting: str | None, *, max_entries: Optional[int] = None) -> EmbeddingCache | None:
+    """``SCONE_EMBEDDING_CACHE``: unset (or ``none``, ``off``) for none,
+    ``memory`` for one that lives with the process, otherwise the path of
+    a file shared by every process that opens it. A path that cannot be
+    opened is refused by name."""
+    if setting is None or not setting.strip() or setting.strip().lower() in ("none", "off", "0", "false"):
         return None
-    if setting.strip() == "memory":
-        return InMemoryEmbeddingCache(max_entries)
-    return SqliteEmbeddingCache(setting.strip(), max_entries)
+    if setting.strip().lower() == "memory":
+        return InMemoryEmbeddingCache(max_entries if max_entries is not None else MAX_MEMORY_ENTRIES)
+    return SqliteEmbeddingCache(setting.strip(), max_entries if max_entries is not None else MAX_ENTRIES)

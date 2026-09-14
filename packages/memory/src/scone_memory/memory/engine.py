@@ -358,6 +358,11 @@ class MemoryEngine:
     async def reembed_vectors(self) -> vector_identity.ReembedReport:
         """Re-embed every stored chunk with this engine's embedder and record it
         as the writer, which turns a disabled vector lane back on."""
+        if self.embedding_cache is not None:
+            # A model can change behind an id that did not; a rebuild is
+            # the moment that is said, and nothing kept before it may be
+            # served after it.
+            self.embedding_cache.clear()
         try:
             report = await vector_identity.rebuild(self)
         except BaseException:
@@ -391,7 +396,7 @@ class MemoryEngine:
         self._closed = True
         await self.entities.aclose()
         first: Optional[BaseException] = None
-        for store in (self.documents, self.vectors, self.events, self.blobs):
+        for store in (self.documents, self.vectors, self.events, self.blobs, self.embedding_cache):
             closer = getattr(store, "close", None)
             if store is None or not callable(closer):
                 continue

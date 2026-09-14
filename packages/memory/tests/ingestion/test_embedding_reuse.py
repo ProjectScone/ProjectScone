@@ -71,7 +71,7 @@ async def test_a_file_cache_serves_a_later_process(tmp_path):
     memory = await open_memory(cache)
     first = await memory.replace("s", Record(DOCUMENT, kind="file", source="notes.md", dedup_key="doc"))
     await memory.close()
-    cache.close()
+    assert cache.closed, "the engine closes the cache with its stores"
     # A new engine, a new embedder instance, the same file: nothing is embedded.
     later = SqliteEmbeddingCache(path)
     memory = await open_memory(later)
@@ -80,7 +80,6 @@ async def test_a_file_cache_serves_a_later_process(tmp_path):
     assert memory.embedder.texts == [] and later.record()["entries"] == first.added.chunks
     assert later.record()["path"] == str(path) and later.record()["store"] == "sqlite"
     await memory.close()
-    later.close()
 
 
 async def test_the_key_is_the_embedder_and_the_exact_text():
@@ -113,21 +112,28 @@ def test_the_bound_drops_the_least_recently_used_and_says_so():
     assert cache.take(["a"], 2) == {"a": [1.0, 0.0]}, "a is now the most recently used"
     cache.keep({"c": [0.5, 0.5]}, 2)
     assert cache.take(["a", "b", "c"], 2) == {"a": [1.0, 0.0], "c": [0.5, 0.5]}, "b, least recently used, went"
-    assert cache.record() == {"store": "memory", "entries": 2, "max_entries": 2, "reused": 3, "kept": 3, "evicted": 1}
+    assert cache.record() == {"store": "memory", "entries": 2, "max_entries": 2, "reused": 3, "kept": 3, "evicted": 1,
+                              "failures": 0, "last_failure": None}
     with pytest.raises(InvalidInput):
         InMemoryEmbeddingCache(max_entries=0)
+    # The bound holds through a keep, not only after one: three vectors
+    # kept at once into a cache of two leaves two.
+    cache.keep({"d": [1.0, 1.0], "e": [2.0, 2.0], "f": [3.0, 3.0]}, 2)
+    assert cache.record()["entries"] == 2 and set(cache.take(["d", "e", "f"], 2)) == {"e", "f"}
 
 
-def test_the_file_bound_drops_the_least_recently_used_too(tmp_path):
+async def test_the_file_bound_drops_the_least_recently_used_too(tmp_path):
     cache = SqliteEmbeddingCache(tmp_path / "v.sqlite", max_entries=2)
     cache.keep({"a": [1.0, 0.0], "b": [0.0, 1.0]}, 2)
     cache.take(["a"], 2)
     cache.keep({"c": [0.5, 0.5]}, 2)
     assert set(cache.take(["a", "b", "c"], 2)) == {"a", "c"} and cache.record()["evicted"] == 1
-    cache.close()
+    cache.clear()
+    assert cache.record()["entries"] == 0 and cache.take(["a", "c"], 2) == {}
+    await cache.close()
 
 
-def test_a_vector_read_back_is_checked_before_it_is_trusted(tmp_path):
+async def test_a_vector_read_back_is_checked_before_it_is_trusted(tmp_path):
     cache = SqliteEmbeddingCache(tmp_path / "v.sqlite")
     cache.keep({"k": [1.0, 2.0, 3.0]}, 3)
     assert cache.take(["k"], 4) == {}, "a width the embedder does not have is not a vector for it"
@@ -140,15 +146,23 @@ def test_a_vector_read_back_is_checked_before_it_is_trusted(tmp_path):
         cache.keep({"n": [float("nan"), 0.0, 0.0]}, 3)
     with pytest.raises(InvalidInput):
         InMemoryEmbeddingCache().keep({"w": [1.0]}, 2)
-    cache.close()
+    # Integer components, which the pipeline's own validator accepts, are kept as floats.
+    cache.keep({"i": [1, 0, -1]}, 3)
+    assert cache.take(["i"], 3) == {"i": [1.0, 0.0, -1.0]}
+    with pytest.raises(InvalidInput):
+        cache.keep({"b": [True, 0.0, 0.0]}, 3)
+    await cache.close()
 
 
-def test_the_setting_names_the_cache_or_none(tmp_path):
+async def test_the_setting_names_the_cache_or_none(tmp_path):
     assert build_embedding_cache(None) is None and build_embedding_cache("  ") is None
+    assert build_embedding_cache("none") is None and build_embedding_cache("OFF") is None, "not a file called none"
     assert isinstance(build_embedding_cache("memory"), InMemoryEmbeddingCache)
     built = build_embedding_cache(str(tmp_path / "cache.sqlite"))
     assert isinstance(built, SqliteEmbeddingCache) and (tmp_path / "cache.sqlite").exists()
-    built.close()
+    await built.close()
+    with pytest.raises(InvalidInput, match="SCONE_EMBEDDING_CACHE"):
+        build_embedding_cache(str(tmp_path / "no" / "such" / "dir" / "cache.sqlite"))
     from scone_memory.runtime.config import Settings
 
     assert Settings.from_env({"SCONE_EMBEDDING_CACHE": "memory"}).embedding_cache == "memory"
@@ -187,4 +201,91 @@ async def test_map_and_sync_receipts_say_how_many_embeddings_were_reused(tmp_pat
     assert receipt.added == 2 and receipt.embeddings_reused >= 1, "a sync stores under its own marker: new files, cached chunks"
     assert f"{receipt.embeddings_reused} chunk embedding(s) reused" in receipt.text()
     assert receipt.record()["embeddings_reused"] == receipt.embeddings_reused
+    await memory.close()
+
+
+class FailingCache(InMemoryEmbeddingCache):
+    """A cache whose store is broken: every read and write raises."""
+
+    def take(self, keys, dim):
+        raise OSError("disk full")
+
+    def keep(self, vectors, dim):
+        raise OSError("disk full")
+
+
+async def test_a_failing_cache_is_a_miss_and_the_record_is_still_stored():
+    cache = FailingCache()
+    memory = await open_memory(cache)
+    stored = await memory.replace("s", Record(DOCUMENT, kind="file", source="notes.md", dedup_key="doc"))
+    assert stored.outcome == "accepted" and stored.added.chunks >= 4 and stored.added.embeddings_reused == 0
+    assert len(memory.embedder.texts) == stored.added.chunks, "the embedder answered as if there were no cache"
+    assert cache.record()["failures"] == 2 and cache.record()["last_failure"] == "keeping: OSError: disk full"
+    await memory.close()
+
+
+async def test_two_chunks_of_one_text_are_embedded_once_and_both_counted():
+    # Each paragraph is over half the chunk target and under it, so no two
+    # share a chunk and each is one. A chunk's text keeps the separator
+    # after it, so the paragraphs that repeat are the ones not at the end.
+    one, two = "The harbour closes to sailing boats every November. " * 4, "The light on the mole is lit at dusk. " * 6
+    repeated = "\n\n".join([one, two, one, two])
+    cache = InMemoryEmbeddingCache()
+    memory = await open_memory(cache)
+    first = await memory.remember("s", repeated, kind="file", source="a.md")
+    texts = memory.embedder.texts
+    assert len(set(texts)) == len(texts) < first.chunks, "a text the record holds twice went to the embedder once"
+    memory.embedder.texts.clear()
+    second = await memory.remember("t", repeated, kind="file", source="a.md")
+    assert second.embeddings_reused == first.chunks == cache.record()["reused"], "counted per chunk served, not per key"
+    assert memory.embedder.texts == []
+    await memory.close()
+
+
+class Receipts:
+    def __init__(self):
+        self.held = {}
+
+    def get(self, key):
+        return self.held.get(key)
+
+    def put(self, key, value):
+        self.held[key] = value
+
+
+async def test_a_checkpoint_and_a_cache_work_together():
+    cache = InMemoryEmbeddingCache()
+    memory = await open_memory(cache)
+    receipts = Receipts()
+    first = await memory.remember("s", DOCUMENT, kind="file", source="a.md", embedding_checkpoint=receipts)
+    assert first.chunks >= 4 and receipts.held, "the misses were checkpointed"
+    memory.embedder.texts.clear()
+    changed = DOCUMENT.replace("Paragraph 3:", "Paragraph 3 (revised):")
+    second = await memory.remember("s", changed, kind="file", source="a.md", embedding_checkpoint=Receipts())
+    assert 0 < second.embeddings_reused < second.chunks and len(memory.embedder.texts) == second.chunks - second.embeddings_reused
+    await memory.close()
+
+
+async def test_an_embedder_of_undeclared_width_bypasses_the_cache():
+    from scone_memory.ingestion.batch import _embed_chunks
+
+    class Undeclared:
+        id, dim = "undeclared", 0
+
+        async def embed(self, texts):
+            return [[1.0, 2.0] for _ in texts]
+
+    cache = InMemoryEmbeddingCache()
+    flags: list[bool] = []
+    vectors = await _embed_chunks(Undeclared(), ["a", "b"], cache=cache, reused=flags)
+    assert vectors == [[1.0, 2.0], [1.0, 2.0]] and flags == [False, False] and cache.record()["entries"] == 0
+
+
+async def test_a_rebuild_of_the_stored_vectors_clears_the_cache():
+    cache = InMemoryEmbeddingCache()
+    memory = await open_memory(cache)
+    await memory.remember("s", DOCUMENT, kind="file", source="a.md")
+    assert cache.record()["entries"] >= 4
+    await memory.reembed_vectors()
+    assert cache.record()["entries"] == 0, "a model can change behind an id that did not"
     await memory.close()

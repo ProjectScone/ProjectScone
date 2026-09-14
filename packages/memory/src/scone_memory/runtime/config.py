@@ -918,8 +918,13 @@ def build_blobs(settings: Settings):
 
 
 async def build_engine(settings: Settings) -> MemoryEngine:
+    from ..ingestion.embedding_cache import build_embedding_cache
+
     reranker = build_reranker(settings)
     blobs = build_blobs(settings)
+    # Before any store is opened: a setting that cannot be honoured is
+    # refused with nothing left open behind it.
+    embedding_cache = build_embedding_cache(settings.embedding_cache)
     documents = build_documents(settings)
     if hasattr(documents, "open"):
         await documents.open()
@@ -928,8 +933,6 @@ async def build_engine(settings: Settings) -> MemoryEngine:
     events = build_events(settings, documents)
     if hasattr(events, "open"):
         await events.open()
-    from ..ingestion.embedding_cache import build_embedding_cache
-
     engine = MemoryEngine(
         documents,
         build_vectors(settings, documents),
@@ -938,7 +941,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         record_queries=settings.events_queries == "text",
         contextual_embeddings=settings.contextual_embeddings,
         table_context_embeddings=settings.table_context_embeddings,
-        embedding_cache=build_embedding_cache(settings.embedding_cache),
+        embedding_cache=embedding_cache,
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
         candidate_limit=settings.candidate_limit,
