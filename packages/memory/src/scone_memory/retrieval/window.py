@@ -72,7 +72,7 @@ _CLOSERS = "\"')]」』）"
 _BLANK_LINE = re.compile(r"\n[^\S\n]*\n\s*")
 
 
-def _byte_spans(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+def byte_spans(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Ordered character spans as byte offsets, in one walk along ``text``.
 
     Encoding the whole prefix before each span is quadratic in the
@@ -272,7 +272,7 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
             continue
         if unit == "sentences":
             if item.episode_id not in sentences_of:
-                sentences_of[item.episode_id] = _byte_spans(content, sentence_spans(content))
+                sentences_of[item.episode_id] = byte_spans(content, sentence_spans(content))
             spans = sentences_of[item.episode_id]
             touched = [index for index, (begin, end) in enumerate(spans) if begin < item.end and end > item.start]
             if not touched and spans:

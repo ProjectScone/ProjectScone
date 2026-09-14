@@ -146,23 +146,40 @@ async def test_bad_sentence_windows_are_refused(arguments):
         await engine.close()
 
 
-async def test_sentence_offsets_are_found_in_one_pass_over_a_long_episode():
+def test_sentence_offsets_grow_with_the_episode_not_its_square():
     """Byte offsets for every sentence of an episode, found in one walk.
     Encoding the text before each sentence is quadratic: 50,000 sentences
-    holding a non-ASCII letter took 15 seconds on a request path."""
+    holding a non-ASCII letter took 15 seconds on a request path. Timed
+    against itself at two sizes, so a loaded machine slows both alike:
+    four times the sentences takes about four times as long in one walk
+    and sixteen times as long by prefix."""
     import time
 
+    from scone_memory.retrieval.window import byte_spans
+
+    def took(count: int) -> float:
+        content = "Gö to the hall. " * count
+        spans = sentence_spans(content)
+        best = float("inf")
+        for _ in range(3):
+            began = time.perf_counter()
+            byte_spans(content, spans)
+            best = min(best, time.perf_counter() - began)
+        return best
+
+    small, large = took(5_000), took(20_000)
+    assert large / small < 8, (small, large)
+
+
+async def test_a_window_over_a_long_non_ascii_episode_is_quoted():
     content = "Gö to the hall. " * 40_000 + "The needle is here."
     engine, item = await _hit(content, "needle")
     try:
-        began = time.perf_counter()
         widened = await widen(engine, "default", [item], before=1, after=0, unit="sentences")
-        took = time.perf_counter() - began
     finally:
         await engine.close()
     assert widened.items[0].text == "Gö to the hall. The needle is here."
     assert content.encode()[widened.items[0].start:widened.items[0].end] == widened.items[0].text.encode()
-    assert took < 2.0, took
 
 
 async def test_a_window_is_quoted_when_the_space_between_sentences_is_not_ascii():
