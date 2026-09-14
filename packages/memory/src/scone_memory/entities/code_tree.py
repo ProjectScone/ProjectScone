@@ -121,8 +121,13 @@ def code_tree(projection: EntityProjection, *, max_children: Optional[int] = Non
     read = {relation.subject_id for relation in code}
     defined = {relation.object_id for relation in code if relation.predicate == "defines"}
     placed: dict[str, TreeNode] = {}
+    # A name with no directory that nothing was read from and that holds no
+    # declaration is a package or module (`lodash.merge`, `socket.io`), not a file here.
+    holding = {_split(labels[one])[0] for one in held if _split(labels[one])[1] is not None}
     for entity_id in sorted(held, key=lambda one: labels[one]):
         file, declaration = _split(labels[entity_id])
+        if file and declaration is None and "/" not in file and entity_id not in read and file not in holding:
+            continue
         if file:
             placed[labels[entity_id]] = TreeNode(
                 name=declaration if declaration is not None else file.rpartition("/")[2],

@@ -3050,8 +3050,11 @@ the view it shows without opening a zip or parsing XML:
 declarations `import`, `call`, `inherit` and `depend on` one another. It
 places an entity only when a code relation holds it and its label is a
 path or a declaration qualified by one, so a prose name shaped like a
-file (`Node.js`) is not taken for one; the rest are counted as not in
-the tree. A file or declaration that only a call or an import names was
+file (`Node.js`) is not taken for one. A name with no directory is
+placed only when the graph read it or it holds a declaration, so a
+package a manifest depends on or a file imports (`lodash.merge`,
+`socket.io`) is not a file here. The rest are counted as not in the
+tree. A file or declaration that only a call or an import names was
 not read where it is defined and is marked "not read". A chain of
 directories each holding only the next is one fold. At most 200 children
 are listed under one node and 50 links in one list, and the rest are
