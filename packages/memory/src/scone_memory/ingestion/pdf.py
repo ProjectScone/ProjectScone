@@ -6,12 +6,19 @@ from importlib.util import find_spec
 import json
 from typing import Literal, Protocol
 
+from typing import Annotated
+
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from ..core.errors import InvalidInput
 from ..ocr.types import OrderedOcrRegion
 from ..ocr.layout import ReadingOrderReceipt, validate_reading_order
 from ..ocr.process import python_worker, run_bounded
+
+
+#: Runs of a text-layer page that the reading-order pass examines; past it
+#: the page stays as extracted and its receipt says ``region_limit``.
+MAX_REGIONS_PER_PAGE = 2_000
 
 
 class PdfLimits(BaseModel):
@@ -34,6 +41,13 @@ class PdfPage(BaseModel):
 
     Dimensions describe the unrotated PDF media box; rotation is clockwise.
     These are page geometry, not estimated glyph/paragraph bounding boxes.
+
+    ``region_geometry`` says what a region's box is: a rectangle on the
+    displayed page for OCR, or a position on the text layer's character
+    grid (``normalized_text_grid``), estimated and not measured.
+    ``running`` holds the lines a text-layer page's reading-order pass left
+    out of its text: page numbers, and headers or footers repeated across
+    pages. They are recorded here so the extracted text loses nothing.
     """
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
     number: int = Field(ge=1, le=1000)
@@ -44,16 +58,19 @@ class PdfPage(BaseModel):
     rotation: int = Field(ge=0, le=270, multiple_of=90)
     empty: bool
     extraction: Literal['text_layer', 'ocr'] = 'text_layer'
-    region_geometry: Literal['normalized_displayed_page_top_left'] = 'normalized_displayed_page_top_left'
+    region_geometry: Literal['normalized_displayed_page_top_left', 'normalized_text_grid'] = 'normalized_displayed_page_top_left'
     regions: tuple[PdfTextRegion, ...] = Field(default=(), max_length=50_000)
     ocr_engine: str | None = Field(default=None, min_length=1, max_length=96)
     reading_order: ReadingOrderReceipt | None = None
+    running: tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...] = Field(default=(), max_length=4)
 
     @model_serializer(mode='wrap')
     def preserve_legacy(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)
         if self.reading_order is None:
             value.pop('reading_order', None)
+        if not self.running:
+            value.pop('running', None)
         return value
 
 
@@ -68,8 +85,22 @@ class PdfParser(Protocol):
     async def parse(self, data: bytes, limits: PdfLimits) -> ParsedPdf: ...
 
 
+PdfLayout = Literal['columns', 'as_extracted']
+
+
 class PypdfParser:
-    """Extract a PDF text layer without OCR, networking, or model inference."""
+    """Extract a PDF text layer without OCR, networking, or model inference.
+
+    ``layout='columns'`` (the default) reads each page's text in reading
+    order -- a two-column page column by column, running headers, footers
+    and page numbers left out and recorded -- from the geometry of the
+    text layer itself (see ``pdf_layout``). ``'as_extracted'`` keeps the
+    text as pypdf's layout mode writes it, row by row across the page."""
+
+    def __init__(self, *, layout: PdfLayout = 'columns') -> None:
+        if layout not in ('columns', 'as_extracted'):
+            raise InvalidInput("PDF layout must be 'columns' or 'as_extracted'")
+        self.layout: PdfLayout = layout
 
     async def parse(self, data: bytes, limits: PdfLimits = PdfLimits()) -> ParsedPdf:
         return await self._parse(data, limits, allow_empty=False)
@@ -87,8 +118,11 @@ class PypdfParser:
             *(['--allow-empty'] if allow_empty else []),
             *(['--metadata-only'] if metadata_only else []),
             *(['--allow-text-errors'] if allow_text_errors else []),
+            *(['--columns'] if self.layout == 'columns' and not metadata_only else []),
         ), data, timeout=limits.timeout_seconds, label='PDF parser',
-            max_output=limits.max_text_bytes * 6 + limits.max_pages * 2048 + 4096)
+            # A reordered page carries its text again inside its regions,
+            # each with a box and spans; the budget covers a page of them.
+            max_output=limits.max_text_bytes * 8 + limits.max_pages * (4096 + MAX_REGIONS_PER_PAGE * 256) + 4096)
         try:
             envelope = json.loads(output)
             if 'error' in envelope:
@@ -120,8 +154,12 @@ def validate_pdf(parsed: ParsedPdf, limits: PdfLimits, *, allow_empty: bool = Fa
             raise InvalidInput('PDF page span splits a UTF-8 character') from error
         if page.empty != (not page_text.strip()):
             raise InvalidInput('PDF page coverage does not match the extracted text')
-        if page.extraction == 'text_layer' and (page.regions or page.ocr_engine or page.reading_order):
+        if page.extraction == 'text_layer' and (page.ocr_engine or (page.regions and page.region_geometry != 'normalized_text_grid')):
             raise InvalidInput('PDF text-layer page cannot contain OCR regions')
+        if page.extraction == 'ocr' and page.region_geometry != 'normalized_displayed_page_top_left':
+            raise InvalidInput('PDF OCR regions must be rectangles on the displayed page')
+        if page.running and page.extraction != 'text_layer':
+            raise InvalidInput('PDF running lines are left out of a text layer only')
         if page.extraction == 'ocr' and (not page.ocr_engine or (not page.empty and not page.regions)):
             raise InvalidInput('PDF OCR page must identify its engine and recognized regions')
         region_end = page.start
