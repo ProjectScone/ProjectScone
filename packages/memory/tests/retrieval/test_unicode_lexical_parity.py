@@ -41,11 +41,6 @@ async def engine(request, tmp_path):
 @pytest.mark.parametrize("script", list(PASSAGES))
 async def test_the_text_lane_finds_an_unspaced_or_accented_query_in_every_store(engine, script):
     text, query = PASSAGES[script]
-    if script in ("japanese", "chinese", "korean") and isinstance(engine.documents, SqliteDocumentStore):
-        # SQLite's unicode61 tokenizer keeps an unspaced run as one token, so
-        # a part of it cannot be found; the trigram tokenizer with a rebuild
-        # of existing FTS tables is the fix, and a schema change of its own.
-        pytest.xfail("SQLite FTS5 unicode61 does not cut unspaced scripts; audit item 2, next lane")
     found = await engine.recall("s", query, limit=2)
     hit = next((item for item in found.items if item.text == text), None)
     assert hit is not None and hit.lanes.get("text") is not None, (script, [(i.text, i.lanes) for i in found.items])

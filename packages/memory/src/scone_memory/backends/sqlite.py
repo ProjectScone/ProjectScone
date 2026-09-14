@@ -28,6 +28,7 @@ from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, Ne
 from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
+from .sqlite_lexical import initialize_lexical, lexical_match, synchronize_lexical
 from ..core.space_deletion import (
     SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
 )
@@ -180,6 +181,7 @@ CREATE TRIGGER fact_writes_delete AFTER DELETE ON facts BEGIN
   ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;
 COMMIT;""")
     initialize_fact_search(conn)
+    initialize_lexical(conn)
     keep_affirmation_links(conn)
     return conn
 
@@ -519,14 +521,18 @@ class SqliteDocumentStore:
 
     async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
                            prefixes: Sequence[str]) -> list[tuple[int, float]]:
-        match = _match(query, prefixes)
+        # The lane ranks our own tokens (see sqlite_lexical), so it agrees
+        # with the in-memory lane on every script and every accent.
+        match = lexical_match(query, prefixes)
         if match is None:
             return []
+        synchronize_lexical(self.conn, space)
         sql = (
-            "SELECT c.id AS id, bm25(chunks_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
-            " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
+            "SELECT c.id AS id, bm25(chunk_lexical_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
+            " FROM chunk_lexical_fts JOIN chunk_lexical cl ON cl.chunk_id = chunk_lexical_fts.rowid"
+            " JOIN chunks c ON c.id = cl.chunk_id"
             " JOIN episodes e ON e.id = c.episode_id"
-            " WHERE chunks_fts MATCH ? AND c.space = ?"
+            " WHERE chunk_lexical_fts MATCH ? AND c.space = ?"
         )
         return self._ranked(sql, [match, space], filter, limit)
 
