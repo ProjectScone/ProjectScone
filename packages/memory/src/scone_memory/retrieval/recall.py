@@ -14,7 +14,7 @@ from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING
 
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
-from ..core.models import Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
+from ..core.models import DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
@@ -115,6 +115,64 @@ def _finished(trace: "PhraseTrace | None", returned: int, limit: int, *, window_
     return trace.model_copy(update={"short": short, "why": why})
 
 
+#: Candidates diversity fills places from; the rest keep relevance order after them.
+MAX_DIVERSIFIED = 200
+
+
+async def _diversified(runtime: "RecallRuntime", space: str, items: list, chunks: dict, weight: float, limit: int,
+                       degraded: list[str]) -> tuple[list, DiversityTrace]:
+    """``items`` with their first places filled by maximal marginal relevance.
+
+    Each place goes to the candidate with the highest relevance (its fused
+    score over the best one's) times ``1 - weight``, less ``weight`` times
+    its greatest cosine to a passage already placed. Only the first
+    ``2 * limit`` places are filled this way, enough to survive the
+    per-episode cap; the rest keep their relevance order."""
+    considered, rest = items[:MAX_DIVERSIFIED], items[MAX_DIVERSIFIED:]
+    ids = [item.chunk_id for item in considered]
+    vectors: dict[int, list[float]] = {}
+    source = "index"
+    try:
+        reader = getattr(runtime.vectors, "vectors_of", None)
+        if callable(reader):
+            vectors = await reader(space, ids)
+        if len(vectors) < len(ids):
+            # One source for every candidate, so each likeness is on one scale.
+            embedded = await runtime.embedder.embed([chunks[cid].text for cid in ids]) if ids else []
+            vectors, source = dict(zip(ids, embedded)), "embedded"
+    except Exception as error:  # noqa: BLE001 - the order is kept and the reason said
+        degraded.append(f"diversity: {type(error).__name__}: {error}")
+        return items, DiversityTrace(weight=weight, candidates=len(considered), not_diversified=len(rest),
+                                     vectors="unavailable", why="no vectors to compare, so relevance order was kept")
+    unit = {cid: _unit(vector) for cid, vector in vectors.items()}
+    top = max((item.score for item in considered), default=0.0) or 1.0
+    remaining = list(considered)
+    placed: list = []
+    while remaining and len(placed) < 2 * limit:
+        def gain(item) -> float:
+            like = max((_dot(unit[item.chunk_id], unit[other.chunk_id]) for other in placed), default=0.0)
+            return (1 - weight) * item.score / top - weight * like
+        best = max(remaining, key=gain)  # the first of equals, so ties keep relevance order
+        placed.append(best)
+        remaining.remove(best)
+    ordered = placed + remaining + rest
+    replaced = len({item.chunk_id for item in ordered[:limit]} - {item.chunk_id for item in items[:limit]})
+    why = f"{replaced} of the first {limit} places went to passages less like those above them"
+    if rest:
+        why += f"; {len(rest)} candidates past the budget of {MAX_DIVERSIFIED} kept relevance order"
+    return ordered, DiversityTrace(weight=weight, candidates=len(considered), not_diversified=len(rest),
+                                   vectors=source, replaced=replaced, why=why)
+
+
+def _unit(vector: Sequence[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vector))
+    return [x / norm for x in vector] if norm else [0.0 for _ in vector]
+
+
+def _dot(left: Sequence[float], right: Sequence[float]) -> float:
+    return sum(a * b for a, b in zip(left, right))
+
+
 #: The lanes a recall may be asked for, in the order they are named.
 LANES: tuple[str, ...] = ("vector", "text")
 
@@ -155,6 +213,7 @@ async def recall(
     lanes: Sequence[str] = LANES,
     require: Sequence[str] = (),
     exclude: Sequence[str] = (),
+    diversity: Optional[float] = None,
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -200,6 +259,12 @@ async def recall(
     if type(rerank) is not bool:
         raise InvalidInput("rerank must be a boolean")
     active_reranker = runtime.reranker if rerank else None
+    if diversity is not None:
+        if isinstance(diversity, bool) or not isinstance(diversity, (int, float)) or not 0 <= diversity <= 1:
+            raise InvalidInput(f"diversity is a weight from 0 to 1, not {diversity!r}")
+        if active_reranker is not None:
+            raise InvalidInput("diversity and a reranker both set the order, and the reranker would undo the "
+                               "diversity; ask for rerank=false with it")
     if active_reranker is not None:
         validate_rerank_options(runtime.rerank_limit, runtime.rerank_max_bytes, runtime.rerank_timeout)
     boundary = normalise_time(as_of) if as_of else None
@@ -425,6 +490,9 @@ async def recall(
         phrase_trace = PhraseTrace(required=required, excluded=excluded, checked=len(items),
                                    dropped_required=dropped["required"], dropped_excluded=dropped["excluded"])
         items = kept_items
+    diversity_trace: DiversityTrace | None = None
+    if diversity is not None:
+        items, diversity_trace = await _diversified(runtime, space, items, chunks, float(diversity), limit, degraded)
     episode_of = {cid: c.episode_id for cid, c in chunks.items()}
     capped_items = fusion.cap_per_episode(items, episode_of)
     baseline_allowed = {item.chunk_id for item in capped_items}
@@ -597,6 +665,7 @@ async def recall(
         narrowing=narrowing_report,
         fusion=cast(Literal["rank", "score"], fusion_mode),
         lanes=answered,
+        diversity=diversity_trace,
         phrases=_finished(phrase_trace, len(result_items), limit,
                           window_full=any(len(lane) >= depth for lane in (vector_lane, text_lane))),
         entities=query_entities,
@@ -634,6 +703,7 @@ async def recall(
         "returned_bytes": result.returned_bytes,
         "space_bytes": result.space_bytes,
         **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
+        **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
     })
     if event is not None:
         result.event_id = event.event_id

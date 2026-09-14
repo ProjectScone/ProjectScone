@@ -1031,6 +1031,7 @@ class MemoryEngine:
         lanes: Sequence[str] = ("vector", "text"),
         require: Sequence[str] = (),
         exclude: Sequence[str] = (),
+        diversity: Optional[float] = None,
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -1064,6 +1065,10 @@ class MemoryEngine:
         must hold none of, matched as whole words; they are checked across
         the fused candidates before the limit, and ``phrases`` says what
         they dropped and whether the answer came back short.
+
+        ``diversity``, a weight from 0 to 1, fills the answer's places by
+        maximal marginal relevance, so near-copies do not take several;
+        ``diversity`` on the result says how.
 
         ``graph_boost`` adds the entity lane: passages naming the question's
         entities or their neighbours in the knowledge graph. The projection
@@ -1108,7 +1113,7 @@ class MemoryEngine:
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
                             entity_notes=notes, lanes=lanes,
-                            require=require, exclude=exclude)
+                            require=require, exclude=exclude, diversity=diversity)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its

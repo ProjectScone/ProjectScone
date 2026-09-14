@@ -54,6 +54,7 @@
       "recall.window": true,
       "recall.lanes": true,
       "recall.phrases": true,
+      "recall.diversity": true,
       "recall.code_context": true,
       "recall.highlights": true,
       "recall.multi_hop": true,
