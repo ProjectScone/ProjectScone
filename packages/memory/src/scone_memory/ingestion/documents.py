@@ -66,7 +66,8 @@ def _coverage(pages: tuple[PdfPage, ...]) -> str:
 
 async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename: str | None = None,
                      limits: PdfLimits = PdfLimits(), parser: PdfParser | None = None,
-                     embedding_checkpoint: EmbeddingCheckpoint | None = None) -> PdfIngested:
+                     embedding_checkpoint: EmbeddingCheckpoint | None = None,
+                     chunking: str | None = None) -> PdfIngested:
     """Parse first, then store original, manifest and searchable derived episode.
 
     Uses existing attachment/write primitives; this is not an atomic ingest job.
@@ -103,7 +104,7 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
         embedding_checkpoint=embedding_checkpoint,
         metadata={'document_format': 'pdf', 'evidence_origin': 'extracted_text',
             'pdf_original': original.attachment_id, 'pdf_manifest': retained.attachment_id,
-            'pdf_coverage': _coverage(parsed.pages)})
+            'pdf_coverage': _coverage(parsed.pages)}, chunking=chunking)
     return PdfIngested(added, original, retained, empty)
 
 
