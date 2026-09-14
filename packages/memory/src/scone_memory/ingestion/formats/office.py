@@ -7,7 +7,7 @@ interpreted. Repeated ODS cells/rows carry repeat metadata rather than expanding
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import PurePosixPath
 import posixpath
 import re
@@ -264,9 +264,84 @@ def _row_text(row: Element, output: _Output) -> str:
                         for cell in row if _local(cell.tag) == 'tc'), '\t')
 
 
+#: A built-in Word heading style, by the name Word gives it in every language.
+_HEADING_STYLE = re.compile(r'^heading ([1-9])$', re.IGNORECASE)
+#: How many styles a basedOn chain is followed through.
+_STYLE_DEPTH = 16
+
+
+def _outline_level(properties: Element | None) -> int | None:
+    """A paragraph properties' outline level as a heading level: 1 to 9, 0 for explicit body text."""
+    marker = None if properties is None else _child(properties, 'outlineLvl')
+    if marker is None:
+        return None
+    value = _word_attribute(marker, 'val')
+    return int(value) + 1 if value.isdigit() and int(value) <= 8 else 0
+
+
+def _word_heading_styles(bundle: SafeArchive, source: str, relations: dict[str, tuple[str, str]]) -> dict[str, int]:
+    """The heading level each paragraph style gives, through the styles it is based on. A document
+    without a readable styles part gives none, and its paragraphs carry no level."""
+    identifiers = [key for key, (_, kind) in relations.items() if kind == 'styles']
+    if len(identifiers) != 1:
+        return {}
+    try:
+        root = bundle.xml(_related(source, relations, identifiers[0], 'styles'), supported_namespaces=_WORD_TEXT_NAMESPACES)
+    except InvalidInput:
+        return {}
+    own: dict[str, int] = {}
+    based: dict[str, str] = {}
+    for style in root:
+        if _local(style.tag) != 'style':
+            continue
+        identifier = _word_attribute(style, 'styleId')
+        if not identifier:
+            continue
+        level = _outline_level(_child(style, 'pPr'))
+        name = _child(style, 'name')
+        named = _HEADING_STYLE.match(_word_attribute(name, 'val')) if name is not None else None
+        if level is not None:
+            own[identifier] = level
+        elif named:
+            own[identifier] = int(named.group(1))
+        parent = _child(style, 'basedOn')
+        if parent is not None:
+            based[identifier] = _word_attribute(parent, 'val')
+    levels: dict[str, int] = {}
+    for identifier in {*own, *based}:
+        current, level = identifier, None
+        for _ in range(_STYLE_DEPTH):
+            if current in own:
+                level = own[current]
+                break
+            if current not in based:
+                break
+            current = based[current]
+        if level:
+            levels[identifier] = level
+    return levels
+
+
+def _paragraph_levels(root: Element, styles: Mapping[str, int]) -> dict[int, int]:
+    """Heading levels of the paragraphs under ``root``, read before their properties are pruned."""
+    levels: dict[int, int] = {}
+    for paragraph in root.iter():
+        if _local(paragraph.tag) != 'p' or paragraph.tag.rpartition('}')[0][1:] not in _WORD_NAMESPACES:
+            continue
+        properties = _child(paragraph, 'pPr')
+        level = _outline_level(properties)
+        if level is None and properties is not None and (style := _child(properties, 'pStyle')) is not None:
+            level = styles.get(_word_attribute(style, 'val'))
+        if level:
+            levels[id(paragraph)] = level
+    return levels
+
+
 def _word_content(
     root: Element, output: _Output, prefix: str, metadata: dict[str, str],
+    styles: Mapping[str, int] | None = None,
 ) -> Iterator[tuple[Element, str, list[Element]]]:
+    levels = _paragraph_levels(root, styles or {})
     _prune_run_metadata(root, output)
     paragraphs = tables = 0
     for block in _blocks(root, {'p', 'tbl'}, include_tags=frozenset(_WORD_REFERENCES)):
@@ -290,7 +365,8 @@ def _word_content(
             paragraphs += 1
             locator = f'{prefix}paragraph:{paragraphs}'
             boxes = _detach_textboxes(block, output)
-            output.add(_run_text(block, output), locator, metadata)
+            level = levels.get(id(block))
+            output.add(_run_text(block, output), locator, {**metadata, 'heading_level': str(level)} if level else metadata)
             yield block, locator, boxes
 
 
@@ -359,12 +435,13 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
     if _local(root.tag) != 'document' or body is None:
         raise InvalidInput('DOCX is missing its document body')
     relations = _relationships(bundle, source)
+    styles = _word_heading_styles(bundle, source, relations)
     parts: dict[str, tuple[str, dict[str, Element]]] = {}
     emitted: set[tuple[str, str]] = set()
     pending = deque([(body, '', {'member': source})])
     while pending:
         content, prefix, metadata = pending.popleft()
-        for block, locator, boxes in _word_content(content, output, prefix, metadata):
+        for block, locator, boxes in _word_content(content, output, prefix, metadata, styles):
             for number, box in enumerate(boxes, 1):
                 details = {'member': metadata['member'], 'content_role': 'textbox', 'parent_locator': locator}
                 pending.append((box, _word_prefix(locator, f'/textbox:{number}/'), details))
@@ -680,7 +757,11 @@ def _odf_content(
         if _local(block.tag) != 'table':
             paragraphs += 1
             locator = f'{prefix}paragraph:{paragraphs}'
-            output.add(_visible_text(block, output, odf=True), locator, metadata)
+            details = metadata
+            if _local(block.tag) == 'h':
+                written = next((value for key, value in block.attrib.items() if key.endswith('}outline-level')), '1')
+                details = {**metadata, 'heading_level': str(int(written)) if written.isdigit() and 1 <= int(written) <= 10 else '1'}
+            output.add(_visible_text(block, output, odf=True), locator, details)
             _odf_annotations(block, output, locator, metadata)
             continue
         tables += 1
