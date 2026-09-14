@@ -797,6 +797,9 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
     updated, closed, unread_claims = 0, 0, False
+    # Chunks whose vector the embedding cache answered: what a second map
+    # of a tree with one changed line does not pay the embedder for.
+    reused_vectors = 0
     # A map is of the tree as it is. A file is held under the identity
     # `sync` uses for it, so a changed file updates its memory rather
     # than adding a second, and the two commands recognise each other's.
@@ -849,6 +852,7 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
                     episode_of.setdefault(caller, added.episode_id)
             continue
         read += 1
+        reused_vectors += added.embeddings_reused
         updated += done.outcome == "updated"
         if done.claims_closed is None:
             unread_claims = True
@@ -920,6 +924,8 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
         parts.append(f"{removed} gone since the last pass, forgotten")
     if again:
         parts.append(f"{again} already here")
+    if reused_vectors:
+        parts.append(f"{reused_vectors} chunk embedding(s) reused, unchanged since last stored")
     if args.graph:
         parts.append(f"{claims} claim(s)")
         if closed:

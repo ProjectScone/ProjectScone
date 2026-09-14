@@ -19,6 +19,7 @@ from ..core.validation import KINDS, normalise_metadata, normalise_tags, normali
 from .chunker import Span, byte_spans, chunk_spans
 from .semantic_chunks import semantic_spans
 from .structure_chunks import structured_spans
+from .embedding_cache import EmbeddingCache, cache_key
 from .code import code_context, code_language, code_spans
 from .structure import parse_structure
 from .records import Chunking, Record, RetainedVideoRecord, RecoveryReport, _DupOf, _Pending, content_hash
@@ -36,9 +37,45 @@ EMBED_BATCH = 64
 
 async def _embed_chunks(embedder: Embedder, texts: Sequence[str], *,
                         checkpoint: EmbeddingCheckpoint | None = None,
-                        binding: str = '') -> list[list[float]]:
-    """Persist only complete validated batches, and validate receipts on reuse."""
+                        binding: str = '', cache: EmbeddingCache | None = None,
+                        reused: list[bool] | None = None) -> list[list[float]]:
+    """Persist only complete validated batches, and validate receipts on reuse.
+
+    With a ``cache``, a text the cache holds a vector for is not sent to
+    the embedder, and ``reused`` (when given) receives one flag per text
+    saying whether its vector came from the cache. An embedder of
+    undeclared width bypasses the cache: a vector cannot be checked
+    against a width nobody has stated."""
     identifier, dimension = embedder.id, embedder.dim
+    if cache is not None and dimension:
+        keys = [cache_key(identifier, dimension, text) for text in texts]
+        # A cache is not evidence and may not refuse a write: one that
+        # fails is a miss, told so, and the embedder answers instead.
+        try:
+            found = cache.take(keys, dimension)
+        except Exception as error:  # noqa: BLE001 - whatever the store raised, the record is still stored
+            cache.failed("taking", error)
+            found = {}
+        if reused is not None:
+            reused.extend(key in found for key in keys)
+        # Each missing text once, however many chunks share it.
+        wanted = list(dict.fromkeys(key for key in keys if key not in found))
+        first_text: dict[str, str] = {}
+        for key, text in zip(keys, texts):
+            first_text.setdefault(key, text)
+        fresh = (await _embed_chunks(embedder, [first_text[key] for key in wanted], checkpoint=checkpoint, binding=binding)
+                 if wanted else [])
+        # Kept once the whole batch is validated: a partial batch fails
+        # before this line and leaves nothing behind.
+        answered = dict(zip(wanted, fresh))
+        if answered:
+            try:
+                cache.keep(answered, dimension)
+            except Exception as error:  # noqa: BLE001
+                cache.failed("keeping", error)
+        return [list(answered[key]) if key in answered else found[key] for key in keys]
+    if reused is not None:
+        reused.extend(False for _ in texts)
     prefix = ''
     if checkpoint is not None:
         digest = hashlib.sha256(json.dumps(['embedding-batch-v1', identifier, dimension, EMBED_BATCH, binding]).encode())
@@ -86,6 +123,9 @@ class IngestionRuntime:
     embed_text: Callable[[NewEpisode, str], str]
     emit: Callable[[str, str, dict[str, object]], Awaitable[Event | None]]
     embedding_checkpoint: EmbeddingCheckpoint | None = None
+    #: Vectors kept by the text they embed, so a chunk unchanged since it
+    #: was last stored is not embedded again. None embeds everything.
+    embedding_cache: EmbeddingCache | None = None
     #: Whether a source stored under a name that says it is code is cut at
     #: its declarations rather than every chunk_target characters.
     code_aware: bool = True
@@ -239,13 +279,32 @@ async def embedding_inputs(runtime: IngestionRuntime, new: NewEpisode, spans: Se
     return [runtime.embed_text(new, text) for text in contextual]
 
 
-async def embed_pending(runtime: IngestionRuntime, space: str, fresh: Sequence[_Pending]) -> list[list[float]]:
-    texts = []
+async def embed_pending_counted(runtime: IngestionRuntime, space: str,
+                                fresh: Sequence[_Pending]) -> tuple[list[list[float]], list[int]]:
+    """Every pending record's vectors in order, and for each record how
+    many of them the embedding cache answered rather than the embedder."""
+    texts: list[str] = []
+    counts: list[int] = []
     for pending in fresh:
-        texts.extend(await embedding_inputs(runtime, pending.new, pending.spans, pending.texts))
+        inputs = await embedding_inputs(runtime, pending.new, pending.spans, pending.texts)
+        counts.append(len(inputs))
+        texts.extend(inputs)
     binding = '' if runtime.embedding_checkpoint is None else json.dumps(
         [space, [(p.new.content_hash, p.spans) for p in fresh]], separators=(',', ':'))
-    return await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding)
+    flags: list[bool] = []
+    vectors = await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding,
+                                  cache=runtime.embedding_cache, reused=flags)
+    reused: list[int] = []
+    at = 0
+    for count in counts:
+        reused.append(sum(flags[at:at + count]))
+        at += count
+    return vectors, reused
+
+
+async def embed_pending(runtime: IngestionRuntime, space: str, fresh: Sequence[_Pending]) -> list[list[float]]:
+    vectors, _ = await embed_pending_counted(runtime, space, fresh)
+    return vectors
 
 
 async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]) -> list[Added]:
@@ -365,8 +424,8 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
         fresh.append(await chunk_record(runtime, new, slot=len(results) - 1))
 
     if fresh:
-        vectors = await embed_pending(runtime, space, fresh)
-        await write_batch(runtime, space, fresh, vectors, results)
+        vectors, reused = await embed_pending_counted(runtime, space, fresh)
+        await write_batch(runtime, space, fresh, vectors, results, reused=reused)
         await runtime.documents.bump_revision(space)
 
     resolved: list[Added] = []
@@ -401,12 +460,15 @@ async def _retain_visual(runtime: IngestionRuntime, space: str, record: Record) 
 
 
 async def write_batch(
-    runtime: IngestionRuntime, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list[Added | _DupOf | None]
+    runtime: IngestionRuntime, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list[Added | _DupOf | None],
+    reused: Sequence[int] | None = None,
 ) -> None:
+    """``reused`` says, per pending record, how many of its vectors came
+    from the embedding cache; it is written into the record's receipt."""
     written: list[int] = []
     try:
         offset = 0
-        for pending in fresh:
+        for index, pending in enumerate(fresh):
             # The mark outlives a crash; clear_inflight below is the
             # last thing this episode's write does (see recover()).
             await runtime.documents.mark_inflight(space, pending.new.content_hash)
@@ -442,6 +504,7 @@ async def write_batch(
             offset += len(chunks)
             await runtime.documents.clear_inflight(space, pending.new.content_hash)
             results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks),
+                                          embeddings_reused=reused[index] if reused is not None else 0)
                                           chunking=pending.chunking, structure=pending.structure,
                                           embedding_context=pending.embedding_context)
     except Exception:
@@ -504,7 +567,7 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
             )
             texts = await embedding_inputs(runtime, as_new, [(c.start, c.end) for c in chunks],
                                            [c.text for c in chunks])
-            vectors = await _embed_chunks(runtime.embedder, texts)
+            vectors = await _embed_chunks(runtime.embedder, texts, cache=runtime.embedding_cache)
             await runtime.vectors.upsert(
                 [
                     VectorPoint(
