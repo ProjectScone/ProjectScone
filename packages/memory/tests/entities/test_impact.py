@@ -168,3 +168,52 @@ async def test_the_command_reads_a_diff_file_or_stdin_and_prints_what_rests_on_i
             await run(build_parser().parse_args(["graph", "impact", str(tmp_path / "missing.diff")]), engine, io.StringIO(""), out)
     finally:
         await engine.close()
+
+
+def test_git_quoted_paths_renames_and_the_size_bound_are_read():
+    text = ('diff --git a/pkg/store.py b/pkg/store.py\n--- a/pkg/store.py\n+++ b/pkg/store.py\n@@ -1,2 +1,2 @@\n-old\n+new\n'
+            'diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -1,2 +1,2 @@\n-old2\n+new2\n'
+            'diff --git a/x.py b/x.py\nnew file mode 100644\n--- /dev/null\n+++ b/x.py\n@@ -0,0 +1 @@\n+print(1)\n')
+    assert parse_diff(text) == (ChangedFile("pkg/store.py", False, ((1, 3),)), ChangedFile("café.py", False, ((1, 3),)),
+                                ChangedFile("x.py", False, ((1, 2),))), "a quoted, escaped path is one file, not a hunk of the previous"
+
+
+async def test_a_long_name_a_path_outside_the_root_and_a_binary_file_are_each_said(tmp_path):
+    engine = await graphed(tmp_path)
+    try:
+        long_name = "a" * 210
+        (tmp_path / "pkg" / "wide.py").write_text(f"def {long_name}():\n    return 1\n", encoding="utf-8")
+        wide = diff_of("pkg/wide.py", "", f"def {long_name}():\n    return 1\n", added=True)
+        (tmp_path / "pkg" / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00")
+        binary = "diff --git a/pkg/logo.png b/pkg/logo.png\nBinary files a/pkg/logo.png and b/pkg/logo.png differ\n"
+        escape = diff_of("../outside.py", "", "x = 1\n", added=True)
+        result = await impact(engine, "default", wide + binary + escape, root=tmp_path)
+        assert [(t.asked[:12], t.status) for t in result.targets][:1] == [("pkg/wide.py:", "unasked")], "a name over the graph's bound is listed, not fatal"
+        assert "1 name(s) longer than the graph takes" in result.why
+        assert result.files_unread == 1, "a binary file counts once"
+        assert result.files_outside == 1 and "1 file(s) outside the root" in result.why
+        assert [t.asked for t in result.targets if t.path == "pkg/logo.png"] == ["pkg/logo.png"]
+        with pytest.raises(InvalidInput, match="not a directory"):
+            await impact(engine, "default", wide, root=tmp_path / "nowhere")
+    finally:
+        await engine.close()
+
+
+async def test_what_the_graph_itself_left_out_is_carried_up(tmp_path, monkeypatch):
+    from scone_memory.entities.affected import Blast, Reached
+
+    engine = await graphed(tmp_path)
+    try:
+        async def cut_short(engine_, space, name, *, max_hops):
+            return Blast(target=name, status="found", reached=(Reached("e1", "pkg/api.py", 1, "imports", name),),
+                         by_depth={1: 2}, deepest=1, stopped_at_depth=True, not_listed=1, why="cut")
+
+        monkeypatch.setattr(module, "affected", cut_short)
+        new = SOURCES["pkg/store.py"].replace("paper})", "paper.strip()})")
+        (tmp_path / "pkg/store.py").write_text(new, encoding="utf-8")
+        result = await impact(engine, "default", diff_of("pkg/store.py", SOURCES["pkg/store.py"], new), root=tmp_path)
+        assert result.truncated and all(t.not_listed == 1 and t.stopped_at_depth for t in result.targets)
+        assert "left dependants unlisted or stopped at its depth" in result.why
+        assert result.record()["truncated"] is True and result.record()["targets"][0][6:] == [1, True]
+    finally:
+        await engine.close()

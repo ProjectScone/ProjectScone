@@ -997,8 +997,10 @@ scone graph impact change.diff --root . --json
 `graph affected` answers for one symbol; a pull request touches lines in
 many files, and the question people bring to it is the same one asked of
 the diff as a whole. `graph impact` reads a unified diff (what `git diff`
-writes), re-reads each changed file at `--root` with the declaration reader
-that cuts files into chunks, and names what every hunk touches at two
+writes, quoted paths included), re-reads each changed file at `--root` —
+the tree **after** the change, the diff's `b` side, whose line numbers the
+hunks give — with the declaration reader that cuts files into chunks, and
+names what every hunk touches at two
 levels, because the graph holds edges at two levels: the declaration under
 the changed lines (`pkg/store.py:Shelf.keep`), for calls the graph bound to
 it, and the file, spelt as its path and, for Python, as the module an
@@ -1010,7 +1012,10 @@ with what the graph was asked and what it said (`found`, `nothing`,
 on the change follows once, nearest first, with the fewest hops from
 anything touched and the name it was reached through. Bounds on files
 examined, things asked about and dependants listed are each disclosed when
-they bite, and an empty answer means nothing *in this graph* rests on the
+they bite; so is a bound that bit inside one of the graph's own answers (a
+list it cut, a depth it stopped at), a name longer than the graph takes, a
+file the diff names outside the root, and a root that is not a directory;
+and an empty answer means nothing *in this graph* rests on the
 change. The module spelling is a second question asked, not a link
 asserted: where a file and the module that names it are joined only at
 ingestion (`scone map` supplies the resolver; `remember()` does not), the
