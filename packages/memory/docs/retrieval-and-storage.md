@@ -266,6 +266,36 @@ naming how many of how many were shortened and that `detail` holds them
 whole. `scone answer --whole`, `GET /v1/answer?whole=true` and
 `answer_question(..., max_item_chars=0)` show them whole instead.
 
+### What a question says about where to look
+
+```bash
+scone recall "what did we decide about the launch in last week's notes?" --infer
+curl "…/v1/recall?q=the+retry+policy+under+docs/agents/&infer=true"
+```
+
+A question often carries its own scope: a date ("last week", "in March"), a
+kind of memory ("in my notes", "from the files", "in our conversations"),
+tags ("tagged urgent", "#finance"), a place ("under docs/agents/", "in
+README.md"). The reference framework has a model infer metadata filters
+from the question; here the words that name a scope are read by rule, each
+recorded with the words that said it, and — with `--infer` or
+`infer=true` — searched with where no filter was given by hand: the
+question's date becomes `since`/`until` (the readings `dates.py` already
+makes for temporal questions), its kind `kind`, its tags `tags`, its place
+`source_prefix`. A filter the caller set is never replaced, and a caller's
+window, whichever end they set, is theirs whole; a tag filter is "all of",
+so a question's tag is never added to tags the caller set. The answer
+carries `inferred`: every reading, which were applied, and which were
+`withheld` with the reason, so a wrong reading is visible rather than a
+silent narrowing. A tag is the one reading whose mistake empties an answer
+outright (`#include` has the shape of a tag), so a tag the space holds no
+memory under is withheld and said, and one it holds is applied in its
+stored spelling; a hashtag begins a word, so the `#install` of a URL is not
+one. The words stay in the question the
+lanes search, since a word that names a scope can still name what the
+passage says. A kind is read only after a word that places the question in
+it ("in my notes"), a tag begins with a letter (`#12` is an issue, not a
+tag), and nothing is read without `--infer`.
 ### Summary trees for long documents
 
 ```bash
