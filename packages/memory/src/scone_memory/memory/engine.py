@@ -35,6 +35,7 @@ from ..entities.meanings import RelationMeanings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..ingestion.code_graph import Resolve
+    from ..ingestion.embedding_cache import EmbeddingCache
     # Type-only: the vocabulary store needs cryptography, and a base
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
@@ -202,6 +203,7 @@ class MemoryEngine:
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
         table_context_embeddings: bool = False,
+        embedding_cache: "EmbeddingCache | None" = None,
         synonyms: "Synonyms | None" = None,
         context_lane: bool = False,
         lexical_stems: bool = True,
@@ -233,6 +235,9 @@ class MemoryEngine:
         if type(table_context_embeddings) is not bool:
             raise InvalidInput('table_context_embeddings must be a boolean')
         self._table_context_embeddings = table_context_embeddings
+        #: Vectors kept by the text they embed (ingestion/embedding_cache.py);
+        #: None embeds every chunk of every stored record.
+        self.embedding_cache = embedding_cache
         if synonyms is not None and not isinstance(synonyms, Synonyms):
             raise InvalidInput(f"synonyms must be a Synonyms list, not {type(synonyms).__name__}")
         #: The caller's synonym list; the text lane's query gains the other
@@ -395,6 +400,11 @@ class MemoryEngine:
     async def reembed_vectors(self) -> vector_identity.ReembedReport:
         """Re-embed every stored chunk with this engine's embedder and record it
         as the writer, which turns a disabled vector lane back on."""
+        if self.embedding_cache is not None:
+            # A model can change behind an id that did not; a rebuild is
+            # the moment that is said, and nothing kept before it may be
+            # served after it.
+            self.embedding_cache.clear()
         try:
             report = await vector_identity.rebuild(self)
         except BaseException:
@@ -428,7 +438,7 @@ class MemoryEngine:
         self._closed = True
         await self.entities.aclose()
         first: Optional[BaseException] = None
-        for store in (self.documents, self.vectors, self.events, self.blobs):
+        for store in (self.documents, self.vectors, self.events, self.blobs, self.embedding_cache):
             closer = getattr(store, "close", None)
             if store is None or not callable(closer):
                 continue
@@ -543,7 +553,7 @@ class MemoryEngine:
                 added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
                 return Replaced(added=added, outcome="duplicate", replaced=None)
             pending = await ingestion_batch.chunk_record(runtime, new)
-            vectors = await ingestion_batch.embed_pending(runtime, space, [pending])
+            vectors, reused = await ingestion_batch.embed_pending_counted(runtime, space, [pending])
             # Embedding can yield for a long time. Never revoke a different source
             # or recreate one that the user forgot during preparation.
             await self._living(space)
@@ -568,7 +578,7 @@ class MemoryEngine:
             receipt = await self.forget(space, existing.episode_id)
         try:
             results: list[Added | _DupOf | None] = [None]
-            await ingestion_batch.write_batch(runtime, space, [pending], vectors, results)
+            await ingestion_batch.write_batch(runtime, space, [pending], vectors, results, reused=reused)
             await self.documents.bump_revision(space)
             added = cast(Added, results[0])
             retired = file_claims.Retired(closed=0)
@@ -685,7 +695,8 @@ class MemoryEngine:
             context_inputs = partial(embedding_inputs, blobs=self.blobs)
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
-            self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
+            self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint,
+            embedding_cache=self.embedding_cache, code_aware=self.code_aware,
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware, heading_context=self.heading_context,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,

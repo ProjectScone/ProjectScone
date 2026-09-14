@@ -179,6 +179,10 @@ class Settings:
     contextual_embeddings: bool = False
     heading_context: bool = False
     table_context_embeddings: bool = False
+    #: SCONE_EMBEDDING_CACHE: unset embeds every chunk of every stored
+    #: record; "memory" keeps vectors for the process; a path keeps them in
+    #: a file every process that opens it shares (ingestion/embedding_cache.py).
+    embedding_cache: str | None = None
     demote_restated: bool = True
     context_lane: bool = False
     lexical_stems: bool = True
@@ -401,6 +405,7 @@ class Settings:
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             heading_context=env.get("SCONE_HEADING_CONTEXT") == "1",
             table_context_embeddings=env.get("SCONE_TABLE_CONTEXT_EMBEDDINGS") == "1",
+            embedding_cache=env.get("SCONE_EMBEDDING_CACHE") or None,
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
@@ -976,8 +981,13 @@ def build_blobs(settings: Settings):
 
 
 async def build_engine(settings: Settings) -> MemoryEngine:
+    from ..ingestion.embedding_cache import build_embedding_cache
+
     reranker = build_reranker(settings)
     blobs = build_blobs(settings)
+    # Before any store is opened: a setting that cannot be honoured is
+    # refused with nothing left open behind it.
+    embedding_cache = build_embedding_cache(settings.embedding_cache)
     documents = build_documents(settings)
     if hasattr(documents, "open"):
         await documents.open()
@@ -995,6 +1005,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         contextual_embeddings=settings.contextual_embeddings,
         heading_context=settings.heading_context,
         table_context_embeddings=settings.table_context_embeddings,
+        embedding_cache=embedding_cache,
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
         candidate_limit=settings.candidate_limit,
