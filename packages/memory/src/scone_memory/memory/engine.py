@@ -677,7 +677,10 @@ class MemoryEngine:
         # relative import, where the reader's own path arithmetic still
         # names a candidate, so a lone file keeps that.
         if resolve is None:
-            sources = [record.source for record in records if record.source]
+            # Only records the batch actually stored: a record refused by a
+            # partial batch has no episode and may not even carry a path.
+            sources = [record.source for record, outcome in zip(records, added)
+                       if isinstance(record.source, str) and record.source and outcome.episode_id >= 0]
             resolve = file_resolver(sources) if len(sources) > 1 else None
         mapped: list[Fact] = []
         for record, outcome in zip(records, added):
