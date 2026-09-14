@@ -193,3 +193,17 @@ async def test_delimited_text_queries_the_same_way():
     assert answer.value == '1270.5' and [c.text for c in answer.cells] == ['1,250.50', '20']
     episode = await memory.episode('s', episode_id)
     assert verify_quotes(answer, episode.content.encode())
+
+
+async def test_a_json_document_queries_like_a_spreadsheet():
+    import json
+
+    raw = json.dumps({"rows": [{"region": "West", "revenue": "1,250.50"}, {"region": "East", "revenue": 35},
+                               {"region": "West", "revenue": 20}]}).encode()
+    memory, episode_id = await memory_with(raw, 'sales.json')
+    (table,) = await episode_tables(memory, 's', episode_id)
+    assert table.name == 'json:/rows' and table.columns == ('region', 'revenue') and table.basis == 'json_object_keys'
+    answer = await query_table(memory, 's', episode_id, args('sum', 'revenue', ('region', '==', 'West')))
+    assert answer.value == '1270.5' and [c.text for c in answer.cells] == ['1,250.50', '20']
+    episode = await memory.episode('s', episode_id)
+    assert verify_quotes(answer, episode.content.encode())
