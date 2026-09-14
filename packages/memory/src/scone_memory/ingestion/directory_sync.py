@@ -20,7 +20,7 @@ from .files import (FILE_MEDIA_TYPES, DocumentManifest, digest, document_provena
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits
 from .sensitive import screen
-from .source_journal import SourceEntry, SourceJournal, SourceRevision, SourceState
+from .source_journal import MAX_CLAIMANTS, SourceEntry, SourceJournal, SourceRevision, SourceState
 from .source_scan import DirectoryScanner, ScanIssue, ScanLimits, ScannedFile
 
 
@@ -31,6 +31,15 @@ class SourceReceipt:
     episode_id: int | None = None
     previous_episode_id: int | None = None
     code: str | None = None
+    #: Claims the stored revision makes (a source file's definitions,
+    #: imports and calls; a manifest's dependencies); zero for a document
+    #: that makes none.
+    claims: int = 0
+    #: Claims of the previous revision closed because the new one no
+    #: longer makes them, or because the file was deleted. None when the
+    #: store could not read the claims by episode: nothing was closed,
+    #: and the receipt says so rather than saying zero.
+    claims_closed: int | None = 0
 
 
 @dataclass(frozen=True)
@@ -40,6 +49,11 @@ class DirectorySyncResult:
     receipts: tuple[SourceReceipt, ...]
     issues: tuple[ScanIssue, ...]
     skipped: int
+    #: Totals over the receipts: claims the run recorded, claims it
+    #: closed, and whether some could not be read and so were not closed.
+    claims: int = 0
+    claims_closed: int = 0
+    claims_unread: bool = False
 
 
 class DirectorySync:
@@ -47,9 +61,12 @@ class DirectorySync:
 
     Replacements retain and verify the new source before retiring the previous
     episode. Stages are recoverable; the stores do not provide a global atomic
-    swap. Extracted claims stand when source episodes are forgotten. An external
-    forget suppresses the path; managed missing-file deletion permits its later
-    return. Missing evidence or ownership mismatches fail closed.
+    swap. A managed replacement closes the claims the new revision no longer
+    makes, and a managed deletion closes them all, each naming the file and
+    why; the receipts count both. An external forget suppresses the path and
+    leaves its claims standing, by the engine's contract for forget. Managed
+    missing-file deletion permits the file's later return. Missing evidence or
+    ownership mismatches fail closed.
     """
 
     def __init__(self, memory: MemoryEngine, root: str | Path, *, space: str, include_sensitive: bool = False,
@@ -152,7 +169,7 @@ class DirectorySync:
                 raise InvalidInput('directory journal references missing sources; verify the store identity and retained data') from None
 
     async def _suppress(self, state: SourceState, path: str, entry: SourceEntry) -> SourceReceipt:
-        self._save(state, path, SourceEntry(state='suppress', current=entry.current, pending=entry.pending))
+        self._save(state, path, SourceEntry(state='suppress', current=entry.current, pending=entry.pending, claimants=entry.claimants))
         for revision in (entry.current, entry.pending):
             if revision is None:
                 continue
@@ -168,7 +185,7 @@ class DirectorySync:
         revision = entry.pending or entry.current
         if revision is None:
             raise InvalidInput('source suppression has no revision')
-        self._save(state, path, SourceEntry(state='suppressed', current=revision))
+        self._save(state, path, SourceEntry(state='suppressed', current=revision, claimants=entry.claimants))
         return SourceReceipt(path, 'suppressed', revision.episode_id)
 
     async def _finish(self, state: SourceState, path: str, entry: SourceEntry) -> SourceReceipt:
@@ -201,26 +218,81 @@ class DirectorySync:
                 raise InvalidInput('pending manifest does not match its source')
             added = await store_document(self.memory, self.space, original, manifest,
                                          source=self._source(state, path, pending))
+            claims = added.claims
             pending = pending.model_copy(update={'episode_id': added.added.episode_id})
             await self._episode(state, path, pending)
-            entry = SourceEntry(state='retire', current=current, pending=pending)
+            entry = SourceEntry(state='retire', current=current, pending=pending, claimants=entry.claimants)
             self._save(state, path, entry)
+        else:
+            claims = 0
         # A recorded retire intent permits an already-forgotten old episode on
         # retry. A missing record without its tombstone remains an error.
         try:
             await self._episode(state, path, pending)
         except Gone:
             return await self._suppress(state, path, entry)
+        closed: int | None = 0
+        claimants = entry.claimants
         if current is not None:
             try:
                 old = await self._episode(state, path, current)
             except Gone:
                 pass
             else:
+                # What the new revision still says stays; the rest is closed
+                # before the old episode goes, so a retry after a crash here
+                # finds the episode and closes again (nothing more), instead
+                # of finding it gone and closing nothing. A claim restated
+                # across revisions is one fact cited to the episode that
+                # first made it, so every earlier episode is closed against
+                # the new revision too.
+                closed, claimants = await self._close_claims(
+                    (*claimants, old.episode_id), path, kept=await self._kept(pending),
+                    reason=f'no longer stated by {path}', kind='source_changed')
                 await self.memory.forget(self.space, old.episode_id)
-        self._save(state, path, SourceEntry(state='active', current=pending))
+        self._save(state, path, SourceEntry(state='active', current=pending, claimants=claimants))
         return SourceReceipt(path, 'updated' if current is not None else 'added', pending.episode_id,
-                             current.episode_id if current else None)
+                             current.episode_id if current else None, claims=claims, claims_closed=closed)
+
+    async def _kept(self, revision: SourceRevision) -> list[tuple[str, str, str]]:
+        """The claims a revision makes, read from its retained manifest:
+        what a replacement keeps of the previous revision's claims."""
+        from .files import document_claims
+
+        _retained, encoded = await self.memory.attachment(self.space, revision.manifest_sha256)
+        manifest = DocumentManifest.model_validate_json(encoded)
+        return [(claim.subject, claim.predicate, claim.object)
+                for claim in document_claims(manifest.parsed, manifest.filename)]
+
+    async def _close_claims(self, episodes: tuple[int, ...], path: str, *, kept: list[tuple[str, str, str]],
+                            reason: str, kind: str) -> tuple[int | None, tuple[int, ...]]:
+        """Close what the given episodes' claims say that `kept` does not,
+        and say how many, or None when a store could not read them. Also
+        says which of the episodes still have claims citing them, bounded
+        by MAX_CLAIMANTS: past it the newest are left out and the count
+        is None, because claims nobody tracks are claims nobody closes."""
+        from ..core import graph_read
+        from .files import says_claims
+
+        if not says_claims(path):
+            return 0, ()
+        ids = tuple(dict.fromkeys(episodes))
+        closed: int | None = 0
+        still: list[int] = []
+        documents = self.memory.documents
+        reader = documents if isinstance(documents, graph_read.GraphFactReader) else None
+        for episode_id in ids:
+            retired = await self.memory.close_unstated(self.space, episode_id, kept=kept, reason=reason, kind=kind)
+            if retired.closed is None or retired.unread:
+                closed = None
+            elif closed is not None:
+                closed += retired.closed
+            if reader is None or any(fact.status == 'active' and fact.origin == 'extracted'
+                                     for fact in await reader.facts_for_graph(self.space, episode_id, graph_read.MAX_GRAPH_FACTS)):
+                still.append(episode_id)
+        if len(still) > MAX_CLAIMANTS:
+            return None, tuple(still[:MAX_CLAIMANTS])
+        return closed, tuple(still)
 
     async def _prepare(self, state: SourceState, item: ScannedFile, current: SourceRevision | None,
                        generation: int) -> SourceReceipt:
@@ -249,7 +321,8 @@ class DirectorySync:
         await asyncio.to_thread(self.scanner.read, item)
         pending = SourceRevision(original_sha256=digest(data), manifest_sha256=digest(encoded),
                                  parser_revision=self.parser_revision, generation=generation)
-        entry = SourceEntry(state='replace', current=current, pending=pending)
+        entry = SourceEntry(state='replace', current=current, pending=pending,
+                            claimants=state.entries[item.path].claimants if item.path in state.entries else ())
         # Validate the bounded journal entry before uploads; persist the intent
         # after both exact inputs are retained and before indexing starts.
         checked = SourceState(collection_id=state.collection_id, entries=state.entries | {item.path: entry})
@@ -278,13 +351,14 @@ class DirectorySync:
                 await self._episode(state, item.path, current)
             except Gone:
                 if entry is not None and entry.state == 'delete':
-                    self._save(state, item.path, SourceEntry(state='absent', current=current))
+                    self._save(state, item.path, SourceEntry(state='absent', current=current, claimants=entry.claimants))
                     current = None
                 else:
-                    return await self._suppress(state, item.path, SourceEntry(state='active', current=current))
+                    return await self._suppress(state, item.path, SourceEntry(state='active', current=current,
+                                                                              claimants=entry.claimants if entry else ()))
             else:
                 if entry is not None and entry.state == 'delete':
-                    self._save(state, item.path, SourceEntry(state='active', current=current))
+                    self._save(state, item.path, SourceEntry(state='active', current=current, claimants=entry.claimants))
                 if current.original_sha256 == item.sha256 and current.parser_revision == self.parser_revision:
                     return recovered or SourceReceipt(item.path, 'unchanged', current.episode_id)
         return await self._prepare(state, item, current, generation)
@@ -300,6 +374,8 @@ class DirectorySync:
         current = entry.current
         if current is None or current.episode_id is None:
             raise InvalidInput('missing managed source has no current episode')
+        closed: int | None = 0
+        claimants = entry.claimants
         try:
             await self._episode(state, path, current)
         except Gone:
@@ -309,9 +385,14 @@ class DirectorySync:
             self._save(state, path, SourceEntry(state='delete', current=current))
             if not await asyncio.to_thread(self.scanner.missing, path):
                 raise InvalidInput('managed source reappeared before deletion')
+            # Closed before the episode goes, for the same reason as a
+            # replacement: a retry after a crash still finds it. Every
+            # earlier episode a restated claim still cites is closed too.
+            closed, claimants = await self._close_claims((*entry.claimants, current.episode_id), path, kept=[],
+                                                         reason=f'{path} was removed', kind='source_removed')
             await self.memory.forget(self.space, current.episode_id)
-        self._save(state, path, SourceEntry(state='absent', current=current))
-        return SourceReceipt(path, 'deleted', previous_episode_id=current.episode_id)
+        self._save(state, path, SourceEntry(state='absent', current=current, claimants=claimants))
+        return SourceReceipt(path, 'deleted', previous_episode_id=current.episode_id, claims_closed=closed)
 
     async def synchronize(self, *, delete_missing: bool = False) -> DirectorySyncResult:
         if type(delete_missing) is not bool:
@@ -357,4 +438,7 @@ class DirectorySync:
                 if entry.state == 'delete' and path not in reported:
                     receipts.append(SourceReceipt(path, 'failed', code='deletion_pending'))
             return DirectorySyncResult(state.collection_id, stable and all(item.status != 'failed' for item in receipts),
-                                       tuple(sorted(receipts, key=lambda item: item.path)), tuple(issues), final.skipped)
+                                       tuple(sorted(receipts, key=lambda item: item.path)), tuple(issues), final.skipped,
+                                       claims=sum(item.claims for item in receipts),
+                                       claims_closed=sum(item.claims_closed or 0 for item in receipts),
+                                       claims_unread=any(item.claims_closed is None for item in receipts))

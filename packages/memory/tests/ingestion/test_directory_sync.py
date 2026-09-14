@@ -7,6 +7,10 @@ from scone_memory.ingestion.files import document_provenance
 from scone_memory.ingestion.formats.types import DocumentSegment, ParsedDocument
 
 
+MODULE = "import os\nimport json\n\n\ndef read(path):\n    return json.load(open(path))\n\n\ndef write(path, value):\n    json.dump(value, open(path, 'w'))\n"
+SHORTER = "import json\n\n\ndef read(path):\n    return json.load(open(path))\n"
+
+
 class CountingEmbedder(HashEmbedder):
     def __init__(self):
         super().__init__()
@@ -540,3 +544,91 @@ async def test_a_tracked_file_that_gains_a_secret_keeps_its_last_clean_revision(
     assert second.previous_episode_id == first.episode_id
     kept = await memory.documents.get_episode('alpha', first.episode_id)
     assert kept is not None and KEY not in kept.content
+
+
+async def test_directory_sync_records_claims_closes_what_a_revision_drops_and_closes_all_on_deletion(env):
+    from scone_memory.ingestion.directory_sync import DirectorySync
+    memory, root, tmp_path = env
+    (root / "store.py").write_text(MODULE)
+    sync = DirectorySync(memory, root, space="alpha", journal=tmp_path / "claims.journal",
+                         key=b"k" * 32, store_id="fixture-catalog", parser_revision="v1")
+    first = await sync.synchronize()
+    receipt = receipts(first)["store.py"]
+    assert receipt.status == "added" and receipt.claims >= 4 and receipt.claims_closed == 0
+    assert first.claims == receipt.claims and first.claims_closed == 0 and not first.claims_unread
+    facts = await memory.documents.facts_for_graph("alpha", receipt.episode_id, 500)
+    assert {f.object for f in facts if f.predicate == "defines"} == {"store.py:read", "store.py:write"}
+    stored = await memory.episode("alpha", receipt.episode_id)
+    assert facts and all(f.quote in stored.content for f in facts), "every claim quotes a line the episode holds"
+
+    (root / "store.py").write_text(SHORTER)
+    second = await DirectorySync(memory, root, space="alpha", journal=tmp_path / "claims.journal", key=b"k" * 32,
+                                 store_id="fixture-catalog", parser_revision="v1").synchronize()
+    updated = receipts(second)["store.py"]
+    from scone_memory.ingestion.code_graph import code_claims
+    still_said = {(c.predicate, c.object) for c in code_claims(SHORTER, "store.py", language="python")}
+    old = await memory.documents.facts_for_graph("alpha", receipt.episode_id, 500)
+    closed = {(f.predicate, f.object) for f in old if f.status != "active"}
+    assert updated.status == "updated" and updated.claims_closed == len(closed) >= 2
+    assert {("defines", "store.py:write"), ("imports", "os")} <= closed, "write's definition and the os import are no longer stated"
+    assert closed.isdisjoint(still_said), "nothing the new revision still says was closed"
+    assert {(f.predicate, f.object) for f in old if f.status == "active"} <= still_said, "what stayed open is what the new revision says"
+    assert ("defines", "store.py:read") in still_said and ("imports", "json") in still_said
+    with pytest.raises(Gone):
+        await memory.episode("alpha", receipt.episode_id)
+
+    (root / "store.py").write_text("import json\n")
+    third = await DirectorySync(memory, root, space="alpha", journal=tmp_path / "claims.journal", key=b"k" * 32,
+                                store_id="fixture-catalog", parser_revision="v1").synchronize()
+    assert receipts(third)["store.py"].claims_closed >= 1
+    first_facts = await memory.documents.facts_for_graph("alpha", receipt.episode_id, 500)
+    assert {(f.predicate, f.object) for f in first_facts if f.status == "active"} == {("imports", "json")}, \
+        "read's definition, restated by the second revision and cited to the first episode, closes when the third drops it"
+
+    (root / "store.py").unlink()
+    fourth = await DirectorySync(memory, root, space="alpha", journal=tmp_path / "claims.journal", key=b"k" * 32,
+                                 store_id="fixture-catalog", parser_revision="v1").synchronize(delete_missing=True)
+    deleted = receipts(fourth)["store.py"]
+    assert deleted.status == "deleted" and deleted.claims_closed == 1 and fourth.claims_closed == 1
+    assert all(f.status != "active" for f in await memory.documents.facts_for_graph("alpha", receipt.episode_id, 500)), \
+        "a deleted file states nothing, whichever revision first said it"
+
+
+async def test_a_crash_between_storing_and_recording_claims_still_yields_them_on_retry(env, monkeypatch):
+    import scone_memory.ingestion.files as files
+    from scone_memory.ingestion.directory_sync import DirectorySync
+    memory, root, tmp_path = env
+    (root / "store.py").write_text(MODULE)
+    import scone_memory.ingestion.code_graph as code_graph
+    original = code_graph.record_claims
+    fired = False
+    async def crashing(*args, **kwargs):
+        nonlocal fired
+        if not fired:
+            fired = True
+            raise OSError("simulated power loss")
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(code_graph, "record_claims", crashing)
+    options = dict(space="alpha", journal=tmp_path / "claims.journal", key=b"k" * 32, store_id="fixture-catalog", parser_revision="v1")
+    failed = await DirectorySync(memory, root, **options).synchronize()
+    assert fired and not failed.complete
+    resumed = await DirectorySync(memory, root, **options).synchronize()
+    assert resumed.complete
+    receipt = receipts(resumed)["store.py"]
+    assert receipt.claims >= 4, "the retried stage records what the crashed one did not"
+    assert len([f for f in await memory.documents.facts_for_graph("alpha", receipt.episode_id, 500) if f.status == "active"]) == receipt.claims
+
+
+async def test_a_store_that_cannot_read_claims_by_episode_says_unread_not_zero(env, monkeypatch):
+    from scone_memory.ingestion.directory_sync import DirectorySync
+    from scone_memory.memory.file_claims import Retired
+    memory, root, tmp_path = env
+    (root / "store.py").write_text(MODULE)
+    options = dict(space="alpha", journal=tmp_path / "claims.journal", key=b"k" * 32, store_id="fixture-catalog", parser_revision="v1")
+    await DirectorySync(memory, root, **options).synchronize()
+    async def unreadable(*args, **kwargs):
+        return Retired(closed=None)
+    monkeypatch.setattr(memory, "close_unstated", unreadable)
+    (root / "store.py").write_text(SHORTER)
+    result = await DirectorySync(memory, root, **options).synchronize()
+    assert receipts(result)["store.py"].claims_closed is None and result.claims_unread and result.claims_closed == 0
