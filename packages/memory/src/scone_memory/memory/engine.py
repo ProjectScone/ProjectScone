@@ -15,7 +15,8 @@ from functools import partial
 from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Mapping, Optional,
                     Sequence, TypedDict, cast)
 
-from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, source_keys, vector_identity
+from . import (archive, catalog, fact_placement, fact_relationships, fact_review, file_claims, retention,
+               source_keys, vector_identity)
 from .identity import join_match
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
@@ -145,6 +146,13 @@ class Replaced:
     added: Added
     outcome: str
     replaced: Optional[ForgetReceipt] = None
+    #: Extracted claims the replaced episode grounded that the new content
+    #: no longer makes, closed. None when the store cannot read claims by
+    #: episode, in which case nothing was closed.
+    claims_closed: Optional[int] = 0
+    #: The replaced episode grounded more claims than one read returns;
+    #: some were not examined and may still stand.
+    claims_unread: bool = False
 
 
 class _RecallEventItem(TypedDict):
@@ -452,7 +460,7 @@ class MemoryEngine:
             await self.blobs.link(space, attachment_id, added.episode_id)
         return added
 
-    async def replace(self, space: str, record: Record) -> "Replaced":
+    async def replace(self, space: str, record: Record, *, map_code: bool = True) -> "Replaced":
         """Store a keyed record as the current one under its key. A key
         nobody holds is accepted; the same content again is a duplicate
         and changes nothing; changed content is an update: the episode
@@ -462,7 +470,12 @@ class MemoryEngine:
         the old source available. The subsequent forget/store is not an
         atomic swap: a storage failure between them can leave the key empty,
         and its error reports the removed source. Competing writers still
-        need caller serialization across the commit phase."""
+        need caller serialization across the commit phase.
+
+        With the code graph on, the new content's claims are read and the
+        replaced episode's claims it no longer makes are closed. A caller
+        that reads claims itself, with a resolver this engine does not
+        have, passes ``map_code=False`` and does both."""
         await self._living(space)
         check_space(space)
         if not record.dedup_key:
@@ -510,9 +523,18 @@ class MemoryEngine:
             await ingestion_batch.write_batch(runtime, space, [pending], vectors, results)
             await self.documents.bump_revision(space)
             added = cast(Added, results[0])
-            if self.code_graph:
+            retired = file_claims.Retired(closed=0)
+            if self.code_graph and map_code:
                 prepared = Record(new.content, kind=new.kind, source=new.source, created_at=new.created_at)
-                await self._map_code(space, [prepared], [added])
+                mapped = await self._map_code(space, [prepared], [added])
+                if receipt is not None:
+                    # The old episode's claims stood through the forget, by
+                    # its contract. What the new content no longer says is
+                    # closed now, naming the file.
+                    retired = await self.close_unstated(
+                        space, receipt.episode_id,
+                        kept=[(fact.subject, fact.predicate, fact.object) for fact in mapped],
+                        reason=f"no longer stated by {new.source or record.dedup_key}", kind="source_changed")
         except Exception as error:
             await self._emit(space, "remember", {
                 "records": 1, "error": f"{type(error).__name__}: {error}", "latency_ms": _ms(started),
@@ -529,7 +551,8 @@ class MemoryEngine:
         })
         outcome = "updated" if receipt is not None else added.outcome
         added = added.model_copy(update={"outcome": outcome, "replaced": receipt})
-        return Replaced(added=added, outcome=outcome, replaced=receipt)
+        return Replaced(added=added, outcome=outcome, replaced=receipt,
+                        claims_closed=retired.closed, claims_unread=retired.unread)
 
     # -- attachments ------------------------------------------------------
 
@@ -633,7 +656,7 @@ class MemoryEngine:
             await self._map_code(space, records, added)
         return added
 
-    async def _map_code(self, space: str, records: Sequence[Record], added: Sequence[Added]) -> None:
+    async def _map_code(self, space: str, records: Sequence[Record], added: Sequence[Added]) -> list[Fact]:
         """What a source file says about itself, recorded as claims like any
         other: quoted from the line they were read on, cited to the episode
         they came from, and marked extracted rather than stated, because
@@ -644,11 +667,21 @@ class MemoryEngine:
         twice for no reason."""
         from ..ingestion.code_graph import record_claims
 
+        mapped: list[Fact] = []
         for record, outcome in zip(records, added):
             if outcome.deduplicated or outcome.episode_id < 0 or not record.source:
                 continue
             await record_claims(self, space, episode_id=outcome.episode_id, content=record.content,
-                                path=record.source, when=record.created_at or self.clock())
+                                path=record.source, when=record.created_at or self.clock(), _facts=mapped)
+        return mapped
+
+    async def close_unstated(self, space: str, episode_id: int, *, kept: Sequence[tuple[str, str, str]] = (),
+                             reason: str, kind: str = "source_changed") -> "file_claims.Retired":
+        """Close the extracted claims an episode grounded that are not in
+        ``kept``: the file was replaced by content that no longer says
+        them, or removed. What a person stated is never touched here."""
+        return await file_claims.close_unstated(self._review_runtime(), space, episode_id, kept=kept,
+                                                reason=reason, kind=kind)
 
     def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
         """What the embedder sees for a chunk. Stored text is never changed."""

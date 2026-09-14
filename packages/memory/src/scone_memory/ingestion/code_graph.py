@@ -44,8 +44,12 @@ ASSETS = frozenset("css scss sass less styl png jpg jpeg gif svg webp avif ico b
 
 import builtins
 import re
+from typing import TYPE_CHECKING
 
 from .code import Language, MAX_LINES, _line_starts, declarations
+
+if TYPE_CHECKING:
+    from ..core.models import Fact
 
 #: Claims from one file, past which a generated file is not worth reading.
 MAX_CLAIMS = 20_000
@@ -664,7 +668,8 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
 
 async def record_claims(engine, space: str, *, episode_id: int, content: str, path: str,
                         when: str, resolve: Optional["Resolve"] = None,
-                        _recorded: Optional[list[CodeClaim]] = None) -> int:
+                        _recorded: Optional[list[CodeClaim]] = None,
+                        _facts: Optional[list["Fact"]] = None) -> int:
     """Record what a file says about itself, and say how many claims that
     was. One place decides how these are written — quoted from the line,
     cited to the episode, extracted rather than stated — so the engine and
@@ -680,9 +685,11 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     for claim in claims:
         if _recorded is not None:
             _recorded.append(claim)
-        await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,
-                                 valid_from=when, source_episode_id=episode_id,
-                                 quote=claim.quote, origin="extracted")
+        fact = await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,
+                                        valid_from=when, source_episode_id=episode_id,
+                                        quote=claim.quote, origin="extracted")
+        if _facts is not None:
+            _facts.append(fact)
         said += 1
     return said
 
