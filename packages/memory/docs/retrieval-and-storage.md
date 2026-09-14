@@ -1102,6 +1102,23 @@ at most 4, 1.0 by default — and every recall event records
 that made it. Change it only on a number: the pull request that added it
 carries the measurement.
 
+### Both stores agree on every script
+
+Two stores that answer the same query differently are a bug a reader
+cannot see. The in-memory lane cuts an unspaced run — a Japanese or
+Thai phrase — into character grams and finds a part of it; SQLite's
+built-in tokenizer kept the run as one token and could not. The SQLite
+text lane now ranks our own tokens: a derived table holds each chunk's
+terms exactly as the lexical tokenizer makes them, diacritics folded as
+the in-memory lane folds them, searched through an FTS5 shadow that
+splits only on the spaces between them. It is versioned by the
+tokenizer and the Unicode data it ran under and rebuilt whole when
+either changes — lazily, so an old database opens at once and each
+space pays as it is read — and triggers keep it current on write and
+delete. A parity test pins that Japanese, Chinese, Thai, Korean and
+accented Latin queries find their passage through the text lane in
+both stores.
+
 ### A word's family by prefix
 
 "bills", "billing" and "billed" are one word to a reader and three to the
