@@ -4,6 +4,7 @@ the HTTP routes and MCP tools read."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import sys
 import json
@@ -615,3 +616,31 @@ async def test_recall_can_widen_a_single_hit():
     code = await run(build_parser().parse_args(asked[:2] + ["--limit", "1"]),
                      memory, io.StringIO(""), plain)
     assert code == 0 and "widened" not in plain.getvalue(), "widening stays opt-in"
+
+
+async def test_map_watch_records_what_changed_between_passes(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    out = io.StringIO()
+
+    async def change_between_passes():
+        await asyncio.sleep(0.15)
+        (root / "a.py").write_text("def a():\n    return 2\n", encoding="utf-8")
+        (root / "b.py").write_text("def b():\n    return 3\n", encoding="utf-8")
+
+    changing = asyncio.create_task(change_between_passes())
+    code = await run(build_parser().parse_args(["map", str(root), "--watch", "--every", "0.3", "--rounds", "2"]),
+                     memory, io.StringIO(""), out)
+    await changing
+    text = out.getvalue()
+    assert code == 0, text
+    assert text.count("pass ") == 2 and "pass 1 at" in text and "pass 2 at" in text
+    assert (await memory.status("default")).episodes == 2, "the second pass took the new file and the changed one"
+    found = await memory.recall("default", "return 2", limit=2)
+    assert any("return 2" in item.text for item in found.items), "the changed file's new text is what is remembered"
+    out = io.StringIO()
+    with pytest.raises(InvalidInput, match="--every"):
+        await run(build_parser().parse_args(["map", str(root), "--watch", "--every", "0", "--rounds", "1"]), memory, io.StringIO(""), out)
+    await memory.close()

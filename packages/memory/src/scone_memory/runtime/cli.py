@@ -23,6 +23,7 @@ import pathlib
 import posixpath
 import asyncio
 import json
+from datetime import datetime, timezone
 import os
 import sys
 import stat
@@ -388,6 +389,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-bytes", type=int, default=400_000, help="bytes of one file to read (default 400000)")
     p.add_argument("--include-sensitive", action="store_true",
                    help="take a source that screens as a credential anyway; off, it is withheld and named")
+    p.add_argument("--watch", action="store_true",
+                   help="keep mapping: after the pass, read the tree again every --every seconds and record what "
+                        "changed, until interrupted or --rounds passes are done")
+    p.add_argument("--every", type=float, default=5.0, help="seconds between passes under --watch (default 5)")
+    p.add_argument("--rounds", type=int, default=0, help="passes to make under --watch, 0 for until interrupted (default 0)")
 
     p = sub.add_parser("fs", help="the space as a tree: ls, cat, find and write a note")
     tree = p.add_subparsers(dest="fs_command", required=True)
@@ -669,6 +675,30 @@ async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> i
 
 
 async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
+    """One pass over the tree, or under --watch pass after pass: the graph
+    follows the files as they change, each pass a receipt of its own. A
+    pass re-reads every file and replaces only what changed, so a quiet
+    tree costs a read and a hash per file and writes nothing."""
+    if not args.watch:
+        return await map_pass(args, engine, out)
+    if args.every < 0.1 or args.rounds < 0:
+        raise InvalidInput("--every is at least 0.1 seconds and --rounds is 0 or more")
+    rounds = 0
+    code = 0
+    try:
+        while True:
+            rounds += 1
+            print(f"pass {rounds} at {datetime.now(timezone.utc).strftime('%H:%M:%S')}Z", file=out)
+            code = await map_pass(args, engine, out)
+            if code != 0 or (args.rounds and rounds >= args.rounds):
+                return code
+            await asyncio.sleep(args.every)
+    except KeyboardInterrupt:
+        print(f"watch ended after {rounds} pass(es)", file=out)
+        return code
+
+
+async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
     """Remember every source file under a directory, stored under the path
     it was read from. With --graph, also record what each file says about
     itself. What was read and what was not is said: a map that quietly
