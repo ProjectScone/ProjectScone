@@ -288,5 +288,36 @@ def test_a_bare_message_saved_as_a_mailbox_is_one_message_and_the_bound_counts_t
 
 def test_a_mailbox_with_a_malformed_message_names_it() -> None:
     raw = b"From a@b Mon Jan 1 00:00:00 2024\nSubject: ok\n\nfine\n\nFrom c@d Mon Jan 1 00:00:00 2024\nContent-Type: text/plain; charset=not-a-charset\n\ncaf\xe9\n"
-    with pytest.raises(InvalidInput):
+    with pytest.raises(InvalidInput, match="mailbox message 2: "):
         parse_text(raw, "inbox.mbox", DocumentLimits())
+
+
+def test_a_body_line_that_begins_with_from_is_not_a_message_and_a_bom_is_not_a_preamble() -> None:
+    raw = (b"\xef\xbb\xbfFrom alice@example.com Mon Jan  1 00:00:00 2024\nFrom: alice@example.com\nSubject: Notes\n\n"
+           b"Hello.\nFrom now on I will write more.\nBye.\n"
+           b"From bob@example.com Tue Jan  2 10:00:00 2024\nFrom: bob@example.com\nSubject: Second\n\nSecond body.\n")
+    doc = parse_text(raw, "inbox.mbox", DocumentLimits())
+    assert doc.metadata["messages"] == "2", "an unquoted body line is not an envelope line, and the BOM is not text before the first"
+    joined = "\n".join(s.text for s in doc.segments)
+    assert "From now on I will write more." in joined and "Bye." in joined
+    assert {s.metadata["message"] for s in doc.segments if "Second body" in s.text} == {"2"}
+
+
+def test_an_html_table_in_a_mail_carries_the_mails_metadata_and_a_bare_file_is_not_unquoted() -> None:
+    email = EmailMessage()
+    email["Subject"] = "Table"
+    email["From"] = "ada@example.test"
+    email.set_content("plain")
+    email.add_alternative("<table><caption>Costs</caption><tr><th>item</th><th>cost</th></tr><tr><td>rope</td><td>3</td></tr></table>",
+                          subtype="html")
+    raw = b"From ada@example.test Mon Nov  4 09:00:00 2024\n" + email.as_bytes() + b"\n"
+    doc = parse_text(raw, "inbox.mbox", DocumentLimits())
+    rows = [s for s in doc.segments if "table_locator" in s.metadata or s.locator.endswith("/caption")]
+    assert rows and all(s.metadata.get("message") == "1" and s.metadata.get("from") == "ada@example.test" for s in rows), \
+        "every segment, table rows and captions included, says which mail it came from"
+    bare = EmailMessage()
+    bare["Subject"] = "reply"
+    bare.set_content(">From my notes, the harbour closes in November.")
+    doc = parse_text(bare.as_bytes(), "one.mbox", DocumentLimits())
+    assert any(s.text == ">From my notes, the harbour closes in November." for s in doc.segments), \
+        "a file no mbox writer made was never quoted, so nothing is unquoted"
