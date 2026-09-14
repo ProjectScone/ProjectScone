@@ -1050,6 +1050,30 @@ environment says, so what it measures is the difference between the
 settings and nothing else: `SCONE_RECALL_CANDIDATES`,
 `SCONE_DEMOTE_RESTATED`, `SCONE_CONTEXTUAL_EMBEDDINGS`.
 
+### Synonyms the caller wrote down
+
+The lexical lane finds the words a passage has, and only those. A
+passage that says "automobile" is invisible to a query about a "car"
+unless somebody wrote down that in this corpus the two are one word.
+`SCONE_SYNONYMS=./synonyms.txt` names that list — one group per line,
+terms separated by commas, `#` for comments — and `MemoryEngine(...,
+synonyms=Synonyms(groups))` gives it in code. A query term that is in a
+group adds the group's other members to the **text lane's** query; the
+vector lane's query stays as written, because an embedder already knows
+what it knows about the two words and padding its input with a list
+would move the vector in ways nobody measured. The lanes are fused by
+rank, so a passage found only through an added word competes on rank,
+never on a score the addition inflated.
+
+No model proposes a synonym here, and nothing is guessed: matching uses
+the lane's own tokenizer, so case, possessives and stopwords are treated
+exactly as the index treats them, a phrase matches as a phrase, and the
+result's `expansion` says which terms matched and which words were
+added (`matched`, `added`, `offered`, `capped`; the recall event carries
+the counts). The list is bounded — 2,000 groups of up to 16 terms of up
+to 64 characters, at most 12 words added to one query, the rest left
+out with `capped: true` — and a list over a bound is refused, not cut.
+
 The rule for choosing is stated rather than implied: the setting that
 answered most wins; a tie goes to the quicker; and a change that only
 matches the default is no change at all, so the default stands and the

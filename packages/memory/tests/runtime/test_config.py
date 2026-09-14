@@ -156,3 +156,23 @@ async def test_table_context_embedding_policy_reaches_standard_and_in_process_en
         assert local.table_context_embeddings is True
     finally:
         await local.close()
+
+
+async def test_a_synonym_file_is_read_at_build_time_and_reaches_every_engine(tmp_path):
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import FILE_SETTINGS, build_in_process_engine, build_synonyms
+
+    path = tmp_path / "synonyms.txt"
+    path.write_text("car, automobile\n")
+    settings = Settings.from_env({"SCONE_SYNONYMS": str(path)})
+    assert settings.synonyms == str(path) and "synonyms" in FILE_SETTINGS
+    assert Settings.from_env({}).synonyms is None and build_synonyms(Settings.from_env({})) is None
+    engine = await build_engine(settings)
+    try:
+        assert engine.synonyms is not None and engine.synonyms.record() == {"groups": 1, "terms": 2}
+    finally:
+        await engine.close()
+    in_process = await build_in_process_engine(settings, HashEmbedder())
+    assert in_process.synonyms is not None and in_process.synonyms.expand("a car").added == ("automobile",)
+    with pytest.raises(InvalidInput, match="not found"):
+        await build_engine(Settings.from_env({"SCONE_SYNONYMS": str(tmp_path / "missing.txt")}))
