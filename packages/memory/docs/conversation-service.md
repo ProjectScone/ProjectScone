@@ -126,6 +126,8 @@ proxy buffering disabled. JSON `data` frames preserve literal text safely:
 | `text` | `{sequence, text, provisional: true}` | Public chunk, with matching SSE `id`; not a token or saved-reply receipt. |
 | `gap` | `{after, next_sequence}` | Earlier chunks left the bounded window. Do not synthesize the missing text. |
 | `terminal` | `{request_id, status, read_receipt: true}` | Fetch the existing turn receipt for final status and available saved text. |
+
+Text the window still holds goes out before any `terminal`: the last chunk and the receipt land microseconds apart, and a reader whose cursor is behind at that moment receives the rest, for as long as the window is held (the turn's window stays with its session). Only after the window is drained does the stream say what the turn became.
 | `end` | `{request_id, reason, read_receipt: true}` | Window unavailable, service shutting down, or session deleted; not proof of completion. |
 
 Reconnect with `after=<last-sequence>` or `Last-Event-ID`; both must agree if

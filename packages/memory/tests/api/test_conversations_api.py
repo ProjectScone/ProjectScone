@@ -383,3 +383,55 @@ async def test_symlink_alias_cannot_get_a_second_owner(engine, tmp_path):
     with pytest.raises(Exception, match="hard-linked"):
         async with client_for(linked):
             pass
+
+
+class StreamingConversation(ControlledConversation):
+    """Publishes the reply in two pieces back to back and settles at once."""
+
+    async def reply(self, text, *, on_text=None):
+        self.calls += 1
+        answer = "Scripted response to " + text
+        if on_text is not None:
+            await on_text(answer[:8])
+            await on_text(answer[8:])
+        item = await self.engine.remember(self.space, answer, metadata={"session_id": self.sid})
+        return {"text": answer, "assistant_episode_id": item.episode_id, "provider_completion": "unverified"}
+
+
+def _frames(body: str):
+    out = []
+    for block in body.strip().split("\n\n"):
+        kind, data = None, None
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                kind = line[7:]
+            elif line.startswith("data: "):
+                data = __import__("json").loads(line[6:])
+        if kind is not None:
+            out.append((kind, data))
+    return out
+
+
+async def test_a_reader_behind_the_window_gets_the_rest_of_the_text_before_the_terminal(engine, tmp_path):
+    """The last chunk and the receipt land microseconds apart; the text was promised."""
+    app = create_conversation_app(engine, {"alpha-key": "alpha"}, tmp_path / "sessions.db",
+                                  lambda space, sid: StreamingConversation(engine, space, sid), public_text_streaming=True)
+    async with client_for(app) as client:
+        session = await create(client)
+        sid, revision = session["session_id"], session["revision"]
+        accepted = await client.post(f"/v1/conversations/{sid}/turns",
+                                     json={"request_id": "t1", "expected_revision": revision, "text": "hello"})
+        assert accepted.status_code == 202
+        for _ in range(100):
+            receipt = (await client.get(f"/v1/conversations/{sid}/turns/t1")).json()
+            if receipt["status"] != "pending":
+                break
+            await asyncio.sleep(0.02)
+        assert receipt["status"] == "completed"
+        streamed = await client.get(f"/v1/conversations/{sid}/turns/t1/stream")
+        frames = _frames(streamed.text)
+        assert [kind for kind, _ in frames] == ["text", "text", "terminal"], frames
+        assert "".join(data["text"] for kind, data in frames if kind == "text") == "Scripted response to hello"
+        behind = await client.get(f"/v1/conversations/{sid}/turns/t1/stream", params={"after": 1})
+        assert [kind for kind, _ in _frames(behind.text)] == ["text", "terminal"]
+        assert _frames(behind.text)[0][1]["sequence"] == 2

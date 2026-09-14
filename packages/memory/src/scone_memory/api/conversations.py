@@ -827,6 +827,19 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 except NotFound:
                     yield sse("end", {"request_id": request_id, "reason": "deleted", "read_receipt": True})
                     return
+                # What the window still holds goes out before any verdict on
+                # the turn: the last chunk and the receipt land microseconds
+                # apart, and a reader one chunk behind at that moment was
+                # promised the text, not a terminal that swallows it.
+                gap, chunk = window.next_after(after) if window is not None else (None, None)
+                if gap is not None:
+                    yield sse("gap", {"after": after, "next_sequence": gap})
+                    after = gap - 1
+                    continue
+                if chunk is not None:
+                    after, text = chunk
+                    yield sse("text", {"sequence": after, "text": text, "provisional": True}, sequence=after)
+                    continue
                 live = entry.turns.get(request_id, {}).get("receipt") if entry else None
                 status = live["status"] if live else ("pending" if kept["status"] == "accepted" else kept["status"])
                 if status != "pending":
@@ -835,18 +848,10 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 if current["state"] != "running" or window is None or window.closed:
                     yield sse("end", {"request_id": request_id, "reason": "window_unavailable", "read_receipt": True})
                     return
-                gap, chunk = window.next_after(after)
-                if gap is not None:
-                    yield sse("gap", {"after": after, "next_sequence": gap})
-                    after = gap - 1
-                elif chunk is not None:
-                    after, text = chunk
-                    yield sse("text", {"sequence": after, "text": text, "provisional": True}, sequence=after)
-                else:
-                    try:
-                        await asyncio.wait_for(window.wait_after(after), 10)
-                    except asyncio.TimeoutError:
-                        yield ": keep-alive\n\n"
+                try:
+                    await asyncio.wait_for(window.wait_after(after), 10)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
 
         return StreamingResponse(output(), media_type="text/event-stream", headers={
             "Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff",
