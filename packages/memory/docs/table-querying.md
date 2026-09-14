@@ -81,6 +81,10 @@ spans) and spreadsheets read through the converters (`xls`, `xlsb`) do
 not carry cells yet.
 
 No model is involved anywhere here. Reading a question in words and
-turning it into these arguments is a caller's job — or an agent's, in
-the tool loop — and keeping that step outside the computation is what
-lets the computation be exact.
+turning it into these arguments is a caller's job — or an agent's: with
+`SCONE_CONVERSATIONS_TOOL_TABLES=1` (`ScopedMemoryTools(...,
+enable_tables=True)`) the tool loop offers `list_tables` and
+`query_table`, whose answer is this record with each cell tied to the
+stored chunk that holds it, prepared and revalidated like every other
+tool evidence. Keeping the words-to-arguments step outside the
+computation is what lets the computation be exact.
