@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 from ..core.errors import InvalidInput, SconeError
 from .code import BRACE_SUFFIXES, PYTHON_SUFFIXES
+from .manifests import is_manifest
 from .code_resolution import file_resolver
 from .records import Record
 
@@ -227,8 +228,15 @@ def _wanted(suffixes: Sequence[str]) -> set[str]:
     return {suffix.lower() for suffix in suffixes}
 
 
+#: A sync that reads code reads the project's manifests too, whatever
+#: their suffix: `map` does, and the two commands walk one tree the
+#: same way. A sync of notes alone (`--suffix .md`) leaves them.
+_CODE_SUFFIXES = frozenset(suffix.lower() for suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES))
+
+
 def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
-    """Whether a path **below the root** is one a sync reads.
+    """Whether a path **below the root** is one a sync reads: by its
+    suffix, or as a package manifest when the sync reads code at all.
 
     The hidden-directory rule is about what is under the root — a
     repository means its source and not its ``.git``. It must be judged on
@@ -238,8 +246,11 @@ def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
     entire tree, and the receipt would report ``files_found: 0`` with every
     file sitting on disk.
     """
-    return (here.suffix.lower() in wanted
-            and not any(part.startswith(".") or part == "__pycache__" for part in here.parts))
+    if any(part.startswith(".") or part == "__pycache__" for part in here.parts):
+        return False
+    if here.suffix.lower() in wanted:
+        return True
+    return bool(wanted & _CODE_SUFFIXES) and is_manifest(here.name)
 
 
 #: The namespace every key this writes begins with. A space is shared —

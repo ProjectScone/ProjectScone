@@ -1195,7 +1195,13 @@ scone sync ~/work/notes --apply --remove         # also forgets what is gone
 An unchanged file is **not a write**: the space's revision does not move,
 so a sync on a timer does not churn the store. A changed file is an
 update through the engine's keyed `replace`, so a source that changed
-leaves **one** memory and not two.
+leaves **one** memory and not two. A sync that reads code reads the
+project's manifests too (`pyproject.toml`, `package.json`, `Cargo.toml`,
+`go.mod`, `requirements*.txt` and the rest `map` knows), whatever their
+suffix, so a scheduled sync keeps what the project depends on as current
+as what it defines; a sync of notes alone (`--suffix .md`) leaves them,
+and a manifest that falls out of a narrowed sync's scope is out of
+scope, not missing.
 
 ### Deletion is opt-in, previewed, and refused when the path looks wrong
 
