@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 from ..core.errors import InvalidInput, SconeError
 from .code import BRACE_SUFFIXES, PYTHON_SUFFIXES
 from .code_resolution import file_resolver
+from .ignore import Ignore
 from .records import Record
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -95,6 +96,13 @@ class SyncReceipt:
     added: int = 0
     updated: int = 0
     unchanged: int = 0
+    #: Files the suffixes selected that a `.gitignore` or `.sconeignore`
+    #: excluded, and directories those rules pruned (each hiding an
+    #: unknown number of files). Zero under ``ignore=False``.
+    ignored: int = 0
+    ignored_directories: int = 0
+    #: The ignore files read, relative to the root, in reading order.
+    ignore_files: tuple[str, ...] = ()
     #: Episodes the marker holds whose file is no longer on disk. Only
     #: meaningful when ``checked_for_missing``: a walk that stopped at the
     #: file cap did not see the whole directory, so it cannot tell a file
@@ -148,6 +156,8 @@ class SyncReceipt:
                 "files_found": self.files_found, "files_read": self.files_read,
                 "capped": self.capped, "added": self.added, "updated": self.updated,
                 "unchanged": self.unchanged, "removed": self.removed,
+                "ignored": self.ignored, "ignored_directories": self.ignored_directories,
+                "ignore_files": list(self.ignore_files),
                 "out_of_scope": self.out_of_scope, "unreadable": self.unreadable,
                 "links": self.links, "special": self.special,
                 "forgotten": self.forgotten, "empty": self.empty, "cut": self.cut,
@@ -163,6 +173,9 @@ class SyncReceipt:
         lines = [f"{did} {self.marker}: {self.files_read} of {self.files_found} file(s) read"
                  + (" (capped)" if self.capped else "")
                  + f"; {self.added} added, {self.updated} updated, {self.unchanged} unchanged"]
+        if self.ignored or self.ignored_directories:
+            lines.append(f"{self.ignored} file(s) and {self.ignored_directories} directory(ies) left unread by "
+                         f"{', '.join(self.ignore_files) or 'the ignore rules'}; pass --no-ignore to read them")
         if self.unreadable:
             lines.append(f"{self.unreadable} directory(ies) under the root could not be read, so "
                          f"this run cannot say what is gone and forgot nothing")
@@ -272,8 +285,9 @@ def default_marker(root: str | pathlib.Path) -> str:
 
 
 def _files(root: pathlib.Path, suffixes: Sequence[str],
-           limit: int) -> tuple[list[pathlib.Path], int, int, int, int]:
-    """(files to read, how many there are, directories unread, links, special files).
+           limit: int, ignore: "Ignore | None" = None) -> tuple[list[pathlib.Path], int, int, int, int, int, int]:
+    """(files to read, how many there are, directories unread, links, special
+    files, files the ignore rules skipped, directories they pruned).
 
     Walked explicitly rather than with ``rglob``, which swallows a
     ``PermissionError`` and returns what it could reach — indistinguishable
@@ -283,7 +297,7 @@ def _files(root: pathlib.Path, suffixes: Sequence[str],
     """
     wanted = _wanted(suffixes)
     found: list[pathlib.Path] = []
-    unreadable = links = special = 0
+    unreadable = links = special = ignored = pruned = 0
     stack = [root]
     while stack:
         here = stack.pop()
@@ -312,15 +326,22 @@ def _files(root: pathlib.Path, suffixes: Sequence[str],
                 continue
             below = entry.relative_to(root)
             if directory:
-                if not any(part.startswith(".") or part == "__pycache__" for part in below.parts):
-                    stack.append(entry)
+                if any(part.startswith(".") or part == "__pycache__" for part in below.parts):
+                    continue
+                if ignore is not None and ignore.ignored(below.as_posix(), directory=True):
+                    pruned += 1
+                    continue
+                stack.append(entry)
             elif not ordinary:
                 if _in_scope(below, wanted):
                     special += 1
             elif _in_scope(below, wanted):
+                if ignore is not None and ignore.ignored(below.as_posix(), directory=False):
+                    ignored += 1
+                    continue
                 found.append(entry)
     found.sort()
-    return found[:limit], len(found), unreadable, links, special
+    return found[:limit], len(found), unreadable, links, special, ignored, pruned
 
 
 async def sync_directory(
@@ -334,8 +355,11 @@ async def sync_directory(
     remove: bool = False,
     limit: int = MAX_FILES,
     max_bytes: int = MAX_BYTES,
+    ignore: bool = True,
 ) -> SyncReceipt:
-    """Bring ``space`` into step with ``root``, or say what that would do."""
+    """Bring ``space`` into step with ``root``, or say what that would do.
+    ``ignore`` reads the tree's `.gitignore` and `.sconeignore` files and
+    leaves what they exclude unread; off, the tree is read whole."""
     where = pathlib.Path(root)
     if not where.is_dir():
         raise InvalidInput(f"{root} is not a directory to sync")
@@ -349,7 +373,8 @@ async def sync_directory(
     if not name.strip():
         raise InvalidInput("a marker cannot be blank: it is what names this directory's memories")
 
-    reading, there, unreadable, links, special = _files(where, suffixes, limit)
+    rules = Ignore.load(where) if ignore else None
+    reading, there, unreadable, links, special, skipped, pruned = _files(where, suffixes, limit, rules)
     known = {episode.source: episode
              for episode in await engine.episodes(space, {"sync": name})
              if episode.source}
@@ -435,6 +460,7 @@ async def sync_directory(
     receipt = SyncReceipt(
         root=str(where), marker=name, space=space, applied=apply, removing=remove,
         files_found=there, files_read=len(reading), added=tally.added, updated=tally.updated,
+        ignored=skipped, ignored_directories=pruned, ignore_files=rules.files if rules is not None else (),
         unchanged=tally.unchanged, removed=len(missing), forgotten=forgotten,
         out_of_scope=len(out_of_scope), unreadable=unreadable, links=links,
         special=special,
