@@ -1643,6 +1643,16 @@ scone sync ~/work/notes --apply --remove         # also forgets what is gone
 An unchanged file is **not a write**: the space's revision does not move,
 so a sync on a timer does not churn the store. A changed file is an
 update through the engine's keyed `replace`, so a source that changed
+leaves **one** memory and not two. A sync that reads code reads the
+project's manifests too (`pyproject.toml`, `package.json`, `Cargo.toml`,
+`go.mod`, `requirements*.txt` and `requirements/*.txt`, and the rest
+`map` knows), whatever their suffix, judged by their path below the
+root as `map` judges them, so with the code graph on (`code_graph=True`;
+the command line records claims only under `map --graph`) a scheduled
+sync keeps what the project depends on as current as what it defines; a
+sync of notes alone (`--suffix .md`) leaves them, and a manifest that
+falls out of a narrowed sync's scope is out of scope, not missing. The
+receipt's `files_found` counts them with the files the suffixes chose.
 leaves **one** memory and not two — and with `SCONE_EMBEDDING_CACHE` set,
 only the chunks whose text changed reach the embedder; the receipt's
 `embeddings_reused` counts the rest (see [file ingestion](file-ingestion.md#reusing-embeddings-across-updates)).

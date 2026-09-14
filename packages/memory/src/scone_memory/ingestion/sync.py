@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 from ..core.errors import InvalidInput, SconeError
 from .code import BRACE_SUFFIXES, PYTHON_SUFFIXES
+from .manifests import is_manifest
 from .code_resolution import file_resolver
 from .ignore import Ignore
 from .records import Record
@@ -88,6 +89,8 @@ class SyncReceipt:
     space: str
     applied: bool
     removing: bool
+    #: Files under the root matching the suffixes, or package manifests
+    #: when any suffix is code. What is there.
     #: Files under the root matching the suffixes and not excluded by the
     #: ignore rules. What is there to read.
     files_found: int = 0
@@ -127,9 +130,9 @@ class SyncReceipt:
     #: Symbolic links under the root, which are counted and not followed:
     #: what one points at is outside the root the caller named.
     links: int = 0
-    #: Things matching the suffixes that are not ordinary files -- named
-    #: pipes, sockets, devices. Counted and never opened: reading one can
-    #: block forever.
+    #: Things matching the suffixes (or named as a manifest) that are not
+    #: ordinary files -- named pipes, sockets, devices. Counted and never
+    #: opened: reading one can block forever.
     special: int = 0
     #: Directories under the root this sync could not read. Each one hides
     #: an unknown number of files, so a run with any of these cannot say
@@ -221,7 +224,7 @@ class SyncReceipt:
             lines.append(f"{self.out_of_scope} memory(ies) are out of scope for this run's "
                          f"suffixes and were left alone, not treated as gone")
         if self.special:
-            lines.append(f"{self.special} path(s) matching the suffixes are not ordinary files "
+            lines.append(f"{self.special} path(s) matching the suffixes or named as a manifest are not ordinary files "
                          f"and were not opened")
         if self.links:
             lines.append(f"{self.links} symbolic link(s) were left alone: what a link points at "
@@ -270,8 +273,15 @@ def _wanted(suffixes: Sequence[str]) -> set[str]:
     return {suffix.lower() for suffix in suffixes}
 
 
+#: A sync that reads code reads the project's manifests too, whatever
+#: their suffix: `map` does, and the two commands walk one tree the
+#: same way. A sync of notes alone (`--suffix .md`) leaves them.
+_CODE_SUFFIXES = frozenset(suffix.lower() for suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES))
+
+
 def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
-    """Whether a path **below the root** is one a sync reads.
+    """Whether a path **below the root** is one a sync reads: by its
+    suffix, or as a package manifest when the sync reads code at all.
 
     The hidden-directory rule is about what is under the root — a
     repository means its source and not its ``.git``. It must be judged on
@@ -281,8 +291,13 @@ def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
     entire tree, and the receipt would report ``files_found: 0`` with every
     file sitting on disk.
     """
-    return (here.suffix.lower() in wanted
-            and not any(part.startswith(".") or part == "__pycache__" for part in here.parts))
+    if any(part.startswith(".") or part == "__pycache__" for part in here.parts):
+        return False
+    if here.suffix.lower() in wanted:
+        return True
+    # By its path below the root, so `requirements/test.txt` is the
+    # manifest `is_manifest` says it is, wherever the sync started.
+    return bool(wanted & _CODE_SUFFIXES) and is_manifest(here.as_posix())
 
 
 #: The namespace every key this writes begins with. A space is shared —
