@@ -21,7 +21,9 @@ from .semantic_chunks import semantic_spans
 from .structure_chunks import structured_spans
 from .embedding_cache import EmbeddingCache, cache_key
 from .code import code_context, code_language, code_spans
+from .document_outline import DocumentOutline
 from .structure import Heading, parse_structure
+from .unit_chunks import unit_spans
 from .records import Chunking, Record, RetainedVideoRecord, RecoveryReport, _DupOf, _Pending, content_hash
 
 from .vectors import validated_vectors
@@ -150,13 +152,13 @@ class IngestionRuntime:
     context_lane: bool = False
     # With an episode id, verification also repairs its original/manifest links.
     verify_visual: Callable[[str, Record, int | None], Awaitable[None]] | None = None
-    #: The headings an imported file marked itself, read from its retained
-    #: manifest; None for an episode that is not an imported file.
-    document_headings: Callable[[NewEpisode], Awaitable[tuple[Heading, ...] | None]] | None = None
-    #: Headings already read in this dispatch, by space and content hash:
-    #: the cut, its receipt and the embedding inputs ask for the same ones,
+    #: The headings and units an imported file's reader found, read from its
+    #: retained manifest; None for an episode that is not an imported file.
+    document_outline: Callable[[NewEpisode], Awaitable[DocumentOutline | None]] | None = None
+    #: Outlines already read in this dispatch, by space and content hash:
+    #: the cut, its receipt and the embedding inputs ask for the same one,
     #: and each read fetches, hashes and validates the whole manifest.
-    headings_read: dict[tuple[str, str], tuple[Heading, ...] | None] = field(default_factory=dict)
+    outlines_read: dict[tuple[str, str], DocumentOutline | None] = field(default_factory=dict)
 
 
 def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False) -> NewEpisode:
@@ -212,24 +214,32 @@ MAX_HEADING_CONTEXT_BYTES = 256
 #: part of the vector writer's identity, so change it whenever that rule, or
 #: the bound above, changes what a chunk is embedded with.
 HEADING_CONTEXT_VERSION = "heading-path-v2"
-#: How many records' headings one runtime keeps for reuse. Recovery and a
+#: How many records' outlines one runtime keeps for reuse. Recovery and a
 #: vector rebuild use one runtime for a whole pass; past this the oldest is
 #: dropped, which costs another read of its manifest, never a heading.
-HEADINGS_READ_MAX = 256
+OUTLINES_READ_MAX = 256
+
+
+async def outline_of(runtime: IngestionRuntime, episode: NewEpisode | None) -> DocumentOutline | None:
+    """A file episode's own outline, or None when there is none to read. The key is the
+    episode's identity in its space, which for an imported file is derived from its original
+    and manifest."""
+    if episode is None or runtime.document_outline is None:
+        return None
+    key = (episode.space, episode.content_hash)
+    if key in runtime.outlines_read:
+        return runtime.outlines_read[key]
+    found = await runtime.document_outline(episode)
+    while len(runtime.outlines_read) >= OUTLINES_READ_MAX:
+        del runtime.outlines_read[next(iter(runtime.outlines_read))]
+    runtime.outlines_read[key] = found
+    return found
 
 
 async def headings_of(runtime: IngestionRuntime, episode: NewEpisode | None) -> tuple[Heading, ...] | None:
     """The headings a file episode's own manifest marks, or None when there is none to read."""
-    if episode is None or runtime.document_headings is None:
-        return None
-    key = (episode.space, episode.content_hash)
-    if key in runtime.headings_read:
-        return runtime.headings_read[key]
-    found = await runtime.document_headings(episode)
-    while len(runtime.headings_read) >= HEADINGS_READ_MAX:
-        del runtime.headings_read[next(iter(runtime.headings_read))]
-    runtime.headings_read[key] = found
-    return found
+    found = await outline_of(runtime, episode)
+    return None if found is None else found.headings
 
 
 def context_lines(content: str, source: str | None, spans: Sequence[tuple[int, int]],
@@ -370,7 +380,7 @@ async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]
 
 
 #: The ways one record can ask to be cut.
-CHUNKINGS: tuple[str, ...] = ("length", "code", "structure", "semantic")
+CHUNKINGS: tuple[str, ...] = ("length", "code", "structure", "semantic", "unit")
 
 
 @dataclass(frozen=True)
@@ -413,6 +423,14 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
         found = structured_spans(content, runtime.chunk_target, headings=await headings_of(runtime, episode))
         receipt = {key: value for key, value in found.record().items() if key not in ("spans", "chunks")}
         return Cut(list(found.spans), "structure", receipt)
+    if mode == "unit":
+        outlined = await outline_of(runtime, episode)
+        named = outlined.units if outlined is not None else ()
+        if not any(unit.label != "text" for unit in named):
+            raise InvalidInput("chunking=unit needs an imported file whose reader named its units: "
+                               "pages, slides, rows, records, frames or audio segments")
+        by_unit = unit_spans(content, named, runtime.chunk_target)
+        return Cut(list(by_unit.spans), "unit", {key: value for key, value in by_unit.record().items() if key != "chunks"})
     if mode == "semantic":
         return Cut(list(await semantic_spans(content, runtime.embedder, runtime.chunk_target)), "semantic")
     return Cut(chunk_spans(content, runtime.chunk_target), "length")

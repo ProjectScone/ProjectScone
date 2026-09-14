@@ -15,7 +15,7 @@ import pytest
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
 from scone_memory.ingestion import batch
-from scone_memory.ingestion.document_outline import Heading, outline
+from scone_memory.ingestion.document_outline import DocumentOutline, Heading, outline
 from scone_memory.ingestion.files import ingest_document
 from scone_memory.ingestion.formats.types import DocumentSegment
 from scone_memory.ingestion.structure_chunks import structured_spans
@@ -181,22 +181,22 @@ async def test_the_headings_kept_for_reuse_are_bounded(monkeypatch):
     grow with the store. Past the bound the oldest is dropped, which costs a read, never a heading."""
     from scone_memory.core.ports import NewEpisode
 
-    monkeypatch.setattr(batch, "HEADINGS_READ_MAX", 2)
+    monkeypatch.setattr(batch, "OUTLINES_READ_MAX", 2)
     asked = []
 
     async def read(episode):
         asked.append(episode.content_hash)
-        return (Heading(0, 1, episode.content_hash),)
+        return DocumentOutline(headings=(Heading(0, 1, episode.content_hash),))
     memory, _ = await engine_with()
     try:
         runtime = memory._ingestion_runtime()
-        runtime = batch.IngestionRuntime(**{**runtime.__dict__, "document_headings": read, "headings_read": {}})
+        runtime = batch.IngestionRuntime(**{**runtime.__dict__, "document_outline": read, "outlines_read": {}})
         episodes = [NewEpisode(space="default", kind="file", content=name, content_hash=name, created_at="2026-01-01T00:00:00Z",
                                ingested_at="2026-01-01T00:00:00Z") for name in ("a", "b", "c")]
         for episode in episodes:
             assert (await batch.headings_of(runtime, episode))[0].title == episode.content_hash
             assert (await batch.headings_of(runtime, episode))[0].title == episode.content_hash
-        assert asked == ["a", "b", "c"] and len(runtime.headings_read) == 2
+        assert asked == ["a", "b", "c"] and len(runtime.outlines_read) == 2
         assert (await batch.headings_of(runtime, episodes[0]))[0].title == "a" and asked[-1] == "a"
     finally:
         await memory.close()

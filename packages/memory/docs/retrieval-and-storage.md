@@ -825,7 +825,7 @@ MemoryEngine(store, index, embedder, structure_aware=True)
 That is the engine's rule for every record. One record can choose for
 itself: `remember(..., chunking="structure")`, `scone remember --chunking
 structure`, `"chunking": "structure"` on `POST /v1/episodes` and in each
-batch record (`length`, `code`, `structure` or `semantic`; unset keeps
+batch record (`length`, `code`, `structure`, `semantic` or `unit`; unset keeps
 the rule). The receipt says which way was actually used -- `code` for a
 code source unless the record said otherwise -- and, for structure, the
 chunker's own counts (`at_boundary`, `by_size`, `over_target`, `capped`).
@@ -838,6 +838,22 @@ episode: it cuts at them whatever the line says, and the receipt carries
 `document_headings`, the number of the file's own headings it read. A
 record that is not an imported file carries no such count. A manifest
 that does not match the episode's text is refused rather than ignored.
+
+`unit` cuts an imported file one chunk per unit its reader named: a PDF
+page, a slide (with its notes), a table or sheet row, a spreadsheet
+cell's row, a JSON Lines record, an image frame or an audio segment.
+Consecutive paragraphs in no unit, such as a Word document's body text
+between two tables, are one `text` unit. A unit longer than the target
+is split exactly as the length cut would split it, and the receipt says
+so: `units`, `split_units`, `by_size` (chunks those splits added) and
+`kinds`, the units by kind. It is asked for per file: `chunking` on
+`POST /v1/documents` and `POST /v1/documents/pdf`, or on
+`ingest_document`, `store_document` and `ingest_pdf`. A record whose
+reader named no units, including anything that is not an imported file,
+is refused before its episode is stored. The units come from the
+manifest kept with the episode, so recovery cuts the same way. A file
+imported again with a different `chunking` is the same episode, so the
+first cut stands.
 The choice is kept on the episode's metadata under `chunking`, so a
 recovery after an interruption cuts the way the record asked; `code` on
 a source whose name does not say its language, a mode not on the list,

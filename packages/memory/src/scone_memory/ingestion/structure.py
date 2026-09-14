@@ -32,6 +32,22 @@ class Heading:
     title: str
 
 
+@dataclass(frozen=True)
+class SourceUnit:
+    """A unit the file's reader named -- a page, a slide, a row, a record -- placed in the
+    text it was stored as. ``label`` is its locator stem (``page:3``, ``table:1/row:2``), or
+    ``text`` for a run of segments the reader put in no unit."""
+
+    #: Byte offsets of its first and one past its last byte in the stored content.
+    start: int
+    end: int
+    label: str
+
+    @property
+    def kind(self) -> str:
+        return self.label.rsplit("/", 1)[-1].split(":", 1)[0]
+
+
 class ByteSpan(BaseModel):
     model_config = ConfigDict(frozen=True)
     start: int

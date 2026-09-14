@@ -111,7 +111,7 @@ class EpisodeBody(BaseModel):
     source: Optional[str] = None
     created_at: Optional[str] = None
     #: How this record is cut; unset keeps the server's rule.
-    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
+    chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
