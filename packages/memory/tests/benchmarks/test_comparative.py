@@ -49,6 +49,7 @@ ITEMS = [
 
 
 async def test_the_embedding_adapter_hands_llamaindex_our_vectors():
+    pytest.importorskip("llama_index.core")
     embedder = HashEmbedder()
     adapter = SconeEmbedding(embedder)
     ours = (await embedder.embed(["calibration notes"]))[0]
@@ -58,6 +59,7 @@ async def test_the_embedding_adapter_hands_llamaindex_our_vectors():
 
 
 async def test_llamaindex_ranks_sessions_for_a_question_with_our_embedder():
+    pytest.importorskip("llama_index.core")
     ranked = await llamaindex_session_ranking(ITEMS[0], HashEmbedder(), k=3)
     assert ranked[0] == "q1-s1", ranked
     assert len(ranked) == len(set(ranked)) <= 3 and set(ranked) <= {"q1-s0", "q1-s1", "q1-s2"}
@@ -66,6 +68,7 @@ async def test_llamaindex_ranks_sessions_for_a_question_with_our_embedder():
 async def test_a_session_cut_into_many_nodes_is_one_session_in_the_ranking():
     """Small chunks make several nodes per session; the ranking folds them
     to the session, once, in the order its best node came."""
+    pytest.importorskip("llama_index.core")
     long = item("q9", "Where are the calibration notes kept?", [
         ["user: " + " ".join(["The calibration notes are kept in the blue binder in the lab."] * 12)],
         ["user: " + " ".join(["The garden needs watering every other day in summer."] * 12)],
@@ -86,6 +89,7 @@ def test_the_delta_is_ours_minus_theirs_at_every_k():
 
 
 async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_it_ran():
+    pytest.importorskip("llama_index.core")
     def make_engine():
         return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
 
@@ -105,6 +109,7 @@ async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_i
 
 
 async def test_the_report_records_and_serialises_every_item_ranking():
+    pytest.importorskip("llama_index.core")
     def make_engine():
         return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
 
@@ -118,6 +123,7 @@ async def test_the_report_records_and_serialises_every_item_ranking():
 async def test_the_reference_synthesizer_writes_with_our_model_over_the_same_passages():
     """LlamaIndex's TreeSummarize runs over the passages we hand it, through
     our ChatModel port, so the two synthesizers share one local model."""
+    pytest.importorskip("llama_index.core")
     from scone_memory.providers.llm import FakeChat
     from scone_memory.bench.comparative import llamaindex_summary
 
@@ -132,6 +138,7 @@ async def test_the_reference_synthesizer_writes_with_our_model_over_the_same_pas
 
 
 async def test_a_reference_synthesizer_whose_model_fails_says_so_instead_of_raising():
+    pytest.importorskip("llama_index.core")
     from scone_memory.providers.llm import ChatError, FakeChat
     from scone_memory.bench.comparative import llamaindex_summary
 
