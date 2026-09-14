@@ -1,7 +1,9 @@
 """What a project says it depends on, read from its package manifest.
 
 A manifest is where a project writes down what it needs: ``pyproject.toml``,
-``requirements.txt``, ``package.json``, ``Cargo.toml``, ``go.mod``. Left
+``requirements.txt``, ``Pipfile``, ``package.json``, ``Cargo.toml``,
+``go.mod``, ``pom.xml``, ``build.gradle(.kts)``, ``Gemfile``,
+``composer.json`` and a .NET project file (``.csproj`` and kin). Left
 unread, the graph knows every ``import requests`` and nothing about which
 project declares requests, at what version, or only for its tests. Read
 here, a manifest makes claims like a source file does -- quoted from the
@@ -19,12 +21,15 @@ Two predicates, because they answer two questions:
 
 The object is the package's bare name, spelled as its index spells it (a
 Python name lowercased with runs of ``-_.`` as one ``-``; a crate with
-``_`` as ``-``; an npm name lowercased), with the extras, version and
-marker left in the quote. So a package five manifests name is one thing
-in the graph, and each manifest's line says what it asked for. The
-subject is the project's declared name where it has one, else the
-manifest's path. A Go ``// indirect`` requirement is left out: it is what
-a dependency needs, not what the module declares.
+``_`` as ``-``; an npm, Composer or NuGet name lowercased; a Maven or
+Gradle artifact as ``group:artifact``; a gem as named), with the extras,
+version and marker left in the quote. So a package five manifests name
+is one thing in the graph, and each manifest's line says what it asked
+for. The subject is the project's declared name where it has one, else
+the manifest's path. A Go ``// indirect`` requirement is left out: it is
+what a dependency needs, not what the module declares; so is a Composer
+platform requirement (``php``, ``ext-json``) and a .NET project
+reference, which names a file this reader cannot place.
 
 Names are not resolved against imports. The name a project depends on
 and the name its code imports differ often enough (``beautifulsoup4``
@@ -38,6 +43,7 @@ import json
 import re
 import tomllib
 from typing import Callable, Optional
+import xml.etree.ElementTree as ElementTree
 
 from .code import MAX_LINES, _line_starts
 from .code_graph import DEFINES, MAX_CLAIMS, CodeClaim
@@ -47,19 +53,23 @@ DEPENDS_ON = "depends_on"
 #: What it needs to build, test or document itself.
 DEVELOPS_WITH = "develops_with"
 
-_NAMED = frozenset(("pyproject.toml", "package.json", "cargo.toml", "go.mod"))
+_NAMED = frozenset(("pyproject.toml", "package.json", "cargo.toml", "go.mod", "pom.xml", "build.gradle",
+                    "build.gradle.kts", "gemfile", "composer.json", "pipfile"))
+#: A .NET project file is known by its suffix; its name is the project's.
+_PROJECT_SUFFIXES = (".csproj", ".fsproj", ".vbproj")
 _PEP508_NAME = re.compile(r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
 _NORMALISE = re.compile(r"[-_.]+")
 
 
 def is_manifest(path: str) -> bool:
-    """Known by its name, wherever it sits: the four named manifests, and
-    any ``requirements*.txt`` or ``requirements/*.txt``."""
+    """Known by its name, wherever it sits: the named manifests, a .NET
+    project file by its suffix, and any ``requirements*.txt`` or
+    ``requirements/*.txt``."""
     if not path:
         return False
     parts = path.replace("\\", "/").lower().rsplit("/", 2)
     name = parts[-1]
-    if name in _NAMED:
+    if name in _NAMED or name.endswith(_PROJECT_SUFFIXES):
         return True
     if not name.endswith(".txt"):
         return False
@@ -303,6 +313,208 @@ def _go_mod(content: str, path: str) -> tuple[CodeClaim, ...]:
     return tuple(text.found)
 
 
+# --- Maven -----------------------------------------------------------------
+
+def _local(tag: str) -> str:
+    """An element's name without its namespace: a POM declares one."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _child_text(element: ElementTree.Element, name: str) -> Optional[str]:
+    for child in element:
+        if _local(child.tag) == name and child.text and child.text.strip():
+            return child.text.strip()
+    return None
+
+
+def _xml(content: str) -> Optional[ElementTree.Element]:
+    try:
+        return ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        return None
+
+
+def _pom(content: str, path: str) -> tuple[CodeClaim, ...]:
+    root = _xml(content)
+    if root is None or _local(root.tag) != "project":
+        return ()
+    text = _Claims(content, path)
+    parent = next((child for child in root if _local(child.tag) == "parent"), None)
+    group = _child_text(root, "groupId") or (_child_text(parent, "groupId") if parent is not None else None)
+    artifact = _child_text(root, "artifactId")
+    subject = path
+    if group and artifact:
+        subject = f"{group}:{artifact}".lower()
+        text.say(path, DEFINES, subject, text.line_matching(re.compile(r"<artifactId>\s*" + re.escape(artifact))))
+    cursor = 0
+
+    def coordinates(element: ElementTree.Element, predicate: str) -> None:
+        nonlocal cursor
+        group, artifact = _child_text(element, "groupId"), _child_text(element, "artifactId")
+        if not group or not artifact:
+            return
+        at = text.line_matching(re.compile(r"<artifactId>\s*" + re.escape(artifact) + r"\s*<"), cursor)
+        cursor = max(cursor, at)
+        text.say(subject, predicate, f"{group}:{artifact}".lower(), at)
+
+    for section in root:
+        name = _local(section.tag)
+        if name == "dependencies":
+            for dependency in section:
+                if _local(dependency.tag) == "dependency":
+                    # A test-scoped dependency is what the project tests
+                    # with, not what it runs on.
+                    scope = (_child_text(dependency, "scope") or "compile").lower()
+                    coordinates(dependency, DEVELOPS_WITH if scope == "test" else DEPENDS_ON)
+        elif name == "build":
+            for plugins in section:
+                if _local(plugins.tag) == "plugins":
+                    for plugin in plugins:
+                        if _local(plugin.tag) == "plugin":
+                            coordinates(plugin, DEVELOPS_WITH)
+    return tuple(text.found)
+
+
+# --- Gradle ----------------------------------------------------------------
+
+#: A dependency line, Groovy or Kotlin: `implementation 'g:a:v'`,
+#: `testImplementation("g:a:v")`. The configuration says what it is for.
+_GRADLE = re.compile(r"^\s*(implementation|api|compileOnly|compileOnlyApi|runtimeOnly|testImplementation|"
+                     r"testCompileOnly|testRuntimeOnly|annotationProcessor|kapt|ksp|classpath)\s*\(?\s*"
+                     r"(?:group\s*[:=]\s*)?['\"]([^'\"]+)['\"]")
+_GRADLE_DEVELOPS = frozenset(("testImplementation", "testCompileOnly", "testRuntimeOnly", "annotationProcessor",
+                              "kapt", "ksp", "classpath"))
+_GRADLE_PLUGIN = re.compile(r"^\s*id\s*\(?\s*['\"]([^'\"]+)['\"]")
+
+
+def _gradle(content: str, path: str) -> tuple[CodeClaim, ...]:
+    text = _Claims(content, path)
+    for number, line in enumerate(text.lines, start=1):
+        code = line.split("//", 1)[0]
+        found = _GRADLE.match(code)
+        if found:
+            parts = found.group(2).split(":")
+            if len(parts) >= 2 and parts[0] and parts[1]:
+                predicate = DEVELOPS_WITH if found.group(1) in _GRADLE_DEVELOPS else DEPENDS_ON
+                text.say(path, predicate, f"{parts[0]}:{parts[1]}".lower(), number)
+            continue
+        plugin = _GRADLE_PLUGIN.match(code)
+        if plugin:
+            text.say(path, DEVELOPS_WITH, plugin.group(1).lower(), number)
+    return tuple(text.found)
+
+
+# --- Bundler ---------------------------------------------------------------
+
+_GEM = re.compile(r"^\s*gem\s+['\"]([^'\"]+)['\"](.*)$")
+_GEM_GROUP = re.compile(r"^\s*group\s+(.+?)\s+do\b")
+_DEVELOPMENT = re.compile(r":(?:test|development|ci|lint)\b")
+
+
+def _gemfile(content: str, path: str) -> tuple[CodeClaim, ...]:
+    text = _Claims(content, path)
+    grouped: list[bool] = []  # for each open block, whether it is a development group
+    for number, line in enumerate(text.lines, start=1):
+        code = line.split("#", 1)[0]
+        opened = _GEM_GROUP.match(code)
+        if opened:
+            grouped.append(bool(_DEVELOPMENT.search(opened.group(1))))
+            continue
+        if re.match(r"^\s*\w[\w.]*.*\bdo\b\s*(?:\|[^|]*\|)?\s*$", code) and not opened:
+            grouped.append(False)  # some other block: `source ... do`, `platforms ... do`
+            continue
+        if code.strip() == "end":
+            if grouped:
+                grouped.pop()
+            continue
+        gem = _GEM.match(code)
+        if gem:
+            inline = _DEVELOPMENT.search(gem.group(2)) if "group" in gem.group(2) else None
+            development = any(grouped) or inline is not None
+            text.say(path, DEVELOPS_WITH if development else DEPENDS_ON, gem.group(1).lower(), number)
+    return tuple(text.found)
+
+
+# --- Composer --------------------------------------------------------------
+
+def _composer(content: str, path: str) -> tuple[CodeClaim, ...]:
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    text = _Claims(content, path)
+    subject = path
+    name = data.get("name")
+    if isinstance(name, str) and name.strip():
+        subject = name.strip().lower()
+        text.say(path, DEFINES, subject, text.line_matching(re.compile(r'^\s*"name"\s*:')))
+    for section, predicate in (("require", DEPENDS_ON), ("require-dev", DEVELOPS_WITH)):
+        listed = _table(data.get(section))
+        if not listed:
+            continue
+        start = text.line_matching(re.compile(r'^\s*"' + section + r'"\s*:'))
+        for package in listed:
+            # `php` and `ext-*`/`lib-*` are the platform, not packages.
+            if not isinstance(package, str) or "/" not in package:
+                continue
+            at = text.line_matching(re.compile(r'^\s*"' + re.escape(package) + r'"\s*:'), max(start - 1, 0))
+            text.say(subject, predicate, package.strip().lower(), at or start)
+    return tuple(text.found)
+
+
+# --- .NET ------------------------------------------------------------------
+
+def _dotnet(content: str, path: str) -> tuple[CodeClaim, ...]:
+    root = _xml(content)
+    if root is None or _local(root.tag) != "Project":
+        return ()
+    text = _Claims(content, path)
+    subject = path
+    for group in root:
+        if _local(group.tag) != "PropertyGroup":
+            continue
+        named = _child_text(group, "PackageId") or _child_text(group, "AssemblyName")
+        if named:
+            subject = named.lower()
+            text.say(path, DEFINES, subject, text.line_matching(re.compile(r"<(?:PackageId|AssemblyName)>")))
+            break
+    cursor = 0
+    for group in root:
+        if _local(group.tag) != "ItemGroup":
+            continue
+        for item in group:
+            if _local(item.tag) != "PackageReference":
+                continue
+            package = item.get("Include") or item.get("Update")
+            if not package:
+                continue
+            # PrivateAssets="all" is a build-time package: an analyzer,
+            # a source generator, a test SDK.
+            private = (item.get("PrivateAssets") or _child_text(item, "PrivateAssets") or "").lower()
+            at = text.line_matching(re.compile(r'<PackageReference\s[^>]*(?:Include|Update)="' + re.escape(package) + '"'), cursor)
+            cursor = max(cursor, at)
+            text.say(subject, DEVELOPS_WITH if private == "all" else DEPENDS_ON, package.lower(), at)
+    return tuple(text.found)
+
+
+# --- Pipfile ---------------------------------------------------------------
+
+def _pipfile(content: str, path: str) -> tuple[CodeClaim, ...]:
+    try:
+        data = tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
+        return ()
+    text = _Toml(content, path)
+    for section, predicate in (("packages", DEPENDS_ON), ("dev-packages", DEVELOPS_WITH)):
+        for key in _table(data.get(section)):
+            package = python_name(key)
+            if package:
+                text.say(path, predicate, package, text.key_line((section,), key))
+    return tuple(text.found)
+
+
 def _reader(path: str) -> Optional[Callable[[str, str], tuple[CodeClaim, ...]]]:
     name = path.replace("\\", "/").lower().rsplit("/", 1)[-1]
     if name == "pyproject.toml":
@@ -313,6 +525,18 @@ def _reader(path: str) -> Optional[Callable[[str, str], tuple[CodeClaim, ...]]]:
         return _cargo
     if name == "go.mod":
         return _go_mod
+    if name == "pom.xml":
+        return _pom
+    if name in ("build.gradle", "build.gradle.kts"):
+        return _gradle
+    if name == "gemfile":
+        return _gemfile
+    if name == "composer.json":
+        return _composer
+    if name == "pipfile":
+        return _pipfile
+    if name.endswith(_PROJECT_SUFFIXES):
+        return _dotnet
     return _requirements if is_manifest(path) else None
 
 

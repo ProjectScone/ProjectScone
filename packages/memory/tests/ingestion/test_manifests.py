@@ -207,8 +207,11 @@ require (
     ("pyproject.toml", True), ("packages/memory/PyProject.toml", True), ("requirements.txt", True),
     ("api/requirements-dev.txt", True), ("requirements/test.txt", True), ("package.json", True),
     ("crates/core/Cargo.toml", True), ("go.mod", True),
+    ("pom.xml", True), ("app/build.gradle", True), ("app/build.gradle.kts", True), ("Gemfile", True),
+    ("composer.json", True), ("Pipfile", True), ("src/App/App.csproj", True), ("Lib.fsproj", True),
     ("notes.toml", False), ("tsconfig.json", False), ("go.sum", False), ("requirements.md", False),
-    ("package-lock.json", False), ("", False),
+    ("package-lock.json", False), ("Gemfile.lock", False), ("settings.gradle", False), ("composer.lock", False),
+    ("App.csproj.user", False), ("", False),
 ])
 def test_a_manifest_is_known_by_its_name_wherever_it_sits(path, expected):
     assert is_manifest(path) is expected
@@ -219,6 +222,8 @@ def test_a_manifest_is_known_by_its_name_wherever_it_sits(path, expected):
     ("package.json", '{"name": "x", "dependencies": ['),
     ("package.json", '["not", "an", "object"]'),
     ("Cargo.toml", "[dependencies]\nserde = 1"),
+    ("pom.xml", "<project><dependencies>"), ("pom.xml", "<notes/>"), ("composer.json", "[1, 2]"),
+    ("App.csproj", "<Project><ItemGroup>"), ("Pipfile", "[packages\nx = '*'"),
 ])
 def test_a_manifest_that_does_not_parse_claims_nothing_and_never_raises(path, content):
     assert manifest_claims(content, path) == ()
@@ -257,3 +262,168 @@ async def test_a_remembered_manifest_is_recorded_as_extracted_quoted_claims():
         assert requests.grounded is True
     finally:
         await engine.close()
+
+
+POM = """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1</version>
+  </parent>
+  <artifactId>Service</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.17.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"""
+
+
+def test_a_maven_pom_reads_coordinates_scopes_and_plugins_under_the_parents_group():
+    claims = manifest_claims(POM, "service/pom.xml")
+    assert said(claims, DEFINES) == [("service/pom.xml", DEFINES, "org.example:service")], "the group is the parent's"
+    assert said(claims, DEPENDS_ON) == [("org.example:service", DEPENDS_ON, "com.fasterxml.jackson.core:jackson-databind"),
+                                        ("org.example:service", DEPENDS_ON, "org.slf4j:slf4j-api")]
+    assert said(claims, DEVELOPS_WITH) == [("org.example:service", DEVELOPS_WITH, "org.junit.jupiter:junit-jupiter"),
+                                           ("org.example:service", DEVELOPS_WITH, "org.apache.maven.plugins:maven-surefire-plugin")]
+    by_object = {c.object: c for c in claims}
+    assert by_object["org.junit.jupiter:junit-jupiter"].quote == "<artifactId>junit-jupiter</artifactId>"
+    assert by_object["org.junit.jupiter:junit-jupiter"].first_line == 18
+    assert POM.encode()[by_object["org.slf4j:slf4j-api"].start:by_object["org.slf4j:slf4j-api"].end].decode().strip() \
+        == "<artifactId>slf4j-api</artifactId>"
+
+
+def test_a_gradle_build_reads_groovy_and_kotlin_configurations_and_plugins():
+    groovy = """plugins {
+    id 'java'
+    id "org.springframework.boot" version "3.2.0"
+}
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web:3.2.0'
+    api group: 'com.google.guava', name: 'guava', version: '33.0'  // not a coordinate string
+    runtimeOnly "org.postgresql:postgresql"
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10' // tests
+    annotationProcessor 'org.projectlombok:lombok:1.18'
+    implementation project(':lib')
+}
+"""
+    claims = manifest_claims(groovy, "app/build.gradle")
+    assert said(claims, DEPENDS_ON) == [("app/build.gradle", DEPENDS_ON, "org.springframework.boot:spring-boot-starter-web"),
+                                        ("app/build.gradle", DEPENDS_ON, "org.postgresql:postgresql")]
+    assert said(claims, DEVELOPS_WITH) == [("app/build.gradle", DEVELOPS_WITH, "java"),
+                                           ("app/build.gradle", DEVELOPS_WITH, "org.springframework.boot"),
+                                           ("app/build.gradle", DEVELOPS_WITH, "org.junit.jupiter:junit-jupiter"),
+                                           ("app/build.gradle", DEVELOPS_WITH, "org.projectlombok:lombok")], \
+        "a map-style or project dependency is not guessed at"
+    kotlin = 'dependencies {\n    implementation("io.ktor:ktor-server-core:2.3.0")\n    testImplementation(kotlin("test"))\n}\n'
+    assert said(manifest_claims(kotlin, "build.gradle.kts")) == [("build.gradle.kts", DEPENDS_ON, "io.ktor:ktor-server-core")]
+
+
+def test_a_gemfile_reads_groups_by_block_and_inline():
+    content = """source 'https://rubygems.org'
+gem 'rails', '~> 7.1'
+gem "pg"
+gem 'rspec-rails', group: :test
+group :development, :test do
+  gem 'rubocop'
+  gem 'pry'
+end
+group :production do
+  gem 'puma'
+end
+platforms :ruby do
+  gem 'nokogiri'
+end
+# gem 'commented-out'
+"""
+    claims = manifest_claims(content, "Gemfile")
+    assert said(claims, DEPENDS_ON) == [("Gemfile", DEPENDS_ON, "rails"), ("Gemfile", DEPENDS_ON, "pg"),
+                                        ("Gemfile", DEPENDS_ON, "puma"), ("Gemfile", DEPENDS_ON, "nokogiri")]
+    assert said(claims, DEVELOPS_WITH) == [("Gemfile", DEVELOPS_WITH, "rspec-rails"), ("Gemfile", DEVELOPS_WITH, "rubocop"),
+                                           ("Gemfile", DEVELOPS_WITH, "pry")]
+    assert {c.object: c.first_line for c in claims}["pry"] == 7
+
+
+def test_a_composer_manifest_separates_require_from_require_dev_and_skips_the_platform():
+    content = """{
+  "name": "Acme/Shop",
+  "require": {
+    "php": ">=8.2",
+    "ext-json": "*",
+    "laravel/framework": "^11.0",
+    "guzzlehttp/guzzle": "^7.8"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11"
+  }
+}
+"""
+    claims = manifest_claims(content, "composer.json")
+    assert said(claims, DEFINES) == [("composer.json", DEFINES, "acme/shop")]
+    assert said(claims, DEPENDS_ON) == [("acme/shop", DEPENDS_ON, "laravel/framework"), ("acme/shop", DEPENDS_ON, "guzzlehttp/guzzle")]
+    assert said(claims, DEVELOPS_WITH) == [("acme/shop", DEVELOPS_WITH, "phpunit/phpunit")]
+    assert {c.object: c.first_line for c in claims}["guzzlehttp/guzzle"] == 7
+
+
+def test_a_dotnet_project_reads_package_references_and_marks_private_assets_as_build_time():
+    content = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Acme.Api</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="xunit" Version="2.6.1" />
+    <PackageReference Include="StyleCop.Analyzers" Version="1.2.0" PrivateAssets="all" />
+    <PackageReference Include="SourceGen">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <ProjectReference Include="..\\Lib\\Lib.csproj" />
+  </ItemGroup>
+</Project>
+"""
+    claims = manifest_claims(content, "src/Api/Api.csproj")
+    assert said(claims, DEFINES) == [("src/Api/Api.csproj", DEFINES, "acme.api")]
+    assert said(claims, DEPENDS_ON) == [("acme.api", DEPENDS_ON, "newtonsoft.json"), ("acme.api", DEPENDS_ON, "xunit")]
+    assert said(claims, DEVELOPS_WITH) == [("acme.api", DEVELOPS_WITH, "stylecop.analyzers"), ("acme.api", DEVELOPS_WITH, "sourcegen")]
+    assert {c.object: c.first_line for c in claims}["sourcegen"] == 10, "a project reference names a file this cannot place"
+
+
+def test_a_pipfile_reads_packages_and_dev_packages():
+    content = """[[source]]
+url = "https://pypi.org/simple"
+
+[packages]
+requests = "*"
+Beautiful_Soup4 = {version = ">=4"}
+
+[dev-packages]
+pytest = "*"
+"""
+    claims = manifest_claims(content, "Pipfile")
+    assert said(claims) == [("Pipfile", DEPENDS_ON, "requests"), ("Pipfile", DEPENDS_ON, "beautiful-soup4"),
+                            ("Pipfile", DEVELOPS_WITH, "pytest")]
+    assert {c.object: c.first_line for c in claims}["pytest"] == 9
