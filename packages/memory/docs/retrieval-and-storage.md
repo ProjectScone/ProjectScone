@@ -3023,7 +3023,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `cypher` | one idempotent `MERGE` per line | Neo4j, Memgraph |
 | `csv` | zip of `entities.csv`, `relations.csv`, `attributes.csv`, `about.json` | spreadsheets, bulk loaders |
 | `jsonld` | JSON-LD linked data | RDF tooling |
-| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` and `graph.canvas`, a canvas of the notes | Obsidian and other note tools |
+| `obsidian` | zip of one Markdown note per entity and one per community, wiki-linked and tagged by community, plus `index.md`, `graph.canvas`, a canvas of the notes, and graph-view colours per community | Obsidian and other note tools |
 | `wiki` | zip of `index.md`, one article per topic and one per entity, in plain Markdown links | agents reading instead of the raw ledger |
 | `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them, grouped by community and styled by kind | GitHub, Markdown viewers, docs |
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
@@ -3246,6 +3246,21 @@ How each format places values and escapes its own syntax:
   way a case- and normalisation-insensitive disk folds it. On a clash it
   takes more of the entity's id, then a number, so every entity keeps its
   own note and every `[[link]]` opens one.
+  - Every community the analysis found has a hub note in `communities/`.
+    It holds the community's members, most central first, and its counts
+    of entities, links inside and links to other communities, and cohesion.
+    It also lists the kinds, the most used predicates, and each community
+    it links to with how many links. A hub's file name is kept distinct
+    from every entity note's, since Obsidian opens a bare `[[name]]`
+    wherever that file sits.
+  - Each community has one tag, `community/c<rank>-<words of its first
+    name>`, rank first so no tag is only digits and no two share one. The
+    tag is on the hub and on every member's note, and a member's note
+    links to its hub. An entity with no relation to another has neither.
+  - `.obsidian/graph.json` gives the graph view a colour group per
+    community, querying that same tag, in the drawings' colours. Unzipped
+    into an existing vault, it replaces that vault's graph view settings.
+  - `index.md` lists the communities, then the entities.
 
 Entity ids are defined for any text the ledger holds, lone surrogates
 included. Valid text gets the same id it always had.

@@ -35,7 +35,7 @@ items, fixed zip timestamps. Text is escaped for its format, never trusted.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 import csv
 import io
@@ -436,11 +436,12 @@ def _note_names(entities: tuple[Entity, ...]) -> dict[str, str]:
     return _file_names([(entity.entity_id, entity.label) for entity in entities], fallback="entity")
 
 
-def _file_names(items: list[tuple[str, str]], *, fallback: str) -> dict[str, str]:
+def _file_names(items: list[tuple[str, str]], *, fallback: str, taken: set[str] | None = None) -> dict[str, str]:
     """Safe, distinct file names for (id, label) pairs, as ``_note_names``
-    describes; ``index`` is always kept free."""
+    describes; ``index`` is always kept free, and so is every folded name in
+    ``taken``."""
     names: dict[str, str] = {}
-    taken = {"index"}  # the vault's own index note
+    taken = {"index", *(taken or ())}  # the vault's own index note
     for ident, label in sorted(items):
         base = " ".join(_UNSAFE.sub("-", label).split()).strip(". ")[:100]
         base = base or fallback
@@ -458,8 +459,41 @@ def _file_names(items: list[tuple[str, str]], *, fallback: str) -> dict[str, str
     return names
 
 
+def _community_links(projection: EntityProjection, community_of: Mapping[str, str]) -> Counter[tuple[str, str]]:
+    """Links between each pair of communities, as the analysis counts a
+    community's links: pairs of entities one or more relations join."""
+    joined: Counter[tuple[str, str]] = Counter()
+    for pair in {tuple(sorted((relation.subject_id, relation.object_id))) for relation in projection.relations
+                 if relation.subject_id != relation.object_id}:
+        ends = sorted({community_of.get(pair[0], ""), community_of.get(pair[1], "")} - {""})
+        if len(ends) == 2:
+            joined[(ends[0], ends[1])] += 1
+    return joined
+
+
+def _community_tag(rank: int, label: str) -> str:
+    """An Obsidian tag for the community of this rank: the rank first, so no
+    tag is only digits and no two share one, then the words of its first name."""
+    words = re.findall(r"[^\W_]+", label.split(" · ")[0].casefold())
+    slug = "-".join(words)[:40].strip("-")
+    return f"community/c{rank}" + (f"-{slug}" if slug else "")
+
+
 def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """A note per entity, a hub note per community the analysis found, and
+    an index. A community's tag is on its hub and on each member's note, and
+    the vault's graph view colours the community by that same tag, in the
+    drawings' colours."""
+    from .analysis import cached_analysis
+
     names = _note_names(projection.entities)
+    ranked = sorted(cached_analysis(projection).communities,
+                    key=lambda community: (-len(community.members), community.community_id))
+    community_of = {member: community.community_id for community in ranked for member in community.members}
+    tag_of = {community.community_id: _community_tag(rank, community.label)
+              for rank, community in enumerate(ranked, start=1)}
+    hub_names = _file_names([(community.community_id, community.label) for community in ranked],
+                            fallback="community", taken={_folded(name) for name in names.values()})
     outgoing: dict[str, list[str]] = defaultdict(list)
     incoming: dict[str, list[str]] = defaultdict(list)
     values: dict[str, list[str]] = defaultdict(list)
@@ -479,17 +513,54 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
             f"- {literal(attribute.predicate)}: {literal(attribute.value)} ({cited(attribute.fact_ids)})")
     files: dict[str, str] = {}
     for entity in projection.entities:
+        home = community_of.get(entity.entity_id)
         body = ["---", f"id: {entity.entity_id}", f"key: {json.dumps(entity.key, ensure_ascii=False)}",
-                f"kind: {entity.kind or 'unknown'}", "---", "", f"# {literal(entity.label)}", ""]
+                f"kind: {entity.kind or 'unknown'}",
+                *([f"tags: {json.dumps([tag_of[home]])}"] if home else []), "---", "",
+                f"# {literal(entity.label)}", "",
+                *([f"Community: [[communities/{hub_names[home]}]]", ""] if home else [])]
         for title, lines in (("Relations", outgoing[entity.entity_id]), ("Referenced by", incoming[entity.entity_id]),
                              ("Values", values[entity.entity_id])):
             if lines:
                 body += [f"## {title}", "", *sorted(lines), ""]
         files[f"entities/{names[entity.entity_id]}.md"] = "\n".join(body)
+    linked = _community_links(projection, community_of)
+    for community in ranked:
+        members = sorted(community.members, key=lambda member: (member not in community.top_entities,
+                                                                 community.top_entities.index(member)
+                                                                 if member in community.top_entities else 0,
+                                                                 names[member]))
+        neighbours = sorted(((pair[1] if pair[0] == community.community_id else pair[0], count)
+                             for pair, count in linked.items() if community.community_id in pair),
+                            key=lambda item: (-item[1], hub_names[item[0]]))
+        cohesion = f"; cohesion {community.cohesion}" if community.cohesion is not None else ""
+        hub = ["---", f"id: {community.community_id}", f"tags: {json.dumps([tag_of[community.community_id]])}",
+               f"members: {len(community.members)}", "---", "", f"# {literal(community.label)}", "",
+               f"{_many(len(community.members), 'entity', 'entities')}; {_many(community.internal_links, 'link')} "
+               f"inside and {community.boundary_links} to other communities{cohesion}. A link is a pair of entities "
+               "one or more relations join.", "", "## Members", "", *(f"- [[{names[member]}]]" for member in members), ""]
+        if community.kinds:
+            hub += ["## Kinds", "", *(f"- {literal(kind)}: {count}" for kind, count in community.kinds), ""]
+        if community.predicates:
+            hub += ["## Most used predicates", "",
+                    *(f"- {literal(predicate)}: {count}" for predicate, count in community.predicates), ""]
+        if neighbours:
+            hub += ["## Linked communities", "",
+                    *(f"- [[communities/{hub_names[other]}]] ({_many(count, 'link')})" for other, count in neighbours), ""]
+        files[f"communities/{hub_names[community.community_id]}.md"] = "\n".join(hub)
     files["index.md"] = "\n".join([f"# Knowledge graph: {literal(projection.space)}", "",
                                    f"Projection `{projection.digest[:12]}`, {len(projection.entities)} entities.",
-                                   *_about_lines(about), "",
+                                   *_about_lines(about), "", "## Communities", "",
+                                   *([f"- [[communities/{hub_names[community.community_id]}]]" for community in ranked]
+                                     or ["No entity has a relation to another, so there is no community."]), "",
+                                   "## Entities", "",
                                    *sorted(f"- [[{name}]]" for name in names.values())]) + "\n"
+    if ranked:
+        # Obsidian's graph view: one colour group per community, querying the tag its notes carry.
+        files[".obsidian/graph.json"] = json.dumps({"colorGroups": [
+            {"query": f"tag:#{tag_of[community.community_id]}",
+             "color": {"a": 1, "rgb": int(_PALETTE[index % (len(_PALETTE) - 1)].lstrip("#"), 16)}}
+            for index, community in enumerate(ranked)]}, indent=1) + "\n"
     # The same graph drawn as a canvas of the vault's own notes.
     files["graph.canvas"] = _canvas_text(projection, about, lambda entity_id: f"entities/{names[entity_id]}.md")
     return Export(_zip(files), "application/zip", "graph-obsidian.zip")
@@ -1015,12 +1086,7 @@ def _communities_map(projection: EntityProjection, about: Mapping[str, object]) 
     kept, left = ranked[:_MAP_COMMUNITIES], ranked[_MAP_COMMUNITIES:]
     community_of = {member: community.community_id for community in kept for member in community.members}
     label_of = {community.community_id: community.label for community in kept}
-    joined: Counter[tuple[str, str]] = Counter()
-    for pair in {tuple(sorted((relation.subject_id, relation.object_id))) for relation in projection.relations
-                 if relation.subject_id != relation.object_id}:
-        ends = sorted({community_of.get(pair[0], ""), community_of.get(pair[1], "")} - {""})
-        if len(ends) == 2:
-            joined[(ends[0], ends[1])] += 1
+    joined = _community_links(projection, community_of)
     strongest = sorted(joined.items(), key=lambda item: (-item[1], item[0]))
     links, links_left = strongest[:_MAP_LINKS], strongest[_MAP_LINKS:]
 
