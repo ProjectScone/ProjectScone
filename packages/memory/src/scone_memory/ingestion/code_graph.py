@@ -20,6 +20,7 @@ import ast
 import io
 import posixpath
 import tokenize
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -594,12 +595,14 @@ def _calls(tree: ast.AST, path: str, named: dict[str, str],
     this package could not place, 37.2% had a head the file had itself
     imported, while 59.8% were methods on values of unstated type. This
     reaches the first group and cannot reach the second."""
-    for holder, qualified, inside in _callers(tree, None, None):
+    holders = list(_callers(tree, None, None))
+    bound = {qualified: _bound(holder) for holder, qualified, _ in holders}
+    for holder, qualified, inside in holders:
         # Named as `defines` names it, and holding only the calls in its own body: a call inside a
         # function written within it is that function's call, not this one's.
         whole = f"{path}:{qualified}"
         for call in _own_calls(holder):
-            target = _target(call.func, inside, named, imported, classes, scope=qualified)
+            target = _target(call.func, inside, named, imported, classes, scope=qualified, bound=bound)
             if target is None:
                 # Collected here rather than walked again elsewhere: a
                 # second copy of the name table is the one that drifts
@@ -647,21 +650,56 @@ def _callers(node: ast.AST, parent: Optional[str], inside: Optional[str]):
             yield from _callers(child, parent, inside)
 
 
-def _own_calls(function: ast.AST):
-    """The calls in a function's own body, not in the functions and classes written inside it."""
-    stack = list(ast.iter_child_nodes(function))
+def _evaluated(function: ast.FunctionDef | ast.AsyncFunctionDef):
+    """Every node a call to the function evaluates in its own frame, each with whether it
+    sits in the body of a class written there.
+
+    Its body, but not its own decorators, defaults or annotations: those ran when the
+    statement defining it did. So of a function or class written inside it, only what that
+    statement evaluates belongs here -- decorators, default values, bases and a class's own
+    body -- and never the inner function's body."""
+    stack: list[tuple[ast.AST, bool]] = [(statement, False) for statement in function.body]
     while stack:
-        node = stack.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        node, in_class = stack.pop()
+        yield node, in_class
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defaults = [*node.args.defaults, *(one for one in node.args.kw_defaults if one is not None)]
+            stack.extend((one, in_class) for one in (*node.decorator_list, *defaults))
+        elif isinstance(node, ast.ClassDef):
+            stack.extend((one, in_class) for one in (*node.decorator_list, *node.bases, *node.keywords))
+            stack.extend((statement, True) for statement in node.body)
+        else:
+            stack.extend((child, in_class) for child in ast.iter_child_nodes(node))
+
+
+def _own_calls(function: ast.FunctionDef | ast.AsyncFunctionDef):
+    """The calls a function makes itself, not those of the functions written inside it."""
+    return (node for node, _ in _evaluated(function) if isinstance(node, ast.Call))
+
+
+def _bound(function: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[frozenset[str], frozenset[str]]:
+    """The names a function binds for itself: its parameters and what it assigns, then what it
+    imports. The functions and classes it defines are not needed here, since those are looked
+    up as declarations first. A name bound in a class body written inside it is that class's."""
+    arguments = function.args
+    names = {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                                 *([arguments.vararg] if arguments.vararg else []),
+                                 *([arguments.kwarg] if arguments.kwarg else []))}
+    brought: set[str] = set()
+    for node, in_class in _evaluated(function):
+        if in_class:
             continue
-        if isinstance(node, ast.Call):
-            yield node
-        stack.extend(ast.iter_child_nodes(node))
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            brought.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+    return frozenset(names), frozenset(brought)
 
 
 def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
             imported: Optional[dict[str, tuple[str, Optional[str]]]] = None,
-            classes: frozenset[str] = frozenset(), scope: Optional[str] = None) -> Optional[str]:
+            classes: frozenset[str] = frozenset(), scope: Optional[str] = None,
+            bound: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {}) -> Optional[str]:
     """What a call refers to, or nothing.
 
     The import table says which of two things a local name is, and the
@@ -681,8 +719,15 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
     the same way: a file cannot tell an imported class from an imported
     object, so ``from x import Y`` then ``Y.m()`` stays unbound, and so does
     a call through a class declared here under a name also imported here.
+
+    A name an enclosing function binds for itself -- a parameter, an assignment -- is that
+    value and not a declaration of the same name further out, so it stays unbound; a name it
+    imports is what the import names.
+    ``self`` and ``cls`` are the class only in the method that takes them, and in functions
+    written inside that method that do not take their own.
     """
     if isinstance(func, ast.Name):
+        brought = False
         if scope:
             # From the innermost enclosing function outwards. A class body is not a scope the
             # functions inside it can see, as Python reads names.
@@ -694,7 +739,13 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
                 enclosed = named.get(f"{prefix}.{func.id}")
                 if enclosed is not None:
                     return enclosed
-        here = named.get(func.id)
+                assigned, imports = bound.get(prefix, (frozenset(), frozenset()))
+                if func.id in assigned:
+                    return None
+                if func.id in imports:
+                    brought = True
+                    break
+        here = None if brought else named.get(func.id)
         if here is not None:
             return here
         came = imported.get(func.id) if imported else None
@@ -709,10 +760,23 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
             return named[spelt]
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
         if func.value.id in ("self", "cls"):
-            within = inside
-            return named.get(f"{within}.{func.attr}") if within else None
+            taker = _binder(func.value.id, scope, bound)
+            method = taker is not None and inside is not None and taker.rpartition(".")[0] == inside
+            return named.get(f"{inside}.{func.attr}") if method else None
         came = imported.get(func.value.id) if imported else None
         return _joined(came[0], func.attr) if came is not None and came[1] is None else None
+    return None
+
+
+def _binder(name: str, scope: Optional[str],
+            bound: Mapping[str, tuple[frozenset[str], frozenset[str]]]) -> Optional[str]:
+    """The innermost function, from ``scope`` outwards, that binds ``name`` for itself. Only
+    functions have bindings here, so a class on the way is passed over."""
+    parts = scope.split(".") if scope else []
+    for end in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:end])
+        if name in bound.get(prefix, (frozenset(), frozenset()))[0]:
+            return prefix
     return None
 
 
