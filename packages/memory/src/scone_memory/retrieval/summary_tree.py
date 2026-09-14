@@ -18,10 +18,15 @@ counted. Adjacency is the grouping, not a clustering: a document's own
 order is a structure nobody has to guess at.
 
 The nodes are stored as notes the framework wrote, each saying which
-episode it summarizes, its level, the chunks it covers and the content
-hash of the document at the time, so the ordinary lanes retrieve them
-beside the chunks, a reader can see what a passage is, and a summary of
-a document that has since changed can be told from a current one.
+episode it summarizes, its level and position, the span of chunks under
+it and the content hash of the document at the time, with the full
+account -- every chunk covered, what it was written from, every
+citation -- retained as an attachment the note links, since a citation
+list is longer than a metadata value may be. The ordinary lanes then
+retrieve a summary beside the chunks and a reader can see what a
+passage is. A document that changes is a new episode with a tree of its
+own; building a tree again for the same episode replaces the tree that
+was there, whatever shape it had.
 """
 
 from __future__ import annotations
@@ -30,6 +35,8 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 from typing import TYPE_CHECKING, Optional, Sequence
+
+from ..core.validation import MAX_METADATA_VALUE
 
 from ..core.errors import InvalidInput, NotFound
 from ..providers.llm import ChatModel
@@ -109,13 +116,24 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def summary_metadata(tree_of: "Episode", node: Node, model_name: str) -> dict[str, str]:
-    """What a stored summary says about itself, in the episode's metadata."""
+def summary_metadata(tree_of: "Episode", node: Node, fan_in: int, model_name: str, detail_id: str) -> dict[str, str]:
+    """What a stored summary says about itself, in the episode's metadata:
+    every value bounded, the long account in the attachment ``detail_id``."""
     return {"summary_of": str(tree_of.episode_id), "summary_level": str(node.level), "summary_index": str(node.index),
-            "summary_covers": ",".join(str(c) for c in node.covers), "summary_written_from": ",".join(node.written_from),
-            "summary_content_hash": _hash(tree_of.content), "summary_model": model_name,
-            "summary_citations": json.dumps([[c.passage_id, c.quote] for s in node.synthesis.sentences for c in s.citations],
-                                            ensure_ascii=False)}
+            "summary_fan_in": str(fan_in), "summary_chunks": str(len(node.covers)),
+            "summary_first_chunk": str(min(node.covers)), "summary_last_chunk": str(max(node.covers)),
+            "summary_content_hash": _hash(tree_of.content), "summary_model": model_name[:MAX_METADATA_VALUE],
+            "summary_detail": detail_id}
+
+
+def summary_detail(node: Node) -> bytes:
+    """The full account of a node, retained as an attachment: what it was
+    written from, every chunk under it, and every citation with its quote."""
+    return json.dumps({"id": node.id, "level": node.level, "index": node.index, "written_from": list(node.written_from),
+                       "covers": list(node.covers),
+                       "sentences": [{"text": s.text, "citations": [{"passage": c.passage_id, "quote": c.quote, "start": c.start, "end": c.end}
+                                                                   for c in s.citations]} for s in node.synthesis.sentences]},
+                      ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 async def build_summary_tree(engine: "MemoryEngine", model: ChatModel, space: str, episode_id: int, *,
@@ -148,7 +166,7 @@ async def build_summary_tree(engine: "MemoryEngine", model: ChatModel, space: st
         level += 1
         written: list[tuple[str, str, tuple[int, ...]]] = []
         wrote = 0
-        for start in range(0, len(level_below), fan_in):
+        for position, start in enumerate(range(0, len(level_below), fan_in)):
             group = level_below[start:start + fan_in]
             if len(group) == 1 and start > 0:
                 # A lone remainder is carried up as it is, not summarized
@@ -163,8 +181,10 @@ async def build_summary_tree(engine: "MemoryEngine", model: ChatModel, space: st
                 continue
             text = " ".join(sentence.text for sentence in made.sentences)
             covers = tuple(c for _, _, under in group for c in under)
-            node = Node(level, len([n for n in nodes if n.level == level]), text,
-                        tuple(identifier for identifier, _, _ in group), covers, made)
+            # The index is the group's position at its level, so a group the
+            # model wrote nothing about leaves a gap rather than shifting the
+            # names of everything after it.
+            node = Node(level, position, text, tuple(identifier for identifier, _, _ in group), covers, made)
             nodes.append(node)
             written.append((node.id, text, covers))
             wrote += 1
@@ -180,12 +200,20 @@ async def build_summary_tree(engine: "MemoryEngine", model: ChatModel, space: st
                        empty_groups=empty, unjoined=unjoined, model_calls=calls, reasons=tuple(reasons))
     if not store or not nodes:
         return tree
+    # A tree replaces the tree that was there: two builds of one document
+    # may differ in shape (another fan_in, a group the model left empty
+    # this time), and nodes of the old shape must not outlive it.
+    for old in await stored_summaries(engine, space, episode_id):
+        await engine.forget(space, old.episode_id)
     stored: list[Node] = []
     for node in nodes:
         where = f"{episode.source}#summary/{node.level}/{node.index}" if episode.source else f"episode:{episode_id}#summary/{node.level}/{node.index}"
+        detail = await engine.attach(space, summary_detail(node), media_type="application/json", filename="summary-node.json")
         added = await engine.remember(space, node.text, kind="note", source=where,
-                                      metadata=summary_metadata(episode, node, model_name or type(model).__name__),
-                                      dedup_key=f"summary:{episode_id}:{content_hash}:{node.level}:{node.index}", replace=True)
+                                      metadata=summary_metadata(episode, node, fan_in, model_name or type(model).__name__,
+                                                                detail.attachment_id),
+                                      attachment_ids=(detail.attachment_id,),
+                                      dedup_key=f"summary:{episode_id}:{content_hash}:{fan_in}:{node.level}:{node.index}", replace=True)
         stored.append(Node(node.level, node.index, node.text, node.written_from, node.covers, node.synthesis, added.episode_id))
     return SummaryTree(episode_id, content_hash, len(chunks), fan_in, level, tuple(stored),
                        empty_groups=empty, unjoined=unjoined, model_calls=calls, stored=True, reasons=tuple(reasons))
@@ -197,28 +225,32 @@ class StoredSummary:
     level: int
     index: int
     text: str
-    covers: tuple[int, ...]
-    #: Whether the document has changed since this summary was written.
-    stale: bool
+    fan_in: int
+    chunks: int
+    first_chunk: int
+    last_chunk: int
+    #: The attachment holding the full account: chunks covered, what it was written from, every citation.
+    detail: str
+    content_hash: str
 
     def record(self) -> dict[str, object]:
         return {"episode_id": self.episode_id, "level": self.level, "index": self.index, "text": self.text,
-                "covers": list(self.covers), "stale": self.stale}
+                "fan_in": self.fan_in, "chunks": self.chunks, "first_chunk": self.first_chunk, "last_chunk": self.last_chunk,
+                "detail": self.detail, "content_hash": self.content_hash}
 
 
 async def stored_summaries(engine: "MemoryEngine", space: str, episode_id: int) -> tuple[StoredSummary, ...]:
-    """The summaries stored for an episode, top level first, each saying whether it is stale."""
-    episode = await engine.episode(space, episode_id)
-    current = _hash(episode.content)
+    """The summaries stored for an episode, top level first. A changed
+    document is a new episode with no summaries until its own are built."""
+    await engine.episode(space, episode_id)
     found = await engine.episodes(space, {"summary_of": str(episode_id)})
     rows = []
     for one in found:
         meta = one.metadata
         try:
-            level, index = int(meta.get("summary_level", "")), int(meta.get("summary_index", ""))
-            covers = tuple(int(c) for c in meta.get("summary_covers", "").split(",") if c)
-        except ValueError:
+            rows.append(StoredSummary(one.episode_id, int(meta["summary_level"]), int(meta["summary_index"]), one.content,
+                                      int(meta["summary_fan_in"]), int(meta["summary_chunks"]), int(meta["summary_first_chunk"]),
+                                      int(meta["summary_last_chunk"]), meta["summary_detail"], meta.get("summary_content_hash", "")))
+        except (KeyError, ValueError):
             continue
-        rows.append(StoredSummary(one.episode_id, level, index, one.content, covers,
-                                  stale=meta.get("summary_content_hash") != current))
     return tuple(sorted(rows, key=lambda s: (-s.level, s.index)))
