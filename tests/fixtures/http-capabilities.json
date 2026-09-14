@@ -53,6 +53,7 @@
       "recall.structural_context": true,
       "recall.window": true,
       "recall.code_context": true,
+      "recall.highlights": true,
       "recall.multi_hop": true,
       "documents.files": true,
       "documents.sync": false,

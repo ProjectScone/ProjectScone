@@ -155,6 +155,25 @@ async def test_contextual_embeddings_are_part_of_the_writer(tmp_path: Path) -> N
         await second.close()
 
 
+async def test_heading_context_is_part_of_the_writer(tmp_path: Path) -> None:
+    # Headings change what is embedded, so vectors written without them
+    # and vectors written with them must never answer one search as one.
+    path = tmp_path / "memory.db"
+    first = await open_sqlite(path, Model("model-a"))
+    await first.remember("space", "# Offices\n\nThe Lisbon office opens in May")
+    await first.close()
+    second = await open_sqlite(path, Model("model-a"), heading_context=True)
+    try:
+        assert second.vector_identity.state == "mismatch"
+    finally:
+        await second.close()
+    third = await open_sqlite(path, Model("model-a"))
+    try:
+        assert third.vector_identity.state == "verified"
+    finally:
+        await third.close()
+
+
 async def test_unrecorded_vectors_from_a_model_wait_for_an_explicit_decision(tmp_path: Path) -> None:
     path = tmp_path / "memory.db"
     first = await open_sqlite(path, Model("model-a"))

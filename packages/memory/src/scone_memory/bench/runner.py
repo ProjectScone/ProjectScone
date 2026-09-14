@@ -6,12 +6,16 @@ import platform
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Coroutine, Callable, Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Coroutine, Callable, Iterable, Optional, Sequence
 
 from . import metrics as bench_metrics
 
 from ..memory.engine import MemoryEngine, Record
 from ..core.models import RecallItem
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..retrieval.query_transforms import Transformed
 
 
 @dataclass(frozen=True)
@@ -128,6 +132,10 @@ class ItemResult:
     #: unless something distilled facts into the item's space first.
     facts: int = 0
     history_facts: int = 0
+    #: When the run transformed questions: the query actually searched,
+    #: and whether the transform was applied to it or the question stood.
+    query: Optional[str] = None
+    transformed: Optional[bool] = None
 
     def any_at(self, k: int) -> bool:
         seen = set(self.retrieved_sessions[:k])
@@ -303,6 +311,7 @@ async def run(
     merge: bool = False,
     window: int = 0,
     fusion: str = "rank",
+    transform: Optional[Callable[[str], "Coroutine[object, object, Transformed]"]] = None,
 ) -> RunReport:
     """``make_engine`` returns a fresh engine (or an awaitable of one) per
     item, so an item's memory never leaks into the next. ``limit`` is the
@@ -318,7 +327,12 @@ async def run(
     episodes came back, so it cannot change session recall at the recall
     limit -- but it compacts the list, so an episode below the cut can
     move above it, and recall at a k smaller than the limit can change in
-    either direction. That is the thing worth measuring."""
+    either direction. That is the thing worth measuring.
+
+    ``transform`` restates each question before recall (see
+    ``retrieval.query_transforms``); the item records the query searched
+    and whether the transform was applied, so the same items measure a
+    transform against the questions as asked."""
     import asyncio
     from datetime import datetime, timezone
 
@@ -359,6 +373,12 @@ async def run(
                 pack = await engine.recall(space, item.question, limit=k_max, history=history)
             else:
                 pack = await engine.recall(space, item.question, limit=k_max, history=history, fusion=fusion)
+            question = item.question
+            if transform is not None:
+                asked = await transform(item.question)
+                question = asked.query
+                result.query, result.transformed = asked.query, asked.applied
+            pack = await engine.recall(space, question, limit=k_max, history=history)
             if window:
                 from ..retrieval.window import widen
 

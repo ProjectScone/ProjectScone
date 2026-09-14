@@ -590,3 +590,40 @@ answer as one delta once it is known.
 
 `tests/test_native_agent_answer_stream.py` follows a real run's answer over
 a loopback server, model to receipt.
+
+## Conversations
+
+The conversation service keeps a session's lifecycle in a journal with a
+revision every command must name, and each turn as a receipt under a
+client-chosen request id that stays `pending` until it settles. The
+client puts that on the wire without inventing anything: a command names
+its `request_id` and `expected_revision`, so a retry is the same command
+and a stale one is a `ConversationConflict` carrying the revision the
+server holds.
+
+```python
+conversations = client.conversations(expected_space="alpha")
+caps = conversations.capabilities()            # text_configured, streaming, turn_cancellation, ...
+session = conversations.create(request_id="open-1")
+receipt = conversations.submit(session.session_id, request_id="ask-1", text_="hello",
+                               expected_revision=session.revision)   # status == "pending"
+with conversations.stream_reply(session.session_id, "ask-1") as stream:
+    for event in stream:               # ReplyDelta, ReplyGap, ReplyTerminal, ReplyEnded
+        ...                            # stream.cursor is what a reconnect sends back
+settled = conversations.wait(session.session_id, "ask-1", timeout=30)   # the receipt is the answer
+page = conversations.transcript(session.session_id)                     # newest first, opaque before= cursor
+history = conversations.events(session.session_id, after=0)             # the journal, by revision
+conversations.stop(session.session_id, request_id="stop-1", expected_revision=settled_session.revision)
+conversations.delete(session.session_id)                                # closed sessions only
+```
+
+What arrives on the stream is provisional: `text` frames carry a
+sequence as their id, `gap` says the reader fell behind the host's
+window, `terminal` says the turn has a receipt (`read_receipt`), and
+`end` says the window closed. A frame whose id does not name its
+sequence, a sequence that skips without a gap, a terminal for another
+turn, or a stream cut inside a frame is refused. Nothing reconnects on
+its own; `stream_reply(..., after=stream.cursor)` resumes, sending the
+cursor as both `after=` and `Last-Event-ID`. `cancel()` returns the
+receipt only when it says `cancelled`; `delete()` and `cancel()` check
+the service's capabilities first and refuse plainly when it lacks them.

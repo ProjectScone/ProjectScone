@@ -18,7 +18,7 @@ import json
 
 import re
 
-from typing import TYPE_CHECKING, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, cast
 from collections.abc import Callable
 
 from fastapi import Depends, FastAPI, Header, Query, Request
@@ -110,6 +110,8 @@ class EpisodeBody(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     source: Optional[str] = None
     created_at: Optional[str] = None
+    #: How this record is cut; unset keeps the server's rule.
+    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
@@ -203,6 +205,22 @@ class MergeBody(BaseModel):
     #: Repeat the space being merged. A whole space does not move by accident.
     confirm: Optional[str] = None
     preview: bool = False
+
+
+class ForgetMatchingBody(BaseModel):
+    """Unknown fields are refused: a filter field that is silently dropped
+    would widen what gets forgotten."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_prefix: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    conditions: Optional[dict[str, object]] = None
+    kind: Optional[str] = None
+    limit: int = 100
+    apply: bool = False
+    selection: Optional[str] = None
+    with_claims: Literal["keep", "exclude"] = "keep"
 
 
 class BatchBody(BaseModel):
@@ -457,7 +475,7 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.code_context": True,
+            "recall.window": True, "recall.code_context": True, "recall.highlights": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -607,6 +625,7 @@ def create_app(
             attachment_ids=body.attachment_ids,
             dedup_key=body.dedup_key,
             replace=body.replace,
+            chunking=body.chunking,
         )
         return added.model_dump()
 
@@ -631,7 +650,8 @@ def create_app(
                                    for outcome in ("accepted", "duplicate", "updated")},
                         "job": job_json(replayed), "replayed": True}
         records = [
-            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key)
+            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
+                   chunking=r.chunking)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
@@ -736,6 +756,16 @@ def create_app(
     async def episode_forget_status(episode_id: int, space: str = Depends(space_for)) -> dict:
         """Read removal progress, including interrupted cleanup, without writes."""
         return (await engine.forget_status(space, episode_id)).model_dump()
+
+    @app.post("/v1/episodes/forget-matching")
+    async def forget_matching_route(body: ForgetMatchingBody, space: str = Depends(space_for)) -> dict:
+        """Forget what a filter selects. Without ``apply`` this is a preview and
+        removes nothing; with it, the preview's ``selection`` digest is required
+        and a selection that changed since is refused."""
+        report = await engine.forget_matching(space, source_prefix=body.source_prefix, tags=body.tags,
+                                              conditions=body.conditions, kind=body.kind, limit=body.limit,
+                                              apply=body.apply, selection=body.selection, with_claims=body.with_claims)
+        return report.model_dump()
 
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, with_claims: Literal["keep", "exclude"] = "keep",
@@ -902,6 +932,11 @@ def create_app(
                                                "imports beside a code passage, with their line "
                                                "numbers. Never spliced into the passage."),
         structural_context: bool = False,
+        highlight: bool = Query(default=False,
+                                description="Give, beside the items and in the same order, the "
+                                            "code-point spans of every word in each returned "
+                                            "passage that the lexical lane would match to the "
+                                            "question. Computed last, on the text as returned."),
         multi_hop: bool = False,
         max_hops: int = Query(default=3, ge=1, le=6),
         expansion_max_bytes: int = Query(default=16000, ge=512, le=256000,
@@ -1094,6 +1129,15 @@ def create_app(
             response["items"] = [item_json(one) for one in inside.items]
             response["returned_bytes"] = sum(len(one.text.encode()) for one in inside.items)
             response["code_context"] = staged(inside.record())
+        if highlight:
+            from ..retrieval.highlights import Shown, highlights
+
+            # After everything, code context included, because every stage
+            # before this one may rewrite or drop a passage's text, and a
+            # span is only true of the text it was measured on.
+            returned = cast(list[dict[str, Any]], response["items"])
+            response["highlights"] = [marks.model_dump() for marks in highlights(
+                [Shown(one["chunk_id"], one["text"]) for one in returned], q)]
         return response
 
     @app.get("/v1/facts")
