@@ -38,13 +38,16 @@ def test_units_are_read_from_the_locators_the_reader_gave():
                 segment("slide:2/shape:1", "Next"), segment("table:1/row:1", "a: 1"), segment("table:1/row:2", "a: 2"),
                 segment("sheet:Q1/cell:B7", "7"), segment("sheet:Q1/cell:C7", "8"), segment("sheet:Q1/cell:B8", "9"),
                 segment("line:4#/name", "/name: Ada"), segment("line:4#/city", "/city: Rome"),
-                segment("audio:0/segment:3/seconds:1.0-2.0", "hello"), segment("line:9", "plain text line"))
+                segment("audio:0/segment:3/seconds:1.0-2.0", "hello"), segment("line:9", "plain text line"),
+                segment("frame:2/region:1", "sign"), segment("video:stream:0/frame:7/region:1", "caption"),
+                segment("sheet:Q%3A1:row:4", "legacy row"))
     content = "\n\n".join(s.text for s in segments).encode()
     found = source_units(segments)
     assert [(unit.label, content[unit.start:unit.end].decode()) for unit in found] == [
         ("text", "Intro.\n\nMore intro."), ("slide:1", "Title\n\nSay hello"), ("slide:2", "Next"),
         ("table:1/row:1", "a: 1"), ("table:1/row:2", "a: 2"), ("sheet:Q1/row:7", "7\n\n8"), ("sheet:Q1/row:8", "9"),
-        ("line:4", "/name: Ada\n\n/city: Rome"), ("audio:0/segment:3", "hello"), ("text", "plain text line")]
+        ("line:4", "/name: Ada\n\n/city: Rome"), ("audio:0/segment:3", "hello"), ("text", "plain text line"),
+        ("frame:2", "sign"), ("video:stream:0/frame:7", "caption"), ("sheet:Q%3A1:row:4", "legacy row")]
 
 
 def test_each_unit_is_one_chunk_and_a_long_one_is_split_by_length_and_counted():
@@ -117,6 +120,41 @@ async def test_a_pdf_episode_whose_manifest_does_not_match_its_text_is_refused(m
     with pytest.raises(InvalidInput, match="PDF outline"):
         await memory.remember("default", episode.content + " altered", kind="file", source=episode.source,
                               chunking="unit", metadata={key: episode.metadata[key] for key in ("pdf_original", "pdf_manifest")})
+
+
+async def test_a_pdf_manifest_whose_pages_do_not_tile_its_text_is_refused_not_crashed(memory):
+    """Stored manifests are data anyone with write access can shape. Pages that overlap, or split a
+    character, are refused as the provenance route refuses them, never raised as a server error."""
+    import hashlib
+
+    from scone_memory.ingestion.documents import PdfManifest
+
+    content = "First page and more text."
+    original = await memory.attach("default", b"%PDF-1.7 forged", media_type="application/pdf")
+    size = dict(width_points=600., height_points=800., rotation=0, empty=False)
+    manifest = PdfManifest(schema_version=1, original_sha256=original.attachment_id,
+                           text_sha256=hashlib.sha256(content.encode()).hexdigest(), parser="forged",
+                           pages=(PdfPage(number=1, start=0, end=10, **size), PdfPage(number=2, start=5, end=25, **size)))
+    retained = await memory.attach("default", manifest.model_dump_json().encode(), media_type="application/json")
+    with pytest.raises(InvalidInput):
+        await memory.remember("default", content, kind="file", source=f"attachment:{original.attachment_id}",
+                              chunking="unit", metadata={"pdf_original": original.attachment_id,
+                                                         "pdf_manifest": retained.attachment_id})
+
+
+async def test_a_pdf_outline_whose_original_is_not_a_pdf_is_refused(memory):
+    pdf = await ingest_pdf(memory, "default", b"%PDF-1.7 pages", filename="report.pdf", parser=Pages())
+    episode = await memory.episode("default", pdf.added.episode_id)
+    other = await memory.attach("default", b"%PDF-1.7 pages but stored as text", media_type="text/plain")
+    manifest = await memory.attachment("default", episode.metadata["pdf_manifest"])
+    from scone_memory.ingestion.documents import PdfManifest
+
+    forged = PdfManifest.model_validate_json(manifest[1]).model_copy(update={"original_sha256": other.attachment_id})
+    retained = await memory.attach("default", forged.model_dump_json().encode(), media_type="application/json")
+    with pytest.raises(InvalidInput, match="PDF outline"):
+        await memory.remember("default", episode.content, kind="file", source=f"attachment:{other.attachment_id}",
+                              chunking="unit", metadata={"pdf_original": other.attachment_id,
+                                                         "pdf_manifest": retained.attachment_id})
 
 
 async def test_unit_chunking_is_refused_for_a_record_without_units(memory):

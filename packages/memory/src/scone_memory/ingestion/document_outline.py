@@ -32,10 +32,12 @@ __all__ = ["DocumentOutline", "Heading", "SourceUnit", "document_outline", "outl
 _SEPARATOR = len(b"\n\n")
 _MAX_PDF_MANIFEST_BYTES = 25 * 1024 * 1024
 #: Locator stems that name a unit, first match wins: a page holds its tables' rows.
-_UNITS = (re.compile(r"^((?:page|slide|frame):\d+)(?:/|$)"),
+_UNITS = (re.compile(r"^((?:page|slide|frame|video:stream:\d+/frame):\d+)(?:/|$)"),
           re.compile(r"^(audio:\d+/segment:\d+)(?:/|$)"),
           re.compile(r"^(line:\d+)#"),
-          re.compile(r"^((?:[^/]+/)*?row:\d+)(?:/|$)"))
+          re.compile(r"^((?:[^/]+/)*?row:\d+)(?:/|$)"),
+          # The legacy Excel reader joins sheet and row with a colon; the sheet name is escaped.
+          re.compile(r"^(sheet:[^/:]*:row:\d+)$"))
 _CELL = re.compile(r"^(sheet:[^/]+)/cell:[A-Za-z]{1,3}(\d+)$")
 
 
@@ -60,8 +62,8 @@ def outline(segments: Sequence[DocumentSegment]) -> tuple[Heading, ...]:
 
 
 def unit_of(locator: str) -> str | None:
-    """The unit a locator names: a page, slide or frame; an audio segment; a JSON Lines
-    record; a table or sheet row, a spreadsheet cell's row. None for anything else."""
+    """The unit a locator names: a page, slide, image frame or video frame; an audio segment;
+    a JSON Lines record; a table or sheet row, a spreadsheet cell's row. None for anything else."""
     cell = _CELL.match(locator)
     if cell:
         return f"{cell[1]}/row:{cell[2]}"
@@ -96,6 +98,7 @@ def pdf_units(pages: Sequence[PdfPage]) -> tuple[SourceUnit, ...]:
 
 async def _retained_pdf(episode: NewEpisode, blobs: BlobStore) -> "PdfManifest | None":
     from .documents import PdfManifest
+    from .pdf import ParsedPdf, PdfLimits, validate_pdf
 
     original_id = episode.metadata.get("pdf_original")
     manifest_id = episode.metadata.get("pdf_manifest")
@@ -104,18 +107,21 @@ async def _retained_pdf(episode: NewEpisode, blobs: BlobStore) -> "PdfManifest |
     if (not original_id or not manifest_id or re.fullmatch(r"[a-f0-9]{64}", original_id) is None
             or re.fullmatch(r"[a-f0-9]{64}", manifest_id) is None or episode.source != f"attachment:{original_id}"):
         raise InvalidInput("PDF outline has invalid source identities")
-    _, raw = await blobs.get(episode.space, original_id)
+    original, raw = await blobs.get(episode.space, original_id)
     retained, encoded = await blobs.get(episode.space, manifest_id)
-    if (not 0 < len(encoded) <= _MAX_PDF_MANIFEST_BYTES or hashlib.sha256(raw).hexdigest() != original_id
+    if (not 0 < len(encoded) <= _MAX_PDF_MANIFEST_BYTES or original.media_type != "application/pdf"
+            or hashlib.sha256(raw).hexdigest() != original_id
             or hashlib.sha256(encoded).hexdigest() != manifest_id or retained.media_type != "application/json"):
         raise InvalidInput("PDF outline does not match its retained sources")
     try:
         manifest = PdfManifest.model_validate_json(encoded)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise InvalidInput("PDF outline requires a valid manifest") from None
     if (manifest.original_sha256 != original_id
             or manifest.text_sha256 != hashlib.sha256(episode.content.encode()).hexdigest()):
         raise InvalidInput("PDF outline does not match the episode")
+    # The pages must tile the text as the provenance route requires, or their spans cannot be cut.
+    validate_pdf(ParsedPdf(text=episode.content, parser=manifest.parser, pages=manifest.pages), PdfLimits(max_pages=1000))
     return manifest
 
 
