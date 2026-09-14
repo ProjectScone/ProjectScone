@@ -124,6 +124,9 @@ def sampled(data: BeirSet, *, queries: Optional[int] = None, seed: int = 0,
     """The judged queries to run, ``queries`` of them chosen by ``seed``, over a corpus
     cut to ``max_documents`` that keeps every document judged for them."""
     judged = sorted(data.qrels)
+    if not judged:
+        raise InvalidInput(f"no query is judged against a document the corpus holds: {data.unknown_documents} "
+                           f"judgements name unknown documents and {data.unknown_queries} unknown queries")
     if queries is not None:
         if queries < 1:
             raise InvalidInput(f"queries is a count from 1, not {queries}")
