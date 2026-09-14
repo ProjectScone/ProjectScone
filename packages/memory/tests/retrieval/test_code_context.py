@@ -304,7 +304,8 @@ async def test_the_cli_refuses_withholding_beside_anything_that_quotes_the_sourc
     route: `--code-context` and `--merge` both re-read the episode from
     the store *after* withholding and print source verbatim, so a
     withheld address in a default argument came back in the signature,
-    and `--parts` answered without withholding at all."""
+    and `--parts` answered without withholding at all. `--merge` now
+    merges before withholding, so it is allowed and must withhold."""
     import io
 
     from scone_memory.runtime.cli import build_parser, run
@@ -314,7 +315,11 @@ async def test_the_cli_refuses_withholding_beside_anything_that_quotes_the_sourc
               "    return json.dumps({\"email\": email}) + \" a body long enough to be a chunk\"\n")
     engine = await memory(source, source="contact.py", target=60)
     try:
-        for clash in ("--code-context", "--merge", "--parts"):
+        merged = io.StringIO()
+        code = await run(build_parser().parse_args(["recall", "contact email json dumps", "--withhold", "email",
+                                                    "--merge"]), engine, io.StringIO(""), merged)
+        assert code == 0 and address not in merged.getvalue(), merged.getvalue()
+        for clash in ("--code-context", "--parts"):
             out = io.StringIO()
             asked = ["recall", "contact email json dumps", "--withhold", "email", clash]
             with pytest.raises(InvalidInput) as raised:

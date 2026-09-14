@@ -1025,15 +1025,18 @@ question, and re-indexing to change it.
 ```bash
 scone recall "crane survey rust jib slew" --merge --limit 5
 # 1 passage(s) joined from 3 chunk(s)
-# joined 3 chunk(s) into #12: 11, 12, 13
+# joined 3 chunk(s) into #12: 11, 12, 13 (84% of it retrieved)
 ```
+
+Over HTTP, `GET /v1/recall?q=...&merge=true`, with the record in
+`merged`. Advertised as `recall.merge`.
 
 **No hierarchy and no re-index**, because every chunk already carries the
 byte span it came from: neighbours from one episode are merged by reading
 the span that contains them. The shape of a merge is therefore decided by
 what was actually retrieved, not by a decision taken at ingestion.
 
-Three rules it keeps:
+The rules it keeps:
 
 - **A merged passage says what went into it.** `from_chunks` names every
   chunk absorbed, because a citation nobody can check is worse than three
@@ -1041,10 +1044,30 @@ Three rules it keeps:
 - **It keeps the best score of its parts, never their sum.** A sum would
   make a merged passage outrank everything by arithmetic rather than by
   relevance.
-- **It is a passage, not a document.** Fragments further apart than
-  `max_merged` bytes are left alone and the report says so — silently
-  returning most of a document to answer a question about a sentence
-  would be worse than not merging.
+- **It is a passage, not a document.** An episode's fragments are joined
+  in clusters, taken in the order they sit, each spanning at most
+  `max_merged` bytes (4,000). A fragment too far from the rest is left
+  alone and the report says so; silently returning most of a document to
+  answer a question about a sentence would be worse than not merging. One
+  far fragment does not stop the fragments beside each other from
+  joining, and every cluster in an episode is merged from one read of it.
+- **It says how much of itself was retrieved.** A merge reads the text
+  between fragments too, so two short hits far apart would make a passage
+  mostly nobody retrieved. `shares` gives, for every merged passage, the
+  part of its bytes that retrieved chunks cover, overlaps counted once.
+  `merge_min_share` (`--merge-min-share`) leaves a sparser merge as
+  fragments, counted in `too_sparse`. The reference merges children into
+  a parent only when enough of them were retrieved; this is that rule in
+  the bytes a reader gets. It defaults to 0, no floor, and is unmeasured.
+- **A budget that bit says so.** At most 50 episodes are read per call;
+  the rest stand unjoined, counted in `not_read`.
+- **Withholding scans what a merge reads.** Merging runs after any window
+  and before withholding, so an address in the text between two
+  fragments is withheld like one inside them. The command line refused
+  `--withhold` beside `--merge` while it merged after withholding; it now
+  merges first and allows both. Merging does not combine with
+  `compress`: a merged passage is reported under one chunk, so
+  compression would not keep the others it holds.
 - **The caller's ranking survives.** Neighbours are found per episode and
   emitted in the order they arrived, a merged passage taking the place of
   its best fragment. Walking a ranked list by episode and appending group
@@ -1147,8 +1170,9 @@ span is never scored, only what widening added around it.
   naming no word the terms scorer can weigh cuts nothing, and `why` says
   each in words. `bytes_before` and `bytes_after` count what was saved.
 - **Refused without a window of sentences**, where there is nothing it
-  may cut, and on the command line alongside `--merge` or `--parts`,
-  which answer from the episode again and would put back what was cut.
+  may cut, and beside a merge, whose passage is reported under one chunk
+  so the other retrieved chunks inside it would not be kept; on the
+  command line also beside `--parts`, which answers without it.
   It runs after widening and before withholding, so what withholding
   scans is what is returned.
 
