@@ -122,3 +122,67 @@ def test_a_section_ends_at_the_next_heading_even_without_a_blank_line():
     for docstring in (google_style, numpy_style):
         assert parameter_descriptions(docstring) == {"city": "The city."}
         assert "Returns" in without_parameters(docstring) and "The city" not in without_parameters(docstring)
+
+
+def test_a_docstring_of_only_a_parameter_section_still_describes_the_tool():
+    def only_args(x: int) -> object:
+        """Args:
+            x: The x.
+        """
+        return x
+    tool = function_tool(only_args, revision="1", describe_from_docstring=True)
+    assert tool.description.strip() and tool.parameters["properties"]["x"]["description"] == "The x."
+
+
+def test_numpy_entries_that_share_a_line_describe_each_name():
+    docstring = ("Summary.\n\n    Parameters\n    ----------\n    a : int\n        The a.\n"
+                 "    x, y : int\n        Two numbers.\n")
+    assert parameter_descriptions(docstring) == {"a": "The a.", "x": "Two numbers.", "y": "Two numbers."}
+
+
+@pytest.mark.parametrize("field", ["param", "parameter", "arg", "argument", "key", "keyword"])
+def test_sphinx_field_synonyms_are_parameters_too(field):
+    docstring = f"Summary.\n\n    :{field} x: The x value.\n"
+    assert parameter_descriptions(docstring) == {"x": "The x value."}
+    assert without_parameters(docstring) == "Summary."
+
+
+def test_a_sphinx_description_after_a_blank_line_is_still_the_parameters():
+    docstring = "Summary.\n\n    :param x:\n\n        The x value.\n\n    Done.\n"
+    assert parameter_descriptions(docstring) == {"x": "The x value."}
+    assert without_parameters(docstring) == "Summary.\n\nDone."
+
+
+def test_headings_synonyms_star_args_and_a_description_on_the_next_line():
+    docstring = ("Summary.\n\n    Keyword Arguments:\n        *items: What to add.\n        **options:\n"
+                 "            How to add them.\n")
+    assert parameter_descriptions(docstring) == {"items": "What to add.", "options": "How to add them."}
+    numpy_style = "Summary.\n\n    Other Parameters\n    ----------------\n    limit : int\n        At most this many.\n"
+    assert parameter_descriptions(numpy_style) == {"limit": "At most this many."}
+
+
+def test_a_wrapped_callable_is_described_from_the_function_it_wraps():
+    import functools
+
+    class Counter:
+        def total(self, count: int, *, offset: int = 0) -> object:
+            """Add the offset to the count.
+
+            Args:
+                count: How many to start from.
+                offset: How much to add.
+            """
+            return count + offset
+
+    tool = function_tool(functools.partial(Counter().total, offset=2), name="total", revision="1",
+                         describe_from_docstring=True)
+    assert tool.parameters["properties"]["count"]["description"] == "How many to start from."
+    assert tool.description == "Add the offset to the count."
+
+
+def test_a_docstring_description_past_the_bound_names_its_parameter():
+    def verbose(x: int) -> object:
+        return x
+    verbose.__doc__ = "Summary.\n\nArgs:\n    x: " + "word " * 2000 + "\n"
+    with pytest.raises(ValueError, match="'x'"):
+        function_tool(verbose, revision="1", describe_from_docstring=True)
