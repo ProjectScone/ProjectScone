@@ -15,7 +15,7 @@ from functools import partial
 from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Literal, Mapping, Optional,
                     Sequence, TypedDict, cast)
 
-from . import (archive, catalog, fact_placement, fact_relationships, fact_review, file_claims, retention,
+from . import (archive, catalog, entity_merging, fact_placement, fact_relationships, fact_review, file_claims, retention,
                source_keys, vector_identity)
 from .identity import join_match
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
@@ -1402,6 +1402,19 @@ class MemoryEngine:
 
     async def close_fact(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         return await fact_review.close_fact(self._review_runtime(), space, fact_id, reason, actor=actor)
+
+    async def merge_entities(self, space: str, alias: str, into: str, *, reason: str,
+                             actor: Optional[str] = None) -> Fact:
+        """Record that ``alias`` names the entity ``into`` names, from now.
+        Every view of the graph, and the walk retrieval takes through it,
+        then treats the two as one entity; see ``memory.entity_merging``."""
+        return await entity_merging.merge_entities(self, space, alias, into, reason=reason, actor=actor)
+
+    async def unmerge_entities(self, space: str, alias: str, *, reason: str,
+                               actor: Optional[str] = None) -> Fact:
+        """Close the merge in force for ``alias``: the names part from now,
+        and a view of an earlier moment still shows them joined."""
+        return await entity_merging.unmerge_entities(self, space, alias, reason=reason, actor=actor)
 
     async def facts(
         self,
