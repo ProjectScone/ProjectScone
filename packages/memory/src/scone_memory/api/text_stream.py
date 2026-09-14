@@ -17,7 +17,23 @@ class TextWindow:
         self.last_sequence = 0
         self.closed = False
         self.failed = False
+        #: Readers listening right now. Text the window holds when it is
+        #: finished is kept for them until the last one leaves, and offered
+        #: to nobody who arrives after the end.
+        self.readers = 0
         self.changed = asyncio.Event()
+
+    def attach(self) -> None:
+        self.readers += 1
+
+    def detach(self) -> None:
+        self.readers -= 1
+        if self.closed and self.readers <= 0:
+            self._forget()
+
+    def _forget(self) -> None:
+        self._chunks.clear()
+        self._bytes = 0
 
     def append(self, text: str) -> None:
         if self.closed:
@@ -58,15 +74,16 @@ class TextWindow:
         self.changed.set()
 
     def finish(self) -> None:
-        """No more text will come. What the window holds stays readable:
-        the last chunk and the turn's receipt land microseconds apart, and
-        a reader one chunk behind at that moment was promised the text."""
+        """No more text will come. The text was provisional: a reader who
+        arrives from now on gets the turn's receipt and none of it. A
+        reader already listening keeps its promise -- the last chunk and
+        the receipt land microseconds apart, and one chunk behind at that
+        moment is not the same as too late -- so what the window holds
+        stays until the last such reader leaves. A failed window offers
+        nothing to anyone: text delivered before a failure may be wrong."""
         self.closed = True
-        if self.failed:
-            # Text delivered before a failure may be wrong or partial; a
-            # failed window offers none of it.
-            self._chunks.clear()
-            self._bytes = 0
+        if self.failed or self.readers <= 0:
+            self._forget()
         self.changed.set()
 
     def next_after(self, cursor: int) -> tuple[int | None, tuple[int, str | None] | None]:
