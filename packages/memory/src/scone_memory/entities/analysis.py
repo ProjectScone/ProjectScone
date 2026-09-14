@@ -303,6 +303,22 @@ def _guarded(graph: Adjacency, parts: list[list[str]], resolution: float) -> tup
     return sorted(guarded, key=lambda part: (-len(part), part[0])), fired
 
 
+def _rejoined(graph: Adjacency, parts: list[list[str]], hubs: set[str]) -> list[list[str]]:
+    """``parts`` with each hub, in name order, added to the part most of its link weight goes to."""
+    joined = [list(part) for part in parts]
+    for hub in sorted(hubs):
+        index_of = {node: index for index, part in enumerate(joined) for node in part}
+        pull: Counter[int] = Counter()
+        for other, weight in graph[hub].items():
+            if other in index_of:
+                pull[index_of[other]] += weight
+        if pull:
+            joined[min(pull, key=lambda index: (-pull[index], index))].append(hub)
+        else:
+            joined.append([hub])
+    return joined
+
+
 def _modularity(graph: Adjacency, membership: dict[str, str], resolution: float = 1.0) -> float:
     total = sum(sum(neighbours.values()) for neighbours in graph.values())
     if total == 0:
@@ -456,18 +472,11 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
     parts, levels = _partition(without, resolution)
     found = parts
     parts, fired = _guarded(without, parts, resolution)
-    before = (_modularity(without, {node: str(index) for index, part in enumerate(found) for node in part}, resolution)
+    parts = _rejoined(own, parts, hubs)
+    # Measured like the final modularity, over the graph's own entities with the hubs rejoined, so the two compare.
+    before = (_modularity(own, {node: str(index) for index, part in enumerate(_rejoined(own, found, hubs))
+                                for node in part}, resolution)
               if fired["split_oversized"] or fired["split_nested"] else None)
-    for hub in sorted(hubs):
-        index_of = {node: index for index, part in enumerate(parts) for node in part}
-        pull: Counter[int] = Counter()
-        for other, weight in own[hub].items():
-            if other in index_of:
-                pull[index_of[other]] += weight
-        if pull:
-            parts[min(pull, key=lambda index: (-pull[index], index))].append(hub)
-        else:
-            parts.append([hub])
     parts = sorted((sorted(part) for part in parts), key=lambda part: (-len(part), part[0]))
     membership = {node: _community_id(part) for part in parts for node in part}
     # An external belongs, for reading, with the community that names it
