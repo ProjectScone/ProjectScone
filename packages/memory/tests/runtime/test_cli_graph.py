@@ -72,6 +72,14 @@ async def test_export_writes_any_format_to_a_file(engine, tmp_path):
     assert ElementTree.fromstring(target.read_bytes()).tag.endswith("graphml")
 
 
+async def test_export_writes_the_community_map(engine, tmp_path):
+    target = tmp_path / "graph-communities.svg"
+    code, text = await graph(engine, "export", "--format", "communities", "--out", str(target))
+    root = ElementTree.fromstring(target.read_bytes())
+    assert code == 0 and root.tag == "{http://www.w3.org/2000/svg}svg"
+    assert root.find("{http://www.w3.org/2000/svg}title").text.startswith("Communities of ")
+
+
 @pytest.mark.parametrize("arguments, code", [(("path", "alice chen", "lisbon"), 0),
                                              (("context", "alice chen"), 0),
                                              (("entity", "alice chen"), 0),

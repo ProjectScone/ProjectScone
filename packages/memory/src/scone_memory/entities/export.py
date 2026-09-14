@@ -55,9 +55,9 @@ if TYPE_CHECKING:
     from .layout import Box, Drawing
 
 ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid", "svg",
-                       "canvas", "html", "explorer"]
+                       "canvas", "html", "explorer", "communities"]
 EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
-                                            "mermaid", "svg", "canvas", "html", "explorer")
+                                            "mermaid", "svg", "canvas", "html", "explorer", "communities")
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -849,7 +849,8 @@ def _drawing_notes(projection: EntityProjection, about: Mapping[str, object], le
             *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
             *([f"read limited by {', '.join(map(str, reasons))}"] if isinstance(reasons, list) and reasons else []),
             (f"{_many(left_out[0], 'entity', 'entities')} and {_many(left_out[1], 'relation')} left out of the drawing"
-             if any(left_out) else "every entity and relation read is drawn"), "values are not drawn"]
+             if any(left_out) else "every entity and relation read is drawn"),
+            *(["the communities format draws the graph by community"] if left_out[0] else []), "values are not drawn"]
 
 
 def _svg(projection: EntityProjection, about: Mapping[str, object]) -> Export:
@@ -979,6 +980,135 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
             "fill": "#222222", "stroke": "#ffffff", "stroke-width": "3", "paint-order": "stroke",
             "stroke-linejoin": "round"}, names[node.entity_id], widths[node.entity_id])
     return root, drawing, notes
+
+
+#: Communities the map draws at most, largest first, and links between them, strongest first.
+_MAP_COMMUNITIES, _MAP_LINKS = 80, 400
+_MAP_RADII = (16.0, 64.0)
+_MAP_LABEL_WIDTH = 180.0
+
+
+def _communities_map(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """The graph by community, for when it is too large to draw entity by
+    entity: a circle per community, its area by its members, and a line
+    between two communities weighted by the links that join them. A link is
+    a pair of entities one or more relations join, as the analysis counts
+    them. Entities with no relation to another share a grey circle. The
+    description says what view it draws, how much of the graph the analysis
+    read, and what the map left out."""
+    import math
+    from collections import Counter
+
+    from .analysis import cached_analysis
+    from .layout import UNLINKED
+
+    analysis = cached_analysis(projection)
+    ranked = sorted(analysis.communities, key=lambda community: (-len(community.members), community.community_id))
+    kept, left = ranked[:_MAP_COMMUNITIES], ranked[_MAP_COMMUNITIES:]
+    community_of = {member: community.community_id for community in kept for member in community.members}
+    label_of = {community.community_id: community.label for community in kept}
+    joined: Counter[tuple[str, str]] = Counter()
+    for pair in {tuple(sorted((relation.subject_id, relation.object_id))) for relation in projection.relations
+                 if relation.subject_id != relation.object_id}:
+        ends = sorted({community_of.get(pair[0], ""), community_of.get(pair[1], "")} - {""})
+        if len(ends) == 2:
+            joined[(ends[0], ends[1])] += 1
+    strongest = sorted(joined.items(), key=lambda item: (-item[1], item[0]))
+    links, links_left = strongest[:_MAP_LINKS], strongest[_MAP_LINKS:]
+
+    # (id, label, members, title, colour), largest first; the unlinked last.
+    circles = [(community.community_id, community.label, len(community.members),
+                f"{community.label}: {_many(len(community.members), 'entity', 'entities')}, "
+                f"{_many(community.internal_links, 'link')} inside, {community.boundary_links} to other communities",
+                _PALETTE[index % (len(_PALETTE) - 1)]) for index, community in enumerate(kept)]
+    isolated = analysis.coverage.isolated_entities
+    if isolated:
+        circles.append((UNLINKED, "no relation", isolated, f"no relation: {_many(isolated, 'entity', 'entities')}",
+                        _PALETTE[-1]))
+    largest = max((members for _, _, members, _, _ in circles), default=1)
+    smallest_r, largest_r = _MAP_RADII
+    names = {group_id: _xml_text(label, _SVG_LABEL) for group_id, label, _, _, _ in circles}
+    # Circles sit on one ring, largest first, each given arc in proportion to
+    # its size, so a line between two is a chord across the middle and never
+    # runs through a third. Names are written outward, clear of the chords.
+    sized = [(group_id, smallest_r + (largest_r - smallest_r) * math.sqrt(members / largest))
+             for group_id, _, members, _, _ in circles]
+    gap = 22.0
+    arcs = [2 * radius + gap for _, radius in sized]
+    ring = sum(arcs) / (2 * math.pi) if len(sized) > 1 else 0.0
+    reach = ring + largest_r + 8 + _MAP_LABEL_WIDTH
+    centre_x, centre_y = reach + 16, reach + 16
+    placed: dict[str, tuple[float, float, float, float]] = {}
+    turned = 0.0
+    for (group_id, radius), arc in zip(sized, arcs):
+        angle = -math.pi / 2 + 2 * math.pi * (turned + arc / 2) / sum(arcs) if ring else -math.pi / 2
+        placed[group_id] = (centre_x + ring * math.cos(angle), centre_y + ring * math.sin(angle), radius, angle)
+        turned += arc
+    total_width, total_height = 2 * centre_x, 2 * centre_y
+
+    coverage = analysis.coverage
+    reasons = about.get("coverage")
+    read_reasons = reasons.get("reasons") if isinstance(reasons, Mapping) else None
+    notes = [f"projection {projection.digest[:12]} at revision {projection.revision}",
+             *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
+             *([f"read limited by {', '.join(map(str, read_reasons))}"] if isinstance(read_reasons, list) and read_reasons
+               else []),
+             (f"communities found among {coverage.entities_analysed} of the {coverage.entities_total} entities with a "
+              f"relation to another" if coverage.truncated else "communities of every entity with a relation to another"),
+             (f"{_many(len(left), 'community', 'communities')} "
+              f"({_many(sum(len(community.members) for community in left), 'entity', 'entities')}) left out of the map"
+              if left else "every community is drawn"),
+             *([f"{_many(sum(count for _, count in links_left), 'link')} between "
+                f"{_many(len(links_left), 'pair')} of communities left out of the map"] if links_left else []),
+             "a link is a pair of entities one or more relations join"]
+
+    def number(value: float) -> str:
+        return f"{value:.1f}"
+
+    ns = "http://www.w3.org/2000/svg"
+    ElementTree.register_namespace("", ns)
+    root = ElementTree.Element(f"{{{ns}}}svg", {
+        "viewBox": f"0 0 {number(total_width)} {number(total_height)}", "width": number(total_width),
+        "height": number(total_height), "role": "img",
+        "font-family": "system-ui, -apple-system, 'Segoe UI', sans-serif", "font-size": "11"})
+    ElementTree.SubElement(root, f"{{{ns}}}title").text = f"Communities of {_xml_text(projection.space)}"
+    ElementTree.SubElement(root, f"{{{ns}}}desc").text = "; ".join(_xml_text(note) for note in notes)
+    ElementTree.SubElement(root, f"{{{ns}}}rect", {"width": "100%", "height": "100%", "fill": "#ffffff"})
+    lines = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "links", "stroke": "#6b6b6b"})
+    for (first, second), count in links:
+        (ax, ay, ar, _), (bx, by, br, _) = placed[first], placed[second]
+        dx, dy = bx - ax, by - ay
+        length = max(math.hypot(dx, dy), 1e-9)
+        ux, uy = dx / length, dy / length
+        a, b = sorted((first, second), key=lambda group_id: (label_of[group_id], group_id))
+        line = ElementTree.SubElement(lines, f"{{{ns}}}line", {
+            "data-from-group": first, "data-to-group": second,
+            "x1": number(ax + ux * ar), "y1": number(ay + uy * ar), "x2": number(bx - ux * br), "y2": number(by - uy * br),
+            "stroke-width": number(1.0 + min(6.0, math.log2(count))), "stroke-opacity": "0.45"})
+        ElementTree.SubElement(line, f"{{{ns}}}title").text = (
+            f"{_many(count, 'link')} between {_xml_text(label_of[a])} and {_xml_text(label_of[b])}")
+    groups = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "communities"})
+    for group_id, label, members, title, colour in circles:
+        cx, cy, radius, angle = placed[group_id]
+        group = ElementTree.SubElement(groups, f"{{{ns}}}g", {"data-group": group_id})
+        circle = ElementTree.SubElement(group, f"{{{ns}}}circle", {
+            "cx": number(cx), "cy": number(cy), "r": number(radius), "fill": colour, "fill-opacity": "0.8",
+            "stroke": "#ffffff", "stroke-width": "2"})
+        ElementTree.SubElement(circle, f"{{{ns}}}title").text = _xml_text(title)
+        # The name starts just outside the circle, on the side facing away from the ring's centre.
+        across, down = math.cos(angle), math.sin(angle)
+        anchor = "start" if across > 0.3 else "end" if across < -0.3 else "middle"
+        at_x = cx + (radius + 8) * across
+        at_y = cy + (radius + 8) * down + (10 if down > 0.3 else -14 if down < -0.3 else -2)
+        halo = {"text-anchor": anchor, "fill": "#222222", "stroke": "#ffffff", "stroke-width": "3",
+                "paint-order": "stroke", "stroke-linejoin": "round"}
+        _fitted(group, f"{{{ns}}}text", {"x": number(at_x), "y": number(at_y), "font-weight": "600", **halo},
+                names[group_id], min(_text_width(names[group_id]), _MAP_LABEL_WIDTH))
+        count_text = _many(members, "entity", "entities")
+        _fitted(group, f"{{{ns}}}text", {"x": number(at_x), "y": number(at_y + 13), **halo, "fill": "#5b5b5b"},
+                count_text, _text_width(count_text))
+    body = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True).replace(b"\r", b"&#13;")
+    return Export(body + b"\n", "image/svg+xml", "graph-communities.svg")
 
 
 _HTML_STYLE = """
@@ -1345,6 +1475,7 @@ def _canvas(projection: EntityProjection, about: Mapping[str, object]) -> Export
 _WRITERS: dict[str, Callable[[EntityProjection, Mapping[str, object]], Export]] = {
     "json": _node_link, "graphml": _graphml, "gexf": _gexf, "cypher": _cypher, "csv": _csv, "jsonld": _json_ld,
     "obsidian": _obsidian, "wiki": _wiki, "mermaid": _mermaid, "svg": _svg, "canvas": _canvas, "html": _html,
+    "communities": _communities_map,
 }
 
 

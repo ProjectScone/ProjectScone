@@ -3028,6 +3028,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them, grouped by community and styled by kind | GitHub, Markdown viewers, docs |
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
 | `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
+| `communities` | an SVG map of the graph by community: a circle per community sized by its members, a line between communities weighted by the links joining them | a graph too large to draw entity by entity |
 | `html` | one page: the drawing, search that moves the view to the entity chosen, a legend that shows or hides each community, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
 | `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate; what the graph names but never reads (`typing`, a package) hidden until the legend shows it, then drawn small; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
 
@@ -3115,6 +3116,26 @@ How each format places values and escapes its own syntax:
     title, and each entity, name the community (`data-group`); each arrow
     names its relation and the communities at both ends
     (`data-relation`, `data-from-group`, `data-to-group`), loops included.
+- **The community map** (`communities`) is for a graph the drawings cannot
+  show whole. They draw the 200 most connected entities, and when they
+  leave some out their description says the community map exists.
+  - Every community the analysis found is a circle, up to 80, largest
+    first. A circle's area grows with its members, and entities with no
+    relation to another share a grey one.
+  - The circles sit on one ring, each given arc in proportion to its size.
+    A line between two communities is a chord across the middle, so it
+    never runs through a third, and names are written outward, clear of
+    the lines.
+  - A line's weight and title count the links between the two
+    communities. A link is a pair of entities that one or more relations
+    join, which is how the analysis counts a community's links inside
+    and to others. Each circle's title gives its members and those two
+    counts. Up to 400 lines are drawn, strongest first.
+  - The description says which view the map draws. It says whether the
+    analysis found communities among every entity with a relation to
+    another or only among the 20,000 most strongly linked. It gives how many
+    communities and their entities were left out, how many links between
+    how many pairs of communities, and what a link is.
 - **Canvas** cards and group labels are escaped as notes are. Positions
   and sizes are whole numbers, as JSON Canvas requires. In the vault's
   `graph.canvas` each card is the entity's own note.
