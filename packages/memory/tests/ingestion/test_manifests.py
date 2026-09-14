@@ -223,6 +223,9 @@ def test_a_manifest_is_known_by_its_name_wherever_it_sits(path, expected):
     ("package.json", '["not", "an", "object"]'),
     ("Cargo.toml", "[dependencies]\nserde = 1"),
     ("pom.xml", "<project><dependencies>"), ("pom.xml", "<notes/>"), ("composer.json", "[1, 2]"),
+    ("pom.xml", '<!DOCTYPE project [<!ENTITY x SYSTEM "file:///etc/passwd">]><project><artifactId>&x;</artifactId></project>'),
+    ("pom.xml", '<!DOCTYPE lol [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;&a;">]><project><groupId>g</groupId><artifactId>&b;</artifactId></project>'),
+    ("App.csproj", '<?xml version="1.0"?><!DOCTYPE Project SYSTEM "http://example.org/p.dtd"><Project/>'),
     ("App.csproj", "<Project><ItemGroup>"), ("Pipfile", "[packages\nx = '*'"),
 ])
 def test_a_manifest_that_does_not_parse_claims_nothing_and_never_raises(path, content):

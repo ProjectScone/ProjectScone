@@ -45,6 +45,7 @@ import tomllib
 from typing import Callable, Optional
 import xml.etree.ElementTree as ElementTree
 
+from ..core.errors import InvalidInput
 from .code import MAX_LINES, _line_starts
 from .code_graph import DEFINES, MAX_CLAIMS, CodeClaim
 
@@ -327,10 +328,31 @@ def _child_text(element: ElementTree.Element, name: str) -> Optional[str]:
     return None
 
 
+#: A manifest never needs a DTD or an entity, and both are how an XML
+#: parser is made to read a file it was not given or expand a kilobyte
+#: into gigabytes. A document carrying either claims nothing.
+_XML_UNSAFE = re.compile(r"<!(?:DOCTYPE|ENTITY)", re.IGNORECASE)
+#: Bytes of XML read as a manifest; a POM is kilobytes.
+XML_MANIFEST_MAX_BYTES = 4 * 1024 * 1024
+
+
 def _xml(content: str) -> Optional[ElementTree.Element]:
+    """The document's tree, or None: refused with a DTD or an entity,
+    past the byte bound, or malformed. Parsed by the bounded, defused
+    parser the document readers use where that extra is installed, and
+    by the standard library -- safe once DTDs are refused -- where not."""
+    if _XML_UNSAFE.search(content) or len(content.encode("utf-8")) > XML_MANIFEST_MAX_BYTES:
+        return None
     try:
-        return ElementTree.fromstring(content)
-    except ElementTree.ParseError:
+        from .formats.bounded_xml import parse_xml
+
+        return parse_xml(content)
+    except InvalidInput as refused:
+        if "require" in str(refused):  # the defused parser is an extra; the base install parses below
+            try:
+                return ElementTree.fromstring(content)
+            except ElementTree.ParseError:
+                return None
         return None
 
 
