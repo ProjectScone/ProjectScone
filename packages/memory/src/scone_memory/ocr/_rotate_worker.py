@@ -8,10 +8,14 @@ import sys
 def main() -> None:
     from PIL import Image
 
+    from scone_memory.ocr.tesseract import MAX_PNG_BYTES
+
     degrees, max_pixels = int(sys.argv[1]), int(sys.argv[2])
     if degrees not in (90, 180, 270) or max_pixels < 1:
         raise SystemExit(2)
-    data = sys.stdin.buffer.read(64 * 1024 * 1024 + 1)
+    data = sys.stdin.buffer.read(MAX_PNG_BYTES + 1)
+    if len(data) > MAX_PNG_BYTES:
+        raise SystemExit(4)
     Image.MAX_IMAGE_PIXELS = max_pixels
     with Image.open(BytesIO(data)) as image:
         if image.format != 'PNG' or image.width * image.height > max_pixels:

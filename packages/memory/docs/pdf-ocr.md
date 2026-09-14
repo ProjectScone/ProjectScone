@@ -51,6 +51,11 @@ so regions still match the page's own geometry. The engine name says what
 happened: `:rotated90`, `:rotated180` or `:rotated270`; `:osd-upright`;
 `:osd-unsure` when a turn was detected below the confidence; `:osd-unknown`
 when the detection could not judge, as on a page with too few characters.
+Without the `osd` data installed the detection always fails, so a failed
+detection checks the installed languages once and, when `osd` is missing,
+refuses the page with that reason instead of reading every page as one it
+could not judge. A language list too long to fit the engine name with the
+orientation suffix (96 characters) is refused when the engine is built.
 Each checked page costs one more Tesseract run. With the setting on, the
 hosted OCR identity used by document jobs and directory sync ends
 `:orientation`, so documents extracted before are extracted again.
