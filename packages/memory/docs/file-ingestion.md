@@ -190,7 +190,11 @@ A chart in a DOCX or PPTX file becomes a segment of its own after the text it
 sits in (`paragraph:3/chart:1`, `slide:2/chart:1`; `content_role` `chart`,
 `parent_locator` its paragraph or slide). Its text is the chart's title and
 kind, then one line per series of category and value pairs, for example
-`Revenue (bar chart)` then `2025: Q1 10; Q2 12.5`. Only the values cached in the
+`Revenue (bar chart)` then `2025: Q1 10; Q2 12.5`. The chart kinds Office 2016
+added (waterfall, histogram, treemap, sunburst, box and whisker, funnel) keep
+their data apart from their series; each series is read from the data it names,
+its kind is its layout (`waterfall`, `treemap`), and of nested category levels
+the first is read and `chart_category_levels_cut` counts the rest. Only the values cached in the
 chart part are read: nothing is recalculated from the embedded workbook and
 nothing is rendered. A series without categories is read by point number. At
 most 64 series per chart and 1,000 points per series are read; past those,

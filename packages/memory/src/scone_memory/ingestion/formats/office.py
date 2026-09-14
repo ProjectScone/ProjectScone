@@ -78,6 +78,8 @@ _OFFICE_RELATIONSHIP_NAMESPACES = frozenset({
     'http://purl.oclc.org/ooxml/officeDocument/relationships',
 })
 _MAIN_PART_TYPES = frozenset(namespace + '/officeDocument' for namespace in _OFFICE_RELATIONSHIP_NAMESPACES)
+#: Relationship types outside the standard namespaces that are read, by their full type.
+_EXTENDED_RELATIONSHIPS = {'http://schemas.microsoft.com/office/2014/relationships/chartEx': 'chartEx'}
 
 
 def _local(tag: str) -> str:
@@ -178,7 +180,8 @@ def _relationships(bundle: SafeArchive, source: str) -> dict[str, tuple[str, str
         if entry.get('TargetMode', 'Internal') != 'Internal':
             continue
         namespace, _, kind = entry.get('Type', '').rpartition('/')
-        result[entry.get('Id', '')] = (entry.get('Target', ''), kind if namespace in _OFFICE_RELATIONSHIP_NAMESPACES else '')
+        result[entry.get('Id', '')] = (entry.get('Target', ''), kind if namespace in _OFFICE_RELATIONSHIP_NAMESPACES
+                                       else _EXTENDED_RELATIONSHIPS.get(entry.get('Type', ''), ''))
     return result
 
 
@@ -481,7 +484,10 @@ def _xlsx(bundle: SafeArchive, output: _Output) -> None:
 
 _CHART_NAMESPACES = ('http://schemas.openxmlformats.org/drawingml/2006/chart',
                      'http://purl.oclc.org/ooxml/drawingml/chart')
-_CHART_REFERENCES = frozenset(f'{{{namespace}}}chart' for namespace in _CHART_NAMESPACES)
+#: The chart kinds Office 2016 added (waterfall, histogram, treemap and others), whose series
+#: name their data by id.
+_CHARTEX = 'http://schemas.microsoft.com/office/drawing/2014/chartex'
+_CHART_REFERENCES = frozenset(f'{{{namespace}}}chart' for namespace in (*_CHART_NAMESPACES, _CHARTEX))
 #: Series read from one chart, and cached points from one series. Past either, the chart's
 #: segment says how many were left out.
 MAX_CHART_SERIES = 64
@@ -498,9 +504,89 @@ def _chart_cache(element: Element | None) -> dict[int, str]:
     return values
 
 
+class _ChartLines:
+    """A chart's series as lines, counting what was read and what the bounds left out."""
+
+    def __init__(self) -> None:
+        self.kinds: list[str] = []
+        self.lines: list[str] = []
+        self.series = self.points = self.series_cut = self.points_cut = self.levels_cut = 0
+
+    def kind(self, kind: str) -> None:
+        if kind not in self.kinds:
+            self.kinds.append(kind)
+
+    def room(self) -> bool:
+        if self.series >= MAX_CHART_SERIES:
+            self.series_cut += 1
+            return False
+        self.series += 1
+        return True
+
+    def add(self, label: str, categories: dict[int, str], values: dict[int, str]) -> None:
+        kept = sorted(values)[:MAX_CHART_POINTS]
+        self.points += len(kept)
+        self.points_cut += len(values) - len(kept)
+        pairs = '; '.join(f'{categories.get(index, str(index + 1))} {values[index]}' for index in kept)
+        self.lines.append(f'{label or f"Series {self.series}"}: {pairs}'.rstrip())
+
+    def segment(self, title: str) -> tuple[str, dict[str, str]] | None:
+        if not self.kinds:
+            return None
+        details = {'chart_type': ','.join(self.kinds), 'chart_series': str(self.series), 'chart_points': str(self.points),
+                   **({'chart_series_cut': str(self.series_cut)} if self.series_cut else {}),
+                   **({'chart_points_cut': str(self.points_cut)} if self.points_cut else {}),
+                   **({'chart_category_levels_cut': str(self.levels_cut)} if self.levels_cut else {})}
+        return '\n'.join([f'{title or "Chart"} ({", ".join(self.kinds)} chart)', *self.lines]), details
+
+
+def _extended_segment(root: Element) -> tuple[str, dict[str, str]] | None:
+    """An Office 2016 chart: each series names its data by id, and each dimension of that data
+    holds its points in levels. The first category level is read; the rest are counted."""
+    body = _child(root, 'chart')
+    plot = None if body is None else _child(body, 'plotArea')
+    region = None if plot is None else _child(plot, 'plotAreaRegion')
+    if body is None or region is None:
+        return None
+    store = _child(root, 'chartData')
+    data = {} if store is None else {entry.get('id', ''): entry for entry in store if _local(entry.tag) == 'data'}
+    heading = _child(body, 'title')
+    title = '' if heading is None else ' '.join(''.join(v.text or '' for v in _elements(heading, 'v')).split())
+    found = _ChartLines()
+    for entry in (child for child in region if _local(child.tag) == 'series'):
+        found.kind(entry.get('layoutId', '') or 'extended')
+        if not found.room():
+            continue
+        named = _child(entry, 'tx')
+        label = '' if named is None else ' '.join(''.join(v.text or '' for v in _elements(named, 'v')).split())
+        pointer = _child(entry, 'dataId')
+        source = data.get('' if pointer is None else pointer.get('val', ''))
+        dimensions = [] if source is None else list(source)
+        categories = next((dimension for dimension in dimensions if dimension.get('type') == 'cat'), None)
+        values = next((dimension for dimension in dimensions if _local(dimension.tag) == 'numDim'
+                       and dimension.get('type') in ('val', 'size', 'y')), None)
+        levels = [] if categories is None else [level for level in categories if _local(level.tag) == 'lvl']
+        found.levels_cut += max(0, len(levels) - 1)
+        first = next((level for level in ([] if values is None else values) if _local(level.tag) == 'lvl'), None)
+        found.add(label, _level_points(levels[0] if levels else None), _level_points(first))
+    return found.segment(title)
+
+
+def _level_points(level: Element | None) -> dict[int, str]:
+    points: dict[int, str] = {}
+    for point in () if level is None else (child for child in level if _local(child.tag) == 'pt'):
+        index = point.get('idx', '')
+        if index.isdecimal() and point.text is not None:
+            points.setdefault(int(index), ' '.join(point.text.split()))
+    return points
+
+
 def _chart_segment(root: Element) -> tuple[str, dict[str, str]] | None:
     """A chart part as its title and kind, then one line per series of category and value."""
-    if _local(root.tag) != 'chartSpace' or root.tag.rpartition('}')[0][1:] not in _CHART_NAMESPACES:
+    namespace = root.tag.rpartition('}')[0][1:]
+    if _local(root.tag) == 'chartSpace' and namespace == _CHARTEX:
+        return _extended_segment(root)
+    if _local(root.tag) != 'chartSpace' or namespace not in _CHART_NAMESPACES:
         return None
     body = _child(root, 'chart')
     plot = None if body is None else _child(body, 'plotArea')
@@ -508,21 +594,15 @@ def _chart_segment(root: Element) -> tuple[str, dict[str, str]] | None:
         return None
     heading = _child(body, 'title')
     title = '' if heading is None else ' '.join(''.join(t.text or '' for t in _elements(heading, 't')).split())
-    kinds: list[str] = []
-    lines: list[str] = []
-    series = points = series_cut = points_cut = 0
+    found = _ChartLines()
     for group in plot:
         name = _local(group.tag)
         if not name.endswith('Chart'):
             continue
-        kind = name.removesuffix('Chart').removesuffix('3D')
-        if kind not in kinds:
-            kinds.append(kind)
+        found.kind(name.removesuffix('Chart').removesuffix('3D'))
         for entry in (child for child in group if _local(child.tag) == 'ser'):
-            if series >= MAX_CHART_SERIES:
-                series_cut += 1
+            if not found.room():
                 continue
-            series += 1
             named = _child(entry, 'tx')
             label = '' if named is None else next(iter(_chart_cache(named).values()), '') or ' '.join(
                 ''.join(v.text or '' for v in _elements(named, 'v')).split())
@@ -530,18 +610,8 @@ def _chart_segment(root: Element) -> tuple[str, dict[str, str]] | None:
             across = _child(entry, 'xVal') if across is None else across
             up = _child(entry, 'val')
             up = _child(entry, 'yVal') if up is None else up
-            categories, values = _chart_cache(across), _chart_cache(up)
-            kept = sorted(values)[:MAX_CHART_POINTS]
-            points += len(kept)
-            points_cut += len(values) - len(kept)
-            pairs = '; '.join(f'{categories.get(index, str(index + 1))} {values[index]}' for index in kept)
-            lines.append(f'{label or f"Series {series}"}: {pairs}'.rstrip())
-    if not kinds:
-        return None
-    details = {'chart_type': ','.join(kinds), 'chart_series': str(series), 'chart_points': str(points),
-               **({'chart_series_cut': str(series_cut)} if series_cut else {}),
-               **({'chart_points_cut': str(points_cut)} if points_cut else {})}
-    return '\n'.join([f'{title or "Chart"} ({", ".join(kinds)} chart)', *lines]), details
+            found.add(label, _chart_cache(across), _chart_cache(up))
+    return found.segment(title)
 
 
 def _chart(bundle: SafeArchive, part: str, relations: dict[str, tuple[str, str]], reference: Element,
@@ -551,7 +621,7 @@ def _chart(bundle: SafeArchive, part: str, relations: dict[str, tuple[str, str]]
     identifier = next((value for key, value in reference.attrib.items() if key.endswith('}id')), '')
     relation = relations.get(identifier)
     found = None
-    if relation is not None and relation[1] == 'chart':
+    if relation is not None and relation[1] in ('chart', 'chartEx'):
         try:
             path = _resolve(part, relation[0])
             found = _chart_segment(bundle.xml(path))
