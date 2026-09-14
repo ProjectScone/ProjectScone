@@ -6,7 +6,7 @@ owns validation, chunking, deduplication, embedding, write ordering and recovery
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
@@ -153,6 +153,10 @@ class IngestionRuntime:
     #: The headings an imported file marked itself, read from its retained
     #: manifest; None for an episode that is not an imported file.
     document_headings: Callable[[NewEpisode], Awaitable[tuple[Heading, ...] | None]] | None = None
+    #: Headings already read in this dispatch, by space and content hash:
+    #: the cut, its receipt and the embedding inputs ask for the same ones,
+    #: and each read fetches, hashes and validates the whole manifest.
+    headings_read: dict[tuple[str, str], tuple[Heading, ...] | None] = field(default_factory=dict)
 
 
 def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False) -> NewEpisode:
@@ -214,7 +218,10 @@ async def headings_of(runtime: IngestionRuntime, episode: NewEpisode | None) -> 
     """The headings a file episode's own manifest marks, or None when there is none to read."""
     if episode is None or runtime.document_headings is None:
         return None
-    return await runtime.document_headings(episode)
+    key = (episode.space, episode.content_hash)
+    if key not in runtime.headings_read:
+        runtime.headings_read[key] = await runtime.document_headings(episode)
+    return runtime.headings_read[key]
 
 
 def context_lines(content: str, source: str | None, spans: Sequence[tuple[int, int]],
