@@ -829,6 +829,15 @@ batch record (`length`, `code`, `structure` or `semantic`; unset keeps
 the rule). The receipt says which way was actually used -- `code` for a
 code source unless the record said otherwise -- and, for structure, the
 chunker's own counts (`at_boundary`, `by_size`, `over_target`, `capped`).
+
+An imported Word, OpenDocument or HTML file is stored as its paragraphs'
+text, where a heading is a line like any other. Its reader keeps each
+heading's level beside the text (`heading_level`), and a structure cut of
+that file reads those headings back from the manifest kept with the
+episode: it cuts at them whatever the line says, and the receipt carries
+`document_headings`, the number of the file's own headings it read. A
+record that is not an imported file carries no such count. A manifest
+that does not match the episode's text is refused rather than ignored.
 The choice is kept on the episode's metadata under `chunking`, so a
 recovery after an interruption cuts the way the record asked; `code` on
 a source whose name does not say its language, a mode not on the list,
@@ -897,14 +906,18 @@ about: "within 30 days" under "## Refund policy" in "# Chapter 4" is,
 once cut, only "within 30 days". With `heading_context=True`
 (`SCONE_HEADING_CONTEXT=1`) each chunk's embedding input starts with the
 path of headings above it, outermost first, and a code chunk's starts
-with its file and the declarations it sits inside.
+with its file and the declarations it sits inside. For an imported file,
+the headings its reader marked count as well, each running to the next
+of the same or a higher level; recovery reads the same ones, so a
+recovered chunk is embedded as an uninterrupted one would have been.
 
 - **Only what is embedded changes.** Stored text is untouched, so recall
   still returns the exact excerpt.
 - **The path is bounded.** At most `MAX_HEADING_CONTEXT_BYTES`; a longer
   path keeps its innermost headings, and the receipt counts the chunks it
   was cut for.
-- **It is part of the vector writer's identity.** Vectors embedded with
+- **It is part of the vector writer's identity** (`heading-path-v2` since
+  imported files' own headings joined the path). Vectors embedded with
   headings and vectors embedded without them never answer one search
   together: turning the setting on or off for an existing store reads as
   a mismatch until the vectors are rebuilt.
