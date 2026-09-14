@@ -50,6 +50,7 @@ import re
 from typing import TYPE_CHECKING, Mapping, Optional, Sequence
 
 from ..capture.redact import SECRET_PATTERNS
+from .lexical import _UNSPACED_CHAR
 from ..core.errors import InvalidInput
 from ..core.models import Fact, RecallItem
 
@@ -88,7 +89,7 @@ MAX_SCANNED = 200_000
 SURFACES: tuple[str, ...] = ("text", "source", "tags", "metadata")
 #: A fact's text-bearing fields. ``quote`` is an exact substring of the
 #: episode, so it carries whatever the episode carried.
-FACT_SURFACES: tuple[str, ...] = ("subject", "predicate", "object", "quote")
+FACT_SURFACES: tuple[str, ...] = ("subject", "predicate", "object", "quote", "closed_reason")
 
 
 def _luhn(digits: str) -> bool:
@@ -169,53 +170,78 @@ def known_names(projection: "EntityProjection", kinds: Sequence[str]) -> dict[st
     return {kind: tuple(sorted(spellings)) for kind, spellings in names.items()}
 
 
-async def names_for(engine: object, space: str, kinds: Sequence[str]) -> Optional[dict[str, tuple[str, ...]]]:
-    """The names to withhold for the name kinds in ``kinds``, read from the space's graph
-    before anything is searched; None when no name kind was asked for. A graph still being
+@dataclass(frozen=True)
+class NamesRead:
+    """The names the graph held, and whether the read of the graph was capped."""
+
+    names: dict[str, tuple[str, ...]]
+    capped: bool = False
+
+
+async def names_for(engine: object, space: str, kinds: Sequence[str],
+                    as_of: Optional[str] = None) -> Optional[NamesRead]:
+    """The names to withhold for the name kinds in ``kinds``, read from the space's graph at
+    ``as_of`` -- the moment the recall asks about, since a past passage names who counted then
+    -- before anything is searched; None when no name kind was asked for. A graph still being
     built cannot say which names it holds, so the request is refused, not answered with none."""
     if not any(kind in NAME_KINDS for kind in kinds):
         return None
-    from ..entities.read import load_projection
+    from ..entities.read import load_projection, read_record
     from ..entities.service import ProjectionBuilding
 
     try:
-        projection, _ = await load_projection(engine, space, mode="current")  # type: ignore[arg-type]
+        projection, coverage = await load_projection(engine, space, mode="current", as_of=as_of)  # type: ignore[arg-type]
     except ProjectionBuilding:
         raise InvalidInput("the space's graph is still being built, so the names to withhold are not known "
                            "yet; ask again when it is ready") from None
-    return known_names(projection, kinds)
+    complete, _ = read_record(coverage)
+    return NamesRead(known_names(projection, kinds), capped=not complete)
 
 
-def _name_patterns(chosen: Sequence[str], names: Optional[Mapping[str, Sequence[str]]]
-                   ) -> tuple[dict[str, "re.Pattern[str]"], dict[str, int], int]:
+def _name_pattern(chosen: Sequence[str], names: Optional[Mapping[str, Sequence[str]]]
+                  ) -> tuple[Optional["re.Pattern[str]"], dict[str, str], dict[str, int], int]:
+    """One pattern for every name of every name kind asked for, longest first across kinds,
+    so a shorter name of one kind never splits a longer name of another."""
     wanted = [kind for kind in chosen if kind in NAME_KINDS]
     if wanted and names is None:
         raise InvalidInput(f"withholding {', '.join(wanted)} names needs the names the space's graph holds; "
                            f"pass them from known_names")
-    patterns: dict[str, "re.Pattern[str]"] = {}
+    kind_of: dict[str, str] = {}
     known: dict[str, int] = {}
     skipped = 0
     for kind in wanted:
         spellings = set((names or {}).get(kind, ()))
-        usable = sorted((name for name in spellings if len(name) >= MIN_NAME_CHARS), key=lambda name: (-len(name), name))
+        usable = [name for name in spellings if len(name) >= MIN_NAME_CHARS]
         skipped += len(spellings) - len(usable)
         known[kind] = len(usable)
-        if usable:
-            # Longest first, so "Acme Robotics Lisbon" is withheld whole before "Acme" inside it.
-            spelt = (r"\s+".join(re.escape(word) for word in name.split()) for name in usable)
-            patterns[kind] = re.compile(r"(?<!\w)(?:" + "|".join(spelt) + r")(?!\w)", re.IGNORECASE)
-    return patterns, known, skipped
+        for name in usable:
+            kind_of.setdefault(_folded(name), kind)
+    if not kind_of:
+        return None, kind_of, known, skipped
+    alternatives = []
+    for name in sorted(kind_of, key=lambda folded: (-len(folded), folded)):
+        spelt = r"\s+".join(re.escape(word) for word in name.split())
+        # A word boundary only where the name is written with spaces: 田中太郎さん has no boundary to find.
+        before = "" if _UNSPACED_CHAR.match(name[0]) else r"(?<!\w)"
+        after = "" if _UNSPACED_CHAR.match(name[-1]) else r"(?!\w)"
+        alternatives.append(before + spelt + after)
+    return re.compile("|".join(alternatives), re.IGNORECASE), kind_of, known, skipped
+
+
+def _folded(name: str) -> str:
+    return " ".join(name.split()).casefold()
 
 
 def withhold(items: Sequence[RecallItem], *, facts: Sequence[Fact] = (),
              kinds: Sequence[str] = KINDS, scan: int = MAX_SCANNED,
-             names: Optional[Mapping[str, Sequence[str]]] = None) -> Withheld:
+             names: Optional[Mapping[str, Sequence[str]]] = None, names_capped: bool = False) -> Withheld:
     """Replace what the named kinds match, and say what was replaced. Name kinds need
-    ``names``, the spellings the space's graph holds (``known_names``)."""
+    ``names``, the spellings the space's graph holds (``known_names``); ``names_capped``
+    says the read of the graph they came from was capped."""
     chosen = chosen_kinds(kinds)
     if not 1 <= scan <= MAX_SCANNED:
         raise InvalidInput(f"the scan bound must be from 1 to {MAX_SCANNED}, not {scan}")
-    patterns, names_known, names_skipped = _name_patterns(chosen, names)
+    pattern, kind_of, names_known, names_skipped = _name_pattern(chosen, names)
 
     counted: dict[str, int] = {}
     kept: list[RecallItem] = []
@@ -226,7 +252,7 @@ def withhold(items: Sequence[RecallItem], *, facts: Sequence[Fact] = (),
 
         def scanned(value: str) -> str:
             nonlocal over
-            held, found = _scanned(chosen, value, scan, patterns)
+            held, found = _scanned(chosen, value, scan, pattern, kind_of)
             over = over or len(value) > scan
             for kind, count in found.items():
                 counted[kind] = counted.get(kind, 0) + count
@@ -259,7 +285,7 @@ def withhold(items: Sequence[RecallItem], *, facts: Sequence[Fact] = (),
 
         def scanned(value: str) -> str:
             nonlocal over
-            held, found = _scanned(chosen, value, scan, patterns)
+            held, found = _scanned(chosen, value, scan, pattern, kind_of)
             over = over or len(value) > scan
             for kind, count in found.items():
                 counted[kind] = counted.get(kind, 0) + count
@@ -289,6 +315,8 @@ def withhold(items: Sequence[RecallItem], *, facts: Sequence[Fact] = (),
         why += ("; names were withheld from the " + ", ".join(f"{count} {kind} spelling(s)"
                                                            for kind, count in names_known.items())
                 + " the space's graph holds, and a name not in the graph is not found")
+    if names_capped:
+        why += "; the graph read was capped, so names it did not reach were not known and not withheld"
     if names_skipped:
         why += f"; {names_skipped} spelling(s) shorter than {MIN_NAME_CHARS} characters were not used"
     if unscanned:
@@ -300,19 +328,26 @@ def withhold(items: Sequence[RecallItem], *, facts: Sequence[Fact] = (),
                     names_known=names_known, names_skipped=names_skipped)
 
 
-def _scanned(kinds: Sequence[str], text: str, scan: int,
-             patterns: Optional[Mapping[str, "re.Pattern[str]"]] = None) -> tuple[str, dict[str, int]]:
-    """One string put through the net, and what each kind matched in it."""
+def _scanned(kinds: Sequence[str], text: str, scan: int, names: Optional["re.Pattern[str]"] = None,
+             kind_of: Optional[Mapping[str, str]] = None) -> tuple[str, dict[str, int]]:
+    """One string put through the net, and what each kind matched in it. The patterns run
+    first, then every name in one pass."""
     head, tail = text[:scan], text[scan:]
     found: dict[str, int] = {}
+    # The patterns first: a name inside an address must not break the address so its pattern misses it.
     for kind in kinds:
         if kind in NAME_KINDS:
-            pattern = (patterns or {}).get(kind)
-            head, count = pattern.subn(f"[withheld: {kind}]", head) if pattern is not None else (head, 0)
-        else:
-            head, count = _apply(kind, head)
+            continue
+        head, count = _apply(kind, head)
         if count:
             found[kind] = found.get(kind, 0) + count
+    if names is not None and kind_of is not None:
+        def named(match: "re.Match[str]") -> str:
+            kind = kind_of[_folded(match.group())]
+            found[kind] = found.get(kind, 0) + 1
+            return f"[withheld: {kind}]"
+
+        head = names.sub(named, head)
     return head + tail, found
 
 
