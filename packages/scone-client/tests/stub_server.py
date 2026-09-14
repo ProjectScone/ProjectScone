@@ -158,6 +158,9 @@ class StubScone:
             def do_POST(self) -> None:
                 self._handle("POST")
 
+            def do_DELETE(self) -> None:
+                self._handle("DELETE")
+
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         # serve_forever polls at 0.5s by default, which would put half a
         # second of teardown on every test that uses the stub.

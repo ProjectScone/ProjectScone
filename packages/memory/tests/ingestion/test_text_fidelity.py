@@ -7,6 +7,13 @@ from scone_memory.core.errors import InvalidInput
 from scone_memory.ingestion import BuiltinDocumentParser
 
 
+def row(line, *columns):
+    """A delimited row's metadata: its physical lines, and the table it is a
+    row of, since every delimited row now carries its cells."""
+    return {'line_start': line, 'line_end': line, 'table_locator': 'delimited',
+            'table_columns': json.dumps(list(columns)), 'table_status': 'structured'}
+
+
 @pytest.mark.parametrize('separator', ['\v', '\f', '\x1c', '\x85', '\u2028', '\u2029'])
 async def test_unicode_and_page_separators_do_not_invent_source_lines(separator):
     raw = f'alpha{separator}beta\r\n\f\r\ngamma\rdelta'.encode()
@@ -35,9 +42,7 @@ async def test_tsv_quotes_are_literal_and_never_swallow_later_rows():
     assert [s.text for s in parsed.segments] == ['size: "12\nlabel: inch', 'size: 3\nlabel: foot"',
                                                'size: 4\nlabel: "yard" at start']
     assert [(s.locator, s.metadata) for s in parsed.segments] == [
-        ('row:2', {'line_start': '2', 'line_end': '2'}),
-        ('row:3', {'line_start': '3', 'line_end': '3'}),
-        ('row:4', {'line_start': '4', 'line_end': '4'})]
+        ('row:2', row('2', 'size', 'label')), ('row:3', row('3', 'size', 'label')), ('row:4', row('4', 'size', 'label'))]
 
 
 @pytest.mark.parametrize('suffix,delimiter', [('csv', ','), ('tsv', '\t')])
@@ -45,8 +50,7 @@ async def test_blank_delimited_records_are_skipped_without_losing_physical_line_
     raw = f'a{delimiter}b\r\n1{delimiter}2\r\n\r\n3{delimiter}4\r\n\r\n'
     parsed = await BuiltinDocumentParser().parse(raw.encode(), f'source.{suffix}')
     assert [s.text for s in parsed.segments] == ['a: 1\nb: 2', 'a: 3\nb: 4']
-    assert [s.metadata for s in parsed.segments] == [
-        {'line_start': '2', 'line_end': '2'}, {'line_start': '4', 'line_end': '4'}]
+    assert [s.metadata for s in parsed.segments] == [row('2', 'a', 'b'), row('4', 'a', 'b')]
     assert [s.locator for s in parsed.segments] == ['row:2', 'row:4']
 
 
@@ -56,7 +60,7 @@ async def test_leading_blank_records_do_not_become_empty_headers(suffix, delimit
     parsed = await BuiltinDocumentParser().parse(raw.encode(), f'source.{suffix}')
     assert parsed.segments[0].text == 'a: 1\nb: 2'
     assert parsed.segments[0].locator == 'row:3'
-    assert parsed.segments[0].metadata == {'line_start': '3', 'line_end': '3'}
+    assert parsed.segments[0].metadata == row('3', 'a', 'b')
 
 
 async def test_html_pre_keeps_code_indentation_across_inline_elements():

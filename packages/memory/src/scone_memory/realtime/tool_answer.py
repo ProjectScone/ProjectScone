@@ -44,7 +44,7 @@ def tool_context_receipt(result: ToolLoopResult, session_id: str) -> ContextRece
         digest.update(len(raw).to_bytes(8, 'big'))
         digest.update(raw)
     return ContextReceipt(
-        request_id=uuid4().hex, session_id=session_id,
+        request_id=uuid4().hex, session_id=session_id, same_session_items=0,
         status='prepared' if result.evidence_ids else 'skipped', retrieval_mode='native_tools',
         recall_event_id=None, references=[{'episode_id': episode, 'chunk_id': chunk} for episode, chunk in sorted(references)],
         context_sha256=digest.hexdigest() if result.evidence_ids else None,
