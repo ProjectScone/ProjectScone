@@ -18,6 +18,7 @@ from xml.etree.ElementTree import Element
 from ...core.errors import InvalidInput
 from .bounded_xml import parse_xml
 from .html_tables import HtmlTables
+from .table_types import DocumentTableCell
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 
 TEXT_EXTENSIONS = frozenset({
@@ -53,7 +54,8 @@ class _Collector:
         if monotonic() > self.deadline:
             raise InvalidInput('document parsing timed out')
 
-    def add(self, text: str, locator: str, metadata: dict[str, str] | None = None) -> None:
+    def add(self, text: str, locator: str, metadata: dict[str, str] | None = None,
+            table_cells: tuple[DocumentTableCell, ...] = ()) -> None:
         self.check()
         if not text.strip():
             return
@@ -65,7 +67,7 @@ class _Collector:
             raise InvalidInput('document exceeds its extracted text byte limit')
         if len(self.segments) >= self.limits.max_segments:
             raise InvalidInput('document exceeds its segment limit')
-        self.segments.append(DocumentSegment(text=text, locator=locator, metadata=metadata or {}))
+        self.segments.append(DocumentSegment(text=text, locator=locator, metadata=metadata or {}, table_cells=table_cells))
 
 
 def _valid_unicode(text: str) -> None:
@@ -120,8 +122,22 @@ def _table(text: str, delimiter: str, out: _Collector) -> None:
                 continue
             if len(row) != len(headers):
                 raise InvalidInput('delimited row has a different column count than its header')
-            out.add('\n'.join(f'{label}: {value}' for label, value in zip(labels, row)),
-                    f'row:{row_number}', {'line_start': str(start), 'line_end': str(end)})
+            # Each value is a cell with its span in the row's text, so a
+            # table query can quote it; the labels are the parser's rendering
+            # of the header line, named once per row in table_columns.
+            lines = [f'{label}: {value}' for label, value in zip(labels, row)]
+            cells = []
+            position = 0
+            for index, (label, value) in enumerate(zip(labels, row)):
+                head = position + len(f'{label}: '.encode('utf-8'))
+                cells.append(DocumentTableCell(table_locator='delimited', locator=f'row:{row_number}/column:{index + 1}',
+                                               row=row_number - header_record - 1, column=index, text=value,
+                                               start=head, end=head + len(value.encode('utf-8'))))
+                position += len(lines[index].encode('utf-8')) + 1
+            out.add('\n'.join(lines), f'row:{row_number}',
+                    {'line_start': str(start), 'line_end': str(end), 'table_locator': 'delimited',
+                     'table_columns': json.dumps(labels), 'table_status': 'structured'},
+                    table_cells=tuple(cells))
     except csv.Error:
         raise InvalidInput('document contains malformed delimited text') from None
 
