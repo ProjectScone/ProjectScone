@@ -377,7 +377,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=100_000, help="files to read (1 to 100000)")
     p.add_argument("--max-bytes", type=int, default=1_000_000, help="bytes read from one file")
 
-    p = sub.add_parser("map", help="remember every source file under a directory, and optionally what each says")
+    p = sub.add_parser("map", help="remember every source file under a directory as it is now -- a changed file "
+                                    "updates its memory -- and optionally what each says")
     p.add_argument("directory")
     p.add_argument("--graph", action="store_true",
                    help="also record what each file defines, imports and calls, and what each package "
@@ -673,6 +674,8 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     skipped half a repository is worse than no map."""
     from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
     from ..ingestion.manifests import is_manifest
+    from ..ingestion.records import Record
+    from ..ingestion.sync import default_marker, sync_key
     from ..ingestion.code_graph import DEFINES, record_claims, unresolved_call_sites
     from ..ingestion.sensitive import screen
     from ..ingestion.code_resolution import REACHABLE_DEPTH, unmistakable, resolve_across_files
@@ -719,6 +722,11 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         return None
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
+    updated, closed, unread_claims = 0, 0, False
+    # A map is of the tree as it is. A file is held under the identity
+    # `sync` uses for it, so a changed file updates its memory rather
+    # than adding a second, and the two commands recognise each other's.
+    marker = default_marker(root)
     unbound: set[str] = set()
     # A key pasted into a source file is still a key. It is not remembered,
     # not embedded, not claimed -- and it is named below, because a map
@@ -745,17 +753,39 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
             if screened.reason is not None:
                 withheld.append((where, screened.reason))
                 continue
-        added = await engine.remember(args.space, text, kind="file", source=where)
-        if added.deduplicated:
+        done = await engine.replace(args.space, Record(content=text, kind="file", source=where,
+                                                       dedup_key=sync_key(marker, where),
+                                                       metadata={"sync": marker}), map_code=not args.graph)
+        added = done.added
+        if done.outcome == "duplicate":
             again += 1
             continue
         read += 1
+        updated += done.outcome == "updated"
+        if done.claims_closed is None:
+            unread_claims = True
+        else:
+            closed += done.claims_closed
+        unread_claims = unread_claims or done.claims_unread
         if args.graph:
             recorded: list = []
+            facts: list = []
             said = await record_claims(engine, args.space, episode_id=added.episode_id,
                                        content=text, path=where, when=engine.clock(),
-                                       resolve=resolve, _recorded=recorded)
+                                       resolve=resolve, _recorded=recorded, _facts=facts)
             claims += said
+            if done.replaced is not None:
+                # Read here, with the resolver, rather than by the engine:
+                # so the claims kept are exactly the ones just recorded.
+                retired = await engine.close_unstated(
+                    args.space, done.replaced.episode_id,
+                    kept=[(fact.subject, fact.predicate, fact.object) for fact in facts],
+                    reason=f"no longer stated by {where}", kind="source_changed")
+                if retired.closed is None:
+                    unread_claims = True
+                else:
+                    closed += retired.closed
+                unread_claims = unread_claims or retired.unread
             for claim in recorded:
                 if claim.predicate != DEFINES:
                     continue
@@ -784,10 +814,16 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     # declaration is a candidate, not evidence, and sampling said so.
     settled = resolve_across_files(sites, declared) if args.graph else None
     parts = [f"{read} file(s) read"]
+    if updated:
+        parts.append(f"{updated} updated")
     if again:
         parts.append(f"{again} already here")
     if args.graph:
         parts.append(f"{claims} claim(s)")
+        if closed:
+            parts.append(f"{closed} claim(s) closed that changed files no longer make")
+        if unread_claims:
+            parts.append("some claims of a changed file could not be examined and may still stand")
         if quiet:
             parts.append(f"{quiet} had nothing to say")
         if unread:
@@ -808,7 +844,8 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         parts.append(f"{len(withheld)} withheld as sensitive: "
                      + ", ".join(where for where, _ in sorted(withheld)))
     if getattr(args, "json", False):
-        print(_ledger_json({"read": read, "deduplicated": again, "claims": claims, "quiet": quiet,
+        print(_ledger_json({"read": read, "updated": updated, "deduplicated": again, "claims": claims,
+                            "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
                             "withheld": [{"path": where, "reason": reason}
                                          for where, reason in sorted(withheld)],
