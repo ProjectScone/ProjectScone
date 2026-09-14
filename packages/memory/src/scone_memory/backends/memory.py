@@ -14,6 +14,10 @@ from collections import defaultdict
 from itertools import count
 from bisect import bisect_left, bisect_right, insort
 from typing import Mapping, Optional, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
 
 from ..retrieval.lexical import Bm25
 from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone, LINK_KINDS
@@ -61,6 +65,8 @@ class InMemoryDocumentStore:
         self._fact_ids = count(1)
         self._link_ids = count(1)
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
+        #: The context lane: what each chunk is under, indexed beside its text.
+        self._context: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
         #: Fact writes per space, only ever growing: the ledger stamp.
         self._fact_writes: dict[str, int] = defaultdict(int)
@@ -198,6 +204,7 @@ class InMemoryDocumentStore:
         removed = [c.chunk_id for c in self._chunks.values() if c.space == space and c.episode_id == episode_id]
         for chunk_id in removed:
             self._bm25[space].remove(chunk_id)
+            self._context[space].remove(chunk_id)
             del self._chunks[chunk_id]
         self._chunks_by_episode.pop((space, episode_id), None)
         if episode is not None:
@@ -244,19 +251,32 @@ class InMemoryDocumentStore:
     #: This store applies a metadata filter itself, so the lanes
     #: do not have to be widened to compensate for it.
     narrows_metadata = True
+    #: This store keeps a context index beside chunk text (see ContextIndex).
+    context_lane = True
+    #: This store can search a term's family by prefix (see PrefixSearch).
+    prefix_terms = True
 
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
-        allowed = None
+        return self._bm25[space].search(query, limit, self._allowed(space, filter))
+
+    async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
+                           prefixes: Sequence[str]) -> list[tuple[int, float]]:
+        return self._bm25[space].search(query, limit, self._allowed(space, filter), prefixes)
+
+    async def index_context(self, space: str, chunk_id: int, text: str) -> None:
+        self._context[space].remove(chunk_id)
+        self._context[space].add(chunk_id, text)
+
+    async def search_context(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        return self._context[space].search(query, limit, self._allowed(space, filter))
+
+    def _allowed(self, space: str, filter: TextFilter) -> list[int] | None:
         if (filter.as_of or filter.tags or filter.where or filter.conditions
                 or any(value is not None for value in (filter.kind, filter.source_prefix, filter.since, filter.until))):
-            allowed = [
-                c.chunk_id
-                for c in self._chunks.values()
-                if c.space == space and self._passes(c, filter)
-            ]
-        return self._bm25[space].search(query, limit, allowed)
+            return [c.chunk_id for c in self._chunks.values() if c.space == space and self._passes(c, filter)]
+        return None
 
     def _passes(self, chunk: Chunk, filter: TextFilter) -> bool:
         if filter.as_of and not is_before_or_at(chunk.created_at, filter.as_of):
@@ -519,6 +539,10 @@ class InMemoryDocumentStore:
 
 class InMemoryVectorIndex:
     name = "memory"
+    #: Metadata conditions are evaluated here, against the row's own
+    #: metadata, so a condition reaches every stored vector rather than
+    #: the best few a post-filter then thins.
+    narrows_conditions = True
 
     def __init__(self) -> None:
         self._points: dict[int, VectorPoint] = {}
@@ -579,7 +603,7 @@ class InMemoryVectorIndex:
 
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
-                        writer: str) -> list[tuple[int, float]]:
+                        writer: str, conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         # While another embedder's write is pending the record never vouches
         # for anyone else: writes change it before they yield, and swap_writer
         # refuses to vouch past them.
@@ -587,7 +611,7 @@ class InMemoryVectorIndex:
         if not vouches(record, writer, bool(self._points)):
             raise VectorsNotComparable(f"stored vectors are recorded as "
                                        f"{record[0] if record else 'unrecorded'}, not {writer}")
-        found = await self.search(space, vector, limit, as_of, tags, where)
+        found = await self.search(space, vector, limit, as_of, tags, where, conditions)
         # A search override may yield; any write that changed the record
         # while it ran may have put another writer's vectors into it.
         if self._writer != record:
@@ -616,6 +640,7 @@ class InMemoryVectorIndex:
         as_of: Optional[str] = None,
         tags: tuple[str, ...] = (),
         where: Mapping[str, str] | None = None,
+        conditions: "Filter | None" = None,
     ) -> list[tuple[int, float]]:
         validate_vector(vector, self.dim)
         scored = []
@@ -627,6 +652,8 @@ class InMemoryVectorIndex:
             if tags and not set(tags) <= set(point.tags):
                 continue
             if where and any(point.metadata.get(k) != v for k, v in where.items()):
+                continue
+            if conditions is not None and not conditions.matches(point.metadata):
                 continue
             scored.append((point.chunk_id, _cosine(vector, point.vector)))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
