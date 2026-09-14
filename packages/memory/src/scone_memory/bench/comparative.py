@@ -176,11 +176,22 @@ def _documents(item: BenchItem) -> list[tuple[str, str]]:
 
 
 async def llamaindex_session_ranking(item: BenchItem, embedder: Embedder, *, k: int,
-                                     chunk_size: int = 512, chunk_overlap: int = 0) -> list[str]:
-    """Sessions in the order LlamaIndex's default vector retrieval ranks
-    their nodes for the item's question, at most ``k`` distinct."""
+                                     chunk_size: int = 512, chunk_overlap: int = 0, hybrid: bool = False) -> list[str]:
+    """Sessions in the order LlamaIndex ranks their nodes for the item's
+    question, at most ``k`` distinct: its default vector retrieval, or with
+    ``hybrid`` its own BM25 retriever fused with the vector retriever by
+    reciprocal rank -- the reference at its best rather than its default."""
     from llama_index.core import Document, VectorStoreIndex
     from llama_index.core.node_parser import SentenceSplitter
+
+    if hybrid:
+        try:
+            from llama_index.retrievers.bm25 import BM25Retriever  # type: ignore[import-untyped]
+        except ImportError:  # pragma: no cover - depends on the optional package
+            raise ImportError("the hybrid reference needs llama-index-retrievers-bm25; install it beside llama-index-core") from None
+        from llama_index.core.llms import MockLLM
+        from llama_index.core.retrievers import QueryFusionRetriever
+        from llama_index.core.retrievers.fusion_retriever import FUSION_MODES
 
     if type(k) is not int or k < 1:
         raise ValueError("k must be a positive integer")
@@ -198,8 +209,17 @@ async def llamaindex_session_ranking(item: BenchItem, embedder: Embedder, *, k: 
         # Every node is ranked, so a session that splits into many nodes
         # cannot crowd the others out of a fixed top-N before the folding.
         nodes_in_index = max(1, len(index.docstore.docs))
-        retriever = index.as_retriever(similarity_top_k=nodes_in_index)
-        return list(retriever.retrieve(item.question))
+        vector = index.as_retriever(similarity_top_k=nodes_in_index)
+        if not hybrid:
+            return list(vector.retrieve(item.question))
+        lexical = BM25Retriever.from_defaults(docstore=index.docstore, similarity_top_k=nodes_in_index)
+        # One query, no LLM: the fusion here is the reference's rank fusion
+        # of its two retrievers, not its model-written query variants.
+        # A mock model satisfies the fusion retriever's constructor; with one
+        # query it is never asked anything, and no hosted model is touched.
+        fused = QueryFusionRetriever([vector, lexical], llm=MockLLM(), similarity_top_k=nodes_in_index, num_queries=1,
+                                     mode=FUSION_MODES.RECIPROCAL_RANK, use_async=False, verbose=False)
+        return list(fused.retrieve(item.question))
 
     nodes = await asyncio.to_thread(build_and_retrieve)
     ranked: list[str] = []
@@ -316,8 +336,10 @@ def side_delta(ours: SideScores, theirs: SideScores) -> SideScores:
 
 
 async def compare(items: Iterable[BenchItem], make_engine: Callable[[], Any], embedder: Embedder, *,
-                  ks: Sequence[int] = (5, 10, 15), chunk_size: int = 512, chunk_overlap: int = 0) -> Comparison:
-    """Both sides over the same items, scored by the same rule."""
+                  ks: Sequence[int] = (5, 10, 15), chunk_size: int = 512, chunk_overlap: int = 0,
+                  hybrid: bool = False) -> Comparison:
+    """Both sides over the same items, scored by the same rule; ``hybrid``
+    runs the reference with its BM25 retriever fused in, its best configuration."""
     import llama_index.core
 
     items = list(items)
@@ -339,7 +361,8 @@ async def compare(items: Iterable[BenchItem], make_engine: Callable[[], Any], em
         if not item.has_evidence:
             excluded += 1
             continue
-        theirs = await llamaindex_session_ranking(item, embedder, k=k_max, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        theirs = await llamaindex_session_ranking(item, embedder, k=k_max, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                                                  hybrid=hybrid)
         mine = by_id.get(item.question_id)
         compared.append(ItemComparison(item.question_id, item.question_type, tuple(item.answer_session_ids),
                                        distinct_sessions(mine.retrieved_sessions, k_max) if mine else (), tuple(theirs)))
@@ -351,6 +374,11 @@ async def compare(items: Iterable[BenchItem], make_engine: Callable[[], Any], em
         "scone": {"recall_limit": recall_limit, "retrieval": "engine defaults: vector + lexical lanes, reciprocal rank fusion",
                   "sessions_folded_from_passages": True},
         "llamaindex": {"version": llama_index.core.__version__, "index": "VectorStoreIndex", "retriever": "VectorIndexRetriever",
+        "scone": {"recall_limit": k_max, "retrieval": "engine defaults: vector + lexical lanes, reciprocal rank fusion"},
+        "llamaindex": {"version": llama_index.core.__version__, "index": "VectorStoreIndex",
+                       "retriever": ("QueryFusionRetriever(VectorIndexRetriever + BM25Retriever)" if hybrid
+                                     else "VectorIndexRetriever"),
+                       "fusion": "reciprocal_rerank" if hybrid else None,
                        "splitter": "SentenceSplitter", "chunk_size": chunk_size, "chunk_overlap": chunk_overlap,
                        "similarity_top_k": "every node in the item's index", "sessions_folded_from_nodes": True},
     }

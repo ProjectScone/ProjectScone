@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import asyncio
 import hashlib
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Literal, Mapping, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -32,7 +32,7 @@ FILE_MEDIA_TYPES = {
     '.odp': 'application/vnd.oasis.opendocument.presentation', '.epub': 'application/epub+zip',
     '.pdf': 'application/pdf', '.json': 'application/json', '.ipynb': 'application/json', '.jsonl': 'application/x-ndjson',
     '.ndjson': 'application/x-ndjson', '.xml': 'application/xml', '.html': 'text/html', '.htm': 'text/html',
-    '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.eml': 'message/rfc822',
+    '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.eml': 'message/rfc822', '.mbox': 'application/mbox',
     '.msg': 'application/vnd.ms-outlook', '.rtf': 'application/rtf',
 }
 
@@ -145,8 +145,11 @@ async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser
 async def store_document(memory: MemoryEngine, space: str, original: Attachment,
                          manifest: DocumentManifest, *,
                          source: DocumentSource | None = None,
-                         embedding_checkpoint: EmbeddingCheckpoint | None = None) -> DocumentIngested:
-    """Index prepared extraction. Replays repair links using content identities."""
+                         embedding_checkpoint: EmbeddingCheckpoint | None = None,
+                         metadata: Mapping[str, str] | None = None) -> DocumentIngested:
+    """Index prepared extraction. Replays repair links using content identities.
+    ``metadata`` is what the caller knows about where the bytes came from
+    (a URL, a moment); the document's own keys are written after it and win."""
     validate_document(manifest.parsed, DocumentLimits())
     if original.attachment_id != manifest.original_sha256:
         raise InvalidInput('document extraction does not match its original')
@@ -159,7 +162,7 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
     if retained.media_type != 'application/json':
         raise InvalidInput('document manifest has an incompatible retained media type')
     content = '\n\n'.join(segment.text for segment in manifest.parsed.segments)
-    metadata = {'document_format': manifest.parsed.format,
+    metadata = {**(metadata or {}), 'document_format': manifest.parsed.format,
                 **({'document_filename': manifest.filename} if len(manifest.filename) <= MAX_METADATA_VALUE else {}),
                 'document_original': original.attachment_id,
                 'document_manifest': retained.attachment_id,
@@ -181,7 +184,8 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
 
 async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, filename: str,
                            parser: DocumentParser | None = None,
-                           limits: DocumentLimits = DocumentLimits()) -> DocumentIngested:
+                           limits: DocumentLimits = DocumentLimits(),
+                           metadata: Mapping[str, str] | None = None) -> DocumentIngested:
     """Parse, retain, index and link a file. Use the workflow for durable retries."""
     check_space(space)
     if len(data) > memory.max_attachment_bytes:
@@ -191,7 +195,7 @@ async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, file
         raise InvalidInput('document manifest exceeds its attachment byte limit')
     original = await memory.attach(space, data, FILE_MEDIA_TYPES.get(extension(filename), 'application/octet-stream'),
                                    filename=filename)
-    return await store_document(memory, space, original, manifest)
+    return await store_document(memory, space, original, manifest, metadata=metadata)
 
 
 async def document_provenance(memory: MemoryEngine, space: str, episode_id: int, *,
