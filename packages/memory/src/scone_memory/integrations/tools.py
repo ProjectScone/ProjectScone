@@ -17,7 +17,7 @@ place to widen a key's reach.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
 from ..core.errors import InvalidInput, SconeError
 from ..core.validation import KINDS, normalise_time
@@ -37,6 +37,10 @@ from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as 
                                   MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT,
                                   MAX_LIMIT as TEMPORAL_MAX_LIMIT)
 from ..entities.view import STATUS_MODES  # noqa: E402
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .tool_offering import Selection, ToolIndex
 
 
 @dataclass(frozen=True)
@@ -256,6 +260,25 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
         }, []),
     ),
     ToolSpec(
+        name="graph_affected",
+        summary=("What rests on a symbol, module, file or package: everything that calls, imports, inherits, "
+                 "mixes in, depends on or develops with it, nearest first, through the code graph's recorded "
+                 "relations. Says how deep it walked, what it could not list, and when nothing here rests on "
+                 "the name."),
+        parameters=_schema({
+            "name": {"type": "string", "minLength": 1, "maxLength": 200,
+                     "description": "The symbol (`pkg/mod.py:Class.method`), module (`pkg.mod`), file or package, "
+                                    "up to 200 characters."},
+            "max_hops": {"type": "integer", "minimum": 1, "maximum": 8,
+                         "description": "Relationship steps to follow, 1 to 8. Defaults to 4."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
+                      "description": "Entities to list, 1 to 1000. Defaults to 200."},
+            "max_bytes": {"type": "integer", "minimum": 1_024, "maximum": 64_000,
+                          "description": "Byte budget for the answer's record, 1024 to 64000: the record's own "
+                                         "framing takes most of a kilobyte. Defaults to 16000."},
+        }, ["name"]),
+    ),
+    ToolSpec(
         name="temporal_answer",
         summary=("A question about dates answered by computation: how long between two events, how long ago one "
                  "was, which came first, what order they were in. Each event is grounded to a passage and the day "
@@ -319,7 +342,7 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
 )
 
 _GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
-                          "graph_overview", "graph_changes", "find_duplicates", "graph_health",
+                          "graph_overview", "graph_changes", "find_duplicates", "graph_health", "graph_affected",
                           "temporal_answer"})
 #: The tree. ``write_note`` is offered only when a policy allows writing:
 #: an absent tool is a clearer refusal than an error a model may argue
@@ -425,12 +448,34 @@ class ToolBox:
         self.tools = tuple(tool for tool in chosen
                            if tool.name != "write_note" or self.filesystem.policy.writable)
         self._by_name = {tool.name: tool for tool in self.tools}
+        self._index: Optional["ToolIndex"] = None
 
-    def openai(self) -> list[dict]:
-        return [tool.as_openai() for tool in self.tools]
+    def _named(self, names: Optional[Sequence[str]]) -> tuple[ToolSpec, ...]:
+        if names is None:
+            return self.tools
+        unknown = [name for name in names if name not in self._by_name]
+        if unknown:
+            raise InvalidInput(f"not in this toolbox: {', '.join(unknown)}")
+        return tuple(self._by_name[name] for name in names)
 
-    def anthropic(self) -> list[dict]:
-        return [tool.as_anthropic() for tool in self.tools]
+    def openai(self, names: Optional[Sequence[str]] = None) -> list[dict]:
+        """Every tool, or the named ones in that order (`offer` names them)."""
+        return [tool.as_openai() for tool in self._named(names)]
+
+    def anthropic(self, names: Optional[Sequence[str]] = None) -> list[dict]:
+        return [tool.as_anthropic() for tool in self._named(names)]
+
+    async def offer(self, query: str, *, limit: Optional[int] = None, always: Sequence[str] = ()) -> "Selection":
+        """The few tools this turn needs, chosen from the ones held by the
+        query (`tool_offering.py`): a suggestion for what to put in front
+        of the model, never a gate on what `run` will run. The tools are
+        embedded once per toolbox, with the engine's embedder; the always
+        tools come first and past the limit if there are more of them."""
+        from .tool_offering import DEFAULT_LIMIT, ToolIndex
+
+        if self._index is None:
+            self._index = await ToolIndex.build(self.tools, self.engine.embedder)
+        return await self._index.select(query, limit=limit if limit is not None else DEFAULT_LIMIT, always=always)
 
     async def run(self, name: str, arguments: Mapping[str, Any]) -> dict:
         """Run one tool call. The answer is always a dict with ``ok``:
@@ -550,6 +595,13 @@ class ToolBox:
                                         limit=arguments.get("limit", DEFAULT_EXAMPLES),
                                         max_bytes=arguments.get("max_bytes", HEALTH_BYTES))
             return health.record(self.space, status="current", as_of=when)
+        if name == "graph_affected":
+            from ..entities.affected import affected
+
+            blast = await affected(self.engine, self.space, arguments["name"],
+                                   max_hops=arguments.get("max_hops", 4), limit=arguments.get("limit", 200),
+                                   max_bytes=arguments.get("max_bytes", 16_000))
+            return blast.record()
         if name == "temporal_answer":
             from ..retrieval.temporal import TemporalError, temporal_answer
 

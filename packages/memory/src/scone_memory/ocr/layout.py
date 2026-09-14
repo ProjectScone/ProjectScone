@@ -6,19 +6,27 @@ within a column retain provider order. Crossing body text prevents a split.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .types import OcrRegion, OrderedOcrRegion
 
 ReadingMode = Literal['provider', 'columns_ltr', 'columns_rtl']
-LayoutNote = Literal['geometry_inferred', 'no_separating_gutter', 'candidate_limit', 'column_limit']
+#: ``tabular_kept_whole``: a split the geometry allowed was refused because
+#: a side did not pass the caller's ``accept`` (a text layer's prose test),
+#: so a table stayed whole. ``region_limit``: a text-layer page with more
+#: runs than ``ingestion.pdf_layout`` examines, left as extracted.
+LayoutNote = Literal['geometry_inferred', 'no_separating_gutter', 'candidate_limit', 'column_limit',
+                     'tabular_kept_whole', 'region_limit']
 
 
 class ReadingOrderReceipt(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
-    strategy: Literal['whitespace-columns-v1'] = 'whitespace-columns-v1'
+    #: ``whitespace-columns-v1`` partitions OCR word boxes; ``grid-columns-v1``
+    #: partitions the runs of a text layer's layout grid, whose boxes are
+    #: estimated from grid positions rather than measured on a raster.
+    strategy: Literal['whitespace-columns-v1', 'grid-columns-v1'] = 'whitespace-columns-v1'
     direction: Literal['ltr', 'rtl'] = 'ltr'
     columns: int = Field(ge=0, le=8)
     notes: tuple[LayoutNote, ...] = Field(max_length=4)
@@ -58,7 +66,7 @@ class _Run:
     indices: tuple[int, ...]
 
 
-def _line_runs(regions: Sequence[OcrRegion]) -> list[_Run]:
+def _line_runs(regions: Sequence[OcrRegion], min_gap: float) -> list[_Run]:
     lines: dict[tuple[int, int], list[int]] = {}
     for i, region in enumerate(regions):
         lines.setdefault((region.block, region.line), []).append(i)
@@ -81,7 +89,7 @@ def _line_runs(regions: Sequence[OcrRegion]) -> list[_Run]:
             current: list[int] = []
             right = -1.0
             for i in sorted(row, key=lambda i: regions[i].box[0]):
-                if current and regions[i].box[0] - right >= .06:
+                if current and regions[i].box[0] - right >= min_gap:
                     emit(current)
                     current = []
                 current.append(i)
@@ -100,7 +108,12 @@ def _rows(regions: Sequence[_Run], indices: list[int]) -> int:
     return rows
 
 
-def _partition(regions: Sequence[_Run], indices: list[int], notes: set[LayoutNote]
+def _members(regions: Sequence[_Run], indices: list[int]) -> tuple[int, ...]:
+    return tuple(sorted(i for index in indices for i in regions[index].indices))
+
+
+def _partition(regions: Sequence[_Run], indices: list[int], notes: set[LayoutNote], min_gap: float,
+               accept: Callable[[Sequence[int]], bool] | None
                ) -> tuple[list[int], list[int], list[int], list[int]] | None:
     edges = sorted({coordinate for i in indices for coordinate in (regions[i].box[0], regions[i].box[2])})
     gaps = sorted(zip(edges, edges[1:]), key=lambda pair: (-(pair[1] - pair[0]), pair[0]))
@@ -119,7 +132,7 @@ def _partition(regions: Sequence[_Run], indices: list[int], notes: set[LayoutNot
         if not left or not right:
             continue
         gap = min(regions[i].box[0] for i in right) - max(regions[i].box[2] for i in left)
-        if gap < .06 or _rows(regions, left) < 3 or _rows(regions, right) < 3:
+        if gap < min_gap or _rows(regions, left) < 3 or _rows(regions, right) < 3:
             continue
         left_top, left_bottom = min(regions[i].box[1] for i in left), max(regions[i].box[3] for i in left)
         right_top, right_bottom = min(regions[i].box[1] for i in right), max(regions[i].box[3] for i in right)
@@ -131,19 +144,34 @@ def _partition(regions: Sequence[_Run], indices: list[int], notes: set[LayoutNot
         below = [i for i in crossing if regions[i].box[1] >= bottom]
         if len(above) + len(below) != len(crossing):
             continue
+        if accept is not None and not (accept(_members(regions, left)) and accept(_members(regions, right))):
+            # The geometry allows this cut and the caller's test does not:
+            # a table's label column beside its numbers looks like two
+            # columns until someone reads them. The next gap is tried.
+            notes.add('tabular_kept_whole')
+            continue
         return above, left, right, below
     return None
 
 
-def order_columns(regions: Sequence[OcrRegion], *, direction: Literal['ltr', 'rtl'] = 'ltr') -> OrderedRegions:
-    """Keep every observation exactly once, including spanning headings/footers."""
-    if direction not in ('ltr', 'rtl') or len(regions) > 50_000:
-        raise ValueError('invalid OCR reading order or region budget')
+def order_columns(regions: Sequence[OcrRegion], *, direction: Literal['ltr', 'rtl'] = 'ltr',
+                  min_gap: float = .06, accept: Callable[[Sequence[int]], bool] | None = None) -> OrderedRegions:
+    """Keep every observation exactly once, including spanning headings/footers.
+
+    ``min_gap`` is the narrowest gutter, as a share of the page width, that
+    separates two columns and two runs on a line: six percent of a raster
+    page for OCR boxes, and the width of a few characters for a text
+    layer's grid, whose gutters are exact and narrow. ``accept`` is asked,
+    with the region indices of each side of a cut the geometry allows,
+    whether that side may be read on its own; a refused cut is noted as
+    ``tabular_kept_whole`` and the next gap is tried."""
+    if direction not in ('ltr', 'rtl') or len(regions) > 50_000 or not 0 < min_gap < 1:
+        raise ValueError('invalid OCR reading order, region budget or gutter width')
     notes: set[LayoutNote] = set()
     ordered: list[int] = []
     assigned: list[int] = []
     column = 0
-    runs = _line_runs(regions)
+    runs = _line_runs(regions, min_gap)
 
     def append(indices: list[int], group: int) -> None:
         members = sorted(i for index in indices for i in runs[index].indices)
@@ -152,7 +180,7 @@ def order_columns(regions: Sequence[OcrRegion], *, direction: Literal['ltr', 'rt
 
     def visit(indices: list[int], depth: int) -> None:
         nonlocal column
-        split = _partition(runs, indices, notes) if len(indices) >= 6 else None
+        split = _partition(runs, indices, notes, min_gap, accept) if len(indices) >= 6 else None
         if split is None or depth == 3:
             if split is not None:
                 notes.add('column_limit')
