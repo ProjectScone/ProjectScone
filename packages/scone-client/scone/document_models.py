@@ -11,6 +11,7 @@ import re
 from ._wire import boolean, digest, identifier, integer, invalid, names, record, text, timestamp
 
 MAX_REVISION = 2**31 - 1
+_OCR_LANGUAGE = re.compile(r'[A-Za-z0-9_]{1,32}(\+[A-Za-z0-9_]{1,32}){0,7}')
 VIDEO_EXTENSIONS = frozenset({'.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi', '.mpeg', '.mpg', '.mpegts'})
 
 
@@ -37,22 +38,34 @@ def instant(value: str) -> datetime:
 class PdfOcr:
     mode: str
     reading_order: str
+    #: One of the languages the host offers (``DocumentFormats.pdf_ocr_languages``); None reads
+    #: with the host's own language and is not sent.
+    language: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.mode not in ('missing_text', 'all_pages') or self.reading_order not in ('provider', 'columns_ltr', 'columns_rtl'):
             raise invalid('PDF OCR selection')
+        if self.language is not None and (not isinstance(self.language, str) or _OCR_LANGUAGE.fullmatch(self.language) is None):
+            raise invalid('PDF OCR language')
 
     @classmethod
     def from_json(cls, value: object) -> Optional[PdfOcr]:
         if value is None:
             return None
         row = record(value)
-        if set(row) != {'mode', 'reading_order'}:
+        if not {'mode', 'reading_order'} <= set(row) <= {'mode', 'reading_order', 'language'}:
             raise invalid('PDF OCR selection')
-        return cls(text(row.get('mode'), 32), text(row.get('reading_order'), 32))
+        language = row.get('language')
+        if 'language' in row and not isinstance(language, str):
+            raise invalid('PDF OCR language')
+        return cls(text(row.get('mode'), 32), text(row.get('reading_order'), 32),
+                   language if isinstance(language, str) else None)
 
     def to_json(self) -> dict[str, object]:
-        return {'mode': self.mode, 'reading_order': self.reading_order}
+        result: dict[str, object] = {'mode': self.mode, 'reading_order': self.reading_order}
+        if self.language is not None:
+            result['language'] = self.language
+        return result
 
 
 def check_ocr(name: str, selection: Optional[PdfOcr]) -> None:
@@ -266,6 +279,8 @@ class DocumentFormats:
     pdf_reading_orders: tuple[str, ...]
     video_ocr_available: bool = False
     video_ocr_extensions: tuple[str, ...] = ()
+    #: Languages a scan may choose in PdfOcr.language; empty when the host offers none.
+    pdf_ocr_languages: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, value: object) -> DocumentFormats:
@@ -284,6 +299,14 @@ class DocumentFormats:
         modes, orders = names(ocr.get('modes'), 2), names(ocr.get('reading_orders'), 3)
         if set(modes) - {'missing_text', 'all_pages'} or set(orders) - {'provider', 'columns_ltr', 'columns_rtl'}:
             raise invalid('document OCR choices')
+        languages: tuple[str, ...] = ()
+        if 'languages' in ocr:
+            offered = ocr['languages']
+            if (not isinstance(offered, list) or len(offered) > 64
+                    or any(not isinstance(one, str) or _OCR_LANGUAGE.fullmatch(one) is None for one in offered)
+                    or len(set(offered)) != len(offered)):
+                raise invalid('document OCR languages')
+            languages = tuple(offered)
         video_available = False
         video_extensions: tuple[str, ...] = ()
         if 'video_ocr' in row:
@@ -295,4 +318,4 @@ class DocumentFormats:
                     or type(record(video['selection']).get('video_ocr')) is not bool):
                 raise invalid('document video OCR choices')
         return cls(MappingProxyType(parsed), integer(row.get('max_input_bytes'), 1, 25*1024*1024),
-                   boolean(ocr.get('available')), modes, orders, video_available, video_extensions)
+                   boolean(ocr.get('available')), modes, orders, video_available, video_extensions, languages)
