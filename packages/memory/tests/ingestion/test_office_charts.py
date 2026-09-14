@@ -130,3 +130,55 @@ def test_a_series_named_by_a_literal_or_not_at_all_is_still_labelled():
     parsed = parse_office(deck(chart("<c:areaChart>" + literal + unnamed + "</c:areaChart>")), "results.pptx",
                           DocumentLimits())
     assert parsed.segments[1].text == "Revenue (area chart)\nTyped name: Q1 3\nSeries 2: 1 4"
+
+
+CX = "http://schemas.microsoft.com/office/drawing/2014/chartex"
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+
+
+def extended(layout: str = "waterfall", levels: int = 1) -> str:
+    level = '<cx:lvl ptCount="2"><cx:pt idx="0">Start</cx:pt><cx:pt idx="1">Sales</cx:pt></cx:lvl>'
+    outer = '<cx:lvl ptCount="2"><cx:pt idx="0">2025</cx:pt><cx:pt idx="1">2025</cx:pt></cx:lvl>'
+    return (f'<cx:chartSpace xmlns:cx="{CX}"><cx:chartData><cx:data id="0">'
+            f'<cx:strDim type="cat"><cx:f>Sheet1!$A$2:$A$3</cx:f>{level}{outer * (levels - 1)}</cx:strDim>'
+            # A colour dimension is data too, but not the values the series plots.
+            '<cx:numDim type="colorVal"><cx:lvl ptCount="2"><cx:pt idx="0">1</cx:pt><cx:pt idx="1">2</cx:pt></cx:lvl></cx:numDim>'
+            '<cx:numDim type="val"><cx:f>Sheet1!$B$2:$B$3</cx:f><cx:lvl ptCount="2" formatCode="General">'
+            '<cx:pt idx="0">100</cx:pt><cx:pt idx="1">40</cx:pt></cx:lvl></cx:numDim></cx:data></cx:chartData>'
+            '<cx:chart><cx:title><cx:tx><cx:txData><cx:v>Quarter</cx:v></cx:txData></cx:tx></cx:title><cx:plotArea>'
+            f'<cx:plotAreaRegion><cx:series layoutId="{layout}"><cx:tx><cx:txData><cx:f>Sheet1!$B$1</cx:f>'
+            '<cx:v>Cash flow</cx:v></cx:txData></cx:tx><cx:dataId val="0"/></cx:series></cx:plotAreaRegion>'
+            "</cx:plotArea></cx:chart></cx:chartSpace>")
+
+
+def extended_deck(chart_xml: str) -> bytes:
+    frame = (f'<mc:AlternateContent xmlns:mc="{MC}"><mc:Choice xmlns:cx1="{CX}" Requires="cx1"><p:graphicFrame>'
+             f'<a:graphic><a:graphicData uri="{CX}"><cx:chart xmlns:cx="{CX}" xmlns:r="{R}" r:id="x1"/></a:graphicData>'
+             "</a:graphic></p:graphicFrame></mc:Choice><mc:Fallback><p:sp/></mc:Fallback></mc:AlternateContent>")
+    slide = (f'<p:sld xmlns:p="{P}" xmlns:a="{A}"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Results</a:t></a:r>'
+             f"</a:p></p:txBody></p:sp>{frame}</p:spTree></p:cSld></p:sld>")
+    return ooxml_archive({
+        "ppt/presentation.xml": f'<p:presentation xmlns:p="{P}" xmlns:r="{R}"><p:sldIdLst><p:sldId id="200" r:id="r1"/></p:sldIdLst></p:presentation>',
+        "ppt/_rels/presentation.xml.rels": f'<Relationships xmlns="{REL}"><Relationship Id="r1" Target="slides/slide1.xml" Type="{R}/slide"/></Relationships>',
+        "ppt/slides/slide1.xml": slide,
+        "ppt/slides/_rels/slide1.xml.rels": (f'<Relationships xmlns="{REL}"><Relationship Id="x1" Target="../charts/chartEx1.xml" '
+                                            'Type="http://schemas.microsoft.com/office/2014/relationships/chartEx"/></Relationships>'),
+        "ppt/charts/chartEx1.xml": chart_xml,
+    }, main_part="ppt/presentation.xml")
+
+
+def test_an_office_2016_chart_reads_its_series_from_the_data_it_names():
+    # Waterfall, histogram, treemap and the other newer kinds keep their data apart from their
+    # series, which point at it by id.
+    parsed = parse_office(extended_deck(extended()), "results.pptx", DocumentLimits())
+    assert [(s.locator, s.text) for s in parsed.segments] == [
+        ("slide:1/paragraph:1", "Results"), ("slide:1/chart:1", "Quarter (waterfall chart)\nCash flow: Start 100; Sales 40")]
+    assert parsed.segments[1].metadata == {"member": "ppt/charts/chartEx1.xml", "content_role": "chart",
+                                           "parent_locator": "slide:1", "chart_type": "waterfall",
+                                           "chart_series": "1", "chart_points": "2"}
+
+
+def test_an_office_2016_chart_with_nested_categories_reads_the_first_level_and_says_so():
+    segment = parse_office(extended_deck(extended("treemap", levels=2)), "results.pptx", DocumentLimits()).segments[1]
+    assert segment.text == "Quarter (treemap chart)\nCash flow: Start 100; Sales 40"
+    assert segment.metadata["chart_category_levels_cut"] == "1"
