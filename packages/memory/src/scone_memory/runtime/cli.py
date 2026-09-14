@@ -765,6 +765,7 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     itself. What was read and what was not is said: a map that quietly
     skipped half a repository is worse than no map."""
     from ..ingestion.code import BRACE_SUFFIXES, PYTHON_SUFFIXES, code_language, declarations
+    from ..ingestion.doc_graph import DOC_SUFFIXES
     from ..ingestion.manifests import is_manifest
     from ..ingestion.schema_claims import is_schema
     from ..ingestion.records import Record
@@ -816,6 +817,12 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     declared: dict[str, list[str]] = {}
     sites: list[tuple[str, str]] = []
     episode_of: dict[str, int] = {}
+    # What a document pointed at that nothing here answers to, and what
+    # two files would: said, never guessed at, like an unbound call.
+    unresolved_links: set[str] = set()
+    ambiguous_links: set[str] = set()
+    outside_links = 0
+    long_lines = 0
     for path in found[: args.limit]:
         raw = path.read_bytes()
         cut += len(raw) > args.max_bytes
@@ -894,10 +901,20 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
             # is only visible here.
             unbound.update(name for _, name in
                            unresolved_call_sites(text, where, language=code_language(where)))
+            if is_document(where):
+                links = doc_links(text, where, resolve=resolve)
+                unresolved_links.update(links.unresolved)
+                ambiguous_links.update(links.ambiguous)
+                outside_links += links.outside
+                long_lines += links.long_lines
             # A file with nothing to say and a file this cannot read are
             # different things, and a count that adds them together tells
             # a reader neither.
-            if said == 0 and code_language(where) is not None:
+            if said == 0 and is_document(where):
+                # A document has no parse failure: nothing to say is
+                # nothing to say.
+                quiet += 1
+            elif said == 0 and code_language(where) is not None:
                 if declarations(text, language=code_language(where)) or _parses(text):
                     quiet += 1
                 else:
@@ -938,6 +955,11 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
             parts.append(f"{unread} could not be read")
         if unbound:
             parts.append(f"{len(unbound)} call(s) left unbound")
+        if unresolved_links or ambiguous_links or outside_links:
+            parts.append(f"documents: {len(unresolved_links)} link(s) to files not read, {len(ambiguous_links)} that "
+                         f"two files would answer, {outside_links} outside the tree")
+        if long_lines:
+            parts.append(f"{long_lines} document line(s) too long to read for links")
         if settled is not None and (settled.edges or settled.ambiguous or settled.unknown):
             # What the blind spot is made of. "Unbound" alone says how
             # much was missed; this says how much of it could even be
@@ -955,6 +977,8 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
         print(_ledger_json({"read": read, "updated": updated, "removed": removed, "deduplicated": again, "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
+                            "unresolved_links": sorted(unresolved_links), "ambiguous_links": sorted(ambiguous_links),
+                            "outside_links": outside_links, "long_document_lines": long_lines,
                             "withheld": [{"path": where, "reason": reason}
                                          for where, reason in sorted(withheld)],
                             # Candidates, not claims: nothing here was written
