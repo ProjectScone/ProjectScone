@@ -3028,7 +3028,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them | GitHub, Markdown viewers, docs |
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
 | `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
-| `html` | one page: the drawing, search by name, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
+| `html` | one page: the drawing, search that moves the view to the entity chosen, a legend that shows or hides each community, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
 | `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate; what the graph names but never reads (`typing`, a package) hidden until the legend shows it, then drawn small; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
 
 Every relation and every value carries the ids of the facts behind it,
@@ -3097,6 +3097,24 @@ How each format places values and escapes its own syntax:
     page's code writes every name with `textContent`, never as markup.
   - Entities can be reached by keyboard: Tab to one, and Enter or Space
     opens its panel.
+  - Typing in the search box dims the entities whose names do not hold it
+    and lists up to eight that do, names that begin with it first; a longer
+    list says how many more there are. Choosing one, or pressing Enter for
+    the first, moves the view to it at the current zoom and opens its
+    panel. A relation in the panel moves the view to the entity at its
+    other end the same way.
+  - A legend lists the drawn communities in the drawing's order, each with
+    its colour and how many of its entities are drawn. That is a count of
+    the drawing, not the community's size: the drawing may leave entities
+    out, and the header says how many. Clearing a community's box hides its
+    box, its entities and every relation with an end in it; the first box
+    shows or hides every community, and is half-set when only some are
+    hidden. Choosing a hidden entity from the search shows its community
+    again, and the search list says which matches are hidden.
+  - The SVG carries what the page needs for this: each community's box and
+    title, and each entity, name the community (`data-group`); each arrow
+    names its relation and the communities at both ends
+    (`data-relation`, `data-from-group`, `data-to-group`), loops included.
 - **Canvas** cards and group labels are escaped as notes are. Positions
   and sizes are whole numbers, as JSON Canvas requires. In the vault's
   `graph.canvas` each card is the entity's own note.

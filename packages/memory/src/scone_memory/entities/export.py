@@ -51,7 +51,7 @@ from .markdown import literal
 from .project import Entity, EntityProjection, Support, backing_of, merged_periods
 
 if TYPE_CHECKING:
-    from .layout import Drawing
+    from .layout import Box, Drawing
 
 ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid", "svg",
                        "canvas", "html", "explorer"]
@@ -762,6 +762,11 @@ _SVG_LABEL = 32
 _PALETTE = ("#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#999999")
 
 
+def _community_colour(box: "Box") -> str:
+    """A community's colour; the last is kept for entities with no relation to another."""
+    return _PALETTE[-1] if box.colour < 0 else _PALETTE[box.colour % (len(_PALETTE) - 1)]
+
+
 def _xml_text(value: object, limit: int | None = None) -> str:
     text = " ".join(str(value).split())
     if limit is not None and len(text) > limit:
@@ -860,15 +865,16 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
     colour_of: dict[str, str] = {}
     boxes = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "communities"})
     for box in drawing.groups:
-        colour = _PALETTE[-1] if box.colour < 0 else _PALETTE[box.colour % (len(_PALETTE) - 1)]
-        colour_of[box.group_id] = colour
-        ElementTree.SubElement(boxes, f"{{{ns}}}rect", {
+        colour = colour_of[box.group_id] = _community_colour(box)
+        # The box and its title both name the community, so a page can hide them together.
+        ElementTree.SubElement(boxes, f"{{{ns}}}rect", {"data-group": box.group_id,
             "x": number(box.x + margin), "y": number(box.y + margin), "width": number(box.width),
             "height": number(box.height), "rx": "14", "fill": colour, "fill-opacity": "0.07", "stroke": colour,
             "stroke-opacity": "0.45"})
         # A title is cut to about what its box holds, then fitted to it.
         title = _xml_text(box.label, max(8, min(60, int((box.width - 24) / 6.6))))
-        _fitted(boxes, f"{{{ns}}}text", {"x": number(box.x + margin + 12), "y": number(box.y + margin + 20),
+        _fitted(boxes, f"{{{ns}}}text", {"data-group": box.group_id,
+                                         "x": number(box.x + margin + 12), "y": number(box.y + margin + 20),
                                          "font-weight": "600", "fill": "#333333"},
                 title, min(_text_width(title) * 1.08, box.width - 24))
     at = {node.entity_id: node for node in drawing.nodes}
@@ -880,6 +886,9 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
         # the communities themselves stay legible.
         across = {"stroke-opacity": "0.35", "stroke-dasharray": "5 4"} if source.group_id != target.group_id \
             else {"stroke-opacity": "0.6"}
+        # The communities at each end, so hiding either hides the relation.
+        across.update({"data-relation": relation.relation_id, "data-from-group": source.group_id,
+                       "data-to-group": target.group_id})
         origin, standing, grounding = backing_of(relation.support)
         across.update({"data-origin": origin, "data-status": standing, "data-grounding": grounding})
         if origin == "inferred":
@@ -907,7 +916,7 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
             dx, dy = target.x - source.x, target.y - source.y
             length = max((dx * dx + dy * dy) ** 0.5, 1e-9)
             ux, uy = dx / length, dy / length
-            element = ElementTree.SubElement(arrows, f"{{{ns}}}line", {"data-relation": relation.relation_id,
+            element = ElementTree.SubElement(arrows, f"{{{ns}}}line", {
                 "x1": number(source.x + margin + ux * source.radius), "y1": number(source.y + margin + uy * source.radius),
                 "x2": number(target.x + margin - ux * (target.radius + 1)),
                 "y2": number(target.y + margin - uy * (target.radius + 1)),
@@ -915,7 +924,8 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
         ElementTree.SubElement(element, f"{{{ns}}}title").text = title
     circles = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "entities"})
     for node in drawing.nodes:
-        group = ElementTree.SubElement(circles, f"{{{ns}}}g", {"data-entity": node.entity_id})
+        group = ElementTree.SubElement(circles, f"{{{ns}}}g", {"data-entity": node.entity_id,
+                                                              "data-group": node.group_id})
         circle = ElementTree.SubElement(group, f"{{{ns}}}circle", {
             "cx": number(node.x + margin), "cy": number(node.y + margin), "r": number(node.radius),
             "fill": colour_of[node.group_id], "stroke": "#ffffff", "stroke-width": "1.5"})
@@ -938,24 +948,43 @@ header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; p
   border-bottom: 1px solid #dcdcd8; background: #ffffff; }
 header h1 { margin: 0; font-size: 16px; }
 header p { margin: 0; color: #5b5b5b; font-size: 12px; flex: 1 1 320px; }
-input { font: inherit; padding: 6px 10px; border: 1px solid #c6c6c2; border-radius: 6px; min-width: 220px; }
+.find { position: relative; }
+input[type=search] { font: inherit; padding: 6px 10px; border: 1px solid #c6c6c2; border-radius: 6px; min-width: 220px; }
+#matches { position: absolute; z-index: 2; top: 100%; left: 0; right: 0; margin: 4px 0 0; padding: 4px;
+  list-style: none; background: #ffffff; border: 1px solid #c6c6c2; border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); max-height: 50vh; overflow: auto; }
+#matches:empty { display: none; }
+#matches button { display: block; width: 100%; text-align: left; font: inherit; color: inherit; background: none;
+  border: 0; border-radius: 4px; padding: 4px 8px; cursor: pointer; overflow-wrap: anywhere; }
+#matches button:hover, #matches button:focus { background: #ecebe6; outline: none; }
+#matches li.muted { padding: 4px 8px; font-size: 12px; }
 main { display: grid; grid-template-columns: 1fr minmax(260px, 340px); min-height: 0; }
 #drawing { min-width: 0; min-height: 0; overflow: hidden; background: #ffffff; }
 #drawing svg { width: 100%; height: 100%; cursor: grab; touch-action: none; }
-aside { border-left: 1px solid #dcdcd8; padding: 16px; overflow: auto; background: #fbfbfa; }
+aside { border-left: 1px solid #dcdcd8; overflow: auto; background: #fbfbfa; display: flex; flex-direction: column; }
+aside > * { padding: 16px; }
 aside h2 { margin: 0 0 4px; font-size: 16px; overflow-wrap: anywhere; }
 aside ul { padding-left: 18px; }
 aside li { margin: 4px 0; overflow-wrap: anywhere; }
 aside button { font: inherit; color: #0b57d0; background: none; border: 0; padding: 0; cursor: pointer;
   text-decoration: underline; }
+#legend { border-bottom: 1px solid #dcdcd8; }
+#legend h2 { font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #5b5b5b; }
+#legend ul { list-style: none; padding: 0; margin: 6px 0 0; }
+#legend label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+#legend .all { font-size: 12px; color: #5b5b5b; }
+.swatch { flex: none; width: 12px; height: 12px; border-radius: 50%; }
+.community-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.count { flex: none; white-space: nowrap; font-size: 12px; }
 .muted { color: #5b5b5b; }
 g[data-entity] { cursor: pointer; }
 g[data-entity]:focus { outline: none; }
 g[data-entity]:focus circle, g.chosen circle { stroke: #1d1d1f; stroke-width: 3; }
 g.dim { opacity: 0.15; }
+.gone { display: none; }
 @media (max-width: 720px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
   aside { border-left: 0; border-top: 1px solid #dcdcd8; max-height: 40vh; } }
-"""
+""" + "".join(f".swatch.c{index} {{ background: {colour}; }}\n" for index, colour in enumerate(_PALETTE))
 
 # The page's own code. Every stored name reaches the page through the
 # data block and is written with textContent, never parsed as markup.
@@ -965,7 +994,12 @@ _HTML_CODE = """
   var data = JSON.parse(document.getElementById("graph-data").textContent);
   var svg = document.querySelector("#drawing svg");
   var panel = document.getElementById("details");
-  var nodes = {}, links = {}, shapes = {};
+  var search = document.getElementById("search");
+  var matches = document.getElementById("matches");
+  var everyCommunity = document.getElementById("legend-all");
+  var toggles = Array.prototype.slice.call(document.querySelectorAll("#legend li input[data-group]"));
+  var nodes = {}, links = {}, shapes = {}, hidden = {}, chosen = null;
+  var prompt = panel.firstElementChild;
   data.nodes.forEach(function (node) { nodes[node.id] = node; links[node.id] = []; });
   data.edges.forEach(function (edge) {
     links[edge.source].push(edge);
@@ -980,21 +1014,92 @@ _HTML_CODE = """
   function cited(ids) { return (ids.length === 1 ? "fact " : "facts ") + ids.join(", "); }
   function show(id) {
     var node = nodes[id];
+    chosen = id;
     Object.keys(shapes).forEach(function (key) { shapes[key].classList.toggle("chosen", key === id); });
-    panel.replaceChildren(element("h2", node.label), element("p", (node.kind || "unknown kind") + " \u00b7 " + id, "muted"));
+    panel.replaceChildren(element("h2", node.label), element("p", (node.kind || "unknown kind") + " \\u00b7 " + id, "muted"));
     var list = document.createElement("ul");
     links[id].forEach(function (edge) {
       var outgoing = edge.source === id, other = nodes[outgoing ? edge.target : edge.source];
       var item = document.createElement("li");
-      item.appendChild(element("span", outgoing ? edge.predicate + " \u2192 " : "\u2190 " + edge.predicate + " "));
+      item.appendChild(element("span", outgoing ? edge.predicate + " \\u2192 " : "\\u2190 " + edge.predicate + " "));
       var go = element("button", other.label);
       go.type = "button";
-      go.addEventListener("click", function () { show(other.id); shapes[other.id].focus(); });
+      go.addEventListener("click", function () { choose(other.id); });
       item.appendChild(go);
-      item.appendChild(element("span", " (" + cited(edge.fact_ids) + ")", "muted"));
+      var note = " (" + cited(edge.fact_ids) + ")";
+      if (hidden[other.group]) { note += ", its community is hidden"; }
+      item.appendChild(element("span", note, "muted"));
       list.appendChild(item);
     });
     panel.appendChild(list.childElementCount ? list : element("p", "No relation of it is drawn.", "muted"));
+  }
+  // Hiding a community hides its box, its entities and every relation
+  // with an end in it; the legend's first box says whether all are shown.
+  function applyHidden() {
+    svg.querySelectorAll("[data-group]").forEach(function (mark) {
+      mark.classList.toggle("gone", hidden[mark.getAttribute("data-group")] === true);
+    });
+    svg.querySelectorAll("[data-from-group]").forEach(function (mark) {
+      mark.classList.toggle("gone", hidden[mark.getAttribute("data-from-group")] === true
+        || hidden[mark.getAttribute("data-to-group")] === true);
+    });
+    var off = 0;
+    toggles.forEach(function (toggle) {
+      toggle.checked = hidden[toggle.getAttribute("data-group")] !== true;
+      if (!toggle.checked) { off += 1; }
+    });
+    everyCommunity.checked = off === 0;
+    everyCommunity.indeterminate = off > 0 && off < toggles.length;
+    if (chosen !== null && hidden[nodes[chosen].group]) {
+      shapes[chosen].classList.remove("chosen");
+      chosen = null;
+      panel.replaceChildren(prompt);
+    }
+  }
+  toggles.forEach(function (toggle) {
+    toggle.addEventListener("change", function () {
+      if (toggle.checked) { delete hidden[toggle.getAttribute("data-group")]; }
+      else { hidden[toggle.getAttribute("data-group")] = true; }
+      applyHidden();
+    });
+  });
+  everyCommunity.addEventListener("change", function () {
+    toggles.forEach(function (toggle) {
+      if (everyCommunity.checked) { delete hidden[toggle.getAttribute("data-group")]; }
+      else { hidden[toggle.getAttribute("data-group")] = true; }
+    });
+    applyHidden();
+  });
+  var view = svg.viewBox.baseVal, start = null, moved = false, gliding = 0;
+  var still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // Moves the view, at its current zoom, so the entity sits in its middle.
+  function centre(id) {
+    var circle = shapes[id].querySelector("circle");
+    var toX = parseFloat(circle.getAttribute("cx")) - view.width / 2;
+    var toY = parseFloat(circle.getAttribute("cy")) - view.height / 2;
+    var fromX = view.x, fromY = view.y, began = null, run = ++gliding;
+    if (still) { view.x = toX; view.y = toY; return; }
+    function step(now) {
+      if (run !== gliding) { return; }
+      if (began === null) { began = now; }
+      var t = Math.min(1, (now - began) / 240), eased = 1 - Math.pow(1 - t, 3);
+      view.x = fromX + (toX - fromX) * eased;
+      view.y = fromY + (toY - fromY) * eased;
+      if (t < 1) { window.requestAnimationFrame(step); }
+    }
+    window.requestAnimationFrame(step);
+  }
+  // Choosing reveals the entity's community if it was hidden, moves the
+  // view to it and lists its relations.
+  function choose(id) {
+    if (hidden[nodes[id].group]) {
+      delete hidden[nodes[id].group];
+      applyHidden();
+    }
+    matches.replaceChildren();
+    centre(id);
+    show(id);
+    shapes[id].focus({ preventScroll: true });
   }
   svg.querySelectorAll("g[data-entity]").forEach(function (shape) {
     var id = shape.getAttribute("data-entity");
@@ -1007,11 +1112,46 @@ _HTML_CODE = """
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(id); }
     });
   });
-  document.getElementById("search").addEventListener("input", function (event) {
-    var wanted = event.target.value.trim().toLocaleLowerCase();
+  var byName = data.nodes.slice().sort(function (a, b) { return a.label.localeCompare(b.label); });
+  var MATCHES_SHOWN = 8;
+  // Names that begin with what was typed come first, then names containing it.
+  function found(wanted) {
+    var starting = [], containing = [];
+    byName.forEach(function (node) {
+      var at = node.label.toLocaleLowerCase().indexOf(wanted);
+      if (at === 0) { starting.push(node); } else if (at > 0) { containing.push(node); }
+    });
+    return starting.concat(containing);
+  }
+  search.addEventListener("input", function () {
+    var wanted = search.value.trim().toLocaleLowerCase();
     Object.keys(shapes).forEach(function (key) {
       shapes[key].classList.toggle("dim", wanted !== "" && nodes[key].label.toLocaleLowerCase().indexOf(wanted) < 0);
     });
+    if (wanted === "") { matches.replaceChildren(); return; }
+    var hits = found(wanted), items = [];
+    hits.slice(0, MATCHES_SHOWN).forEach(function (node) {
+      var item = document.createElement("li");
+      var go = element("button", hidden[node.group] ? node.label + " (community hidden)" : node.label);
+      go.type = "button";
+      go.addEventListener("click", function () { choose(node.id); });
+      item.appendChild(go);
+      items.push(item);
+    });
+    if (hits.length === 0) { items.push(element("li", "No drawn entity has that in its name.", "muted")); }
+    if (hits.length > MATCHES_SHOWN) {
+      items.push(element("li", (hits.length - MATCHES_SHOWN) + " more; keep typing to narrow", "muted"));
+    }
+    matches.replaceChildren.apply(matches, items);
+  });
+  search.addEventListener("keydown", function (event) {
+    var wanted = search.value.trim().toLocaleLowerCase();
+    if (event.key === "Enter" && wanted !== "") {
+      var hits = found(wanted);
+      if (hits.length) { event.preventDefault(); choose(hits[0].id); }
+    } else if (event.key === "Escape") {
+      matches.replaceChildren();
+    }
   });
   // Screen points become drawing points through the drawing's own screen
   // transform, letterboxing included; a drag keeps the transform it began
@@ -1022,9 +1162,9 @@ _HTML_CODE = """
     point.y = event.clientY;
     return point.matrixTransform(inverse);
   }
-  var view = svg.viewBox.baseVal, start = null, moved = false;
   svg.addEventListener("wheel", function (event) {
     event.preventDefault();
+    gliding += 1;
     var scale = event.deltaY > 0 ? 1.15 : 1 / 1.15, at = drawn(event, svg.getScreenCTM().inverse());
     view.x = at.x - (at.x - view.x) * scale;
     view.y = at.y - (at.y - view.y) * scale;
@@ -1033,6 +1173,7 @@ _HTML_CODE = """
   }, { passive: false });
   svg.addEventListener("pointerdown", function (event) {
     var inverse = svg.getScreenCTM().inverse();
+    gliding += 1;
     start = { x: event.clientX, y: event.clientY, inverse: inverse, at: drawn(event, inverse), left: view.x, top: view.y };
     moved = false;
   });
@@ -1050,8 +1191,9 @@ _HTML_CODE = """
 
 def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     """The drawing as one interactive page that fetches nothing: search by
-    name, a panel listing a chosen entity's relations with their facts,
-    and zoom and pan. Its data is a JSON block every name reaches the page
+    name that lists matches and moves the view to the one chosen, a legend
+    of the drawn communities that shows or hides each, a panel listing a
+    chosen entity's relations with their facts, and zoom and pan. Its data is a JSON block every name reaches the page
     through, written as text and never parsed as markup, and its content
     security policy lets only its own style and code run."""
     import base64
@@ -1076,6 +1218,18 @@ def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     policy = f"default-src 'none'; img-src data:; script-src {pinned(_HTML_CODE)}; style-src {pinned(_HTML_STYLE)}"
     title = f"Knowledge graph {projection.space}"
     drawn = ElementTree.tostring(root, encoding="unicode").replace("\r", "&#13;")
+    members: dict[str, int] = {}
+    for node in drawing.nodes:
+        members[node.group_id] = members.get(node.group_id, 0) + 1
+    # A count of what is drawn of a community, never its size: the drawing
+    # may leave entities out, and the header says how many.
+    legend = "".join(
+        f'<li data-group="{markup.escape(box.group_id)}"><label>'
+        f'<input type="checkbox" id="community-{index}" data-group="{markup.escape(box.group_id)}" checked>'
+        f'<span class="swatch c{_PALETTE.index(_community_colour(box))}" aria-hidden="true"></span> '
+        f'<span class="community-name">{markup.escape(box.label)}</span> '
+        f'<span class="muted count">{members.get(box.group_id, 0)} drawn</span></label></li>'
+        for index, box in enumerate(drawing.groups))
     page = "\n".join([
         "<!DOCTYPE html>", '<html lang="en">', "<head>", '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -1084,10 +1238,14 @@ def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
         '<link rel="icon" href="data:,">',
         f"<title>{markup.escape(title)}</title>", f"<style>{_HTML_STYLE}</style>", "</head>", "<body>",
         f"<header><h1>{markup.escape(title)}</h1><p>{markup.escape(said)}</p>",
-        '<input id="search" type="search" placeholder="Find an entity" aria-label="Find an entity"></header>',
-        f'<main><div id="drawing">{drawn}</div>',
-        '<aside id="details" aria-live="polite"><p class="muted">Choose an entity to see its relations and the '
-        "facts behind them.</p></aside></main>",
+        '<div class="find"><input id="search" type="search" placeholder="Find an entity" aria-label="Find an entity">',
+        '<ul id="matches" aria-label="Matching entities"></ul></div></header>',
+        f'<main><div id="drawing">{drawn}</div>', "<aside>",
+        '<nav id="legend" aria-label="Communities"><h2>Communities</h2>',
+        '<label class="all"><input type="checkbox" id="legend-all" checked> Show every community</label>',
+        f"<ul>{legend}</ul></nav>",
+        '<section id="details" aria-live="polite"><p class="muted">Choose an entity to see its relations and the '
+        "facts behind them.</p></section>", "</aside></main>",
         f'<script id="graph-data" type="application/json">{block}</script>',
         f'<script id="graph-code">{_HTML_CODE}</script>', "</body>", "</html>", ""])
     return Export(page.encode("utf-8", "backslashreplace"), "text/html", "graph.html")
