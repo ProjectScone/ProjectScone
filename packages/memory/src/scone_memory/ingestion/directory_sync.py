@@ -40,6 +40,11 @@ class SourceReceipt:
     #: store could not read the claims by episode: nothing was closed,
     #: and the receipt says so rather than saying zero.
     claims_closed: int | None = 0
+    #: Earlier episodes this file's claims still cite that the journal
+    #: stopped tracking, because its lineage is bounded; what they cite
+    #: is not closed by later replacements or deletion. Zero unless the
+    #: bound bit.
+    claims_untracked: int = 0
 
 
 @dataclass(frozen=True)
@@ -224,7 +229,9 @@ class DirectorySync:
             entry = SourceEntry(state='retire', current=current, pending=pending, claimants=entry.claimants)
             self._save(state, path, entry)
         else:
-            claims = 0
+            # Resumed after the retire save: the claims were recorded with
+            # the store; read how many stand, so the receipt says so.
+            claims = (await self._claims_of(pending.episode_id) or 0) if pending.episode_id is not None else 0
         # A recorded retire intent permits an already-forgotten old episode on
         # retry. A missing record without its tombstone remains an error.
         try:
@@ -232,6 +239,7 @@ class DirectorySync:
         except Gone:
             return await self._suppress(state, path, entry)
         closed: int | None = 0
+        untracked = 0
         claimants = entry.claimants
         if current is not None:
             try:
@@ -246,13 +254,14 @@ class DirectorySync:
                 # across revisions is one fact cited to the episode that
                 # first made it, so every earlier episode is closed against
                 # the new revision too.
-                closed, claimants = await self._close_claims(
+                closed, claimants, untracked = await self._close_claims(
                     (*claimants, old.episode_id), path, kept=await self._kept(pending),
                     reason=f'no longer stated by {path}', kind='source_changed')
                 await self.memory.forget(self.space, old.episode_id)
         self._save(state, path, SourceEntry(state='active', current=pending, claimants=claimants))
         return SourceReceipt(path, 'updated' if current is not None else 'added', pending.episode_id,
-                             current.episode_id if current else None, claims=claims, claims_closed=closed)
+                             current.episode_id if current else None, claims=claims, claims_closed=closed,
+                             claims_untracked=untracked)
 
     async def _kept(self, revision: SourceRevision) -> list[tuple[str, str, str]]:
         """The claims a revision makes, read from its retained manifest:
@@ -264,35 +273,43 @@ class DirectorySync:
         return [(claim.subject, claim.predicate, claim.object)
                 for claim in document_claims(manifest.parsed, manifest.filename)]
 
-    async def _close_claims(self, episodes: tuple[int, ...], path: str, *, kept: list[tuple[str, str, str]],
-                            reason: str, kind: str) -> tuple[int | None, tuple[int, ...]]:
-        """Close what the given episodes' claims say that `kept` does not,
-        and say how many, or None when a store could not read them. Also
-        says which of the episodes still have claims citing them, bounded
-        by MAX_CLAIMANTS: past it the newest are left out and the count
-        is None, because claims nobody tracks are claims nobody closes."""
+    async def _claims_of(self, episode_id: int) -> int | None:
+        """Active extracted claims cited to an episode; None when the store
+        cannot read claims by episode."""
         from ..core import graph_read
+
+        documents = self.memory.documents
+        if not isinstance(documents, graph_read.GraphFactReader):
+            return None
+        rows = await documents.facts_for_graph(self.space, episode_id, graph_read.MAX_GRAPH_FACTS)
+        return sum(1 for fact in rows if fact.status == 'active' and fact.origin == 'extracted')
+
+    async def _close_claims(self, episodes: tuple[int, ...], path: str, *, kept: list[tuple[str, str, str]],
+                            reason: str, kind: str) -> tuple[int | None, tuple[int, ...], int]:
+        """Close what the given episodes' claims say that `kept` does not.
+        Says how many were closed (None when a store could not read them),
+        which episodes still have claims citing them, and how many such
+        episodes were left untracked because the lineage is bounded by
+        MAX_CLAIMANTS: the oldest are kept, the newest dropped, and what
+        the dropped ones still cite is no longer closed by this sync."""
         from .files import says_claims
 
         if not says_claims(path):
-            return 0, ()
+            return 0, (), 0
         ids = tuple(dict.fromkeys(episodes))
         closed: int | None = 0
         still: list[int] = []
-        documents = self.memory.documents
-        reader = documents if isinstance(documents, graph_read.GraphFactReader) else None
         for episode_id in ids:
             retired = await self.memory.close_unstated(self.space, episode_id, kept=kept, reason=reason, kind=kind)
             if retired.closed is None or retired.unread:
                 closed = None
             elif closed is not None:
                 closed += retired.closed
-            if reader is None or any(fact.status == 'active' and fact.origin == 'extracted'
-                                     for fact in await reader.facts_for_graph(self.space, episode_id, graph_read.MAX_GRAPH_FACTS)):
+            standing = await self._claims_of(episode_id)
+            if standing is None or standing:
                 still.append(episode_id)
-        if len(still) > MAX_CLAIMANTS:
-            return None, tuple(still[:MAX_CLAIMANTS])
-        return closed, tuple(still)
+        untracked = max(0, len(still) - MAX_CLAIMANTS)
+        return closed, tuple(still[:MAX_CLAIMANTS]), untracked
 
     async def _prepare(self, state: SourceState, item: ScannedFile, current: SourceRevision | None,
                        generation: int) -> SourceReceipt:
@@ -375,6 +392,7 @@ class DirectorySync:
         if current is None or current.episode_id is None:
             raise InvalidInput('missing managed source has no current episode')
         closed: int | None = 0
+        untracked = 0
         claimants = entry.claimants
         try:
             await self._episode(state, path, current)
@@ -382,17 +400,18 @@ class DirectorySync:
             if entry.state != 'delete':
                 return await self._suppress(state, path, entry)
         else:
-            self._save(state, path, SourceEntry(state='delete', current=current))
+            self._save(state, path, SourceEntry(state='delete', current=current, claimants=entry.claimants))
             if not await asyncio.to_thread(self.scanner.missing, path):
                 raise InvalidInput('managed source reappeared before deletion')
             # Closed before the episode goes, for the same reason as a
             # replacement: a retry after a crash still finds it. Every
             # earlier episode a restated claim still cites is closed too.
-            closed, claimants = await self._close_claims((*entry.claimants, current.episode_id), path, kept=[],
-                                                         reason=f'{path} was removed', kind='source_removed')
+            closed, claimants, untracked = await self._close_claims((*entry.claimants, current.episode_id), path, kept=[],
+                                                                    reason=f'{path} was removed', kind='source_removed')
             await self.memory.forget(self.space, current.episode_id)
         self._save(state, path, SourceEntry(state='absent', current=current, claimants=claimants))
-        return SourceReceipt(path, 'deleted', previous_episode_id=current.episode_id, claims_closed=closed)
+        return SourceReceipt(path, 'deleted', previous_episode_id=current.episode_id, claims_closed=closed,
+                             claims_untracked=untracked)
 
     async def synchronize(self, *, delete_missing: bool = False) -> DirectorySyncResult:
         if type(delete_missing) is not bool:

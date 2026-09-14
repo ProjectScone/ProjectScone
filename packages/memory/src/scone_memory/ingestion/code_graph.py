@@ -53,6 +53,9 @@ if TYPE_CHECKING:
 
 #: Claims from one file, past which a generated file is not worth reading.
 MAX_CLAIMS = 20_000
+#: The ledger's bound on a quote (memory/fact_placement); a longer line
+#: is quoted by its first MAX_QUOTE_CHARS characters.
+MAX_QUOTE_CHARS = 2_000
 #: What a claim can say. Each is a predicate in the ledger like any other.
 DEFINES = "defines"
 IMPORTS = "imports"
@@ -685,9 +688,12 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     for claim in claims:
         if _recorded is not None:
             _recorded.append(claim)
+        # A quote is the line the claim was read from; the ledger holds a
+        # quote of at most MAX_QUOTE_CHARS, so a generated line is quoted
+        # by its start, which is still the line's own text in the episode.
         fact = await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,
                                         valid_from=when, source_episode_id=episode_id,
-                                        quote=claim.quote, origin="extracted")
+                                        quote=claim.quote[:MAX_QUOTE_CHARS], origin="extracted")
         if _facts is not None:
             _facts.append(fact)
         said += 1
