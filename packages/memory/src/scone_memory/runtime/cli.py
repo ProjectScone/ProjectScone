@@ -115,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--candidate-limit", type=int,
                    help="how many candidates each lane fetches before fusion (1 to 1000)")
     p.add_argument("--no-rerank", action="store_true", help="skip the configured reranker for this search")
+    p.add_argument("--require", action="append", default=[], metavar="PHRASE",
+                   help="a phrase every returned passage must hold, as whole words; repeatable")
+    p.add_argument("--exclude", action="append", default=[], metavar="PHRASE",
+                   help="a phrase no returned passage may hold; repeatable")
     p.add_argument("--lanes", metavar="LANES",
                    help="the lanes to run, comma separated: vector, text, or both (the default); "
                         "a lane not named is not run")
@@ -1769,6 +1773,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
             **({"lanes": [lane.strip() for lane in args.lanes.split(",") if lane.strip()]} if args.lanes else {}),
+            require=args.require, exclude=args.exclude,
         )
         kept = None
         opened = None

@@ -61,6 +61,24 @@ items (`lanes.entity`) and in `degraded`, not in `lanes`. When the only lane ask
 fails rather than returning an empty answer that reads as nothing found.
 Advertised as `recall.lanes`.
 
+`require` and `exclude` (repeat each for more; CLI `--require`,
+`--exclude`) are phrases a returned passage must all hold, or must hold
+none of. A phrase matches as whole words in order, whatever the case and
+the punctuation between them: `slew ring` matches `SLEW-RING`, and `art`
+does not match `party`. In scripts written without spaces a phrase
+matches inside a run. The reference's keyword filter drops nodes after
+retrieval, so a filter that drops three of five returns two and says
+nothing. Here the phrases are checked across every fused candidate before
+the per-episode cap and the limit, so a passage ranked below the limit
+that holds the phrase takes the place of one that does not. `phrases` in
+the answer (and the recall event) says how many candidates were checked,
+how many each rule dropped, and `short: true` when fewer passages came
+back than the limit after the phrases dropped some, because passages
+beyond the candidate window were never checked. Facts are not filtered.
+A phrase both required and excluded, one with no word to match, more than
+20 phrases or one over 200 characters is refused. Advertised as
+`recall.phrases`.
+
 `history=true` (CLI `--history`) adds, for every matched fact, the closed
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.
