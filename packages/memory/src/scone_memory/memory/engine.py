@@ -298,6 +298,14 @@ class MemoryEngine:
             if isinstance(window, bool) or not isinstance(window, int) or window < 1:
                 raise InvalidInput("embedding_budget needs an embedder that declares its input window "
                                    "(max_input_tokens); this one declares none")
+            counter = getattr(embedder, "count_tokens", None)
+            if callable(counter):
+                # Tried now: the vector writer's name says the tokenizer counted, so it must be able to.
+                try:
+                    counter("")
+                except Exception as error:  # noqa: BLE001 - any failure to count refuses the setting, with its reason
+                    raise InvalidInput(f"embedding_budget counts with the embedder's tokenizer, which failed: "
+                                       f"{type(error).__name__}: {error}") from error
         self.embedding_budget = embedding_budget
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
