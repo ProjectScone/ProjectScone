@@ -16,8 +16,10 @@ def test_every_case_is_a_lexical_miss_by_construction():
 async def test_the_lane_recovers_bodies_the_text_lane_cannot_see():
     report = await run_under_benchmark(count=20, limit=5)
     assert report.version == VERSION and report.cases == 20 and report.store == "memory"
-    assert report.body_found_without == 0, "by construction the text lane cannot see the tail"
-    assert report.body_found_with >= 12, report.as_payload()
+    # The text lane alone sees a tail only where the topic word is in it,
+    # and how many of those reach the window depends on the fusion weights;
+    # what the lane adds over that is the claim.
+    assert report.body_found_with - report.body_found_without >= 12, report.as_payload()
     assert report.chatter_first_with < report.chatter_first_without, "chatter that repeats the question loses first place"
 
 

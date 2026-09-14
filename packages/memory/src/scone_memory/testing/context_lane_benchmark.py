@@ -96,8 +96,10 @@ async def run_under_benchmark(count: int = 20, limit: int = 5, *, sqlite_path: s
                 store_name = "sqlite"
             else:
                 documents = InMemoryDocumentStore()
+            # Word families are a lever of their own, measured elsewhere; held
+            # off here so what the lane recovers is the lane's, not a prefix's.
             engine = await MemoryEngine(documents, InMemoryVectorIndex(), HashEmbedder(), chunk_target=120,
-                                        context_lane=lane).open()
+                                        context_lane=lane, lexical_stems=False).open()
             try:
                 for line in case["chatter"].splitlines():
                     await engine.remember("s", line)
