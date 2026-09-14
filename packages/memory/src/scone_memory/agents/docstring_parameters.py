@@ -14,8 +14,9 @@ _GOOGLE = re.compile(r'^(\s*)(Args|Arguments|Parameters|Params|Keyword Args|Keyw
 _GOOGLE_ENTRY = re.compile(r'^\*{0,2}(\w+)\s*(?:\([^)]*\))?\s*:\s*(.*)$')
 _NUMPY = re.compile(r'^(\s*)(Parameters|Other Parameters|Keyword Arguments)\s*$')
 _UNDERLINE = re.compile(r'^\s*-{3,}\s*$')
-_NUMPY_ENTRY = re.compile(r'^\*{0,2}(\w+)\s*(?::.*)?$')
-_SPHINX = re.compile(r'^\s*:param\s+(?:[^:]*\s)?\*{0,2}(\w+)\s*:\s*(.*)$')
+_NUMPY_ENTRY = re.compile(r'^((?:\*{0,2}\w+\s*,\s*)*\*{0,2}\w+)\s*(?::.*)?$')
+#: Sphinx reads these field names alike.
+_SPHINX = re.compile(r'^\s*:(?:param|parameter|arg|argument|key|keyword)\s+(?:[^:]*\s)?\*{0,2}(\w+)\s*:\s*(.*)$')
 _SPHINX_TYPE = re.compile(r'^\s*:type\s+\w+\s*:')
 
 
@@ -37,17 +38,25 @@ def _read(docstring: str | None) -> tuple[dict[str, str], list[str], set[int]]:
             said = found.setdefault(sphinx[1], [sphinx[2]])
             section.add(index)
             index += 1
-            while index < len(lines) and lines[index].strip() and _indent(lines[index]) > _indent(line):
-                said.append(lines[index])
-                section.add(index)
-                index += 1
+            while index < len(lines):
+                ahead = index
+                while ahead < len(lines) and not lines[ahead].strip():
+                    ahead += 1
+                # Blank lines belong to the field only when its text carries on, indented, after them.
+                if ahead >= len(lines) or _indent(lines[ahead]) <= _indent(line):
+                    break
+                said.extend(lines[ahead:ahead + 1])
+                section.update(range(index, ahead + 1))
+                index = ahead + 1
             continue
         if _SPHINX_TYPE.match(line):
             section.add(index)
             index += 1
             continue
         if google or numpy:
-            header = _indent(line)
+            # A heading on a docstring's first line lost its indent to cleandoc while the entries under it
+            # lost theirs, so there the entries sit at the heading's column and still belong to it.
+            header = -1 if google and index == 0 else _indent(line)
             section.update({index} if google else {index, index + 1})
             index += 1 if google else 2
             entry: int | None = None
@@ -68,8 +77,13 @@ def _read(docstring: str | None) -> tuple[dict[str, str], list[str], set[int]]:
                 if entry is None:
                     entry = depth
                 matched = (_GOOGLE_ENTRY if google else _NUMPY_ENTRY).match(body.strip()) if depth == entry else None
-                if matched:
-                    current = found.setdefault(matched[1], [matched[2]] if google else [])
+                if matched and google:
+                    current = found.setdefault(matched[1], [matched[2]])
+                elif matched:
+                    # ``x, y : int`` describes both names with the lines that follow.
+                    current = []
+                    for name in matched[1].split(','):
+                        found.setdefault(name.strip().lstrip('*'), current)
                 elif current is not None:
                     current.append(body)
                 section.add(index)

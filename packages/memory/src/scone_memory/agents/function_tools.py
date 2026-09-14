@@ -96,7 +96,12 @@ def _signature(function: Callable[..., object]) -> inspect.Signature:
         raise ValueError('function tool requires an inspectable signature') from None
 
 
-def _namespace(function: Callable[..., object], supplied: Mapping[str, object] | None) -> dict[str, object]:
+#: Characters of one parameter description taken from a docstring.
+MAX_DOCSTRING_DESCRIPTION = 4096
+
+
+def _resolved(function: Callable[..., object]) -> object:
+    """The function a partial, bound method, wrapper or callable object finally runs."""
     target: object = function
     for _ in range(32):
         if isinstance(target, functools.partial):
@@ -112,6 +117,11 @@ def _namespace(function: Callable[..., object], supplied: Mapping[str, object] |
             target = target.__call__
         else:
             break
+    return target
+
+
+def _namespace(function: Callable[..., object], supplied: Mapping[str, object] | None) -> dict[str, object]:
+    target = _resolved(function)
     namespace = dict(getattr(target, '__globals__', {}))
     if supplied is not None:
         if not isinstance(supplied, Mapping) or any(not isinstance(key, str) for key in supplied):
@@ -195,7 +205,13 @@ def function_tool(function: Callable[..., object], *, revision: str,
     if not callable(function) or inspect.isgeneratorfunction(function) or inspect.isasyncgenfunction(function):
         raise ValueError('function tools require a synchronous or asynchronous callable')
     signature = _signature(function)
-    documented = parameter_descriptions(inspect.getdoc(function)) if describe_from_docstring else None
+    # The docstring is the resolved function's, as the signature is: a partial or a bound method has none of its own.
+    written = inspect.getdoc(_resolved(function) if describe_from_docstring else function) or ''
+    documented = parameter_descriptions(written) if describe_from_docstring else None
+    for parameter_name, text in (documented or {}).items():
+        if len(text) > MAX_DOCSTRING_DESCRIPTION:
+            raise ValueError(f'docstring description for parameter {parameter_name!r} exceeds '
+                             f'{MAX_DOCSTRING_DESCRIPTION} characters')
     parameters, schema, defaults_json = _parameters(signature, _namespace(function, annotation_namespace), context_parameter,
                                                     documented)
 
@@ -214,8 +230,8 @@ def function_tool(function: Callable[..., object], *, revision: str,
         return function(*positional, **keywords)
 
     selected_name = getattr(function, '__name__', '') if name is None else name
-    written = inspect.getdoc(function) or ''
-    selected_description = ((without_parameters(written) if describe_from_docstring else written)
+    # A docstring that is only its parameter section still describes the tool.
+    selected_description = (((without_parameters(written) or written) if describe_from_docstring else written)
                             if description is None else description)
     return AgentTool(selected_name, selected_description, revision, schema, invoke, max_output_bytes,
                      return_direct=return_direct, requires_approval=requires_approval)

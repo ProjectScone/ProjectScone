@@ -106,8 +106,13 @@ return annotations do not add output validation or convert Python objects.
 
 Pass `describe_from_docstring=True` to give each parameter the description its
 docstring writes, in Google (`Args:` then `name (type): text`), NumPy (a
-`Parameters` heading underlined with dashes) or Sphinx (`:param name: text`)
-style. A description continued on further lines becomes one line. An
+`Parameters` heading underlined with dashes, where `x, y : int` describes both)
+or Sphinx (`:param name: text`, and its synonyms `:arg`, `:parameter`, `:key`,
+`:keyword`) style. A description continued on further lines becomes one line.
+The docstring is read from the function a `functools.partial`, bound method or
+callable object finally runs, as its signature is. A description longer than
+4,096 characters is refused naming its parameter; a docstring that is only its
+parameter section still becomes the tool's description. An
 `Annotated[T, "description"]` still wins. When the tool's description comes from
 the docstring, the parameter section is left out of it, since the same text is now
 in the schema; an explicit `description` is kept whole. It is off by default,
