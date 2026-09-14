@@ -110,6 +110,8 @@ class EpisodeBody(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     source: Optional[str] = None
     created_at: Optional[str] = None
+    #: How this record is cut; unset keeps the server's rule.
+    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
@@ -607,6 +609,7 @@ def create_app(
             attachment_ids=body.attachment_ids,
             dedup_key=body.dedup_key,
             replace=body.replace,
+            chunking=body.chunking,
         )
         return added.model_dump()
 
@@ -631,7 +634,8 @@ def create_app(
                                    for outcome in ("accepted", "duplicate", "updated")},
                         "job": job_json(replayed), "replayed": True}
         records = [
-            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key)
+            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
+                   chunking=r.chunking)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
@@ -982,6 +986,7 @@ def create_app(
             "top_similarity": result.top_similarity,
             "low_confidence": result.low_confidence,
             "degraded": result.degraded,
+            "narrowing": result.narrowing.model_dump() if result.narrowing is not None else None,
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),

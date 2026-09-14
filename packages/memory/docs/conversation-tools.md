@@ -55,6 +55,7 @@ SCONE_CONVERSATIONS_JOURNAL=~/.scone-memory/conversations.db
 SCONE_CONVERSATIONS_TOOL_MODE=structured # off (default), native, structured
 SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH=1 # default when tool mode is enabled
 SCONE_CONVERSATIONS_TOOL_COMPUTE=0 # opt-in exact arithmetic/counts on quoted inputs
+SCONE_CONVERSATIONS_TOOL_TABLES=0 # opt-in exact answers from a document's table cells
 # SCONE_CONVERSATIONS_TOOL_MAX_CALLS=4
 # SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS=4
 # SCONE_CONVERSATIONS_TOOL_TIMEOUT=120
@@ -69,6 +70,16 @@ to let the model choose whether to search. SDK `TextConversation` exposes the
 same option as `tool_initial_search=True`, with the SDK default remaining false.
 
 ## Computation from retained passages
+
+Set `SCONE_CONVERSATIONS_TOOL_TABLES=1` to offer `list_tables` and
+`query_table`: a document's declared tables, and one structured question
+over one of them answered from its own cells on exact fractions (count,
+sum, average, min, max or the rows, after `where` conditions), every cell
+quoted and tied to the stored chunk that holds it, so the final answer's
+sources are checked like any other tool evidence. The model turns words
+into the arguments; nothing it says reaches the numbers. SDK callers use
+`TextConversation(..., tool_tables=True)` or
+`ScopedMemoryTools(..., enable_tables=True)`; see `table-querying.md`.
 
 Set `SCONE_CONVERSATIONS_TOOL_COMPUTE=1` to offer `compute_memory` after a
 passage has been retrieved in the current turn. SDK callers use

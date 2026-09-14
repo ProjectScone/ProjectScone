@@ -111,6 +111,7 @@ class TextConversation:
     _tool_limits: ToolLoopLimits
     _tool_initial_search: bool
     _tool_compute: bool
+    _tool_tables: bool
     _evidence_answer_policy: Literal["when_available", "required"]
     _answer_reviewer: AnswerReviewer | None
     _answer_requirements: AnswerRequirements | None
@@ -164,7 +165,10 @@ class TextConversation:
             raise ValueError("neighbor_chunks is for ordinary search; tool mode uses read_memory")
         if type(tool_compute) is not bool or (tool_compute and tool_model_factory is None):
             raise ValueError("tool_compute requires a boolean and a tool model")
+        if type(tool_tables) is not bool or (tool_tables and tool_model_factory is None):
+            raise ValueError("tool_tables requires a boolean and a tool model")
         self._tool_compute = tool_compute
+        self._tool_tables = tool_tables
         self._tool_factory = tool_model_factory
         self._tool_initial_search = tool_initial_search
         self._tool_limits = ToolLoopLimits.model_validate((tool_limits or ToolLoopLimits()).model_dump())
@@ -409,7 +413,8 @@ class TextConversation:
             except Exception:
                 raise RuntimeError('tool model unavailable') from None
             tools = ScopedMemoryTools(self._memory, self._space, scope=self._scope,
-                                      exclude_session_id=self._session_id, enable_computation=self._tool_compute)
+                                      exclude_session_id=self._session_id, enable_computation=self._tool_compute,
+                                      enable_tables=self._tool_tables)
             result = await EvidenceToolLoop(model, tools, limits=self._tool_limits,
                                            initial_search=self._tool_initial_search).run(messages)
         check_active()

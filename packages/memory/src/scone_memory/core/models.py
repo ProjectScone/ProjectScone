@@ -396,6 +396,30 @@ class QueryEntity(BaseModel):
     matched: str
 
 
+class Narrowing(BaseModel):
+    """What a narrowed recall did in each lane, and how far it looked.
+
+    A lane that narrows ``in_store`` applied the request to every row it
+    holds; one that is ``postfiltered`` returned its best ``window``
+    candidates and the request then removed the ones that did not fit.
+    ``window_exhausted`` is the bound biting: the filter removed some
+    candidates and a post-filtered lane's window was full when it did,
+    so a memory that fits may lie deeper than the recall looked. An
+    empty answer with this true is not "there is none".
+    """
+
+    conditions: bool
+    kind_or_source_or_dates: bool
+    text_lane: Literal["in_store", "postfiltered", "off"]
+    vector_lane: Literal["in_store", "postfiltered", "off"]
+    text_window: int
+    vector_window: int
+    text_returned: int
+    vector_returned: int
+    postfiltered_out: int
+    window_exhausted: bool
+
+
 class RecallResult(BaseModel):
     #: Id of the evidence event recorded for this recall, when an event
     #: log is attached; feedback refers to it.
@@ -417,10 +441,22 @@ class RecallResult(BaseModel):
     #: Lanes that failed and were left out, named so a caller can tell a
     #: thin answer from a broken one.
     degraded: list[str] = Field(default_factory=list)
+    #: Present when the recall narrowed by condition, kind, source or date:
+    #: which lane applied it where, how deep each looked, and whether a
+    #: post-filtered lane's window was full when the filter removed
+    #: candidates. None when nothing narrowed.
+    narrowing: Optional[Narrowing] = None
     #: With ``graph_boost``: the entities the entity lane searched for.
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
     space_bytes: int = 0
+    #: What the caller's synonym list added to the text lane's query, when
+    #: a term matched: ``matched``, ``added``, ``offered``, ``capped``. None
+    #: when no list is configured or nothing in the query was on it.
+    expansion: Optional[dict[str, object]] = None
+    #: With stem prefixes on: the prefixes added to the text lane's query
+    #: (``added``) and whether the store could take them (``applied``).
+    prefixes: Optional[dict[str, object]] = None
 
     @property
     def context_reduction(self) -> float:
@@ -445,6 +481,14 @@ class Added(BaseModel):
     replaced: Optional[ForgetReceipt] = None
     #: Why nothing was stored, for a failed record. None for the rest.
     reason: Optional[str] = None
+    #: How a stored record was cut -- the way actually used, which is
+    #: ``code`` for a code source unless the record said otherwise -- and,
+    #: when it was cut at its structure, the chunker's own counts: what
+    #: landed on a boundary, what was split by size, whether a unit ran
+    #: over the target and whether the unit bound bit. None on a receipt
+    #: that stored nothing.
+    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
+    structure: Optional[dict[str, object]] = None
 
 
 class Status(BaseModel):

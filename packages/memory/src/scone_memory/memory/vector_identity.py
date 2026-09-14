@@ -40,6 +40,7 @@ from ..core.ports import NewEpisode, RecordsVectorWriter, VectorIndex, VectorPoi
 from ..core.vector_writers import Writer, rebuilding_token
 
 if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
     from .engine import MemoryEngine
 
 logger = logging.getLogger(__name__)
@@ -126,9 +127,13 @@ class GuardedVectors:
         await cast(RecordsVectorWriter, self._inner).upsert_as(points, self._writer())
 
     async def search(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
-                     tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None) -> list[tuple[int, float]]:
+                     tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None,
+                     conditions: "Filter | None" = None) -> list[tuple[int, float]]:
+        if conditions is None:
+            return await cast(RecordsVectorWriter, self._inner).search_as(
+                space, vector, limit, as_of, tags, where, writer=self._writer())
         return await cast(RecordsVectorWriter, self._inner).search_as(
-            space, vector, limit, as_of, tags, where, writer=self._writer())
+            space, vector, limit, as_of, tags, where, writer=self._writer(), conditions=conditions)
 
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         await self._inner.delete(chunk_ids)
