@@ -2505,7 +2505,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
 | `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
 | `html` | one page: the drawing, search by name, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
-| `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate; what the graph names but never reads (`typing`, a package) drawn small and hideable; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
+| `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate; what the graph names but never reads (`typing`, a package) hidden until the legend shows it, then drawn small; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`

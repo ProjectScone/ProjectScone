@@ -849,3 +849,32 @@ def test_explorer_draws_the_codebases_own_first_and_says_what_it_left_out(monkey
     data = json.loads(_page(exported.body).data["graph-data"])
     assert len(data["nodes"]) == 8 and not any(node["external"] for node in data["nodes"]), "the room goes to the code"
     assert data["left_out"]["entities"] == len(projection.entities) - 8 and "left out of the page" in data["about"]
+    assert "named but never read were left out first" in data["about"]
+    monkeypatch.setattr(explorer, "MAX_NODES", 5_000)
+    monkeypatch.setattr(explorer, "MAX_EDGES", 2)
+    data = json.loads(_page(export_graph(projection, "explorer").body).data["graph-data"])
+    assert len(data["edges"]) == 2 and data["left_out"]["relations"] == len(projection.relations) - 2
+    assert "relations left out of the page" in data["about"]
+
+
+def test_explorer_pins_its_policy_to_the_bytes_it_emits_and_its_script_parses(projection):
+    import base64
+    import hashlib
+    import re
+    import shutil
+    import subprocess
+
+    text = export_graph(projection, "explorer").body.decode("utf-8")
+    policy = re.search(r'Content-Security-Policy" content="([^"]+)"', text).group(1)
+    code = re.search(r'<script id="graph-code">(.*?)</script>', text, re.S).group(1)
+    style = re.search(r"<style>(.*?)</style>", text, re.S).group(1)
+    for emitted in (code, style):
+        pinned = "'sha256-" + base64.b64encode(hashlib.sha256(emitted.encode("utf-8")).digest()).decode() + "'"
+        assert pinned in policy, "the hash covers exactly the bytes the page carries"
+    assert "'unsafe-inline'" not in policy and "projection " in json.loads(_page(text.encode()).data["graph-data"])["about"]
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed here; the script's syntax is checked where it is")
+    checked = subprocess.run([node, "-e", "new Function(process.argv[1])", code], capture_output=True, text=True, timeout=30)
+    assert checked.returncode == 0, checked.stderr
+    assert "Object.create(null)" in code and "pointerleave" in code and "settle()" in code
