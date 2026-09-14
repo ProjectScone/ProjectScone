@@ -12,6 +12,8 @@ from html.parser import HTMLParser
 from io import StringIO
 from pathlib import PurePath
 from time import monotonic
+
+from pydantic import ValidationError
 from typing import cast
 from xml.etree.ElementTree import Element
 
@@ -140,6 +142,8 @@ def _table(text: str, delimiter: str, out: _Collector) -> None:
                     table_cells=tuple(cells))
     except csv.Error:
         raise InvalidInput('document contains malformed delimited text') from None
+    except ValidationError:
+        raise InvalidInput('document exceeds its table row limit') from None
 
 
 class _Number(str):
@@ -221,7 +225,10 @@ def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth
     if cell is not None:
         table, row, column, names = cell
         quoted = isinstance(value, str) and not isinstance(value, _Number)  # a JSON number is a str subclass here
-        inner: str = str(value) if quoted else rendered
+        # The cell quotes the segment as written, so a string's text is its
+        # JSON rendering between the quotes, escapes and all: the span then
+        # holds exactly those bytes.
+        inner: str = rendered[1:-1] if quoted else rendered
         head = len(f'{pointer}: '.encode('utf-8')) + (1 if quoted else 0)
         cells = (DocumentTableCell(table_locator=table, locator=f'{prefix}#{pointer}', row=row, column=column,
                                    text=inner, start=head, end=head + len(inner.encode('utf-8'))),)

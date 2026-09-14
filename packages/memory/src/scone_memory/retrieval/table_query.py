@@ -136,6 +136,9 @@ class TableAnswer:
     numeric_form: str
     #: Rows an ordering condition could not read as a number, and so did not match.
     rows_skipped_non_numeric: int = 0
+    #: Matched rows with no cell at all in the queried column (a JSON object
+    #: without the key); they are not in the number, and this says so.
+    rows_without_cell: int = 0
     verified_accuracy: Literal[False] = False
 
     def record(self) -> dict[str, object]:
@@ -145,6 +148,7 @@ class TableAnswer:
                 'cells_used': self.cells_used, 'quotes_truncated': self.quotes_truncated,
                 'totals_rows_excluded': self.totals_rows_excluded,
                 'rows_skipped_non_numeric': self.rows_skipped_non_numeric,
+                'rows_without_cell': self.rows_without_cell,
                 'where': [{'column': c.column, 'op': c.op, 'value': c.value} for c in self.conditions],
                 'numeric_form': self.numeric_form, 'coverage': 'matched_rows_only', 'verified_accuracy': False,
                 'notice': ('Exact computation over the matched rows of one table. What a column means, its units, '
@@ -155,11 +159,13 @@ def number(text: str) -> Optional[Fraction]:
     """The exact number a cell holds, or None when it is not one by the rule in ``NUMERIC_FORM``."""
     body = text.strip()
     sign = ''
-    if body[:1] in '+-':
+    if body and body[0] in '+-':
         sign, body = body[0], body[1:].lstrip()
-    if body[:1] in _CURRENCY:
+    if body and body[0] in _CURRENCY:
         body = body[1:].lstrip()
-    if not _NUMBER.match(body):
+    # One sign at most: "--5" and "- -5" are not numbers by the rule, and
+    # an empty cell is no number at all rather than a crash.
+    if not body or body[0] in '+-' or not _NUMBER.match(body):
         return None
     return Fraction(sign + body.replace(',', ''))
 
@@ -195,6 +201,9 @@ class _Draft:
 def tables_from(provenance: "DocumentProvenance") -> tuple[Table, ...]:
     """The tables a document's manifest declares, as rows keyed by column name."""
     drafts: dict[str, _Draft] = {}
+    #: Per table, the column position a header name was first seen at, so
+    #: two headers spelt the same at different positions stay two columns.
+    positions: dict[str, dict[str, int]] = {}
     offset = 0
     for segment in provenance.segments:
         role = segment.metadata.get('table_role')
@@ -213,6 +222,9 @@ def tables_from(provenance: "DocumentProvenance") -> tuple[Table, ...]:
                 continue
             if column_headers:
                 name = column_headers[0]
+                first = positions.setdefault(cell.table_locator, {}).setdefault(name, cell.column)
+                if first != cell.column:
+                    name = f'{name} [column {cell.column + 1}]'
             elif declared and cell.column < len(declared):
                 name = declared[cell.column]
             else:
@@ -298,9 +310,11 @@ def answer_from(tables: Sequence[Table], args: TableQueryArgs) -> TableAnswer:
     else:
         assert column is not None
         numbers: list[Fraction] = []
+        without = 0
         for row in matched:
             cell = row.cells.get(column)
             if cell is None:
+                without += 1
                 continue
             parsed = number(cell.text)
             if parsed is None:
@@ -319,7 +333,8 @@ def answer_from(tables: Sequence[Table], args: TableQueryArgs) -> TableAnswer:
             value = render(max(numbers))
     return TableAnswer(args.operation, column, table.locator, table.name, value, len(matched), len(table.rows),
                        tuple(used[:MAX_QUOTED]), len(used), len(used) > MAX_QUOTED, table.totals_rows,
-                       args.where, NUMERIC_FORM, len({cell.locator for cell in skipped}))
+                       args.where, NUMERIC_FORM, len({cell.locator for cell in skipped}),
+                       without if args.operation in ('sum', 'average', 'min', 'max') else 0)
 
 
 def verify_quotes(answer: TableAnswer, content: bytes) -> bool:

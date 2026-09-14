@@ -96,13 +96,22 @@ async def query_table_tool(memory: MemoryEngine, space: str, args: QueryTableToo
         holders.setdefault(holder.chunk_id, holder)
         cells.append({**cell.record(), 'chunk_id': holder.chunk_id})
     named = list(holders.values())[:MAX_ITEMS]
+    # A cell is anchored only to a chunk the evidence packet carries and
+    # checks for freshness; a cell in a chunk past that bound is returned
+    # with no anchor and counted, never with an anchor nobody rechecked.
+    kept_ids = {c.chunk_id for c in named}  # type: ignore[attr-defined]
+    beyond = 0
+    for quoted in cells:
+        if quoted['chunk_id'] is not None and quoted['chunk_id'] not in kept_ids:
+            quoted['chunk_id'] = None
+            beyond += 1
     packet: dict[str, object] = {
         'ok': True, 'status': 'prepared', 'facts': [], 'verified_accuracy': False,
         'items': [{'chunk_id': c.chunk_id, 'episode_id': c.episode_id, 'text': c.text,  # type: ignore[attr-defined]
                    'source': episode.source, 'created_at': c.created_at, 'score': 0.0} for c in named],  # type: ignore[attr-defined]
         'coverage': {'bounded': True, 'complete': False, 'mode': 'table_cells',
                      'truncated': len(holders) > MAX_ITEMS or answer.quotes_truncated,
-                     'cells_unanchored': unanchored}}
+                     'cells_unanchored': unanchored, 'cells_beyond_evidence': beyond}}
     prepared = await prepare_tool_evidence(memory, space, scope, excluded_session, packet, timeout_s)
     detached: dict[str, object] = json.loads(prepared.payload)
     detached['table'] = {**answer.record(), 'cells': cells}

@@ -207,3 +207,37 @@ async def test_a_json_document_queries_like_a_spreadsheet():
     assert answer.value == '1270.5' and [c.text for c in answer.cells] == ['1,250.50', '20']
     episode = await memory.episode('s', episode_id)
     assert verify_quotes(answer, episode.content.encode())
+
+
+def test_an_empty_or_double_signed_cell_is_no_number_not_a_crash():
+    from scone_memory.retrieval.table_query import number
+
+    assert number("") is None and number("   ") is None and number("--5") is None and number("- -5") is None
+    assert number("-5") == -5 and number("$1,270.50") == Fraction("1270.5") and number("+") is None and number("$") is None
+
+
+async def test_rows_without_the_column_are_counted_and_duplicate_headers_stay_two_columns():
+    from scone_memory.retrieval.table_query import TableQueryArgs, answer_from, episode_tables
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        added = await ingest_document(memory, 'alpha', b'[{"region": "West", "revenue": 20}, {"region": "East"}]', filename='sales.json')
+        tables = await episode_tables(memory, 'alpha', added.added.episode_id)
+        answer = answer_from(tables, TableQueryArgs(operation='sum', column='revenue'))
+        assert (answer.value, answer.rows_matched, answer.cells_used, answer.rows_without_cell) == ('20', 2, 1, 1)
+        assert answer.record()['rows_without_cell'] == 1
+        html = b'<table><tr><th>Amount</th><th>Amount</th></tr><tr><td>10</td><td>20</td></tr></table>'
+        twice = await ingest_document(memory, 'alpha', html, filename='two.html')
+        tables = await episode_tables(memory, 'alpha', twice.added.episode_id)
+        assert tables[0].columns == ('Amount', 'Amount [column 2]'), "two headers spelt the same at two positions are two columns"
+        total = answer_from(tables, TableQueryArgs(operation='sum', column='Amount'))
+        assert total.value == '10' and total.cells_used == 1
+        both = answer_from(tables, TableQueryArgs(operation='sum', column='Amount [column 2]'))
+        assert both.value == '20'
+        blank = await ingest_document(memory, 'alpha', b'region,revenue\r\nWest,20\r\nEast,\r\n', filename='blank.csv')
+        tables = await episode_tables(memory, 'alpha', blank.added.episode_id)
+        with pytest.raises(TableQueryError) as refused:
+            answer_from(tables, TableQueryArgs(operation='sum', column='revenue'))
+        assert refused.value.reason == 'non_numeric_cell'
+    finally:
+        await memory.close()
