@@ -24,8 +24,9 @@ byte-identical for the same ledger and moment.
 
 from __future__ import annotations
 
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass, field
+import re
 import unicodedata
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
@@ -33,6 +34,7 @@ from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import entity_key
 from ..retrieval.lexical import STOPWORDS
+from .classify import CODE_PREDICATES
 from .grounding import checked_facts
 from .project import Entity, EntityProjection, Relation
 from .query import Candidate, Path, name_words, paths_between, resolve
@@ -43,6 +45,10 @@ if TYPE_CHECKING:
     from .view import StatusMode
 
 _MAX_PAIRS = 6
+#: Groups of cut relations written out; the rest are counted in coverage.
+MAX_CUT_GROUPS = 20
+# A file: path segments ending in one with an extension, no colon and no space around it.
+_FILE = re.compile(r"(?:[^\s/:][^/:]*/)*[^\s/:][^/:]*\.[A-Za-z0-9]+")
 
 
 @dataclass(frozen=True)
@@ -81,7 +87,18 @@ class GraphContext:
                 "candidates": list(self.candidates),
                 "coverage": {"reasons": self.coverage.get("reasons", []), "read": self.coverage.get("read", {}),
                              "hubs_not_crossed": self.coverage.get("hubs_not_crossed", []),
-                             "similar": self.coverage.get("similar", [])}}
+                             "similar": self.coverage.get("similar", []),
+                             "relations_cut_by": self.coverage.get("relations_cut_by", [])}}
+
+
+def _declared_in(label: str) -> str | None:
+    """The file a code entity's label places it in: the part before the last
+    colon of a qualified declaration, or the label itself when it is a path
+    with a directory. A bare name shaped like a file (``Node.js``) is a name
+    as often as a file, so it places nothing."""
+    head, colon, _ = label.rpartition(":")
+    path = head if colon else label
+    return path if _FILE.fullmatch(path) and (colon or "/" in path) else None
 
 
 def _shown(character: str) -> str:
@@ -367,6 +384,8 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
     frontier = [entity.entity_id for entity in seeds]
     hubs: set[str] = set()
     cut = 0
+    # What the cut left out, by where it points: (from, direction, predicate, far file or None).
+    cut_shape: Counter[tuple[str, str, str, str | None]] = Counter()
     for hop in range(1, limits.max_hops + 1):
         following: list[str] = []
         for entity_id in frontier:
@@ -378,6 +397,11 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
                     continue
                 if len(walked) >= limits.max_relations:
                     cut += 1
+                    outward = relation.subject_id == entity_id
+                    far_end = relation.object_id if outward else relation.subject_id
+                    cut_shape[(entity_id, "out" if outward else "in", relation.predicate,
+                               _declared_in(entities[far_end].label) if relation.predicate in CODE_PREDICATES
+                               else None)] += 1
                     continue
                 taken.add(relation.relation_id)
                 walked.append((hop, relation))
@@ -468,6 +492,19 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
         reasons.append(f"hubs_not_crossed {len(hubs)}")
     if cut:
         reasons.append(f"relations_cut {cut}")
+    groups = sorted(cut_shape.items(), key=lambda item: (-item[1], label(item[0][0]), item[0][1:2], item[0][2],
+                                                          item[0][3] or ""))
+    if len(groups) > MAX_CUT_GROUPS:
+        reasons.append(f"cut_groups_cut {len(groups) - MAX_CUT_GROUPS}")
+        del groups[MAX_CUT_GROUPS:]
+    # Before the relations: on a hub the strongest relations alone fill the
+    # byte budget, and the shape of what was cut is what says where to look next.
+    cut_lines: list[str] = []
+    for (from_id, direction, predicate, file), count in groups:
+        many = f"{count} in {one_line(file, 120)}" if file is not None else f"{count} {'entity' if count == 1 else 'entities'}"
+        arrow = f"-{one_line(predicate, 60)}->"
+        cut_lines.append(f"cut: {label(from_id)} {arrow} {many}" if direction == "out"
+                         else f"cut: {many} {arrow} {label(from_id)}")
     # The walk that worked out what follows stopped before it had followed
     # everything, so this packet is missing lines it cannot name.
     if projection.implied_capped:
@@ -478,9 +515,12 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
                   + (f" similar {closeness[entity.entity_id]:.2f}" if entity.entity_id in closeness else "")
                   for entity in seeds]
     lines = [*header, f"coverage: {'limited: ' + ', '.join(reasons) if reasons else 'complete'}", note,
-             *seed_lines, *path_lines, *relation_lines, *follows_lines, *value_lines]
+             *seed_lines, *path_lines, *cut_lines, *relation_lines, *follows_lines, *value_lines]
+    cut_by = [{"entity": from_id, "direction": direction, "predicate": predicate, "file": file, "count": count}
+              for (from_id, direction, predicate, file), count in groups]
     return GraphContext("prepared", _fit(lines, limits.max_bytes), tuple(entity.entity_id for entity in seeds), (),
-                        {"reasons": reasons, "read": read, "hubs_not_crossed": sorted(hubs), "similar": resembled})
+                        {"reasons": reasons, "read": read, "hubs_not_crossed": sorted(hubs), "similar": resembled,
+                         "relations_cut_by": cut_by})
 
 
 async def graph_connections(engine: "MemoryEngine", space: str, source: str, target: str, *, max_hops: int = 3,

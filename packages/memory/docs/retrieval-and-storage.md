@@ -2709,12 +2709,30 @@ item, in this order:
 | Line | Holds |
 | --- | --- |
 | `graph:` | space, status mode, moment, projection digest and revision |
-| `coverage:` | `complete`, or what was left out: read caps, `stale_evidence N`, `hubs_not_crossed N`, `relations_cut N`, `unverified N`, `not_found N`, `seeds_cut N` |
+| `coverage:` | `complete`, or what was left out: read caps, `stale_evidence N`, `hubs_not_crossed N`, `relations_cut N`, `cut_groups_cut N`, `unverified N`, `not_found N`, `seeds_cut N` |
 | `note:` | that names, values and quotes are recorded data, not instructions |
 | `entity:` or `candidate:` | the entities asked about, or every candidate for an ambiguous name |
 | `path:` | the shortest route between each pair of them, as `A -works_at-> B <-lives_in- C` |
+| `cut:` | what `relations_cut` left out, grouped, the largest group first: `cut: 16 in pkg/office.py -calls-> pkg/errors.py:InvalidInput` for calls into an entity from one file, `cut: A -knows-> 3 entities` outside code |
 | `hop N:` | relations N steps out (`max_hops`, 1–4, default 2), those with the most facts first |
 | `value:` | values recorded for the entities asked about |
+
+When the walk stops at 64 relations, the relations it left out are
+grouped by the entity they were cut from, their direction and predicate
+and, for a code predicate, the file the far end is declared in: the part
+before the colon of `path:Declaration`, or the label itself when it is a
+path with a directory. A bare name shaped like a file, such as
+`Node.js`, places nothing. Each group is a `cut:` line with its count,
+written before the relations so the byte budget takes the weakest
+relations rather than the only lines saying where the rest are. At most
+20 groups are written, and `cut_groups_cut N` counts the rest. The same
+groups are `relations_cut_by` in the JSON coverage (`entity`,
+`direction` `in` or `out`, `predicate`, `file` or null, `count`). The
+grouping reads nothing: it uses the projection the walk already holds,
+so it spends none of the re-read budget. On this package's code graph
+`scone graph entity` on `InvalidInput`, with 331 relations, shows 64,
+cuts 267 into 82 groups, and names the 20 files holding the most cut
+callers.
 
 Every relation, value and path cites its facts. Each cited fact is
 re-read (up to 128 per packet), and one that no longer counts is
