@@ -375,6 +375,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
                                                                "mermaid", "svg", "canvas", "html", "explorer", "communities"])
     g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
+    g.add_argument("--usage", action="store_true",
+                   help="on the svg and html drawings, say how many recent recalls returned each entity")
     p = sub.add_parser("calibrate",
                        help="measure the floor this engine abstains by, on questions with and without an answer")
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file of questions")
@@ -1552,8 +1554,14 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
                                           direction=args.direction, hops=args.hops)), file=out)
         return 0
     reasons = coverage.get("reasons") or []
+    recalls = None
+    if args.usage:
+        from ..entities.usage import recall_usage
+
+        recalls = await recall_usage(engine, space)
     exported = export_graph(projection, args.format, about={"status": "current", "as_of": when,
-                                                           "coverage": {**coverage, "truncated": bool(reasons)}})
+                                                           "coverage": {**coverage, "truncated": bool(reasons)}},
+                            usage=recalls)
     if args.out:
         with open(args.out, "wb") as file:
             file.write(exported.body)

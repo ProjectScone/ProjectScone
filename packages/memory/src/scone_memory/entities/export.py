@@ -53,6 +53,7 @@ from .project import Entity, EntityProjection, Support, backing_of, merged_perio
 
 if TYPE_CHECKING:
     from .layout import Box, Drawing
+    from .usage import Usage
 
 ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid", "svg",
                        "canvas", "html", "explorer", "communities"]
@@ -850,7 +851,8 @@ def _drawing_notes(projection: EntityProjection, about: Mapping[str, object], le
             *([f"read limited by {', '.join(map(str, reasons))}"] if isinstance(reasons, list) and reasons else []),
             (f"{_many(left_out[0], 'entity', 'entities')} and {_many(left_out[1], 'relation')} left out of the drawing"
              if any(left_out) else "every entity and relation read is drawn"),
-            *(["the communities format draws the graph by community"] if left_out[0] else []), "values are not drawn"]
+            *(["the communities format draws the graph by community"] if left_out[0] else []),
+            *_usage_note(about), "values are not drawn"]
 
 
 def _svg(projection: EntityProjection, about: Mapping[str, object]) -> Export:
@@ -965,6 +967,8 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
                 "y2": number(target.y + margin - uy * (target.radius + 1)),
                 "stroke-width": weight, "marker-end": "url(#arrow)", **across})
         ElementTree.SubElement(element, f"{{{ns}}}title").text = title
+    recalled = _recalled(projection, about)
+    recalls_read = usage.recalls_read if (usage := _usage_of(about)) is not None else 0
     circles = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "entities"})
     for node in drawing.nodes:
         group = ElementTree.SubElement(circles, f"{{{ns}}}g", {"data-entity": node.entity_id,
@@ -973,7 +977,11 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
             "cx": number(node.x + margin), "cy": number(node.y + margin), "r": number(node.radius),
             "fill": colour_of[node.group_id], "stroke": "#ffffff", "stroke-width": "1.5"})
         ElementTree.SubElement(circle, f"{{{ns}}}title").text = (
-            f"{_xml_text(node.label)} ({_xml_text(node.kind or 'unknown kind')}) {node.entity_id}")
+            f"{_xml_text(node.label)} ({_xml_text(node.kind or 'unknown kind')}) {node.entity_id}"
+            + (f"; returned by {recalled[node.entity_id]} of the {_many(recalls_read, 'recall')} read"
+               if recalled is not None else ""))
+        if recalled is not None:
+            group.set("data-recalled", str(recalled[node.entity_id]))
         # A white halo keeps a name legible where an arrow runs under it.
         _fitted(group, f"{{{ns}}}text", {
             "x": number(node.x + margin), "y": number(node.y + margin + node.radius + 12), "text-anchor": "middle",
@@ -1153,6 +1161,7 @@ g[data-entity] { cursor: pointer; }
 g[data-entity]:focus { outline: none; }
 g[data-entity]:focus circle, g.chosen circle { stroke: #1d1d1f; stroke-width: 3; }
 g.dim { opacity: 0.15; }
+g.unreached { opacity: 0.2; }
 .gone { display: none; }
 @media (max-width: 720px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
   aside { border-left: 0; border-top: 1px solid #dcdcd8; max-height: 40vh; } }
@@ -1189,6 +1198,11 @@ _HTML_CODE = """
     chosen = id;
     Object.keys(shapes).forEach(function (key) { shapes[key].classList.toggle("chosen", key === id); });
     panel.replaceChildren(element("h2", node.label), element("p", (node.kind || "unknown kind") + " \\u00b7 " + id, "muted"));
+    if (node.recalled !== undefined) {
+      var read = data.usage.recalls_read;
+      panel.appendChild(element("p", "Returned by " + node.recalled + " of the " + read + (read === 1 ? " recall" : " recalls")
+        + " read.", "muted"));
+    }
     var list = document.createElement("ul");
     links[id].forEach(function (edge) {
       var outgoing = edge.source === id, other = nodes[outgoing ? edge.target : edge.source];
@@ -1242,6 +1256,15 @@ _HTML_CODE = """
     });
     applyHidden();
   });
+  // Entities no recall read returned fade, so what recall reaches stands out.
+  var dimUnreached = document.getElementById("usage-dim");
+  if (dimUnreached) {
+    dimUnreached.addEventListener("change", function () {
+      svg.querySelectorAll("g[data-recalled]").forEach(function (shape) {
+        shape.classList.toggle("unreached", dimUnreached.checked && shape.getAttribute("data-recalled") === "0");
+      });
+    });
+  }
   var view = svg.viewBox.baseVal, start = null, moved = false, gliding = 0;
   var still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   // Moves the view, at its current zoom, so the entity sits in its middle.
@@ -1374,8 +1397,12 @@ def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
 
     root, drawing, notes = _svg_root(projection, about)
     said = "; ".join(notes)
+    recalled = _recalled(projection, about)
+    usage = _usage_of(about)
     data = {"about": said,
-            "nodes": [{"id": node.entity_id, "label": node.label, "kind": node.kind, "group": node.group_id}
+            **({"usage": usage.record()} if usage is not None else {}),
+            "nodes": [{"id": node.entity_id, "label": node.label, "kind": node.kind, "group": node.group_id,
+                       **({"recalled": recalled[node.entity_id]} if recalled is not None else {})}
                       for node in drawing.nodes],
             "edges": [{"id": relation.relation_id, "source": relation.subject_id, "target": relation.object_id,
                        "predicate": relation.predicate, "fact_ids": list(relation.fact_ids),
@@ -1415,6 +1442,8 @@ def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
         f'<main><div id="drawing">{drawn}</div>', "<aside>",
         '<nav id="legend" aria-label="Communities"><h2>Communities</h2>',
         '<label class="all"><input type="checkbox" id="legend-all" checked> Show every community</label>',
+        *(['<label class="all"><input type="checkbox" id="usage-dim"> Dim what no recall returned</label>']
+          if recalled is not None else []),
         f"<ul>{legend}</ul></nav>",
         '<section id="details" aria-live="polite"><p class="muted">Choose an entity to see its relations and the '
         "facts behind them.</p></section>", "</aside></main>",
@@ -1491,5 +1520,40 @@ _WRITERS["explorer"] = _explorer
 
 
 def export_graph(projection: EntityProjection, format: ExportFormat, *,
-                 about: Mapping[str, object] | None = None) -> Export:
-    return _WRITERS[format](projection, about or {})
+                 about: Mapping[str, object] | None = None, usage: "Usage | None" = None) -> Export:
+    """``usage``, the recalls ``recall_usage`` read, puts on the SVG and the
+    page how many of them returned each drawn entity; other formats ignore it."""
+    return _WRITERS[format](projection, {**(about or {}), **({"usage": usage} if usage is not None else {})})
+
+
+def _usage_of(about: Mapping[str, object]) -> "Usage | None":
+    from .usage import Usage
+
+    usage = about.get("usage")
+    return usage if isinstance(usage, Usage) else None
+
+
+def _recalled(projection: EntityProjection, about: Mapping[str, object]) -> dict[str, int] | None:
+    """Per entity, the recalls read that returned one of its facts; None when that is unknown."""
+    from .usage import recalled_by_entity
+
+    usage = _usage_of(about)
+    if usage is None or not usage.available or not usage.recalls_read:
+        return None
+    counted = recalled_by_entity(usage, {role.fact_id: role for role in projection.roles})
+    return {entity.entity_id: counted[entity.entity_id] for entity in projection.entities}
+
+
+def _usage_note(about: Mapping[str, object]) -> list[str]:
+    """Which recalls the counts come from, in words that claim only that window."""
+    usage = _usage_of(about)
+    if usage is None:
+        return []
+    if not usage.available:
+        return ["recall use unknown: the engine keeps no events"]
+    since = f" since {usage.since}" if usage.since else ""
+    if not usage.recalls_read:
+        return [f"recall use unknown: the event log keeps no recalls{since}"]
+    oldest = f", the oldest from {usage.oldest}" if usage.oldest else ""
+    cut = " (older ones unread)" if usage.truncated else ""
+    return [f"recall use over the {_many(usage.recalls_read, 'recall')} the event log keeps{since}{oldest}{cut}"]
