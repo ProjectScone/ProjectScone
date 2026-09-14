@@ -841,7 +841,7 @@ that does not match the episode's text is refused rather than ignored.
 
 `unit` cuts an imported file one chunk per unit its reader named: a PDF
 page, a slide (with its notes), a table or sheet row, a spreadsheet
-cell's row, a JSON Lines record, an image frame or an audio segment.
+cell's row (and a legacy `.xls` row), a JSON Lines record, an image or video frame or an audio segment.
 Consecutive paragraphs in no unit, such as a Word document's body text
 between two tables, are one `text` unit. A unit longer than the target
 is split exactly as the length cut would split it, and the receipt says
