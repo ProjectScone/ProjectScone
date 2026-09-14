@@ -13,8 +13,8 @@ legend that turns each community on and off, a search box, the
 neighbourhood lit on hover, a panel that lists a chosen entity's
 relations with the facts behind each, and a filter by predicate. What
 the graph names but never reads (`typing`, a package, a cited record)
-is drawn small and dim and can be hidden, so the picture is of the
-codebase and not of the standard library.
+is hidden until the legend shows it, and then drawn small and dim, so
+the picture is of the codebase and not of the standard library.
 
 Everything the page holds comes from the projection; nothing is
 fetched. Names reach the page through one JSON block and are written
@@ -41,6 +41,8 @@ from .project import EntityProjection
 #: browser's canvas is still fine; a person's eye is not.
 MAX_NODES = 5_000
 MAX_EDGES = 20_000
+#: Characters of a label the page carries; a longer one is cut and marked.
+MAX_LABEL = 120
 #: Relations whose object may be something the graph only names.
 _NAMED_ONLY = frozenset(("imports", "depends_on", "develops_with", "cites", "uses_type", "references"))
 
@@ -51,6 +53,12 @@ def _external(projection: EntityProjection) -> frozenset[str]:
     subjects = {relation.subject_id for relation in projection.relations}
     return frozenset(relation.object_id for relation in projection.relations
                      if relation.predicate in _NAMED_ONLY and relation.object_id not in subjects)
+
+
+def _label(text: str) -> str:
+    """A label as the page carries it: whitespace collapsed, cut past the bound."""
+    text = " ".join(text.split())
+    return text if len(text) <= MAX_LABEL else text[:MAX_LABEL - 1] + "\u2026"
 
 
 def explorer_page(projection: EntityProjection, about: Mapping[str, object]) -> Export:
@@ -66,25 +74,32 @@ def explorer_page(projection: EntityProjection, about: Mapping[str, object]) -> 
                     key=lambda e: (e.entity_id in external, -degree[e.entity_id], e.label.casefold(), e.entity_id))
     shown = ranked[:MAX_NODES]
     kept = {entity.entity_id for entity in shown}
+    # The busiest relations too: by the facts behind each, then by how
+    # connected its ends are, so a cut does not fall on a slice of id space.
     edges = sorted((r for r in projection.relations if r.subject_id in kept and r.object_id in kept),
-                   key=lambda r: (-len(r.fact_ids), r.subject_id, r.predicate, r.object_id))[:MAX_EDGES]
+                   key=lambda r: (-len(r.fact_ids), -(degree[r.subject_id] + degree[r.object_id]),
+                                  r.subject_id, r.predicate, r.object_id))[:MAX_EDGES]
     membership = {member: community.community_id for community in analysis.communities for member in community.members}
     communities = [{"id": community.community_id, "label": community.label, "size": len(community.members)}
                    for community in sorted(analysis.communities, key=lambda c: (-len(c.members), c.community_id))]
     left_out = (len(projection.entities) - len(shown), len(projection.relations) - len(edges))
-    notes = [line for line in _about_lines(about) if line]
+    notes = [f"projection {projection.digest[:12]} at revision {projection.revision}"]
+    notes += [line for line in _about_lines(about) if line]
     if left_out[0] or left_out[1]:
         notes.append(f"{left_out[0]} entities and {left_out[1]} relations left out of the page: the busiest are drawn")
     named_shown, named_out = len(external & kept), len(external - kept)
     if named_shown:
-        notes.append(f"{named_shown} entities named but never read are drawn small and can be hidden")
+        notes.append(f"{named_shown} entities named but never read are hidden; the legend can show them")
     if named_out:
         notes.append(f"{named_out} entities named but never read were left out first")
+    cut_labels = sum(1 for e in shown if len(e.label) > MAX_LABEL)
+    if cut_labels:
+        notes.append(f"{cut_labels} label(s) longer than {MAX_LABEL} characters are cut on the page")
     said = "; ".join(notes)
     data = {
         "space": projection.space, "revision": projection.revision, "digest": projection.digest[:12],
         "about": said,
-        "nodes": [{"id": e.entity_id, "label": e.label, "kind": e.kind, "community": membership.get(e.entity_id),
+        "nodes": [{"id": e.entity_id, "label": _label(e.label), "kind": e.kind, "community": membership.get(e.entity_id),
                    "degree": degree[e.entity_id], "external": e.entity_id in external} for e in shown],
         "edges": [{"id": r.relation_id, "source": r.subject_id, "target": r.object_id, "predicate": r.predicate,
                    "facts": list(r.fact_ids)} for r in edges],
@@ -109,7 +124,8 @@ def explorer_page(projection: EntityProjection, about: Mapping[str, object]) -> 
         f"<header><h1>{markup.escape(title)}</h1><p id=\"about\">{markup.escape(said)}</p>"
         '<input id="search" type="search" placeholder="Find an entity" aria-label="Find an entity">'
         '<button id="fit" type="button">Fit</button><button id="pause" type="button">Pause</button></header>',
-        '<main><div id="stage"><canvas id="graph"></canvas><div id="hover" hidden></div></div>',
+        '<main><div id="stage"><canvas id="graph" tabindex="0" aria-label="The graph; use the search box to reach an '
+        'entity by name"></canvas><div id="hover" hidden></div></div>',
         '<aside><section id="legend"><h2>Communities</h2><label><input id="externals" type="checkbox"> '
         "Show what is named but never read</label><ul id=\"communities\"></ul>"
         '<h2>Relations</h2><ul id="predicates"></ul></section>'
@@ -151,8 +167,9 @@ aside li { margin: 3px 0; overflow-wrap: anywhere; display: flex; align-items: c
 #details button.go { color: #0b57d0; background: none; border: 0; padding: 0; text-decoration: underline; }
 .muted { color: #5b5b5b; }
 .badge { font-size: 11px; padding: 1px 6px; border-radius: 10px; background: #e8e8e4; color: #5b5b5b; }
-#results { margin: 0; padding: 0; }
+#results { margin: 0; padding: 0; list-style: none; flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: 4px 12px; }
 #results li button { color: #0b57d0; background: none; border: 0; padding: 2px 0; text-decoration: underline; }
+aside li label { display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; }
 @media (max-width: 720px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
   aside { border-left: 0; border-top: 1px solid #dcdcd8; max-height: 45vh; } }
 """
@@ -166,7 +183,10 @@ CODE = r"""
   var details = document.getElementById("details"), search = document.getElementById("search");
   var PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7",
                  "#9c755f", "#bab0ac", "#1f77b4", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2"];
-  var nodes = data.nodes, edges = data.edges, byId = {}, links = {}, colour = {}, index = 0;
+  // Maps keyed by stored text have no prototype: a predicate called
+  // `constructor` or `__proto__` is a predicate, not a property.
+  function bare() { return Object.create(null); }
+  var nodes = data.nodes, edges = data.edges, byId = bare(), links = bare(), colour = bare(), index = 0;
   data.communities.forEach(function (c) { colour[c.id] = PALETTE[index++ % PALETTE.length]; });
   // Deterministic start: the same graph opens the same way every time.
   function seeded(text) { var h = 2166136261; for (var i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; }
@@ -179,8 +199,14 @@ CODE = r"""
   });
   edges.forEach(function (e) { links[e.source].push(e); if (e.target !== e.source) { links[e.target].push(e); } });
   nodes.forEach(function (n) { n.r = n.external ? 2.5 : 3 + 9 * Math.sqrt(n.degree / maxDegree); });
-  var hidden = {}, hiddenPredicates = {}, showExternals = false, chosen = null, hovered = null;
+  var hidden = bare(), hiddenPredicates = bare(), showExternals = false, chosen = null, hovered = null;
   var view = { x: 0, y: 0, k: 1 }, running = true, iterations = 0, MAX_ITERATIONS = 400;
+  // Drawn only when something changed, and the frame loop sleeps when
+  // the simulation has settled and nothing has: a settled page costs
+  // nothing.
+  var dirty = true, scheduled = false;
+  function wake() { dirty = true; if (!scheduled) { scheduled = true; window.requestAnimationFrame(frame); } }
+  function settle() { running = true; iterations = 0; document.getElementById("pause").textContent = "Pause"; wake(); }
 
   function visible(n) { return !hidden[n.community] && (showExternals || !n.external); }
   function edgeVisible(e) { return !hiddenPredicates[e.predicate] && visible(byId[e.source]) && visible(byId[e.target]); }
@@ -189,12 +215,12 @@ CODE = r"""
   // stays cheap, springs along the edges, a pull toward the centre and
   // toward each community's own centre so communities settle apart.
   function step() {
-    var alive = nodes.filter(visible), cell = 60, grid = {}, i, n;
+    var alive = nodes.filter(visible), cell = 60, grid = bare(), i, n;
     for (i = 0; i < alive.length; i++) {
       n = alive[i]; var key = Math.floor(n.x / cell) + ":" + Math.floor(n.y / cell);
       (grid[key] = grid[key] || []).push(n);
     }
-    var centres = {}, counts = {};
+    var centres = bare(), counts = bare();
     for (i = 0; i < alive.length; i++) {
       n = alive[i]; if (!n.community) { continue; }
       centres[n.community] = centres[n.community] || { x: 0, y: 0 };
@@ -225,6 +251,7 @@ CODE = r"""
     }
     for (i = 0; i < alive.length; i++) { n = alive[i]; n.x += Math.max(-30, Math.min(30, n.vx)); n.y += Math.max(-30, Math.min(30, n.vy)); }
     iterations++;
+    dirty = true;
     if (iterations >= MAX_ITERATIONS) { running = false; document.getElementById("pause").textContent = "Resume"; }
   }
 
@@ -233,8 +260,10 @@ CODE = r"""
     canvas.width = rect.width * scale; canvas.height = rect.height * scale;
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
   }
-  function toScreen(n) { return { x: (n.x + view.x) * view.k + canvas.clientWidth / 2, y: (n.y + view.y) * view.k + canvas.clientHeight / 2 }; }
-  function neighbourhood(id) { var set = {}; set[id] = true; links[id].forEach(function (e) { set[e.source] = true; set[e.target] = true; }); return set; }
+  // One reused pair rather than an object per node per frame.
+  var screen = { x: 0, y: 0 };
+  function toScreen(n) { screen.x = (n.x + view.x) * view.k + canvas.clientWidth / 2; screen.y = (n.y + view.y) * view.k + canvas.clientHeight / 2; return screen; }
+  function neighbourhood(id) { var set = bare(); set[id] = true; links[id].forEach(function (e) { set[e.source] = true; set[e.target] = true; }); return set; }
 
   function draw() {
     ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
@@ -242,10 +271,12 @@ CODE = r"""
     ctx.lineWidth = 1;
     for (i = 0; i < edges.length; i++) {
       var e = edges[i]; if (!edgeVisible(e)) { continue; }
-      var a = toScreen(byId[e.source]), b = toScreen(byId[e.target]);
+      var a = toScreen(byId[e.source]), ax = a.x, ay = a.y, b = toScreen(byId[e.target]);
       var on = !lit || (lit[e.source] && lit[e.target] && (e.source === focus || e.target === focus));
       ctx.strokeStyle = on ? "rgba(90,90,90,0.35)" : "rgba(90,90,90,0.06)";
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(ax, ay);
+      if (e.source === e.target) { ctx.arc(ax + 6, ay - 6, 6, 0, Math.PI * 2); } else { ctx.lineTo(b.x, b.y); }
+      ctx.stroke();
     }
     for (i = 0; i < nodes.length; i++) {
       var n = nodes[i]; if (!visible(n)) { continue; }
@@ -260,7 +291,12 @@ CODE = r"""
     }
     ctx.globalAlpha = 1;
   }
-  function frame() { if (running) { step(); } draw(); window.requestAnimationFrame(frame); }
+  function frame() {
+    scheduled = false;
+    if (running) { step(); }
+    if (dirty) { draw(); dirty = false; }
+    if (running) { scheduled = true; window.requestAnimationFrame(frame); }
+  }
 
   function fit() {
     var alive = nodes.filter(visible); if (!alive.length) { return; }
@@ -284,7 +320,8 @@ CODE = r"""
     chosen = id; var n = byId[id];
     details.replaceChildren();
     details.appendChild(element("h3", n.label));
-    var meta = element("p", (n.kind || "kind unknown") + " · " + n.degree + " relation(s)" + (n.community ? " · " + communityLabel(n.community) : ""), "muted");
+    var drawn = links[id].length, said = drawn === n.degree ? n.degree + " relation(s)" : drawn + " of " + n.degree + " relations drawn";
+    var meta = element("p", (n.kind || "kind unknown") + " · " + said + (n.community ? " · " + communityLabel(n.community) : ""), "muted");
     if (n.external) { meta.appendChild(document.createTextNode(" ")); meta.appendChild(element("span", "named, never read", "badge")); }
     details.appendChild(meta);
     var groups = {};
@@ -308,28 +345,29 @@ CODE = r"""
     });
   }
   function communityLabel(id) { for (var i = 0; i < data.communities.length; i++) { if (data.communities[i].id === id) { return data.communities[i].label; } } return id; }
-  function centre(n) { view.x = -n.x; view.y = -n.y; }
+  function centre(n) { view.x = -n.x; view.y = -n.y; wake(); }
 
   // Legend: one row per community with a switch, and one per predicate.
   var communityList = document.getElementById("communities");
   data.communities.forEach(function (c) {
-    var item = document.createElement("li"), box = document.createElement("input"), swatch = element("span", "", "swatch");
+    var item = document.createElement("li"), row = document.createElement("label"), box = document.createElement("input"), swatch = element("span", "", "swatch");
     box.type = "checkbox"; box.checked = true; swatch.style.background = colour[c.id];
-    box.addEventListener("change", function () { hidden[c.id] = !box.checked; });
-    item.appendChild(box); item.appendChild(swatch); item.appendChild(element("span", c.label));
-    item.appendChild(element("span", String(c.size), "count")); communityList.appendChild(item);
+    // A shown-again community is laid out again: what was hidden was not moved.
+    box.addEventListener("change", function () { hidden[c.id] = !box.checked; settle(); });
+    row.appendChild(box); row.appendChild(swatch); row.appendChild(element("span", c.label));
+    row.appendChild(element("span", String(c.size), "count")); item.appendChild(row); communityList.appendChild(item);
   });
   var predicateList = document.getElementById("predicates");
   data.predicates.forEach(function (p) {
-    var item = document.createElement("li"), box = document.createElement("input");
+    var item = document.createElement("li"), row = document.createElement("label"), box = document.createElement("input");
     box.type = "checkbox"; box.checked = true;
-    box.addEventListener("change", function () { hiddenPredicates[p] = !box.checked; });
-    item.appendChild(box); item.appendChild(element("span", p)); predicateList.appendChild(item);
+    box.addEventListener("change", function () { hiddenPredicates[p] = !box.checked; settle(); });
+    row.appendChild(box); row.appendChild(element("span", p)); item.appendChild(row); predicateList.appendChild(item);
   });
-  document.getElementById("externals").addEventListener("change", function (event) { showExternals = event.target.checked; });
-  document.getElementById("fit").addEventListener("click", fit);
+  document.getElementById("externals").addEventListener("change", function (event) { showExternals = event.target.checked; settle(); });
+  document.getElementById("fit").addEventListener("click", function () { fit(); wake(); });
   document.getElementById("pause").addEventListener("click", function () {
-    running = !running; if (running) { iterations = 0; } this.textContent = running ? "Pause" : "Resume";
+    if (running) { running = false; this.textContent = "Resume"; } else { settle(); }
   });
 
   // Search: up to twenty matches by name, each a button that chooses.
@@ -338,7 +376,7 @@ CODE = r"""
     var q = search.value.trim().toLowerCase(); results.replaceChildren(); if (!q) { return; }
     nodes.filter(function (n) { return n.label.toLowerCase().indexOf(q) !== -1; }).slice(0, 20).forEach(function (n) {
       var item = document.createElement("li"), go = element("button", n.label); go.type = "button";
-      go.addEventListener("click", function () { if (n.external) { showExternals = true; document.getElementById("externals").checked = true; } show(n.id); centre(n); results.replaceChildren(); });
+      go.addEventListener("click", function () { if (n.external) { showExternals = true; document.getElementById("externals").checked = true; settle(); } show(n.id); centre(n); results.replaceChildren(); });
       item.appendChild(go); results.appendChild(item);
     });
   });
@@ -350,26 +388,30 @@ CODE = r"""
     var rect = canvas.getBoundingClientRect(), px = event.clientX - rect.left, py = event.clientY - rect.top;
     if (dragging) {
       if (Math.abs(event.clientX - dragging.x) + Math.abs(event.clientY - dragging.y) > 3) { moved = true; }
-      view.x = dragging.vx + (event.clientX - dragging.x) / view.k; view.y = dragging.vy + (event.clientY - dragging.y) / view.k; return;
+      view.x = dragging.vx + (event.clientX - dragging.x) / view.k; view.y = dragging.vy + (event.clientY - dragging.y) / view.k; wake(); return;
     }
-    var n = at(px, py); hovered = n ? n.id : null;
+    var n = at(px, py), was = hovered; hovered = n ? n.id : null;
     if (n) { hoverBox.hidden = false; hoverBox.textContent = n.label + (n.external ? " (named, never read)" : ""); hoverBox.style.left = (px + 12) + "px"; hoverBox.style.top = (py + 12) + "px"; }
     else { hoverBox.hidden = true; }
+    if (hovered !== was) { wake(); }
   });
   canvas.addEventListener("pointerup", function (event) {
-    if (dragging && !moved) { var rect = canvas.getBoundingClientRect(), n = at(event.clientX - rect.left, event.clientY - rect.top); if (n) { show(n.id); } }
+    if (dragging && !moved) { var rect = canvas.getBoundingClientRect(), n = at(event.clientX - rect.left, event.clientY - rect.top); if (n) { show(n.id); wake(); } }
     dragging = null;
   });
+  // The pointer gone: nothing is hovered, nothing is dragged, and the graph is lit whole again.
+  canvas.addEventListener("pointerleave", function () { hovered = null; hoverBox.hidden = true; dragging = null; wake(); });
+  canvas.addEventListener("pointercancel", function () { hovered = null; hoverBox.hidden = true; dragging = null; wake(); });
   canvas.addEventListener("wheel", function (event) {
     event.preventDefault();
     var factor = event.deltaY < 0 ? 1.1 : 1 / 1.1, rect = canvas.getBoundingClientRect();
     var px = event.clientX - rect.left - canvas.clientWidth / 2, py = event.clientY - rect.top - canvas.clientHeight / 2;
-    view.x -= px / view.k * (1 - 1 / factor); view.y -= py / view.k * (1 - 1 / factor); view.k *= factor;
+    view.x -= px / view.k * (1 - 1 / factor); view.y -= py / view.k * (1 - 1 / factor); view.k *= factor; wake();
   }, { passive: false });
-  window.addEventListener("resize", resize);
+  window.addEventListener("resize", function () { resize(); wake(); });
   resize();
   for (var warm = 0; warm < 120; warm++) { step(); }
   fit();
-  frame();
+  wake();
 })();
 """

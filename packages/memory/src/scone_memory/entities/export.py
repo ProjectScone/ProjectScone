@@ -23,8 +23,9 @@
   laid out in the browser by the page's own force simulation, coloured
   by community with a legend that turns each on and off, searched,
   hovered, clicked for an entity's relations and their facts, filtered
-  by predicate; what the graph names but never reads drawn small and
-  hideable. Up to 5,000 entities; past that the busiest, and it says so.
+  by predicate; what the graph names but never reads hidden until the
+  legend shows it. Up to 5,000 entities; past that the busiest, and it
+  says so.
 
 Every format carries the fact ids behind each relation and value, the
 projection digest it came from and, when given, ``about``: the view's
