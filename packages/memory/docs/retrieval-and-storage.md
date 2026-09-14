@@ -535,10 +535,15 @@ scone graph match --pattern "?who" calls "retrieval/temporal.py:_spelled"
 `scone map <dir> --watch` keeps mapping: after the pass it reads the tree
 again every `--every` seconds (5 by default) and records what changed — a
 changed file replaces its memory and, with `--graph`, its claims; a file
-that is gone is forgotten; a quiet tree costs a read and a hash per file
+that is gone is forgotten (`removed` in the receipt, its claims closed
+the way `sync` closes them); a quiet tree costs a read and a hash per file
 and writes nothing — until interrupted or `--rounds` passes are done. Each
-pass prints its own receipt under a timestamp, so what the graph reflects
-at any moment is what the last pass said. This is the reference graph
+pass prints its own receipt under a timestamp (under `--json`, a
+`{"pass": n, "at": …}` line before each receipt, so the output stays a JSON
+stream `jq` can read), so what the graph reflects at any moment is what the
+last pass said. A file that did not change is not recorded again, but what
+it declares still counts: a call in a changed file binds to a declaration
+in an unchanged one. This is the reference graph
 tool's watch mode without a file-system event library: polling, bounded,
 and honest about each pass.
 
