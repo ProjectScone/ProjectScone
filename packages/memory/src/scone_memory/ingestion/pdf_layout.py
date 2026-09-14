@@ -140,6 +140,11 @@ def lay_out_page(rows: Sequence[str], offset: int, *, drop: dict[int, str] | Non
         return PageLayout(as_extracted, (), receipt, running)
     width = max(len(line) for line in kept)
     height = len(kept)
+    if width < RUN_GAP:
+        # A page narrower than one gutter holds no gutter: a lone numeral,
+        # a colophon's "II". It stays as extracted, and says so.
+        receipt = ReadingOrderReceipt(strategy=GRID, direction=direction, columns=0, notes=('no_separating_gutter',))
+        return PageLayout(as_extracted, (), receipt, running)
     regions = [OcrRegion(text=kept[row][start:end], line=row,
                          box=(start / width, row / height, end / width, (row + 1) / height))
                for row, start, end in runs]
