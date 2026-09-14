@@ -72,7 +72,9 @@ def mount_agent_text_routes(
             if not service.step_known(space, run_id, step_id):
                 raise WorkflowError('step_not_found')
             window = service.text_window(space, run_id, step_id)
-            if window is not None and not window.closed and cursor > window.last_sequence:
+            # A cursor past what was observed is refused whether the window is
+            # open or done: a finished window's last sequence is final.
+            if window is not None and cursor > window.last_sequence:
                 raise WorkflowError('text_cursor_ahead')
         except (WorkflowError, ValueError) as error:
             return _failure(error)
@@ -115,7 +117,10 @@ def mount_agent_text_routes(
                         listening.attach()
                     if listening is not None:
                         current = listening
-                    if current is None or (current.closed and current.next_after(after) == (None, None)):
+                    # Only a listening reader drains a closed window: one that arrived
+                    # after the end reads the receipt, and a cursor it never validated
+                    # against the window is never handed to it.
+                    if current is None or (current.closed and (listening is None or current.next_after(after) == (None, None))):
                         # No provisional text to read. The step's answer, if it has
                         # one, is in the receipt: say so once the run has one, and
                         # keep waiting for it -- bounded by the observation window --

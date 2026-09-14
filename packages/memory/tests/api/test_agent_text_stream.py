@@ -321,3 +321,13 @@ async def test_a_reader_already_listening_gets_the_chunk_that_lands_with_the_rec
     assert [event for event, _, _ in late] == ['terminal'], "after the end, the receipt and no provisional text"
     window = service.text_window('alpha', 'one', 'find')
     assert window is None or window.readers == 0
+
+
+async def test_a_cursor_past_a_finished_window_is_refused_not_a_broken_stream(setup):
+    app, service, entered, release, *_ = setup
+    await started(app, service, entered)
+    release.set()
+    await service.wait('alpha', 'one')
+    messages = await collect(app, query='after=99')
+    assert status_of(messages) != 200, "a cursor ahead of a finished window is refused up front"
+    assert not any(message.get('body', b'') for message in messages if message['type'] == 'http.response.body' and b'event: text' in message.get('body', b''))
