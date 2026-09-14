@@ -1028,6 +1028,7 @@ class MemoryEngine:
         rerank: bool = True,
         graph_boost: bool = False,
         fusion: str = "rank",
+        lanes: Sequence[str] = ("vector", "text"),
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -1052,6 +1053,10 @@ class MemoryEngine:
         UTF-8 payload and cooperative async time budgets. Scores remain ranking
         signals, not confidence. A failed reranker retains baseline ordering;
         ``rerank=False`` explicitly disables the configured adapter.
+
+        ``lanes`` names the lanes to run, "vector" and "text" by default. A
+        lane not named is not run, and the result's ``lanes`` names the
+        ones that answered.
 
         ``graph_boost`` adds the entity lane: passages naming the question's
         entities or their neighbours in the knowledge graph. The projection
@@ -1095,7 +1100,7 @@ class MemoryEngine:
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
-                            entity_notes=notes)
+                            entity_notes=notes, lanes=lanes)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its

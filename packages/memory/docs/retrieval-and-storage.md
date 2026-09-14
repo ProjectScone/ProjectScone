@@ -47,6 +47,18 @@ floor has no default because the right value depends on the embedder:
 no-evidence questions it would catch and how many answerable ones it
 would wrongly withhold, and that sweep is where a floor comes from.
 
+`lanes=text` or `lanes=vector` (CLI `--lanes`) runs one lane alone; both
+run by default. A lane not asked for is not run at all: a text-only
+recall makes no embedding call, which suits an exact code or identifier
+no embedding knows, and comparing the two lanes on one question. It is
+not reported as degraded, because nothing failed. The answer's `lanes`
+names the lanes that answered, so with both asked and one failed it
+names the other, and the recall event records the same list. A vector
+lane that did not run judges no confidence: `top_similarity` and
+`low_confidence` are `null`. When the only lane asked for fails, recall
+fails rather than returning an empty answer that reads as nothing found.
+Advertised as `recall.lanes`.
+
 `history=true` (CLI `--history`) adds, for every matched fact, the closed
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.

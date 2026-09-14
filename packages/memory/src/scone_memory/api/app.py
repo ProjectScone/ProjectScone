@@ -477,7 +477,7 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.code_context": True, "recall.highlights": True,
+            "recall.window": True, "recall.code_context": True, "recall.highlights": True, "recall.lanes": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -970,6 +970,10 @@ def create_app(
                                                       "code context included. `window` is not "
                                                       "bounded by it: its own size in bytes is "
                                                       "the budget the caller already set."),
+        lanes: Optional[str] = Query(default=None,
+                                     description="The lanes to run, comma separated: vector, text, or both "
+                                                 "(the default). A lane not named is not run; the answer's "
+                                                 "lanes names those that answered."),
         graph_boost: bool = Query(default=False, description="Add the entity lane: passages naming the question's "
                                                               "entities or their neighbours in the knowledge graph."),
         infer: bool = Query(default=False, description="Read the question's own words for a scope -- a date, a kind "
@@ -1030,6 +1034,7 @@ def create_app(
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
+            **({"lanes": [lane.strip() for lane in lanes.split(",") if lane.strip()]} if lanes is not None else {}),
         )
         opened = None
         if window:
@@ -1064,6 +1069,7 @@ def create_app(
             "degraded": result.degraded,
             "fusion": result.fusion,
             "narrowing": result.narrowing.model_dump() if result.narrowing is not None else None,
+            "lanes": result.lanes,
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),
