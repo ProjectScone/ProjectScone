@@ -101,6 +101,7 @@ storage ports, source validation and resource ownership.
 |---|---|
 | Choose stores and understand recovery | [Recall and storage](docs/retrieval-and-storage.md), [storage adapters](docs/storage-adapters.md), [S3 catalog](docs/s3-catalog.md) |
 | Ingest Office, structured data and text with restart checkpoints | [File ingestion and format coverage](docs/file-ingestion.md) |
+| Import WhatsApp, Telegram, Discord and Slack exports as conversations | [Chat exports](docs/chat-exports.md) |
 | Reconcile local files, changed revisions and managed deletions | [Incremental directory ingestion](docs/directory-sync.md) |
 | Resume interrupted source deletion across stores | [Source cleanup and recovery](docs/retirement-catalog.md) |
 | Ingest PDFs, scans and page provenance | [PDF ingestion](docs/pdf-ingestion.md), [PDF OCR](docs/pdf-ocr.md) |
