@@ -448,9 +448,10 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         """The view's whole graph as a file another tool reads: node-link JSON,
         GraphML, dynamic GEXF, Cypher, CSV, JSON-LD, an Obsidian vault (with a
         canvas of its notes), a wiki an agent can crawl, a Mermaid chart, an
-        SVG drawing, an Obsidian canvas or one interactive page. The file says
-        which projection it holds and, when the read was capped, that it is
-        partial."""
+        SVG drawing, an Obsidian canvas, one interactive page of the busiest
+        entities (`html`) or the whole graph on one page (`explorer`). The
+        file says which projection it holds and, when the read was capped,
+        that it is partial."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
         reasons = coverage.get("reasons") or []
