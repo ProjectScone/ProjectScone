@@ -993,14 +993,16 @@ def create_app(
             tag_list = list(searched.tags)
             inferred = searched.record(asked_scope)
         policy: tuple[str, ...] = ()
+        names: Optional[dict[str, tuple[str, ...]]] = None
         if withhold_kinds:
-            from ..retrieval.withhold import chosen_kinds
+            from ..retrieval.withhold import chosen_kinds, names_for
 
             # Checked before the search, not after it: a policy naming a
             # kind that does not exist is a mistake in the request, and
             # searching first spends the work -- and logs a recall event
             # -- for an answer nobody receives.
             policy = chosen_kinds(tuple(k.strip() for k in withhold_kinds.split(",") if k.strip()))
+            names = await names_for(engine, space, policy)
             # Withholding covers the items and the facts. The expansions
             # below build their own structures, which it does not reach,
             # so asking for both is refused rather than answered with a
@@ -1047,7 +1049,7 @@ def create_app(
             from ..retrieval.withhold import withhold
 
             kept = withhold(result.items, facts=list(result.facts) + list(result.history),
-                            kinds=policy)
+                            kinds=policy, names=names)
             result = result.model_copy(update={
                 "items": list(kept.items),
                 "facts": list(kept.facts[:len(result.facts)]),
@@ -1074,6 +1076,7 @@ def create_app(
             # that nothing withheld is not a finding of nothing present.
             response["withheld"] = {"count": kept.withheld, "by_kind": dict(kept.by_kind),
                                     "kinds_applied": list(kept.kinds_applied),
+                                    "names_known": dict(kept.names_known), "names_skipped": kept.names_skipped,
                                     "unscanned": kept.unscanned,
                                     # Beside a count of zero unscanned,
                                     # what was scanned is the half that

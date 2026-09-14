@@ -127,7 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "serves the single precise hit that --merge cannot")
     p.add_argument("--withhold", metavar="KINDS",
                    help="withhold matches of these kinds from the answer, comma separated "
-                        "(email,phone,ip,card,secret); a net of patterns, never a guarantee")
+                        "(email,phone,ip,card,secret, or person,organisation,place for the names the "
+                        "space's graph holds); a net, never a guarantee")
     p.add_argument("--code-context", action="store_true",
                    help="for a passage of code, also quote the signature it sits inside and the "
                         "imports of its file; the passage itself is not changed")
@@ -1707,14 +1708,16 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
     if args.command == "recall":
         policy: tuple[str, ...] = ()
+        names: Optional[dict[str, tuple[str, ...]]] = None
         if args.withhold:
-            from ..retrieval.withhold import chosen_kinds
+            from ..retrieval.withhold import chosen_kinds, names_for
 
             # Checked before the search, as the HTTP route does: a policy
             # naming a kind that does not exist is a mistake in the
             # request, and searching first spends the work for an answer
             # nobody receives.
             policy = chosen_kinds(tuple(k.strip() for k in args.withhold.split(",") if k.strip()))
+            names = await names_for(engine, space, policy)
             # Everything refused here re-reads the episode from the store
             # *after* withholding and prints source verbatim, which hands
             # back what was just withheld: --merge and --code-context both
@@ -1780,7 +1783,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             # Facts and history too. Fixing this on the HTTP route and
             # not here left the same address reachable through the CLI.
             kept = withhold(result.items, facts=list(result.facts) + list(result.history),
-                            kinds=policy)
+                            kinds=policy, names=names)
             result = result.model_copy(update={
                 "items": list(kept.items),
                 "facts": list(kept.facts[:len(result.facts)]),
