@@ -116,9 +116,9 @@ module the graph's other files name.
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
-| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
+| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows, referenced notes and charts' cached series | Direct source properties; no rendered layout, inherited style resolution or macros |
 | XLSX, and XLSM, XLTX, XLTM | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
-| PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text and notes | No rendered Office layout or macro execution |
+| PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text, notes and charts' cached series | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
@@ -185,6 +185,21 @@ unreferenced annotations and separator notes do not become searchable content.
 Current-text filtering also applies inside notes. Dangling, ambiguous and invalid
 part references are rejected. All extracted parts share the document's text and
 segment budgets, and nested reference locators are bounded.
+
+A chart in a DOCX or PPTX file becomes a segment of its own after the text it
+sits in (`paragraph:3/chart:1`, `slide:2/chart:1`; `content_role` `chart`,
+`parent_locator` its paragraph or slide). Its text is the chart's title and
+kind, then one line per series of category and value pairs, for example
+`Revenue (bar chart)` then `2025: Q1 10; Q2 12.5`. Only the values cached in the
+chart part are read: nothing is recalculated from the embedded workbook and
+nothing is rendered. A series without categories is read by point number. At
+most 64 series per chart and 1,000 points per series are read; past those,
+`chart_series_cut` and `chart_points_cut` say how many were left out. The
+segment also carries `chart_type`, `chart_series` and `chart_points`. A chart
+whose relationship or part cannot be read is not a reason to refuse the file:
+it is left out and counted in the document's `charts_unreadable`. A file with a
+chart read says `charts` and its parser id ends `+charts-v1`; a file without
+charts is read exactly as before.
 
 DOCX, XLSX and PPTX locate their main document through `_rels/.rels` and resolve
 child relationships relative to that selected part. Nonstandard main-part paths

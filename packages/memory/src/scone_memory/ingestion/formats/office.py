@@ -2,7 +2,7 @@
 
 No macros, formulas, external relationships, embedded objects or scripts execute.
 Spreadsheet values are stored values; layout, images and chart rendering are not
-interpreted. Repeated ODS cells/rows carry repeat metadata rather than expanding.
+interpreted. A DOCX or PPTX chart gives the values cached in its part, never recalculated. Repeated ODS cells/rows carry repeat metadata rather than expanding.
 """
 from __future__ import annotations
 
@@ -100,6 +100,8 @@ class _Output:
     def __init__(self, limits: DocumentLimits) -> None:
         self.limits = limits
         self.segments: list[DocumentSegment] = []
+        #: Document-level counts, kept in the parsed document's metadata when not zero.
+        self.counts: dict[str, int] = {}
         self.text_bytes = 0
         self.deadline = monotonic() + limits.timeout_seconds
 
@@ -362,14 +364,23 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
     parts: dict[str, tuple[str, dict[str, Element]]] = {}
     emitted: set[tuple[str, str]] = set()
     pending = deque([(body, '', {'member': source})])
+    chart_relations: dict[str, dict[str, tuple[str, str]]] = {}
     while pending:
         content, prefix, metadata = pending.popleft()
         for block, locator, boxes in _word_content(content, output, prefix, metadata):
             for number, box in enumerate(boxes, 1):
                 details = {'member': metadata['member'], 'content_role': 'textbox', 'parent_locator': locator}
                 pending.append((box, _word_prefix(locator, f'/textbox:{number}/'), details))
+            charts = 0
             for reference in block.iter():
                 output.check()
+                if reference.tag in _CHART_REFERENCES:
+                    charts += 1
+                    member = metadata['member']
+                    if member not in chart_relations:
+                        chart_relations[member] = relations if member == source else _relationships(bundle, member)
+                    _chart(bundle, member, chart_relations[member], reference, output, f'{locator}/chart:{charts}', locator)
+                    continue
                 kind = _WORD_REFERENCES.get(reference.tag)
                 if kind is None:
                     continue
@@ -468,6 +479,92 @@ def _xlsx(bundle: SafeArchive, output: _Output) -> None:
                 output.add(segment.text, segment.locator, segment.metadata, table_cells=segment.table_cells)
 
 
+_CHART_NAMESPACES = ('http://schemas.openxmlformats.org/drawingml/2006/chart',
+                     'http://purl.oclc.org/ooxml/drawingml/chart')
+_CHART_REFERENCES = frozenset(f'{{{namespace}}}chart' for namespace in _CHART_NAMESPACES)
+#: Series read from one chart, and cached points from one series. Past either, the chart's
+#: segment says how many were left out.
+MAX_CHART_SERIES = 64
+MAX_CHART_POINTS = 1000
+
+
+def _chart_cache(element: Element | None) -> dict[int, str]:
+    """A chart reference's cached points by index: the values the file was saved with."""
+    values: dict[int, str] = {}
+    for point in () if element is None else _elements(element, 'pt'):
+        index, value = point.get('idx', ''), _child(point, 'v')
+        if index.isdecimal() and value is not None and value.text is not None:
+            values.setdefault(int(index), ' '.join(value.text.split()))
+    return values
+
+
+def _chart_segment(root: Element) -> tuple[str, dict[str, str]] | None:
+    """A chart part as its title and kind, then one line per series of category and value."""
+    if _local(root.tag) != 'chartSpace' or root.tag.rpartition('}')[0][1:] not in _CHART_NAMESPACES:
+        return None
+    body = _child(root, 'chart')
+    plot = None if body is None else _child(body, 'plotArea')
+    if body is None or plot is None:
+        return None
+    heading = _child(body, 'title')
+    title = '' if heading is None else ' '.join(''.join(t.text or '' for t in _elements(heading, 't')).split())
+    kinds: list[str] = []
+    lines: list[str] = []
+    series = points = series_cut = points_cut = 0
+    for group in plot:
+        name = _local(group.tag)
+        if not name.endswith('Chart'):
+            continue
+        kind = name.removesuffix('Chart').removesuffix('3D')
+        if kind not in kinds:
+            kinds.append(kind)
+        for entry in (child for child in group if _local(child.tag) == 'ser'):
+            if series >= MAX_CHART_SERIES:
+                series_cut += 1
+                continue
+            series += 1
+            named = _child(entry, 'tx')
+            label = '' if named is None else next(iter(_chart_cache(named).values()), '') or ' '.join(
+                ''.join(v.text or '' for v in _elements(named, 'v')).split())
+            across = _child(entry, 'cat')
+            across = _child(entry, 'xVal') if across is None else across
+            up = _child(entry, 'val')
+            up = _child(entry, 'yVal') if up is None else up
+            categories, values = _chart_cache(across), _chart_cache(up)
+            kept = sorted(values)[:MAX_CHART_POINTS]
+            points += len(kept)
+            points_cut += len(values) - len(kept)
+            pairs = '; '.join(f'{categories.get(index, str(index + 1))} {values[index]}' for index in kept)
+            lines.append(f'{label or f"Series {series}"}: {pairs}'.rstrip())
+    if not kinds:
+        return None
+    details = {'chart_type': ','.join(kinds), 'chart_series': str(series), 'chart_points': str(points),
+               **({'chart_series_cut': str(series_cut)} if series_cut else {}),
+               **({'chart_points_cut': str(points_cut)} if points_cut else {})}
+    return '\n'.join([f'{title or "Chart"} ({", ".join(kinds)} chart)', *lines]), details
+
+
+def _chart(bundle: SafeArchive, part: str, relations: dict[str, tuple[str, str]], reference: Element,
+           output: _Output, locator: str, parent: str) -> None:
+    """Add the chart a drawing refers to as a segment, or count it as unreadable: a chart the
+    file cannot give is not a reason to refuse the text around it."""
+    identifier = next((value for key, value in reference.attrib.items() if key.endswith('}id')), '')
+    relation = relations.get(identifier)
+    found = None
+    if relation is not None and relation[1] == 'chart':
+        try:
+            path = _resolve(part, relation[0])
+            found = _chart_segment(bundle.xml(path))
+        except InvalidInput:
+            found = None
+    if found is None:
+        output.counts['charts_unreadable'] = output.counts.get('charts_unreadable', 0) + 1
+        return
+    text, details = found
+    output.add(text, locator, {'member': path, 'content_role': 'chart', 'parent_locator': parent, **details})
+    output.counts['charts'] = output.counts.get('charts', 0) + 1
+
+
 def _drawing(root: Element, output: _Output, prefix: str) -> None:
     paragraphs = tables = 0
     for block in _blocks(root, {'p', 'tbl'}):
@@ -495,6 +592,11 @@ def _pptx(bundle: SafeArchive, output: _Output) -> None:
             raise InvalidInput('PPTX relationship is not a slide')
         _drawing(slide_root, output, f'slide:{number}')
         slide_relations = _relationships(bundle, path)
+        charts = 0
+        for reference in slide_root.iter():
+            if reference.tag in _CHART_REFERENCES:
+                charts += 1
+                _chart(bundle, path, slide_relations, reference, output, f'slide:{number}/chart:{charts}', f'slide:{number}')
         for relation_id, (_, kind) in slide_relations.items():
             if kind == 'notesSlide':
                 notes_path = _related(path, slide_relations, relation_id, kind)
@@ -748,8 +850,13 @@ def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDo
             'table_status' in segment.metadata for segment in output.segments) else 'native-xml'
         if family == 'sheet' and any('table_status' in segment.metadata for segment in output.segments):
             parser = 'native-xml-xlsx-tables-v1'
+        if output.counts.get('charts'):
+            parser += '+charts-v1'
+        metadata = {key: str(value) for key, value in output.counts.items() if value}
+        if macros:
+            metadata['macros'] = 'present, not read'
         parsed = ParsedDocument(format=extension, parser=parser, segments=tuple(output.segments),
-                                metadata={'macros': 'present, not read'} if macros else {})
+                                metadata=metadata)
         validate_document(parsed, limits)
         return parsed
     except (ValidationError, ValueError, OverflowError, RecursionError):
