@@ -259,6 +259,8 @@ def _run_text(root: Element, output: _Output) -> str:
 MAX_LINKS = 200
 #: A target longer than this is not recorded, and is counted as unresolved.
 MAX_LINK_TARGET = 2_048
+#: The bytes one metadata value may hold, which the ``links`` list must fit.
+MAX_LINKS_BYTES = 4_096
 
 
 def _hyperlink_targets(bundle: SafeArchive, source: str) -> dict[str, str]:
@@ -269,10 +271,15 @@ def _hyperlink_targets(bundle: SafeArchive, source: str) -> dict[str, str]:
     if relpath not in bundle.names:
         return {}
     targets: dict[str, str] = {}
-    for entry in _relationship_entries(bundle, relpath):
-        namespace, _, kind = entry.get('Type', '').rpartition('/')
-        if kind == 'hyperlink' and namespace in _OFFICE_RELATIONSHIP_NAMESPACES:
-            targets[entry.get('Id', '')] = entry.get('Target', '')
+    try:
+        for entry in _relationship_entries(bundle, relpath):
+            namespace, _, kind = entry.get('Type', '').rpartition('/')
+            if kind == 'hyperlink' and namespace in _OFFICE_RELATIONSHIP_NAMESPACES:
+                targets[entry.get('Id', '')] = entry.get('Target', '')
+    except InvalidInput:
+        # A part's text never depended on its relationships; broken ones lose only its links,
+        # which are then counted as unresolved.
+        return {}
     return targets
 
 
@@ -348,10 +355,19 @@ def _linked_text(root: Element, output: _Output, targets: Mapping[str, str]) -> 
             continue
         found.append({'text': kept[start:end].decode('utf-8'), 'target': target, 'start': start, 'end': end})
     metadata: dict[str, str] = {}
-    if found:
-        metadata['links'] = json.dumps(found[:MAX_LINKS], ensure_ascii=False)
-    if len(found) > MAX_LINKS:
-        metadata['links_cut'] = str(len(found) - MAX_LINKS)
+    recorded: list[str] = []
+    size = 2  # the brackets
+    for link in found[:MAX_LINKS]:
+        item = json.dumps(link, ensure_ascii=False)
+        grown = size + len(item.encode('utf-8')) + (2 if recorded else 0)
+        if grown > MAX_LINKS_BYTES:
+            break
+        recorded.append(item)
+        size = grown
+    if recorded:
+        metadata['links'] = '[' + ', '.join(recorded) + ']'
+    if len(found) > len(recorded):
+        metadata['links_cut'] = str(len(found) - len(recorded))
     if unresolved:
         metadata['links_unresolved'] = str(unresolved)
     return text, metadata

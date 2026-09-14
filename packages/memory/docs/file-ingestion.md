@@ -194,8 +194,11 @@ surrounding spaces left out of the span. An internal bookmark is `#name`. A
 target lives in the part's relationships, which are external for a web or
 mail address; they are read only as addresses and never followed. A link
 whose relationship is missing, is not a hyperlink, is blank or is longer
-than 2,048 characters is counted in `links_unresolved` and not recorded. At
-most 200 links are recorded per segment; `links_cut` counts the rest. Links
+than 2,048 characters is counted in `links_unresolved` and not recorded, and
+so is every link of a part whose relationships cannot be read (the part's
+text is read as before). Links are recorded while the list fits one metadata
+value of 4,096 bytes, and at most 200 per segment; `links_cut` counts the
+rest, so two links to long presigned addresses never fail the document. Links
 in table cells and in field codes (`HYPERLINK` fields) are not read yet.
 Targets are recorded data: a page showing them must not make them live
 without the reader choosing to follow one.
