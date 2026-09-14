@@ -105,7 +105,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             runtime_available=None, model_connections_available=False,
                             vision_available=None, vision_factory=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
                             agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None, document_video=None,
-                            directory_sync_service=None):
+                            directory_sync_service=None, synthesis_factory=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -1072,7 +1072,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             directory_sync_service=directory_sync_service,
                             ingest_concurrency=ingest_concurrency, roles=roles,
                             model_connections_available=model_connections_available, vision_available=vision_available,
-                            vision_factory=vision_factory)
+                            vision_factory=vision_factory, synthesis_factory=synthesis_factory)
     app.state.memory_app = memory_app
     app.state.ingest_lane_width = memory_app.state.ingest_lane_width
     app.mount("/", memory_app)

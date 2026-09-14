@@ -222,7 +222,25 @@ says which way it went and why**:
 `route=` insists on one instead, and the answer says it was asked for
 rather than chosen: a rule that cannot be overridden is a rule somebody
 will work around, and then the framework learns nothing from being
-wrong. `GET /v1/answer`, `scone answer`. Nothing here calls a model.
+wrong. `GET /v1/answer`, `scone answer`. Nothing here calls a model
+unless the fourth route is asked for by name:
+
+4. **`route=synthesize`**, which the rule never chooses. A broad question
+   ("what is known about the launch?") is not answered by five passages
+   and a score; this reads up to `limit` passages (fifty at most) and has
+   a model write a few sentences about them, each naming the passage it
+   came from and a quote from that passage **that the framework found
+   there**. A sentence without such a quote is not shown, and is counted.
+   Passages are packed into rounds by bytes, one model call each, so an
+   early passage cannot shape what a later one is allowed to say and a
+   model that fails costs only its round; when more than one round left
+   notes, one more call may fold them into a summary whose sentences cite
+   notes by id. `detail` counts what was read, unread, refused as too
+   large for a round, and dropped as unquoted or uncited, says whether the
+   sentences were cut, and carries `verified_accuracy: false` on every
+   record because only the quotes were checked, not the sentences. It
+   needs a model (`SCONE_CHAT_URL` and `SCONE_CHAT_MODEL`); without one
+   the route is refused. `scone answer --route synthesize --limit 30`.
 
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
@@ -515,7 +533,17 @@ scone graph match --pattern "?who" calls "retrieval/temporal.py:_spelled"
 ```
 
 `map` walks a directory, remembers every source file under the path it
-was read from, and with `--graph` records what each says. An answer
+was read from, and with `--graph` records what each says. A map is of the
+tree as it is now: a file is held under the identity `sync` uses for it,
+so mapping again after an edit updates the file's memory rather than
+adding a second, the receipt counts it as `updated`, and with `--graph`
+the claims the new version no longer makes are closed, naming the file
+(`claims_closed`). What `map` stored, `sync` recognises as its own, and
+the other way round, and both follow a relative import the same way: only
+to a file the walk actually read -- the ones walked now and the ones the
+marker already holds -- never guessed at, through one resolver
+(`code_resolution.file_resolver`) that a batch of files remembered together
+also uses among themselves. An answer
 carries the line it rests on, **re-read from the file** before it is
 shown: a graph of a codebase goes stale the moment somebody edits it, and
 a citation that was not checked is the thing least worth trusting.
@@ -953,6 +981,12 @@ Dependency names are not bound to import names. They differ often
 enough (`beautifulsoup4` and `bs4`, `Pillow` and `PIL`) that binding them
 would guess, and the graph does not.
 
+A package a manifest names is an entity, as a code symbol is, so the
+questions the graph answers about code reach it: `scone graph affected
+requests` lists the projects whose manifests declare it, through
+`depends_on`, beside the files that import it, and a test dependency's
+blast radius runs through `develops_with`.
+
 ### Claims read from files hold side by side
 
 A ledger predicate holds one value at a time unless configured
@@ -967,9 +1001,36 @@ The predicates the framework extracts -- `defines`, `imports`, `calls`,
 `develops_with` -- are many-valued by their nature, declared so in the
 core (`scone_memory.core.extracted.MANY_VALUED`), and no configuration
 takes one out of that set. `SCONE_MANY_VALUED` still adds predicates a
-person names; `GET /v1/graph/schema` marks both kinds as `many`. A file
-read again restates its claims; a claim a changed file no longer makes is
-not closed by this, which remains open.
+person names; `GET /v1/graph/schema` marks both kinds as `many`.
+
+### A claim read from a file holds while the file says it
+
+`replace` and `sync` store a changed file as an update: the old episode
+is forgotten, the new one stored, its claims read. Forget's contract
+leaves claims standing, rightly -- a person's memory of a fact survives
+deleting its source -- but for what a reader extracted that meant the
+ledger held what the file used to say beside what it says now: a module
+that dropped an import still imported it, a function that was removed
+was still defined.
+
+So on replacement, the extracted claims the old episode grounded that the
+new content did not restate are closed, reason `no longer stated by
+<path>`, event kind `source_changed`; a restated claim -- the same
+subject, predicate and object read out of the new content -- is one fact,
+still holding. When a sync asked to `remove` forgets a file that is gone,
+every extracted claim it grounded is closed, reason `<path> was removed`,
+kind `source_removed`. Neither is counted as a manual closure. What a
+person stated about the episode is left alone, a plain `forget` still
+touches no claim, and nothing happens with the code graph off.
+
+The receipts say what was done. `Replaced.claims_closed` counts the
+closures, `None` when the store cannot read claims by episode (nothing is
+closed on a guess); `claims_unread` is true when the old episode grounded
+more claims than one read returns, so some were not examined and may
+still stand. A sync receipt carries `claims_closed` and `claims_unread`
+only when there is something to say, so a sync without the code graph
+reads exactly as it did. The durable directory-sync service does not read
+claims and is untouched.
 
 ## Code: cut where the declarations are
 
@@ -1113,10 +1174,12 @@ nothing parked in it — a CLI retry would report success and do nothing.
 
 ## Keeping a space in step with a directory
 
-`map` remembers the files under a directory and notices when it has seen
-one before. What it cannot notice is that a file has **changed** or that
-a file is **gone** — and those two are the difference between an import
-you run once and a sync you run on a schedule.
+`map` remembers the files under a directory, notices when it has seen
+one before, and updates one that has **changed**. What it cannot notice
+is that a file is **gone**, and it never plans before writing — those are
+the difference between an import you run once and a sync you run on a
+schedule. The two share one identity for a file, so either can follow the
+other.
 
 ```bash
 scone sync ~/work/notes                          # a plan: nothing is written
