@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Path, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from ..ingestion.web import WebLimits
 
 from ..ingestion.files import document_provenance, extraction_filename, prepare_document, store_document, digest
 from ..ocr.tables import infer_tables
@@ -21,6 +22,11 @@ from ..ingestion.formats.types import DocumentLimits
 from ..memory.engine import MemoryEngine
 from .video_documents import mount_video_frame_routes
 from .video_catalogue import mount_video_catalogue_route
+
+
+class _UrlBody(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid')
+    url: str = Field(min_length=1, max_length=4096)
 
 
 class _FileBody(BaseModel):
@@ -37,7 +43,8 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
                                document_ocr: DocumentOcr | None = None, *,
                                assert_current_space: Callable[[Request, str], None],
                                document_media: DocumentMedia | None = None,
-                               document_video: DocumentVideo | None = None) -> None:
+                               document_video: DocumentVideo | None = None,
+                               url_import: WebLimits | None = None) -> None:
     mount_video_frame_routes(app, engine, space_for, ingest_slot, document_video,
                              assert_current_space=assert_current_space)
     mount_video_catalogue_route(app, engine, space_for, ingest_slot,
@@ -82,6 +89,32 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
         return JSONResponse(jsonable_encoder({**asdict(saved),
             **({'video_ocr': True} if body.video_ocr else {}),
             **({'pdf_ocr': body.pdf_ocr.model_dump()} if body.pdf_ocr is not None else {})}))
+
+    @app.post('/v1/documents/from-url')
+    async def index_url(request: Request, space: str = Depends(space_for)) -> JSONResponse:
+        """Fetch a page by URL and read it as the document its media type
+        says it is. Off unless the server was started with URL import on:
+        a server that fetches whatever it is told to fetches its own
+        network, so the door is opened deliberately and bounded."""
+        from ..ingestion.web import ingest_url
+
+        if url_import is None:
+            return JSONResponse({'error': 'URL import is not enabled on this server (SCONE_URL_IMPORT=1)'}, status_code=501)
+        data = bytearray()
+        async for part in request.stream():
+            if len(data) + len(part) > 8192:
+                return JSONResponse({'error': 'URL import request exceeds its byte limit'}, status_code=413)
+            data.extend(part)
+        try:
+            body = _UrlBody.model_validate_json(data)
+        except ValidationError:
+            return JSONResponse({'error': 'invalid URL import request'}, status_code=400)
+        assert_current_space(request, space)
+        parser: DocumentParser = document_media.parser() if document_media else BuiltinDocumentParser()
+        async with ingest_slot(1):
+            imported = await ingest_url(engine, space, body.url, limits=url_import, parser=parser)
+        assert_current_space(request, space)
+        return JSONResponse(jsonable_encoder(imported.record()))
 
     @app.get('/v1/episodes/{episode_id}/document')
     async def evidence(request: Request, episode_id: int = Path(ge=1, le=2**63 - 1),
