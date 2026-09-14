@@ -114,3 +114,37 @@ async def test_an_unsure_detection_leaves_the_page_as_given():
     turned_png, _ = page(180)
     result = await TesseractOcr(orientation=True, min_orientation_confidence=1000.0).recognize(turned_png)
     assert result.engine.endswith(":osd-unsure") and "harbour crane survey" not in words(result)
+
+
+def fake_tesseract(tmp_path, languages: str):
+    """A stand-in executable: orientation detection fails, the language list is ``languages``,
+    and recognition finds no words."""
+    script = tmp_path / "tesseract"
+    header = "level\\tpage_num\\tblock_num\\tpar_num\\tline_num\\tword_num\\tleft\\ttop\\twidth\\theight\\tconf\\ttext"
+    script.write_text("#!/bin/sh\n"
+                      'case "$*" in\n'
+                      f'  *--list-langs*) printf "List of available languages (2):\\n{languages}\\n" ;;\n'
+                      '  *"--psm 0"*) cat >/dev/null; exit 1 ;;\n'
+                      f'  *) cat >/dev/null; printf "{header}\\n" ;;\n'
+                      "esac\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+async def test_missing_orientation_data_is_said_rather_than_read_as_an_unjudgeable_page(tmp_path):
+    png, _ = page(blank=True)
+    with pytest.raises(InvalidInput, match="osd"):
+        await TesseractOcr(executable=fake_tesseract(tmp_path, "eng"), orientation=True).recognize(png)
+    result = await TesseractOcr(executable=fake_tesseract(tmp_path, "eng\\nosd"), orientation=True).recognize(png)
+    assert result.engine.endswith(":osd-unknown"), "with the data installed, a failed detection is a page it cannot judge"
+
+
+def test_a_language_list_too_long_to_name_with_orientation_is_refused_up_front():
+    many = "+".join(["eng"] * 8)
+    # 79 characters: the engine name fits in its 96 without the orientation suffix, not with it.
+    long_name = "+".join(f"lang{n:02d}xxxxxxxxx" for n in range(5))
+    assert len(long_name) == 79
+    TesseractOcr(language=many, orientation=True)
+    TesseractOcr(language=long_name)
+    with pytest.raises(InvalidInput, match="name"):
+        TesseractOcr(language=long_name, orientation=True)

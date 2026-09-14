@@ -19,7 +19,7 @@ HEADER = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twi
 
 def png_dimensions(image: bytes, max_pixels: int) -> tuple[int, int]:
     """Bound the declared raster before a native decoder sees its compressed data."""
-    if (not isinstance(image, bytes) or not 33 <= len(image) <= 80_000_000
+    if (not isinstance(image, bytes) or not 33 <= len(image) <= MAX_PNG_BYTES
             or image[:16] != b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'
             or zlib.crc32(image[12:29]) != int.from_bytes(image[29:33], 'big')):
         raise InvalidInput('OCR requires a bounded PNG image with a valid header')
@@ -67,6 +67,10 @@ def parse_tsv(raw: bytes, *, width: int, height: int, max_regions: int, engine: 
         raise InvalidInput('OCR returned invalid TSV geometry, scores or text') from error
 
 
+#: The largest PNG the engine reads, and so the largest the turning worker must read.
+MAX_PNG_BYTES = 80_000_000
+#: The longest outcome the engine name carries with orientation on.
+_LONGEST_OUTCOME = ':osd-unknown'
 #: Orientation confidence, as Tesseract's detection reports it, from which a page is turned.
 ORIENTATION_CONFIDENCE = 2.0
 _ROTATE = re.compile(rb'^Rotate:\s*(\d+)\s*$', re.M)
@@ -119,8 +123,12 @@ class TesseractOcr:
         self.executable = executable
         self.language = language
         self.page_segmentation = page_segmentation
+        if orientation and len(f'tesseract:{language}:psm{page_segmentation}{_LONGEST_OUTCOME}') > 96:
+            raise InvalidInput('OCR language list is too long to name the engine with orientation on; '
+                               'the engine name holds 96 characters')
         self.orientation = orientation
         self.min_orientation_confidence = float(min_orientation_confidence)
+        self._has_osd: bool | None = None
 
     async def recognize(self, image: bytes, *, max_pixels: int = 20_000_000,
                         max_regions: int = 10_000, timeout_seconds: float = 30.0) -> OcrResult:
@@ -148,16 +156,28 @@ class TesseractOcr:
         regions = tuple(region.model_copy(update={'box': unrotated_box(region.box, turn)}) for region in result.regions)
         return OcrResult(engine=engine, width=width, height=height, regions=regions)
 
+    async def _orientation_data(self, deadline: float) -> bool:
+        """Whether Tesseract has its orientation data, asked once per engine."""
+        if self._has_osd is None:
+            try:
+                self._has_osd = 'osd' in await _installed_languages(self.executable, deadline)
+            except InvalidInput:
+                return True  # the listing failed too; the recognition that follows will say why
+        return self._has_osd
+
     async def _orientation(self, image: bytes, deadline: float) -> tuple[int, str]:
         """How far to turn the page, and the word the engine name carries for it."""
         try:
             raw = await run_bounded([self.executable, 'stdin', 'stdout', '--psm', '0'], image,
                 timeout=_left(deadline), max_output=4096, label='OCR orientation detection')
         except InvalidInput:
-            # Tesseract exits with an error on a page with too few characters to judge.
+            # Tesseract exits with an error on a page with too few characters to judge, and also
+            # when its orientation data is not installed, which must be said, not read as the first.
+            if not await self._orientation_data(deadline):
+                raise InvalidInput("OCR orientation needs Tesseract's osd language data, which is not installed") from None
             return 0, 'osd-unknown'
         found = parse_osd(raw)
-        if found is None:
+        if found is None:  # an answer without a quarter turn and a confidence to act on
             return 0, 'osd-unknown'
         turn, sure = found
         if turn == 0:
@@ -165,6 +185,12 @@ class TesseractOcr:
         if sure < self.min_orientation_confidence:
             return 0, 'osd-unsure'
         return turn, f'rotated{turn}'
+
+
+async def _installed_languages(executable: str, deadline: float) -> set[str]:
+    raw = await run_bounded([executable, '--list-langs'], b'', timeout=_left(deadline), max_output=65_536,
+                            label='OCR language listing')
+    return {line.strip() for line in raw.decode('utf-8', errors='replace').splitlines() if line.strip()}
 
 
 def _left(deadline: float) -> float:
