@@ -196,6 +196,37 @@ def test_fitting_counts_with_the_counter_it_is_given():
     assert made == "c\none two three four five" and outcome == "shortened"
 
 
+class Uncountable(Windowed):
+    """An embedder that says it counts tokens and cannot."""
+
+    def count_tokens(self, text: str) -> int:
+        raise RuntimeError("no tokenizer here")
+
+
+async def test_a_budget_whose_counter_fails_is_refused_before_anything_is_embedded():
+    """The writer identity names the tokenizer when the embedder has a
+    counter, so the counter is tried when the engine is built rather than
+    failing in the middle of an ingestion."""
+    with pytest.raises(InvalidInput, match="no tokenizer here"):
+        MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), Uncountable(), embedding_budget=True)
+    MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), Uncountable())  # without the budget it is never asked
+
+
+def test_a_local_embedder_whose_fastembed_has_no_tokenizer_says_so():
+    """The tokenizer is read from inside fastembed's model object, which is
+    not a public interface: a version without it gets a message, not an
+    AttributeError."""
+    from types import SimpleNamespace
+
+    from scone_memory.embedders.local import LocalEmbedder
+
+    embedder = object.__new__(LocalEmbedder)
+    embedder._model = SimpleNamespace(model=SimpleNamespace())
+    embedder._counter = None
+    with pytest.raises(RuntimeError, match="fastembed"):
+        embedder.count_tokens("the crane")
+
+
 def test_the_local_model_counts_past_its_own_window(monkeypatch):
     """Needs the model already on disk; nothing is downloaded."""
     import os

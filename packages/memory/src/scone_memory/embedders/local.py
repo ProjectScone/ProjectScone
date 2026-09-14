@@ -40,9 +40,14 @@ class LocalEmbedder:
         The model's own tokenizer truncates at the window, which is exactly
         what a count must see past, so an untruncated copy counts."""
         if self._counter is None:
+            # fastembed keeps the tokenizer on its model object, which is not a public interface.
+            tokenizer = getattr(getattr(self._model, "model", None), "tokenizer", None)
+            if not callable(getattr(tokenizer, "to_str", None)):
+                raise RuntimeError("counting tokens reads the tokenizer inside fastembed's model, and this "
+                                   "fastembed has none there; fastembed 0.8 does")
             from tokenizers import Tokenizer
 
-            counter = Tokenizer.from_str(self._model.model.tokenizer.to_str())  # type: ignore[attr-defined]
+            counter = Tokenizer.from_str(tokenizer.to_str())  # type: ignore[union-attr]
             counter.no_truncation()
             counter.no_padding()
             self._counter = counter
