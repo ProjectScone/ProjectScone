@@ -79,6 +79,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
+    p = sub.add_parser("import-chat", help="a WhatsApp, Telegram, Discord or Slack export, one conversation memory per message")
+    p.add_argument("file", help="WhatsApp .txt, Telegram result.json, Discord .json, or a Slack .zip export or day .json")
+    p.add_argument("--chat", help="the chat's name in every memory; default: the file's name, or what the export says")
+    p.add_argument("--time-zone", help="zone of clock times the export writes without one (WhatsApp, Telegram): an IANA name or +HH:MM; default UTC, and the receipt says so")
+    p.add_argument("--gap-hours", type=float, default=6.0, help="silence that ends a session (default 6)")
+    p.add_argument("--meta", action="append", default=[], help="key=value scope on every message, repeatable")
+
     p = sub.add_parser("when", help="a question about dates answered by computation, with its working")
     p.add_argument("question")
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
@@ -1329,6 +1336,38 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "sync-directory":
         from .directory_cli import run_directory_sync
         return await run_directory_sync(args, engine, out)
+
+    if args.command == "import-chat":
+        from dataclasses import asdict
+
+        from ..ingestion.chat_exports import ingest_chat_export
+
+        if args.gap_hours < 0:
+            raise InvalidInput("--gap-hours must be zero or more")
+        try:
+            export = pathlib.Path(args.file).read_bytes()
+        except OSError as exc:
+            raise InvalidInput(f"cannot read {args.file}: {exc.strerror or exc}") from None
+        imported = await ingest_chat_export(engine, space, export, filename=pathlib.Path(args.file).name, chat=args.chat,
+                                           time_zone=args.time_zone, gap_seconds=int(args.gap_hours * 3600),
+                                           metadata=parse_pairs(args.meta, "--meta"))
+        if args.json:
+            emit({k: v for k, v in asdict(imported).items() if k != "episode_ids"} | {"episodes": len(imported.episode_ids)})
+        else:
+            print(f"imported {imported.stored} of {imported.messages} messages from the {imported.platform} chat {imported.chat!r} "
+                  f"as {imported.sessions} session(s), {imported.speakers} speaker(s)"
+                  + (f", {imported.duplicates} already known" if imported.duplicates else "")
+                  + (f", {imported.failed} refused ({imported.failed_reason})" if imported.failed else ""), file=out)
+            tallies = [(imported.system_messages, "system line(s)"), (imported.media_only_messages, "media-only message(s)"),
+                       (imported.attachments_skipped, "attachment(s)"), (imported.unparsed_lines, "unparsed line(s)"),
+                       (imported.messages_unread, "message(s) past the bound")]
+            if any(count for count, _ in tallies):
+                print("counted, not stored: " + ", ".join(f"{count} {what}" for count, what in tallies if count), file=out)
+            if imported.date_order == "undecidable":
+                print("dates read day-first: no line in the file decides the order; pass a month-first file's dates through --chat and check", file=out)
+            if imported.time_zone:
+                print(f"clock times read in {imported.time_zone}", file=out)
+        return 0
 
     if args.command == "remember":
         if args.image is not None and args.jsonl:
