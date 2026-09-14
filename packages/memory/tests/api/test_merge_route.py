@@ -86,10 +86,11 @@ async def test_bad_merges_are_refused_over_http():
     with TestClient(create_app(memory, {"key-a": "alpha"})) as client:
         codes = [client.get("/v1/recall", params=params, headers=auth()).status_code for params in (
             {"q": QUESTION, "merge_min_share": 0.5},
+            {"q": QUESTION, "merge_min_share": 0},
             {"q": QUESTION, "merge": True, "merge_min_share": 1.5},
             {"q": QUESTION, "merge": True, "window": 2, "window_unit": "sentences", "compress": 0.5})]
     await memory.close()
-    assert codes == [422, 422, 422]
+    assert codes == [422, 422, 422, 422]
 
 
 @pytest.mark.asyncio
@@ -110,3 +111,20 @@ async def test_the_command_line_withholds_from_a_merge_and_takes_a_share_floor()
     assert code == 0 and said["merged"]["merged"] == 1 and ADDRESS not in out.getvalue()
     assert said["withheld"]["withheld"] >= 1
     assert floor_code == 0 and json.loads(floor.getvalue())["merged"]["rules"]["min_share"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_after_a_window_the_share_counts_what_was_retrieved_on_both_surfaces():
+    """A byte window makes the two hits overlap, so counting the widened
+    spans would call the merge wholly retrieved."""
+    memory = await engine()
+    with TestClient(create_app(memory, {"key-a": "alpha"})) as client:
+        body = client.get("/v1/recall", params={"q": QUESTION, "limit": LIMIT, "merge": True, "window": 100},
+                          headers=auth()).json()
+    out = io.StringIO()
+    await run(build_parser().parse_args(["--space", "alpha", "recall", QUESTION, "--limit", str(LIMIT), "--merge",
+                                         "--window", "100", "--json"]), memory, io.StringIO(""), out)
+    await memory.close()
+    [(_, share)] = body["merged"]["shares"].items()
+    [(_, said)] = json.loads(out.getvalue())["merged"]["shares"].items()
+    assert share < 0.9 and said == share

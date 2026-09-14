@@ -160,3 +160,43 @@ async def test_a_passage_exactly_as_long_as_the_cap_is_merged():
     finally:
         await engine.close()
     assert at_cap.merged == 1 and over.merged == 0 and over.too_far == 1
+
+
+async def test_a_share_counts_the_chunks_retrieved_not_the_windows_around_them():
+    """Widened items carry the window's span. Counting those as retrieved
+    reported a merge of two windows as wholly retrieved; the spans the
+    chunks were retrieved at are what the share counts."""
+    engine, [episode] = await stored()
+    hits = [fragment(episode, 1, 500, 590, 0.9), fragment(episode, 2, 1_090, 1_180)]
+    widened = [hit.model_copy(update={"start": hit.start - 500, "end": hit.end + 500,
+                                      "text": "x" * (hit.end - hit.start + 1_000)}) for hit in hits]
+    try:
+        merged = await merge_neighbours(engine, "default", widened, hits=hits)
+        unaware = await merge_neighbours(engine, "default", widened)
+    finally:
+        await engine.close()
+    assert merged.shares == {1: round(180 / 1_680, 3)}
+    assert unaware.shares == {1: 1.0}, "without the hits, the items are all it has to count"
+
+
+async def test_a_cluster_whose_span_reads_blank_does_not_stop_the_next_one():
+    """Found in review: the first blank span ended the episode's loop, so a
+    second cluster that would have merged stood as fragments, and a read
+    that succeeded was counted as one that failed."""
+    engine, [episode] = await stored()
+    reading = engine.episode
+
+    async def blank_start(space, episode_id):
+        found = await reading(space, episode_id)
+        return found.model_copy(update={"content": " " * 200 + found.content[200:]})
+
+    engine.episode = blank_start
+    try:
+        merged = await merge_neighbours(engine, "default", [
+            fragment(episode, 1, 0, 60, 0.9), fragment(episode, 2, 61, 120),
+            fragment(episode, 3, 5_000, 5_060, 0.8), fragment(episode, 4, 5_061, 5_120)], max_merged=1_000)
+    finally:
+        await engine.close()
+    assert merged.merged == 1 and merged.from_chunks == {3: (3, 4)}
+    assert merged.blank == 1 and merged.unread == 0
+    assert "blank" in merged.why and "could not be read" not in merged.why

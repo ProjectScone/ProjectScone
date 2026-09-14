@@ -92,13 +92,16 @@ class Merged:
     #: Episodes the store would not answer for, which is not a finding
     #: that they are absent. Their fragments stand unjoined.
     unread: int = 0
+    #: Clusters whose span read back as only whitespace, from an episode
+    #: that was read: the text changed under the chunks. Left as fragments.
+    blank: int = 0
     max_merged: int = MAX_MERGED
     min_share: float = 0.0
     why: str = ""
 
     def record(self) -> dict[str, object]:
         return {"merged": self.merged, "absorbed": self.absorbed, "too_far": self.too_far,
-                "too_sparse": self.too_sparse, "gone": self.gone, "unread": self.unread,
+                "too_sparse": self.too_sparse, "gone": self.gone, "unread": self.unread, "blank": self.blank,
                 "not_read": self.not_read, "why": self.why,
                 "from_chunks": {str(k): list(v) for k, v in self.from_chunks.items()},
                 "shares": {str(k): v for k, v in self.shares.items()},
@@ -115,8 +118,14 @@ async def merge_neighbours(
     min_leaves: int = MIN_LEAVES,
     episodes: int = MAX_EPISODES,
     min_share: float = 0.0,
+    hits: Optional[Sequence[RecallItem]] = None,
 ) -> Merged:
-    """Join neighbouring chunks of one episode into the passages holding them."""
+    """Join neighbouring chunks of one episode into the passages holding them.
+
+    ``hits`` are the items as retrieved, before any window widened them,
+    matched by chunk id: the share of a merge counts their spans, since a
+    window's span is not what was retrieved. Without them the items' own
+    spans are all there is to count."""
     check_space(space)
     if not 1 <= max_merged <= 1_000_000:
         raise InvalidInput(f"max_merged must be from 1 to 1000000, not {max_merged}")
@@ -137,7 +146,8 @@ async def merge_neighbours(
     dropped: set[int] = set()
     from_chunks: dict[int, tuple[int, ...]] = {}
     shares: dict[int, float] = {}
-    merged = absorbed = far = sparse = vanished = unread = unbudgeted = 0
+    retrieved = {hit.chunk_id: hit for hit in hits or ()}
+    merged = absorbed = far = sparse = vanished = unread = blank = unbudgeted = 0
     read = 0
     for episode_id, group in together.items():
         if len(group) < min_leaves:
@@ -174,14 +184,14 @@ async def merge_neighbours(
             continue
         for cluster in clusters:
             first, last = cluster[0].start, max(i.end for i in cluster)
-            share = round(_covered(cluster) / (last - first), 3)
+            share = round(_covered([retrieved.get(item.chunk_id, item) for item in cluster]) / (last - first), 3)
             if share < min_share:
                 sparse += 1
                 continue
             text = _span(episode.content, first, last)
             if not text.strip():
-                unread += 1
-                break
+                blank += 1
+                continue
             best = max(cluster, key=lambda i: i.score)
             joined[best.chunk_id] = best.model_copy(update={
                 "text": text, "start": first, "end": last,
@@ -209,11 +219,14 @@ async def merge_neighbours(
     if vanished:
         why += (f"; {vanished} episode(s) are no longer there and their fragments were dropped "
                 f"rather than served from text this space has deleted")
+    if blank:
+        why += (f"; {blank} passage(s) read back blank from an episode that was read -- its text changed "
+                f"under the chunks -- and were left as fragments")
     if unread:
         why += (f"; {unread} episode(s) could not be read, so their fragments stand unjoined -- "
                 f"that is a failure to merge, not a finding that there was nothing to merge")
     return Merged(items=tuple(kept), merged=merged, absorbed=absorbed, from_chunks=from_chunks, too_far=far,
-                  shares=shares, too_sparse=sparse, gone=vanished, unread=unread, not_read=unbudgeted,
+                  shares=shares, too_sparse=sparse, gone=vanished, unread=unread, blank=blank, not_read=unbudgeted,
                   max_merged=max_merged, min_share=float(min_share), why=why)
 
 
