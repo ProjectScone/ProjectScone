@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 #: The same vocabulary as the Rust product's schema CHECK, so an episode
 #: means the same thing on both sides (shared spec, section 1).
@@ -389,6 +389,8 @@ class RecallItem(BaseModel):
     #: reader who takes the first result; one who reads or quotes them all
     #: needs to be told, and a passage carries no date that says so.
     superseded: bool = False
+    #: What people said about this passage, when recall was asked for lessons; left out otherwise.
+    lessons: Optional[dict[str, object]] = None
     #: The chunk's own UTF-8 byte span of its episode, half-open, so a
     #: caller can quote the source exactly and cite where it stops.
     start: int = 0
@@ -401,6 +403,14 @@ class RecallItem(BaseModel):
     #: holds it ("Engine.forget"), when the source is code and one holds
     #: all of it.
     declaration: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def omit_unasked_lessons(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # Recall not asked for lessons answers exactly as it did before they existed.
+        value: dict[str, object] = handler(self)
+        if self.lessons is None:
+            value.pop("lessons", None)
+        return value
 
 
 class RerankTrace(BaseModel):

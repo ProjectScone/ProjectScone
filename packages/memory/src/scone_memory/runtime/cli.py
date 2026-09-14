@@ -119,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="add the entity lane: passages naming what the question is about, or one relation away")
     p.add_argument("--fusion", choices=("rank", "score"), default="rank",
                    help="fuse the lanes by rank (default) or by each lane's scores scaled to its own range")
+    p.add_argument("--lessons", action="store_true",
+                   help="show beside each passage what people said about it in feedback; the order is unchanged")
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each")
@@ -255,6 +257,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="counts and which stores are in use")
     sub.add_parser("tags", help="tag counts")
     sub.add_parser("profile", help="identity facts plus recent activity")
+    p = sub.add_parser("lessons", help="what people said about passages in feedback, weighed by age")
+    p.add_argument("--window-days", type=int, default=90, help="read feedback from this many days back (default 90)")
+    p.add_argument("--half-life-days", type=float, default=30, help="a judgement's weight halves every this many days")
+    p.add_argument("--min-corroboration", type=int, default=2,
+                   help="useful judgements, and none against, before a passage is preferred (default 2)")
     p = sub.add_parser("export", help="dump the space as JSON lines to stdout")
     p.add_argument("--include-attachments", action="store_true",
                    help="include verified linked evidence bytes using archive profile 2")
@@ -1765,6 +1772,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
+            lessons=args.lessons,
         )
         kept = None
         opened = None
@@ -1860,6 +1868,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 words = list(dict.fromkeys(item.text[span.start:span.end] for span in marked[position].spans))
                 more = " and more" if marked[position].truncated else ""
                 print(f"      matched: {', '.join(words) or 'no word of the question'}{more}", file=out)
+            if item.lessons is not None:
+                said = item.lessons
+                print(f"      lesson {said['state']} ({said['useful']} useful, {said['not_useful']} not; "
+                      f"score {said['score']}, last {str(said['last_at'])[:10]}, passage {said['evidence']})", file=out)
         for d in result.degraded:
             print(f"degraded: {d}", file=sys.stderr)
         if result.narrowing is not None and result.narrowing.window_exhausted:
@@ -2169,6 +2181,20 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "tags":
         tags = await engine.tags(space)
         emit(tags) if args.json else [print(f"{n:6} {t}", file=out) for t, n in tags.items()]
+        return 0
+
+    if args.command == "lessons":
+        folded = await engine.lessons(space, window_days=args.window_days, half_life_days=args.half_life_days,
+                                     min_corroboration=args.min_corroboration)
+        if args.json:
+            emit(folded.record())
+            return 0
+        print(f"{len(folded.lessons)} passage(s) judged in the last {folded.window_days} days; "
+              f"half-life {folded.half_life_days:g} days; {folded.events_read} judgement(s) read"
+              + ("; the read was cut, oldest left out" if folded.events_cut else ""), file=out)
+        for chunk, lesson in sorted(folded.lessons.items(), key=lambda pair: (-abs(pair[1].score), pair[0])):
+            print(f"#{chunk} {lesson.state} {lesson.score:+.3f} ({lesson.useful} useful, {lesson.not_useful} not; "
+                  f"last {lesson.last_at[:10]}; passage {lesson.evidence})", file=out)
         return 0
 
     if args.command == "profile":
