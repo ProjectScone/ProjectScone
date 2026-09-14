@@ -12,7 +12,7 @@ import hashlib
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Mapping, Optional,
+from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Literal, Mapping, Optional,
                     Sequence, TypedDict, cast)
 
 from . import (archive, catalog, fact_placement, fact_relationships, fact_review, file_claims, retention,
@@ -76,6 +76,7 @@ from ..core.errors import Conflict, InvalidInput, NotFound
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
     Added,
+    BulkForgetReport,
     Attachment,
     BatchDecision,
     DecisionOutcome,
@@ -791,6 +792,17 @@ class MemoryEngine:
         it are reported, not closed: a source being gone is a fact about
         the evidence."""
         return await retention.impact(self._retention_runtime(), space, episode_id)
+
+    async def forget_matching(self, space: str, *, source_prefix: Optional[str] = None, tags: Sequence[str] = (),
+                              conditions: Mapping[str, object] | None = None, kind: Optional[str] = None,
+                              limit: int = 100, apply: bool = False, selection: Optional[str] = None,
+                              with_claims: Literal["keep", "exclude"] = "keep") -> "BulkForgetReport":
+        """Forget what a filter selects: a preview by default, the forgets only
+        with the preview's selection digest. See ``memory.bulk_forget``."""
+        from .bulk_forget import forget_matching
+
+        return await forget_matching(self, space, source_prefix=source_prefix, tags=tags, conditions=conditions,
+                                     kind=kind, limit=limit, apply=apply, selection=selection, with_claims=with_claims)
 
     async def forget_status(self, space: str, episode_id: int) -> ForgetStatus:
         """Observe retained, pending or completed source removal without writes."""

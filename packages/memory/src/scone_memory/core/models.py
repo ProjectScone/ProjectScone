@@ -287,6 +287,36 @@ class ForgetReceipt(BaseModel):
     claims_already_excluded: list[int] = Field(default_factory=list)
 
 
+class BulkForgetReport(BaseModel):
+    """One pass of forgetting what a filter selects, or its preview.
+
+    ``matched`` is every source the filter selected; ``episode_ids`` the ones
+    this pass takes, oldest first, at most the pass limit (``pass_limited``
+    says the limit bit); ``selection`` is the digest applying must present.
+    ``selection_complete`` false means the walk stopped before reading every
+    source. Impact totals count what the pass would take (preview) or took
+    (applied). ``remaining`` is what still matches after an applied pass."""
+
+    space: str
+    applied: bool
+    filter: dict[str, object] = Field(default_factory=dict)
+    with_claims: Literal["keep", "exclude"] = "keep"
+    matched: int = 0
+    selection_complete: bool = True
+    pass_limited: bool = False
+    episode_ids: list[int] = Field(default_factory=list)
+    selection: str = ""
+    chunks: int = 0
+    attachments_released: int = 0
+    facts_citing: int = 0
+    links_citing: int = 0
+    affirmations_citing: int = 0
+    forgotten: list[int] = Field(default_factory=list)
+    receipts: list["ForgetReceipt"] = Field(default_factory=list)
+    skipped: list[dict[str, object]] = Field(default_factory=list)
+    remaining: int = 0
+
+
 class ForgetStatus(BaseModel):
     """Observed cleanup state. A completed tombstone has no full receipt.
 
