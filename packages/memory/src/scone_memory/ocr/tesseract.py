@@ -4,12 +4,13 @@ from __future__ import annotations
 import math
 import re
 import struct
+import time
 import zlib
 
 from pydantic import ValidationError
 
 from ..core.errors import InvalidInput
-from .process import run_bounded
+from .process import python_worker, run_bounded
 from .types import OcrRegion, OcrResult
 
 
@@ -66,26 +67,108 @@ def parse_tsv(raw: bytes, *, width: int, height: int, max_regions: int, engine: 
         raise InvalidInput('OCR returned invalid TSV geometry, scores or text') from error
 
 
+#: Orientation confidence, as Tesseract's detection reports it, from which a page is turned.
+ORIENTATION_CONFIDENCE = 2.0
+_ROTATE = re.compile(rb'^Rotate:\s*(\d+)\s*$', re.M)
+_ORIENTATION_CONFIDENCE = re.compile(rb'^Orientation confidence:\s*([0-9]+(?:\.[0-9]+)?)\s*$', re.M)
+
+
+def parse_osd(raw: bytes) -> tuple[int, float] | None:
+    """How far Tesseract's orientation detection says to turn the page clockwise, and how
+    sure it is; nothing when it gave no quarter turn and confidence to act on."""
+    turn, sure = _ROTATE.search(raw), _ORIENTATION_CONFIDENCE.search(raw)
+    if turn is None or sure is None or int(turn.group(1)) not in (0, 90, 180, 270):
+        return None
+    return int(turn.group(1)), float(sure.group(1))
+
+
+def unrotated_box(box: tuple[float, float, float, float], degrees: int) -> tuple[float, float, float, float]:
+    """A box read on the page turned clockwise by ``degrees``, given back in the page as it was."""
+    x0, y0, x1, y1 = box
+    if degrees == 90:
+        return (y0, 1 - x1, y1, 1 - x0)
+    if degrees == 180:
+        return (1 - x1, 1 - y1, 1 - x0, 1 - y0)
+    if degrees == 270:
+        return (1 - y1, x0, 1 - y0, x1)
+    return box
+
+
 class TesseractOcr:
-    """Use installed language data. PSM 3 detects blocks; PSM 6 assumes one block."""
-    def __init__(self, *, executable: str = 'tesseract', language: str = 'eng', page_segmentation: int = 3):
+    """Use installed language data. PSM 3 detects blocks; PSM 6 assumes one block.
+
+    With ``orientation``, Tesseract's orientation detection runs first. A page it is at
+    least ``min_orientation_confidence`` sure is turned is turned in a bounded child
+    process, read, and every box given back in the page as it was given. The engine
+    name ends ``:rotated<degrees>``, ``:osd-upright``, ``:osd-unsure`` (a turn below the
+    confidence) or ``:osd-unknown`` (the detection could not judge, as on a page with
+    too few characters), so the result says which."""
+    def __init__(self, *, executable: str = 'tesseract', language: str = 'eng', page_segmentation: int = 3,
+                 orientation: bool = False, min_orientation_confidence: float = ORIENTATION_CONFIDENCE):
         if not re.fullmatch(r'[A-Za-z0-9_]{1,32}(\+[A-Za-z0-9_]{1,32}){0,7}', language):
             raise InvalidInput('OCR language must name installed language data')
         if type(page_segmentation) is not int or page_segmentation not in (3, 6, 11, 12):
             raise InvalidInput('OCR page segmentation must be 3, 6, 11 or 12')
         if not isinstance(executable, str) or not executable or '\x00' in executable:
             raise InvalidInput('OCR executable must be configured explicitly')
+        if type(orientation) is not bool:
+            raise InvalidInput('OCR orientation must be true or false')
+        if (isinstance(min_orientation_confidence, bool) or not isinstance(min_orientation_confidence, (int, float))
+                or not math.isfinite(min_orientation_confidence) or min_orientation_confidence < 0):
+            raise InvalidInput('OCR orientation confidence must be a finite number from 0')
         self.executable = executable
         self.language = language
         self.page_segmentation = page_segmentation
+        self.orientation = orientation
+        self.min_orientation_confidence = float(min_orientation_confidence)
 
     async def recognize(self, image: bytes, *, max_pixels: int = 20_000_000,
                         max_regions: int = 10_000, timeout_seconds: float = 30.0) -> OcrResult:
         width, height = png_dimensions(image, max_pixels)
         if type(max_regions) is not int or not 1 <= max_regions <= 50_000:
             raise InvalidInput('OCR region limit must be between 1 and 50000')
+        engine = f'tesseract:{self.language}:psm{self.page_segmentation}'
+        deadline = time.monotonic() + timeout_seconds
+        turn = 0
+        if self.orientation:
+            turn, outcome = await self._orientation(image, deadline)
+            engine += f':{outcome}'
+        read, read_width, read_height = image, width, height
+        if turn:
+            read = await run_bounded(python_worker('scone_memory.ocr._rotate_worker', str(turn), str(max_pixels)),
+                image, timeout=_left(deadline), max_output=min(128_000_000, max_pixels * 4 + 1_048_576),
+                label='OCR orientation process')
+            read_width, read_height = png_dimensions(read, max_pixels)
         raw = await run_bounded([self.executable, 'stdin', 'stdout', '-l', self.language,
-            '--psm', str(self.page_segmentation), 'tsv'], image, timeout=timeout_seconds,
+            '--psm', str(self.page_segmentation), 'tsv'], read, timeout=_left(deadline),
             max_output=min(8_000_000, max_regions * 1024 + 4096), label='OCR process')
-        return parse_tsv(raw, width=width, height=height, max_regions=max_regions,
-            engine=f'tesseract:{self.language}:psm{self.page_segmentation}')
+        result = parse_tsv(raw, width=read_width, height=read_height, max_regions=max_regions, engine=engine)
+        if not turn:
+            return result
+        regions = tuple(region.model_copy(update={'box': unrotated_box(region.box, turn)}) for region in result.regions)
+        return OcrResult(engine=engine, width=width, height=height, regions=regions)
+
+    async def _orientation(self, image: bytes, deadline: float) -> tuple[int, str]:
+        """How far to turn the page, and the word the engine name carries for it."""
+        try:
+            raw = await run_bounded([self.executable, 'stdin', 'stdout', '--psm', '0'], image,
+                timeout=_left(deadline), max_output=4096, label='OCR orientation detection')
+        except InvalidInput:
+            # Tesseract exits with an error on a page with too few characters to judge.
+            return 0, 'osd-unknown'
+        found = parse_osd(raw)
+        if found is None:
+            return 0, 'osd-unknown'
+        turn, sure = found
+        if turn == 0:
+            return 0, 'osd-upright'
+        if sure < self.min_orientation_confidence:
+            return 0, 'osd-unsure'
+        return turn, f'rotated{turn}'
+
+
+def _left(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise InvalidInput('OCR exceeded its wall time limit')
+    return left
