@@ -164,3 +164,13 @@ async def test_semantic_similarity_needs_no_judge_and_says_what_it_is_not():
             raise RuntimeError("no model")
 
     assert "embedder failed" in (await semantic_similarity(Broken(), answer="a", reference="b")).reasons[0]
+
+    class NotANumber:
+        id, dim = "nan", 2
+
+        async def embed(self, texts):
+            return [[float("nan"), 0.0], [1.0, 1.0]]
+
+    corrupt = await semantic_similarity(NotANumber(), answer="a", reference="b")
+    assert corrupt.verified is False and corrupt.passing is None and "non-finite" in corrupt.reasons[0], \
+        "a NaN would clamp to a perfect match; it is unverified instead"

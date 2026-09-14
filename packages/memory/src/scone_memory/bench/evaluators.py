@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from typing import Optional, Sequence
 
 from ..core.ports import Embedder
@@ -274,6 +275,9 @@ async def semantic_similarity(embedder: Embedder, *, answer: str, reference: str
         return _unverified(kind, f"embedder failed: {type(error).__name__}")
     if len(first) != len(second) or not first:
         return _unverified(kind, "embedder returned vectors of different or zero width")
+    if not all(isinstance(value, (int, float)) and math.isfinite(value) for vector in (first, second) for value in vector):
+        # A NaN slips through a clamp as a perfect match: min(1.0, nan) is 1.0.
+        return _unverified(kind, "embedder returned a vector with a non-finite component")
     dot = sum(a * b for a, b in zip(first, second))
     norms = sum(a * a for a in first) ** 0.5 * sum(b * b for b in second) ** 0.5
     if norms == 0:
