@@ -32,7 +32,7 @@ from .entity_lane import ENTITY_WEIGHT, entity_lane
 CONTEXT_WEIGHT = 2.0
 from .episode_scope import episode_fits
 from .filters import Filter, parse_filter
-from .phrases import checked_phrases, passes
+from .phrases import Phrases, checked_phrases
 if TYPE_CHECKING:
     from .synonyms import Synonyms
     from ..entities.project import EntityProjection
@@ -101,12 +101,14 @@ def _ms(since: float) -> float:
     return round((time.perf_counter() - since) * 1000, 3)
 
 
-def _finished(trace: "PhraseTrace | None", returned: int, limit: int) -> "PhraseTrace | None":
-    """``trace`` told whether the answer came back short after the phrases dropped passages."""
+def _finished(trace: "PhraseTrace | None", returned: int, limit: int, *, window_full: bool) -> "PhraseTrace | None":
+    """``trace`` told whether the answer came back short after the phrases dropped passages. It is
+    short only when a lane filled its window: otherwise every passage was a candidate, and nothing
+    beyond the window went unchecked."""
     if trace is None:
         return None
     dropped = trace.dropped_required + trace.dropped_excluded
-    short = returned < limit and dropped > 0
+    short = returned < limit and dropped > 0 and window_full
     why = (f"{dropped} of the {trace.checked} candidates checked were dropped by the phrases"
            + (f"; {returned} of {limit} came back, and passages beyond the candidate window were not checked"
               if short else ""))
@@ -413,8 +415,9 @@ async def recall(
         # limit, so a passage that fails gives its place to one that holds.
         dropped = {"required": 0, "excluded": 0}
         kept_items = []
+        phrases = Phrases(required, excluded)
         for item in items:
-            fits, rule = passes(chunks[item.chunk_id].text, required, excluded)
+            fits, rule = phrases.passes(chunks[item.chunk_id].text)
             if fits:
                 kept_items.append(item)
             else:
@@ -594,7 +597,8 @@ async def recall(
         narrowing=narrowing_report,
         fusion=cast(Literal["rank", "score"], fusion_mode),
         lanes=answered,
-        phrases=_finished(phrase_trace, len(result_items), limit),
+        phrases=_finished(phrase_trace, len(result_items), limit,
+                          window_full=any(len(lane) >= depth for lane in (vector_lane, text_lane))),
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,
