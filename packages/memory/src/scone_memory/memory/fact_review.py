@@ -279,7 +279,11 @@ async def reopen(runtime: FactReviewRuntime, space: str, fact_id: int, reason: s
     return again
 
 
-async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
+async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str, actor: Optional[str] = None,
+                     *, kind: str = "manual") -> Fact:
+    """``kind`` says on the event why the claim closed: ``manual`` for a
+    person's decision, ``source_changed`` or ``source_removed`` when the
+    file an extracted claim was read from no longer says it."""
     check_space(space)
     reason = _reason(reason)
     fact = await runtime.documents.get_fact(space, fact_id)
@@ -301,7 +305,7 @@ async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reaso
         resumed = await fact_placement.write_resumption(runtime.documents, space, resumes) if resumes else None
         await runtime.documents.update_fact(closed)
         await runtime.documents.bump_revision(space)
-    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual", "actor": actor,
+    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": kind, "actor": actor,
                                              "resumed": resumed.fact_id if resumed else None})
     return closed
 
