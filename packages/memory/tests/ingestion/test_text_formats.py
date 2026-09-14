@@ -160,8 +160,8 @@ def test_json_pointer_amplification_is_bounded() -> None:
 
 def test_csv_physical_lines_include_bare_carriage_returns_in_quoted_fields() -> None:
     doc = parse_text(b'name,note\rAda,"first\rsecond"\rBob,last\r', 'data.csv', DocumentLimits())
-    assert doc.segments[0].metadata == {'line_start': '2', 'line_end': '3'}
-    assert doc.segments[1].metadata == {'line_start': '4', 'line_end': '4'}
+    assert {'line_start': '2', 'line_end': '3'}.items() <= doc.segments[0].metadata.items()
+    assert {'line_start': '4', 'line_end': '4'}.items() <= doc.segments[1].metadata.items()
 
 
 def test_xml_text_node_ordinals_count_only_existing_text_nodes() -> None:
@@ -235,3 +235,20 @@ def test_html_implied_cell_closure_stays_within_nearest_table() -> None:
            b'<td>Visible item</table>')
     doc = parse_text(raw, 'page.html', DocumentLimits())
     assert [segment.text for segment in doc.segments] == ['Intro', 'Visible item']
+
+
+def test_csv_rows_carry_their_cells_with_spans_and_the_column_names() -> None:
+    import json
+
+    from scone_memory.ingestion.formats.table_types import validate_tables
+
+    doc = parse_text(b'region,revenue\r\nWest,"1,250.50"\r\nEast,35\r\n', "sales.csv", DocumentLimits())
+    validate_tables(doc.segments)
+    first, second = doc.segments
+    assert first.text == "region: West\nrevenue: 1,250.50" and json.loads(first.metadata["table_columns"]) == ["region", "revenue"]
+    assert [(c.row, c.column, c.text) for c in first.table_cells] == [(0, 0, "West"), (0, 1, "1,250.50")]
+    for cell in (*first.table_cells, *second.table_cells):
+        assert cell.table_locator == "delimited" and not cell.headers
+    assert first.text.encode()[first.table_cells[1].start:first.table_cells[1].end] == b"1,250.50"
+    assert [c.locator for c in second.table_cells] == ["row:3/column:1", "row:3/column:2"]
+    assert doc.parser == "scone-text-tables-v1"
