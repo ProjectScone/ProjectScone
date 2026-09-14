@@ -196,6 +196,7 @@ class MemoryEngine:
         structure_aware: bool = False,
         semantic_aware: bool = False,
         heading_context: bool = False,
+        embedding_budget: bool = False,
         code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         #: How much newer memory is favoured in fusion: the recency term's
@@ -289,6 +290,15 @@ class MemoryEngine:
         #: its file and declarations). Off unless asked for: it changes
         #: vectors, and a space's existing vectors were made without it.
         self.heading_context = heading_context
+        #: Whether the context in front of a chunk is shortened to fit the
+        #: embedder's declared window. Off unless asked for: it changes the
+        #: vectors of chunks whose context would not fit.
+        if embedding_budget:
+            window = getattr(embedder, "max_input_tokens", None)
+            if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+                raise InvalidInput("embedding_budget needs an embedder that declares its input window "
+                                   "(max_input_tokens); this one declares none")
+        self.embedding_budget = embedding_budget
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -564,7 +574,8 @@ class MemoryEngine:
         started = time.perf_counter()
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context)
+                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context,
+                         self.embedding_budget)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -582,7 +593,7 @@ class MemoryEngine:
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
                         self.code_aware, self.code_graph, self.structure_aware,
-                        self.semantic_aware, self.heading_context) != configuration):
+                        self.semantic_aware, self.heading_context, self.embedding_budget) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -720,6 +731,8 @@ class MemoryEngine:
             embedding_cache=self.embedding_cache, code_aware=self.code_aware,
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware, heading_context=self.heading_context,
+            embedding_budget=cast(int, getattr(self.embedder, "max_input_tokens")) if self.embedding_budget else None,
+            count_tokens=getattr(self.embedder, "count_tokens", None) if self.embedding_budget else None,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
             context_lane=self.context_lane,
         )

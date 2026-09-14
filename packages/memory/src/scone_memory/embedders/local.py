@@ -10,6 +10,9 @@ MODELS = {
     "bge-base-en-v1.5": ("BAAI/bge-base-en-v1.5", 768),
     "nomic-embed-text-v1.5": ("nomic-ai/nomic-embed-text-v1.5", 768),
 }
+#: The tokens a model reads, where its card states it. A model left out
+#: declares no window, so an embedding budget cannot be set for it.
+MAX_INPUT_TOKENS = {"bge-small-en-v1.5": 512, "bge-base-en-v1.5": 512}
 
 
 class LocalEmbedder:
@@ -28,6 +31,22 @@ class LocalEmbedder:
         self._model = TextEmbedding(model_name=hf_name, cache_dir=cache_dir)
         self.id = name
         self.dim = dim
+        self.max_input_tokens = MAX_INPUT_TOKENS.get(name)
+        self._counter: object | None = None
+
+    def count_tokens(self, text: str) -> int:
+        """The tokens this model reads for ``text``, counted past its window.
+
+        The model's own tokenizer truncates at the window, which is exactly
+        what a count must see past, so an untruncated copy counts."""
+        if self._counter is None:
+            from tokenizers import Tokenizer
+
+            counter = Tokenizer.from_str(self._model.model.tokenizer.to_str())  # type: ignore[attr-defined]
+            counter.no_truncation()
+            counter.no_padding()
+            self._counter = counter
+        return len(self._counter.encode(text).ids)  # type: ignore[attr-defined]
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
