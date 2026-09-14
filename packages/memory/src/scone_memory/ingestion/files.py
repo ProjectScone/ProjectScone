@@ -15,6 +15,8 @@ from .extraction_checkpoint import CheckpointedDocumentParser, ExtractionCheckpo
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document, visual_only
 from .document_source import DocumentSource, source_revision_key
+if TYPE_CHECKING:
+    from .code_graph import CodeClaim
 from .video_evidence import DocumentVideoEvidence
 
 if TYPE_CHECKING:
@@ -94,6 +96,60 @@ class DocumentIngested:
     format: str
     segments: int
     filename: str
+    #: What the file said about itself, recorded as claims: a source file
+    #: its definitions, imports and calls, a manifest its dependencies.
+    #: Zero for every other kind of document.
+    claims: int = 0
+
+
+def says_claims(filename: str) -> bool:
+    """Whether a stored document of this name is read for claims: a
+    source file in a language the code graph reads, or a manifest."""
+    from .code import code_language
+    from .manifests import is_manifest
+
+    return code_language(filename) is not None or is_manifest(filename)
+
+
+def source_text(parsed: ParsedDocument) -> str:
+    """The text the code graph reads a stored document by: its segments
+    in order, one per line, which for a source file is the file without
+    its blank lines. Every claim quotes one of those lines, and the
+    episode holds each line as a segment, so a quote is always found in
+    the episode it cites."""
+    return '\n'.join(segment.text for segment in parsed.segments)
+
+
+def document_claims(parsed: ParsedDocument, filename: str) -> tuple['CodeClaim', ...]:
+    """What a stored document says about itself, without recording it:
+    what the sync keeps when it replaces the document, so the claims the
+    new revision no longer makes can be closed."""
+    from .code import code_language
+    from .code_graph import code_claims
+    from .manifests import is_manifest, manifest_claims
+
+    if not says_claims(filename) or visual_only(parsed):
+        return ()
+    text = source_text(parsed)
+    if is_manifest(filename):
+        return manifest_claims(text, filename)
+    return code_claims(text, filename, language=code_language(filename))
+
+
+async def record_document_claims(memory: MemoryEngine, space: str, added: Added, parsed: ParsedDocument,
+                                 filename: str) -> int:
+    """Record what a stored source file or manifest says, cited to its
+    episode, and say how many claims that was. A duplicate store (the
+    same revision again, as a retried stage stores it) records them
+    again: an identical claim already held is a restatement and stays
+    one fact, so a retry after a crash between storing and recording
+    leaves the same ledger as a run that never crashed."""
+    from .code_graph import record_claims
+
+    if added.outcome not in ('accepted', 'duplicate') or not says_claims(filename) or visual_only(parsed):
+        return 0
+    return await record_claims(memory, space, episode_id=added.episode_id, content=source_text(parsed),
+                               path=filename, when=memory.clock())
 
 
 @dataclass(frozen=True)
@@ -175,8 +231,11 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
         added = await memory.remember(space, content, kind='file', source=f'attachment:{original.attachment_id}',
             dedup_key=key, attachment_ids=(original.attachment_id, retained.attachment_id),
             embedding_checkpoint=embedding_checkpoint, metadata=metadata)
+    # A source file or manifest stored as a document says what it defines,
+    # imports, calls and depends on, as one remembered through `map` does.
+    claims = await record_document_claims(memory, space, added, manifest.parsed, manifest.filename)
     return DocumentIngested(added, original, retained, manifest.parsed.format,
-                            len(manifest.parsed.segments), manifest.filename)
+                            len(manifest.parsed.segments), manifest.filename, claims)
 
 
 async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, filename: str,

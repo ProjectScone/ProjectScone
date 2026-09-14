@@ -109,6 +109,21 @@ revision before reporting success. Failed cleanup keeps both revision identities
 for retry. Missing-file deletion performed by this runner instead records an
 absent source, which can be ingested at a new generation if its file returns.
 
+## Claims from source files and manifests
+
+A source file in a language the code graph reads, or a package manifest,
+says what it defines, imports, calls and depends on when the sync stores it,
+as it would through `map`: claims quoted from its lines, cited to the
+document's episode, extracted rather than stated, naming the module by the
+file's root-relative path. A replacement closes the claims the new revision
+no longer makes (`source_changed`, naming the file) and a managed deletion
+closes them all (`source_removed`), each before the old episode is
+forgotten, so a run interrupted between the two closes again on retry. Each
+receipt carries `claims` and `claims_closed`, the result totals them, and a
+store that cannot read claims by episode is reported as `claims_unread`
+rather than as zero closed. An external forget of a managed episode
+suppresses the path and leaves its claims standing, by forget's contract.
+
 ## Scan and recovery limits
 
 Scans do not follow symlinks. Special files, unreadable entries, invalid paths,
