@@ -76,6 +76,14 @@ def test_communities_are_the_codebases_own_and_named_by_it():
     attached = {names[node]: community for community in analysis.communities for node in community.members
                 if node in analysis.external}
     assert "typing" in attached, "an external is attached, for reading, to the community that names it most"
+    # The counts are of the graph's own: one link crosses the packages, and
+    # what both import from outside is no link between them.
+    assert [community.boundary_links for community in analysis.communities] == [1, 1]
+    assert all(community.internal_links == 6 for community in analysis.communities), "three files linked, each with its run"
+    assert len(analysis.surprising_connections) == 1 and analysis.surprising_connections[0].reason.startswith("the only link")
+    assert not any(suggestion.kind == "bridge" for suggestion in analysis.suggestions), \
+        "a file that imports `typing` bridges nothing; only the one import across the packages spreads anything"
+    assert all(item.participation == 0.0 for item in analysis.importance if item.external)
 
 
 def test_the_report_leads_with_the_codebases_own_and_lists_the_rest_apart():
@@ -112,3 +120,58 @@ def test_a_graph_of_people_has_nothing_external():
     assert external_entities(projection) == frozenset()
     analysis = analyze_projection(projection)
     assert analysis.coverage.external_entities == 0 and not any(item.external for item in analysis.importance)
+
+
+def test_an_external_is_attached_to_the_community_that_names_it_most():
+    rows: list[Fact] = []
+    number = 0
+
+    def say(subject: str, predicate: str, obj: str) -> None:
+        nonlocal number
+        number += 1
+        rows.append(fact(number, subject, predicate, obj))
+
+    app, lib = [f"app/{n}.py" for n in "abc"], [f"lib/{n}.py" for n in "ab"]
+    for group in (app, lib):
+        for left in group:
+            for right in group:
+                if left != right:
+                    say(left, "imports", right)
+    for path in app + lib:
+        say(path, "imports", "typing")
+    projection = project_entities("alpha", rows, revision=1)
+    names = labels(projection)
+    analysis = analyze_projection(projection)
+    holder = next(community for community in analysis.communities
+                  if any(names[node] == "typing" for node in community.members))
+    assert {names[node] for node in holder.members if node not in analysis.external} == set(app), \
+        "three namers outweigh two, whatever their ids"
+
+
+def test_an_external_whose_namers_were_all_cut_stands_alone():
+    rows = [fact(n, f"file{n}.py", "imports", "typing") for n in range(1, 6)]
+    rows += [fact(100 + n, "Ana", "knows", "Ben") for n in range(4)]
+    projection = project_entities("alpha", rows, revision=1)
+    names = labels(projection)
+    analysis = analyze_projection(projection, max_entities=3)
+    assert analysis.coverage.truncated and "typing" in {names[e] for e in analysis.external}
+    alone = [community for community in analysis.communities if names[community.members[0]] == "typing"]
+    assert len(alone) == 1 and len(alone[0].members) == 1, "no namer kept: its own community, as a linkless node was"
+    assert all(item.participation == 0.0 for item in analysis.importance if item.external)
+
+
+def test_the_report_and_the_api_grouping_mark_what_is_external():
+    from scone_memory.api.entity_routes import _groupings
+
+    projection = project_entities("alpha", codebase(), revision=1)
+    analysis = analyze_projection(projection)
+    report = build_report(projection, analysis, meta={"digest": "d", "revision": 1},
+                          filters={"status": "current", "as_of": "now"}, coverage={}, exclude_hubs=50)
+    assert not any(hub["label"] in ("typing", "json", "pydantic.BaseModel") for hub in report["hubs_excluded"]), \
+        "an external is listed apart once, not also as an excluded hub"
+    assert report["bridging_entities"] == [], "nothing here bridges: the one import across spreads too little"
+    grouping = _groupings(analysis, {"entities": [{"id": entity.entity_id} for entity in projection.entities]})
+    flagged = {item["entity_id"] for item in grouping["importance"] if item["external"]}
+    assert flagged == set(analysis.external)
+    text = render_markdown(report)
+    assert "kept out of the community partition and the central ranking, attached for reading" in text

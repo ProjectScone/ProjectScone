@@ -1880,9 +1880,13 @@ nothing at all is *external*: named here, read nowhere here (a module of
 the codebase is imported too, but it also defines its own things, so it
 is the graph's own). Externals are left out of the community partition
 (so modularity is the codebase's), attached for reading to the community
-that names each most, kept out of the central ranking, bridging entities
-and surprising connections, and listed apart under `external_dependencies`
-("Named but never read" in the Markdown), by how many things name them.
+that names each most (by the weight of what names it; one whose namers
+were all cut by the entity budget stands alone), kept out of the central
+ranking, bridging entities, participation, surprising connections and
+the counts of links between communities, and listed apart under
+`external_dependencies` ("Named but never read" in the Markdown), by how
+many things name them. A community's `members` list its own members and
+then its attached externals; its link counts and cohesion are of its own.
 The drawing spends its room on the graph's own entities first. The
 coverage says how many were set apart (`external_entities`); a graph of
 people and places has none.

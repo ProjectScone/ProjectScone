@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import math
 from typing import Callable
 
-from .analysis import cached_analysis
+from .analysis import cached_analysis, external_entities
 from .project import Entity, EntityProjection, Relation
 
 MAX_NODES = 200
@@ -125,8 +125,6 @@ def layout_projection(projection: EntityProjection, *, max_nodes: int = MAX_NODE
     says how far from its centre an entity's drawing reaches, its name
     included, given its radius; rings and boxes are spaced by that, so a
     name never runs into another entity or out of its box."""
-    from .analysis import external_entities
-
     degree = _degrees(projection)
     # The drawing's budget goes to the graph's own things first: `typing`
     # and `json`, imported everywhere, would otherwise take the middle of

@@ -81,7 +81,7 @@ def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta:
             "degree": item.degree, "weight": item.weight, "pagerank": item.pagerank,
             "betweenness": item.betweenness, "participation": item.participation} for item in ranked],
         "hubs_excluded": [{**_name(entities, item.entity_id), "degree": item.degree, "pagerank": item.pagerank}
-                          for item in analysis.importance if item.entity_id in hubs],
+                          for item in analysis.importance if item.entity_id in hubs and not item.external],
         "external_dependencies": [{
             **_name(entities, item.entity_id), "named_by": item.degree, "weight": item.weight,
             "community_id": item.community_id, "community": communities[item.community_id].label}
@@ -190,7 +190,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
              f"{summary['isolated_entities']} entities known only by their values"]
     if summary.get("external_entities"):
         lines.append(f"- {summary['external_entities']} entities named but never read (imported modules, packages, "
-                     f"cited records) are kept out of the communities and the central ranking, and listed apart")
+                     f"cited records) are kept out of the community partition and the central ranking, attached for "
+                     f"reading to the community that names each most, and listed apart")
     if analysis.get("exclude_hubs") is not None:
         lines.append(f"- Central entities leave out entities whose links are above the "
                      f"{analysis['exclude_hubs']:g}th percentile; they are listed under Hubs left out of the ranking")
