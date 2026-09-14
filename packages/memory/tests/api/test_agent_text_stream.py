@@ -287,3 +287,37 @@ async def test_a_reader_that_fell_behind_the_window_is_told_the_gap_not_handed_s
         assert texts[0] == first[2]['next_sequence'] and texts == list(range(texts[0], len(pieces) + 1))
     finally:
         release.set(); await service.aclose(); plans.close(); await memory.close()
+
+
+async def test_a_reader_already_listening_gets_the_chunk_that_lands_with_the_receipt(setup):
+    """The step's last chunk and its receipt land together; a reader one chunk
+    behind at that moment was promised the text, and one who arrives after
+    the end is given the receipt alone."""
+    app, service, entered, release, *_ = setup
+    await started(app, service, entered)
+
+    async def release_once_listening():
+        async with asyncio.timeout(3):
+            while (window := service.text_window('alpha', 'one', 'find')) is None or window.readers != 1:
+                await asyncio.sleep(0)
+        release.set()
+
+    pending: list[asyncio.Task] = []
+
+    async def on_start():
+        # The headers are out; the body generator attaches once it runs, so
+        # the release waits for that in a task of its own and blocks nothing.
+        pending.append(asyncio.create_task(release_once_listening()))
+
+    messages = await collect(app, on_start=on_start)
+    await pending[0]
+    assert status_of(messages) == 200
+    events = frames(messages)
+    assert [(event, identifier) for event, identifier, _ in events][:2] == [('text', '1'), ('text', '2')]
+    assert ''.join(data['text'] for event, _, data in events if event == 'text') == 'Answer from model.'
+    assert events[-1][0] == 'terminal'
+    await service.wait('alpha', 'one')
+    late = frames(await collect(app))
+    assert [event for event, _, _ in late] == ['terminal'], "after the end, the receipt and no provisional text"
+    window = service.text_window('alpha', 'one', 'find')
+    assert window is None or window.readers == 0

@@ -24,6 +24,7 @@ from fastapi.responses import Response
 
 from ..agents.run_service import AgentRunService
 from ..agents.workflow import WorkflowError
+from .text_stream import TextWindow
 from .agent_history import VERIFY_SECONDS, _frame, _HistoryResponse, _within, _WindowOver
 from .agent_runs import _failure
 
@@ -82,51 +83,71 @@ def mount_agent_text_routes(
             after = cursor
             loop = asyncio.get_running_loop()
             deadline = loop.time() + STREAM_SECONDS
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    yield _frame('end', {'reason': 'observation_window_ended'})
-                    return
-                # Headers and every previous send may have suspended; the
-                # recipient is checked again before anything is published.
-                try:
-                    assert_current_space(request, space)
-                    status = await service.status(space, run_id)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    yield _frame('error', {'reason': 'text_unavailable'})
-                    return
-                if status is None:
-                    yield _frame('end', {'reason': 'window_unavailable'})
-                    return
-                current = service.text_window(space, run_id, step_id)
-                if current is None or current.closed:
-                    # No provisional text to read. The step's answer, if it has
-                    # one, is in the receipt: say so once the run has one, and
-                    # keep waiting for it -- bounded by the observation window --
-                    # while other steps of the run are still running.
-                    if status.status in _TERMINAL and not status.active_local:
-                        yield _frame('terminal', {'status': status.status, 'read_receipt': True})
+            # A reader who arrives while the step writes is promised its text:
+            # the window it attaches to keeps what lands until it has read
+            # it, even when the step finishes a chunk ahead of it. One who
+            # arrives after the end reads the receipt and no provisional text.
+            listening: TextWindow | None = None
+
+            async def follow():
+                nonlocal after, listening
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        yield _frame('end', {'reason': 'observation_window_ended'})
                         return
-                    await asyncio.sleep(min(POLL_SECONDS, max(remaining, 0.0)))
-                    continue
-                gap, chunk = current.next_after(after)
-                if gap is not None:
-                    yield _frame('gap', {'after': after, 'next_sequence': gap})
-                    after = gap - 1
-                    continue
-                if chunk is not None:
-                    sequence, text = chunk
-                    if text is None:
-                        yield _frame('withdraw', {'sequence': sequence}, str(sequence))
-                    else:
-                        yield _frame('text', {'sequence': sequence, 'text': text}, str(sequence))
-                    after = sequence
-                    continue
-                try:
-                    await asyncio.wait_for(current.wait_after(after), timeout=min(POLL_SECONDS, max(remaining, 0.001)))
-                except TimeoutError:
-                    pass
+                    # Headers and every previous send may have suspended; the
+                    # recipient is checked again before anything is published.
+                    try:
+                        assert_current_space(request, space)
+                        status = await service.status(space, run_id)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        yield _frame('error', {'reason': 'text_unavailable'})
+                        return
+                    if status is None:
+                        yield _frame('end', {'reason': 'window_unavailable'})
+                        return
+                    current = service.text_window(space, run_id, step_id)
+                    if listening is None and current is not None and not current.closed:
+                        listening = current
+                        listening.attach()
+                    if listening is not None:
+                        current = listening
+                    if current is None or (current.closed and current.next_after(after) == (None, None)):
+                        # No provisional text to read. The step's answer, if it has
+                        # one, is in the receipt: say so once the run has one, and
+                        # keep waiting for it -- bounded by the observation window --
+                        # while other steps of the run are still running.
+                        if status.status in _TERMINAL and not status.active_local:
+                            yield _frame('terminal', {'status': status.status, 'read_receipt': True})
+                            return
+                        await asyncio.sleep(min(POLL_SECONDS, max(remaining, 0.0)))
+                        continue
+                    gap, chunk = current.next_after(after)
+                    if gap is not None:
+                        yield _frame('gap', {'after': after, 'next_sequence': gap})
+                        after = gap - 1
+                        continue
+                    if chunk is not None:
+                        sequence, text = chunk
+                        if text is None:
+                            yield _frame('withdraw', {'sequence': sequence}, str(sequence))
+                        else:
+                            yield _frame('text', {'sequence': sequence, 'text': text}, str(sequence))
+                        after = sequence
+                        continue
+                    try:
+                        await asyncio.wait_for(current.wait_after(after), timeout=min(POLL_SECONDS, max(remaining, 0.001)))
+                    except TimeoutError:
+                        pass
+
+            try:
+                async for frame in follow():
+                    yield frame
+            finally:
+                if listening is not None:
+                    listening.detach()
 
         return _HistoryResponse(output())
