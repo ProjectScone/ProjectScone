@@ -686,6 +686,7 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     from .code import code_language
     from .doc_graph import doc_claims, is_document
     from .manifests import is_manifest, manifest_claims
+    from .schema_claims import is_schema, schema_claims
 
     said = 0
     # A manifest says what the project depends on; a source file says what
@@ -699,6 +700,12 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
         claims = doc_claims(content, path, resolve=resolve if hasattr(resolve, "links") else None)
     else:
         claims = code_claims(content, path, language=code_language(path), resolve=resolve)
+    # A manifest says what the project depends on; a schema says what
+    # tables there are and what rests on what; a source file says what it
+    # defines, imports and calls. All are read the same way from here.
+    claims = (manifest_claims(content, path) if is_manifest(path)
+              else schema_claims(content, path) if is_schema(path)
+              else code_claims(content, path, language=code_language(path), resolve=resolve))
     for claim in claims:
         if _recorded is not None:
             _recorded.append(claim)

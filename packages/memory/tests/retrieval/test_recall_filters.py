@@ -159,6 +159,11 @@ CORPUS = [
     {"category": "research", "priority": "soon", "status": "review", "team": "eng"},
     {"category": "engineering", "priority": "-2.5", "status": "published", "team": "eng"},
     {},
+    {"category": "Engineering", "status": "PUBLISHED", "team": "ENG"},
+    {"category": "Stra\u00dfe", "status": "\u00c9T\u00c9"},
+    {"category": "\u212aitchen", "status": "Draft"},
+    # Plain ASCII that a query beyond ASCII folds to: SQLite cannot see it.
+    {"category": "kitchen", "status": "strasse"},
 ]
 
 FILTERS = [
@@ -177,9 +182,22 @@ FILTERS = [
     {"any": [{"field": "team", "is": "sales"}, {"field": "status", "is": "review"}]},
     {"all": [{"field": "status", "is": "published"},
              {"any": [{"field": "priority", "above": 4}, {"field": "team", "is": "eng"}]}]},
+    {"field": "priority", "absent": True},
+    {"field": "priority", "absent": True, "not": True},
+    {"any": [{"field": "priority", "absent": True}, {"field": "priority", "above": 9}]},
+    {"field": "status", "is": "published", "fold": True},
+    {"field": "status", "is": "published", "fold": True, "not": True},
+    {"field": "category", "has": "ENGINE", "fold": True},
+    {"field": "team", "in": ["Eng", "Sales"], "fold": True},
+    {"field": "category", "is": "STRASSE", "fold": True},
+    {"field": "status", "is": "\u00e9t\u00e9", "fold": True},
+    {"field": "category", "has": "kitchen", "fold": True},
+    {"field": "status", "in": ["draft", "review"], "fold": True, "not": True},
+    {"field": "category", "is": "\u212aitchen", "fold": True},
+    {"field": "status", "has": "STRA\u00dfE", "fold": True},
 ]
 
-EXACT = {"is", "has", "in", "present"}
+EXACT = {"is", "has", "in", "present", "absent"}
 
 
 def rows_from_sql(spec):
@@ -187,9 +205,12 @@ def rows_from_sql(spec):
     db.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, metadata TEXT NOT NULL)")
     db.executemany("INSERT INTO notes (id, metadata) VALUES (?, ?)",
                    [(i, json.dumps(m)) for i, m in enumerate(CORPUS)])
-    clause, params = parse_filter(spec).to_sql("notes.metadata")
-    found = db.execute(f"SELECT id FROM notes WHERE {clause} ORDER BY id", params).fetchall()
-    return {row[0] for row in found}
+    try:
+        clause, params = parse_filter(spec).to_sql("notes.metadata")
+        found = db.execute(f"SELECT id FROM notes WHERE {clause} ORDER BY id", params).fetchall()
+        return {row[0] for row in found}
+    finally:
+        db.close()
 
 
 def rows_from_python(spec):
@@ -206,7 +227,7 @@ def test_the_sql_never_loses_a_memory_the_filter_would_keep(spec):
     assert rows_from_python(spec) <= rows_from_sql(spec)
 
 
-@pytest.mark.parametrize("spec", [f for f in FILTERS if set(f) & EXACT and not f.get("not")],
+@pytest.mark.parametrize("spec", [f for f in FILTERS if set(f) & EXACT and not f.get("not") and not f.get("fold")],
                          ids=lambda f: str(sorted(f))[:40])
 def test_a_test_sql_can_make_exactly_narrows_exactly(spec):
     """Where SQLite can express the test, nothing is left for the second
@@ -235,3 +256,36 @@ def test_a_negated_exact_test_does_not_drag_in_memories_with_no_such_key():
     draft fetches every memory that has no status at all, and the second
     pass throws them away again."""
     assert 6 not in rows_from_sql({"field": "status", "is": "draft", "not": True})
+
+
+def test_absent_is_the_one_test_a_missing_key_answers():
+    """Absent satisfies nothing, so "memories with no status" could not be
+    asked at all. `absent` asks it, and its negation is exactly present."""
+    assert keeps({"field": "team_size", "absent": True})
+    assert not keeps({"field": "priority", "absent": True})
+    assert keeps({"field": "priority", "absent": True, "not": True})
+    assert not keeps({"field": "team_size", "absent": True, "not": True})
+
+
+def test_fold_compares_text_without_regard_to_case_across_scripts():
+    note = {"status": "PUBLISHED", "place": "Stra\u00dfe", "unit": "\u212a", "title": "\u00c9T\u00c9 notes"}
+    assert keeps({"field": "status", "is": "published", "fold": True}, note)
+    assert not keeps({"field": "status", "is": "published"}, note), "without fold, case still counts"
+    assert keeps({"field": "place", "is": "STRASSE", "fold": True}, note)
+    assert keeps({"field": "unit", "is": "k", "fold": True}, note)
+    assert keeps({"field": "title", "has": "\u00e9t\u00e9", "fold": True}, note)
+    assert keeps({"field": "status", "in": ["Draft", "Published"], "fold": True}, note)
+    assert not keeps({"field": "missing", "is": "x", "fold": True, "not": True}, note), "absent still answers nothing"
+
+
+@pytest.mark.parametrize("spec", [
+    {"field": "priority", "absent": False},
+    {"field": "priority", "absent": "yes"},
+    {"field": "priority", "at_least": 5, "fold": True},
+    {"field": "priority", "present": True, "fold": True},
+    {"field": "priority", "absent": True, "fold": True},
+    {"field": "status", "is": "x", "fold": "yes"},
+])
+def test_absent_and_fold_are_refused_where_they_mean_nothing(spec):
+    with pytest.raises(InvalidInput):
+        parse_filter(spec)
