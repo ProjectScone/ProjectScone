@@ -32,7 +32,7 @@ FILE_MEDIA_TYPES = {
     '.odp': 'application/vnd.oasis.opendocument.presentation', '.epub': 'application/epub+zip',
     '.pdf': 'application/pdf', '.json': 'application/json', '.ipynb': 'application/json', '.jsonl': 'application/x-ndjson',
     '.ndjson': 'application/x-ndjson', '.xml': 'application/xml', '.html': 'text/html', '.htm': 'text/html',
-    '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.eml': 'message/rfc822',
+    '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.eml': 'message/rfc822', '.mbox': 'application/mbox',
     '.msg': 'application/vnd.ms-outlook', '.rtf': 'application/rtf',
 }
 

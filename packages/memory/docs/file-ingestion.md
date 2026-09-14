@@ -441,7 +441,7 @@ Read provenance through
 `GET /v1/episodes/{episode_id}/document?chunk_id=...`. The API uses its
 authenticated space, write-role authorization and ingestion backpressure.
 HTTP indexing is synchronous and does not automatically create a durable
-workflow journal.
+workflow journal. A mailbox (`.mbox`) is read as one document of many messages: each message as an `.eml` is, its headers and text parts under `message:N/`, every segment carrying the message's number, date and sender so a passage recalled from a mailbox says which mail it came from; attachments are counted, not read, mbox `>From ` quoting is undone, and past 5,000 messages the rest are counted (`messages_unread`).
 
 Parsers enforce input, extracted-text, segment, archive and execution limits.
 Office/ODF/EPUB ZIP members must use stored or deflated compression. Standalone
