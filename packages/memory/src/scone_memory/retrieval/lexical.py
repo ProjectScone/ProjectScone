@@ -126,8 +126,20 @@ def tokenize(text: str) -> list[str]:
     return tokens
 
 
+def fold_diacritics(token: str) -> str:
+    """``token`` without its combining marks ("facturación" to "facturacion"),
+    so a query typed without accents finds the word, as the SQLite store's
+    own tokenizer already does; the tokenizer itself is unchanged, so no
+    persisted token or vector identity moves."""
+    if token.isascii():
+        return token
+    decomposed = unicodedata.normalize("NFD", token)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 class Bm25:
-    """Okapi BM25 over a mutable set of documents keyed by int id."""
+    """Okapi BM25 over a mutable set of documents keyed by int id; terms are
+    kept with their diacritics folded, matching the SQLite text lane."""
 
     def __init__(self, k1: float = 1.2, b: float = 0.75) -> None:
         self.k1 = k1
@@ -142,7 +154,7 @@ class Bm25:
     def add(self, doc_id: int, text: str) -> None:
         if doc_id in self._docs:
             self.remove(doc_id)
-        tokens = tokenize(text)
+        tokens = [fold_diacritics(token) for token in tokenize(text)]
         counts = Counter(tokens)
         self._docs[doc_id] = counts
         self._lengths[doc_id] = len(tokens)
@@ -164,8 +176,9 @@ class Bm25:
         """Documents by BM25 over the query's terms; a prefix counts every
         vocabulary term that starts with it as one term, so a word's family
         ("bill" for billing, billed, bills) is one signal, not several."""
-        terms = tokenize(query)
-        families = [(prefix, [term for term in self._df if term.startswith(prefix)]) for prefix in prefixes]
+        terms = [fold_diacritics(token) for token in tokenize(query)]
+        families = [(fold_diacritics(prefix), [term for term in self._df if term.startswith(fold_diacritics(prefix))])
+                    for prefix in prefixes]
         families = [(prefix, members) for prefix, members in families if members]
         if (not terms and not families) or not self._docs:
             return []

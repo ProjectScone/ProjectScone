@@ -193,3 +193,21 @@ async def test_the_context_lane_is_a_flag_that_reaches_every_engine():
     assert (await build_in_process_engine(settings, HashEmbedder())).context_lane is True
     with pytest.raises(InvalidInput, match="SCONE_CONTEXT_LANE"):
         Settings.from_env({"SCONE_CONTEXT_LANE": "maybe"})
+
+
+async def test_the_vector_weight_is_a_number_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_VECTOR_WEIGHT": "0.5"})
+    assert settings.vector_weight == 0.5 and Settings.from_env({}).vector_weight is None and "vector_weight" in ENGINE_SETTINGS
+    assert (await build_in_process_engine(Settings.from_env({}), HashEmbedder())).vector_weight == 0.25, "unset follows the embedder"
+    engine = await build_engine(settings)
+    try:
+        assert engine.vector_weight == 0.5
+    finally:
+        await engine.close()
+    assert (await build_in_process_engine(settings, HashEmbedder())).vector_weight == 0.5
+    for bad in ("0", "5", "many", "nan"):
+        with pytest.raises(InvalidInput, match="SCONE_VECTOR_WEIGHT"):
+            Settings.from_env({"SCONE_VECTOR_WEIGHT": bad})

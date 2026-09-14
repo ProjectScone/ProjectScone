@@ -1087,6 +1087,21 @@ index, and an engine with the lane on over a store that does not
 reports `context lane: not kept by …` in `degraded` rather than
 pretending the lane ran.
 
+### The vector lane's voice in fusion
+
+Reciprocal rank fusion gives every lane the same voice. That is right
+when both lanes know something the other does not, and wrong when one
+is a weak echo of the other: an embedder whose vectors are hashed
+tokens ranks by word overlap, badly, and its confident wrong picks can
+outvote the text lane's right ones. Measured on LongMemEval-S with that
+embedder, the text lane alone was ahead of the fused ranking.
+`SCONE_VECTOR_WEIGHT` (`MemoryEngine(..., vector_weight=)`) is the
+vector lane's weight against the text lane's 1.0 — a number above 0 and
+at most 4, 1.0 by default — and every recall event records
+`fusion_weights`, so a ranking can always be read back to the voices
+that made it. Change it only on a number: the pull request that added it
+carries the measurement.
+
 ### A word's family by prefix
 
 "bills", "billing" and "billed" are one word to a reader and three to the
