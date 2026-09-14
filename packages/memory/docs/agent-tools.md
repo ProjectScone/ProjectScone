@@ -163,6 +163,30 @@ failures return an unavailable result without partial quotes. Direct adapter
 writes require adapter transaction discipline. Coverage describes this seed's
 bounded neighborhood, never completeness of an answer to an arbitrary query.
 
+## Offering a few tools of many
+
+A host with eighteen tools puts eighteen schemas in front of the model
+on every turn; a host with two hundred cannot, and a model shown two
+hundred chooses worse than one shown eight. `ToolBox.offer(query,
+limit=8, always=(...))` chooses the tools a turn needs the way the
+reference framework's object index retrieves tools: each tool is
+embedded once as its name and its sentence with the engine's embedder,
+the query the same way, and the closest are offered, with a word of the
+query that is a tool's name or in its sentence counting too, so "search
+memory for …" offers `search_memory` whatever the vectors say. The
+`always` tools come first whatever the query. The selection says its
+scores, what it left out and the embedder it used (`record()`), and
+`box.openai(selection.names)` / `box.anthropic(selection.names)` render
+just those. An offer is a suggestion to the host, never a gate: `run`
+runs any tool the toolbox holds.
+
+```python
+box = ToolBox(engine, "default")
+chosen = await box.offer("what is connected to Acme in the graph?", limit=6, always=["search_memory"])
+schema = box.openai(chosen.names)        # six schemas, search_memory first
+print(chosen.record()["left_out"])       # the tools not offered, so a host can see why
+```
+
 ## Scoped read tools
 
 For read tools that must preserve a conversation or application's narrower
