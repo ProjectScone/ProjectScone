@@ -48,7 +48,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: A manifest's ``depends_on`` and ``develops_with`` are dependency edges
 #: like an import: a change to the package reaches the project that
 #: declares it, and a test dependency breaking breaks the tests.
-DEPENDS_ON = ("calls", "imports", "inherits", "mixes_in", "depends_on", "develops_with")
+DEPENDS_ON = ("calls", "imports", "inherits", "mixes_in", "depends_on", "develops_with", "references")
 #: Hops the walk may take. Past this it is the whole component, not a
 #: blast radius.
 MAX_HOPS = 8
