@@ -1054,13 +1054,18 @@ The rules it keeps:
 - **It says how much of itself was retrieved.** A merge reads the text
   between fragments too, so two short hits far apart would make a passage
   mostly nobody retrieved. `shares` gives, for every merged passage, the
-  part of its bytes that retrieved chunks cover, overlaps counted once.
+  part of its bytes that retrieved chunks cover, overlaps counted once,
+  counting the spans the chunks were retrieved at rather than any window
+  around them.
   `merge_min_share` (`--merge-min-share`) leaves a sparser merge as
   fragments, counted in `too_sparse`. The reference merges children into
   a parent only when enough of them were retrieved; this is that rule in
   the bytes a reader gets. It defaults to 0, no floor, and is unmeasured.
 - **A budget that bit says so.** At most 50 episodes are read per call;
-  the rest stand unjoined, counted in `not_read`.
+  the rest stand unjoined, counted in `not_read`. A passage whose span
+  reads back blank from an episode that was read (its text changed under
+  the chunks) is left as fragments and counted in `blank`, apart from an
+  episode that could not be read.
 - **Withholding scans what a merge reads.** Merging runs after any window
   and before withholding, so an address in the text between two
   fragments is withheld like one inside them. The command line refused

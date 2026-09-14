@@ -962,7 +962,7 @@ def create_app(
         merge: bool = Query(default=False,
                             description="Join neighbouring chunks of one episode into the passage holding "
                                         "them, and say which chunks went in and what share was retrieved."),
-        merge_min_share: float = Query(default=0.0, ge=0, le=1,
+        merge_min_share: Optional[float] = Query(default=None, ge=0, le=1,
                                        description="Leave a merge as fragments when retrieved chunks "
                                                    "cover less than this share of its bytes."),
         compress: Optional[float] = Query(
@@ -1046,7 +1046,7 @@ def create_app(
                     "withhold cannot be combined with code_context: code context quotes the "
                     "file again after withholding, which would hand back what was withheld; "
                     "ask for one or the other")
-        if merge_min_share and not merge:
+        if merge_min_share is not None and not merge:
             raise InvalidInput("merge_min_share is a floor under a merge; ask for merge with it")
         if merge and compress is not None:
             # A merged passage is reported under its best chunk, so the
@@ -1084,7 +1084,8 @@ def create_app(
 
             # After any window and before withholding, so withholding scans
             # the text a merge reads between the fragments it joins.
-            joined = await merge_neighbours(engine, space, result.items, min_share=merge_min_share)
+            joined = await merge_neighbours(engine, space, result.items, min_share=merge_min_share or 0.0,
+                                            hits=retrieved)
             result = result.model_copy(update={
                 "items": list(joined.items),
                 "returned_bytes": sum(len(one.text.encode()) for one in joined.items)})

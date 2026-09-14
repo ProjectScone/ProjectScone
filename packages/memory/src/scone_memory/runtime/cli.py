@@ -1807,7 +1807,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             # Before withholding, so withholding scans the text a merge reads
             # between the fragments it joins; merging after it handed that
             # text back unscanned, which is why --withhold refused --merge.
-            joined = await merge_neighbours(engine, space, result.items, min_share=args.merge_min_share or 0.0)
+            joined = await merge_neighbours(engine, space, result.items, min_share=args.merge_min_share or 0.0,
+                                            hits=retrieved)
             result = result.model_copy(update={"items": list(joined.items)})
         if args.compress is not None:
             from ..retrieval.compress import compress

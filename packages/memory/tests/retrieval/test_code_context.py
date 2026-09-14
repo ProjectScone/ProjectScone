@@ -305,7 +305,10 @@ async def test_the_cli_refuses_withholding_beside_anything_that_quotes_the_sourc
     the store *after* withholding and print source verbatim, so a
     withheld address in a default argument came back in the signature,
     and `--parts` answered without withholding at all. `--merge` now
-    merges before withholding, so it is allowed and must withhold."""
+    merges before withholding, so it is allowed; here the address sits in
+    one chunk, so this checks only that nothing leaks beside it. That a
+    merge's between-fragment text is withheld is shown in
+    tests/api/test_merge_route.py, whose address only the merge reads."""
     import io
 
     from scone_memory.runtime.cli import build_parser, run
