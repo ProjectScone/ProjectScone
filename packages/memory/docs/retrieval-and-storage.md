@@ -1097,6 +1097,37 @@ interesting one: asked in a person's words, two in five questions do not
 return the function's own definition. That is an embedder question, not a
 chunker one, and it is where the next gain is.
 
+### Questions your own corpus answers
+
+```bash
+SCONE_CHAT_URL=http://127.0.0.1:11434/v1 SCONE_CHAT_MODEL=gemma4-e4b-ctx8k \
+  scone bench-questions docs/ --set docs-questions.json --write
+scone bench-questions docs/ --set docs-questions.json --k 1,5,10
+```
+
+LongMemEval-S measures conversations and `bench-code` measures functions;
+nothing measured retrieval on a corpus of your own. `bench-questions --write`
+stores every text file (`.md`, `.txt`, `.rst`) and PDF under a directory in
+its own in-process store, shows a sample of the chunks to the configured
+local model (at most `--max-chunks`, sampled by `--seed`; the set says how
+many chunks there were), and asks it for `--per-chunk` questions each with
+the sentence that answers it. A question is kept only when that sentence is
+in the chunk the model was shown, word for word (whitespace aside); one
+whose quote is invented is dropped and counted, as is a reply that is not
+the JSON asked for, a call that failed, and a chunk too long to show. Every
+kept question can therefore be checked by anyone holding the text.
+
+Measuring needs no model and no chunk ids: the same root is stored again,
+every question is asked, and a returned passage that holds the quote is a
+hit — `quote in top k`, MRR, and `source in top k` for questions whose
+chunk came from a file. Because the truth is a quote and not a chunk id,
+one set measures the corpus stored with a different chunk size, store or
+embedder, as long as the text is the same; that is what makes it a bench
+for ingestion changes (a PDF read in a different order, a chunker cut at
+different places) and not only for retrieval settings. The set is a JSON
+file with a version, so a saved set is refused by a reader that does not
+know its shape.
+
 ## Choosing settings by measuring them
 
 ```bash
