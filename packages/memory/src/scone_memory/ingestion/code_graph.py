@@ -676,11 +676,14 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     the command line cannot come to differ about it."""
     from .code import code_language
     from .manifests import is_manifest, manifest_claims
+    from .schema_claims import is_schema, schema_claims
 
     said = 0
-    # A manifest says what the project depends on; a source file says what
-    # it defines, imports and calls. Both are read the same way from here.
+    # A manifest says what the project depends on; a schema says what
+    # tables there are and what rests on what; a source file says what it
+    # defines, imports and calls. All are read the same way from here.
     claims = (manifest_claims(content, path) if is_manifest(path)
+              else schema_claims(content, path) if is_schema(path)
               else code_claims(content, path, language=code_language(path), resolve=resolve))
     for claim in claims:
         if _recorded is not None:
