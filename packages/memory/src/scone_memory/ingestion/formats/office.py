@@ -64,6 +64,8 @@ _WORD_TEXTBOXES = frozenset(f'{{{namespace}}}txbxContent' for namespace in _WORD
 _WORD_TEXT_NAMESPACES = frozenset(_WORD_NAMESPACES) | frozenset({
     'http://schemas.microsoft.com/office/word/2010/wordprocessingShape',
     'urn:schemas-microsoft-com:vml',
+    # Word writes an Office 2016 chart as a choice with a picture as its fallback.
+    'http://schemas.microsoft.com/office/drawing/2014/chartex',
 })
 _WORD_REFERENCES = {
     f'{{{namespace}}}{tag}': kind
@@ -513,6 +515,8 @@ class _ChartLines:
         self.series = self.points = self.series_cut = self.points_cut = self.levels_cut = 0
 
     def kind(self, kind: str) -> None:
+        # A kind is a name the file gives; anything else is not a name to carry in metadata.
+        kind = kind if re.fullmatch(r'[A-Za-z][A-Za-z0-9]{0,63}', kind) else 'extended'
         if kind not in self.kinds:
             self.kinds.append(kind)
 
@@ -554,7 +558,7 @@ def _extended_segment(root: Element) -> tuple[str, dict[str, str]] | None:
     title = '' if heading is None else ' '.join(''.join(v.text or '' for v in _elements(heading, 'v')).split())
     found = _ChartLines()
     for entry in (child for child in region if _local(child.tag) == 'series'):
-        found.kind(entry.get('layoutId', '') or 'extended')
+        found.kind(entry.get('layoutId', ''))
         if not found.room():
             continue
         named = _child(entry, 'tx')
@@ -664,6 +668,7 @@ def _pptx(bundle: SafeArchive, output: _Output) -> None:
         slide_relations = _relationships(bundle, path)
         charts = 0
         for reference in slide_root.iter():
+            output.check()
             if reference.tag in _CHART_REFERENCES:
                 charts += 1
                 _chart(bundle, path, slide_relations, reference, output, f'slide:{number}/chart:{charts}', f'slide:{number}')
