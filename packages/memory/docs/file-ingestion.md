@@ -116,23 +116,13 @@ module the graph's other files name.
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
-| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
+| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties, and heading levels through styles; no rendered layout or macros |
 | XLSX, and XLSM, XLTX, XLTM | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
 | PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
 | DOC, PPT | Converted text locators | Explicit offline converter; macOS textutil also supports DOC; page/slide structure may be lost |
-A paragraph a document marks as a heading carries `heading_level` (1 to 9)
-in its segment's metadata, with its text unchanged. For DOCX, the level comes
-from the paragraph's own outline level, else from its style's (followed
-through the styles it is based on) or from a built-in style named `heading N`,
-whatever the style's id is in the document's language. For ODT it comes from
-`text:h` and its outline level, and for HTML from `h1` to `h6`. A DOCX without
-a readable styles part still reads, with levels only from paragraphs that carry
-their own outline level. The levels are recorded here so section boundaries can
-be cut from them; chunking does not yet use them.
-
 | PDF | Page locators, extraction method, configured OCR regions and engine | Native text by default; OCR requires an explicit parser |
 | Images | Frame/region locators and typed OCR geometry | Explicit `ImageDocumentParser` and OCR engine required |
 | Audio/video | Audio-stream timestamps | Explicit `MediaDocumentParser` and transcription provider required; video frames are not analyzed |
@@ -144,6 +134,17 @@ type on its main part, and are read alike, under their own extension
 read; a document that carried them says so in its metadata (`macros:
 present, not read`), so a search over a folder of macro-enabled files can
 tell which ones held code.
+
+A paragraph a document marks as a heading carries `heading_level` in its
+segment's metadata, as a decimal string, with its text unchanged. For DOCX the
+level is 1 to 9 and comes from the paragraph's own outline level, else from its
+style's (followed through the styles it is based on) or from a built-in style
+named `heading N`, whatever the style's id is in the document's language. For
+ODT it is 1 to 10, from `text:h` and its outline level (1 when none is given).
+For HTML it is 1 to 6, from `h1` to `h6`. A DOCX without a readable styles part
+still reads, with levels only from paragraphs that carry their own outline
+level. The levels are recorded so section boundaries can be cut from them;
+chunking does not yet use them.
 
 OpenDocument extraction uses current content: `text:tracked-changes` revision
 history and `office:change-info` metadata are omitted. Current text, including
