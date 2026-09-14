@@ -144,3 +144,35 @@ async def test_bad_sentence_windows_are_refused(arguments):
             await widen(engine, "default", [item], **{"before": 1, "after": 1, **arguments})
     finally:
         await engine.close()
+
+
+async def test_sentence_offsets_are_found_in_one_pass_over_a_long_episode():
+    """Byte offsets for every sentence of an episode, found in one walk.
+    Encoding the text before each sentence is quadratic: 50,000 sentences
+    holding a non-ASCII letter took 15 seconds on a request path."""
+    import time
+
+    content = "Gö to the hall. " * 40_000 + "The needle is here."
+    engine, item = await _hit(content, "needle")
+    try:
+        began = time.perf_counter()
+        widened = await widen(engine, "default", [item], before=1, after=0, unit="sentences")
+        took = time.perf_counter() - began
+    finally:
+        await engine.close()
+    assert widened.items[0].text == "Gö to the hall. The needle is here."
+    assert content.encode()[widened.items[0].start:widened.items[0].end] == widened.items[0].text.encode()
+    assert took < 2.0, took
+
+
+async def test_a_window_is_quoted_when_the_space_between_sentences_is_not_ascii():
+    # An ideographic space in the blank line: three bytes the offsets must count.
+    content = "Crane survey\n　\nThe jib had rust.　　\n\nThe needle is here."
+    engine, item = await _hit(content, "needle")
+    try:
+        widened = await widen(engine, "default", [item], before=1, after=0, unit="sentences")
+    finally:
+        await engine.close()
+    [one] = widened.items
+    assert one.text == "The jib had rust.　　\n\nThe needle is here."
+    assert content.encode()[one.start:one.end] == one.text.encode()
