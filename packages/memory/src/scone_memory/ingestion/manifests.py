@@ -356,28 +356,102 @@ def _xml(content: str) -> Optional[ElementTree.Element]:
         return None
 
 
+def _tag(name: str) -> str:
+    """A regex for an opening tag, with or without a namespace prefix."""
+    return r"<(?:\w+:)?" + name + r"\s*>"
+
+
+class _Xml(_Claims):
+    """Line attribution for an XML manifest: a search that skips the
+    sections the reader does not read, so a dependency managed in
+    `<dependencyManagement>` before it is declared is cited to the line
+    that declares it, and a search that finds nothing cites nothing."""
+
+    def __init__(self, content: str, path: str, skipped: tuple[str, ...]) -> None:
+        super().__init__(content, path)
+        self.masked = self._masked(skipped)
+
+    def _masked(self, names: tuple[str, ...]) -> set[int]:
+        masked: set[int] = set()
+        for name in names:
+            opened = re.compile(_tag(name))
+            closed = re.compile(r"</(?:\w+:)?" + name + r"\s*>")
+            inside = False
+            for index, line in enumerate(self.lines):
+                if not inside and opened.search(line):
+                    inside = True
+                if inside:
+                    masked.add(index)
+                if inside and closed.search(line):
+                    inside = False
+        return masked
+
+    def find(self, pattern: "re.Pattern[str]", start: int = 0) -> int:
+        """1-based number of the first unmasked line from ``start`` the
+        pattern matches, or 0."""
+        for index in range(start, len(self.lines)):
+            if index not in self.masked and pattern.search(self.lines[index]):
+                return index + 1
+        return 0
+
+    def say_at(self, subject: str, predicate: str, obj: str, line: int) -> bool:
+        """A claim only where a line was found: a citation to the XML
+        declaration would be a citation to nothing."""
+        if line <= 0:
+            return False
+        self.say(subject, predicate, obj, line)
+        return True
+
+
+_PROPERTY = re.compile(r"\$\{([^}]*)\}")
+#: What Maven itself substitutes for a placeholder in a coordinate.
+#: Anything else is a property this reader cannot see, and is left out.
+_MAVEN_GROUP_PROPERTIES = frozenset(("project.groupId", "pom.groupId", "project.parent.groupId", "parent.groupId"))
+_MAVEN_ARTIFACT_PROPERTIES = frozenset(("project.artifactId", "pom.artifactId"))
+_MAVEN_PLUGIN_GROUP = "org.apache.maven.plugins"
+
+
 def _pom(content: str, path: str) -> tuple[CodeClaim, ...]:
     root = _xml(content)
     if root is None or _local(root.tag) != "project":
         return ()
-    text = _Claims(content, path)
+    text = _Xml(content, path, ("dependencyManagement", "pluginManagement", "profiles"))
     parent = next((child for child in root if _local(child.tag) == "parent"), None)
     group = _child_text(root, "groupId") or (_child_text(parent, "groupId") if parent is not None else None)
     artifact = _child_text(root, "artifactId")
     subject = path
-    if group and artifact:
+    if group and artifact and not _PROPERTY.search(group + artifact):
         subject = f"{group}:{artifact}".lower()
-        text.say(path, DEFINES, subject, text.line_matching(re.compile(r"<artifactId>\s*" + re.escape(artifact))))
+        # The project's own artifactId, not the parent's: `service` is not
+        # `service-parent`, so the search closes the tag.
+        text.say_at(path, DEFINES, subject,
+                    text.find(re.compile(_tag("artifactId") + r"\s*" + re.escape(artifact) + r"\s*<")))
+
+    def resolved(value: Optional[str], own: Optional[str], names: frozenset[str]) -> Optional[str]:
+        """A coordinate with Maven's own placeholders substituted, or None
+        for a placeholder this reader cannot see."""
+        if value is None:
+            return None
+        for found in _PROPERTY.findall(value):
+            if found.strip() in names and own:
+                value = value.replace("${" + found + "}", own)
+            else:
+                return None
+        return value
+
     cursor = 0
 
-    def coordinates(element: ElementTree.Element, predicate: str) -> None:
+    def coordinates(element: ElementTree.Element, predicate: str, default_group: Optional[str] = None) -> None:
         nonlocal cursor
-        group, artifact = _child_text(element, "groupId"), _child_text(element, "artifactId")
-        if not group or not artifact:
+        raw_group = _child_text(element, "groupId") or default_group
+        element_group = resolved(raw_group, group, _MAVEN_GROUP_PROPERTIES)
+        element_artifact = resolved(_child_text(element, "artifactId"), artifact, _MAVEN_ARTIFACT_PROPERTIES)
+        if not element_group or not element_artifact:
             return
-        at = text.line_matching(re.compile(r"<artifactId>\s*" + re.escape(artifact) + r"\s*<"), cursor)
+        at = text.find(re.compile(_tag("artifactId") + r"\s*" + re.escape(_child_text(element, "artifactId") or "")
+                                  + r"\s*<"), cursor)
         cursor = max(cursor, at)
-        text.say(subject, predicate, f"{group}:{artifact}".lower(), at)
+        text.say_at(subject, predicate, f"{element_group}:{element_artifact}".lower(), at)
 
     for section in root:
         name = _local(section.tag)
@@ -393,67 +467,123 @@ def _pom(content: str, path: str) -> tuple[CodeClaim, ...]:
                 if _local(plugins.tag) == "plugins":
                     for plugin in plugins:
                         if _local(plugin.tag) == "plugin":
-                            coordinates(plugin, DEVELOPS_WITH)
+                            # A plugin without a group is Maven's own: that
+                            # is Maven's rule, not a guess.
+                            coordinates(plugin, DEVELOPS_WITH, _MAVEN_PLUGIN_GROUP)
     return tuple(text.found)
 
 
 # --- Gradle ----------------------------------------------------------------
 
 #: A dependency line, Groovy or Kotlin: `implementation 'g:a:v'`,
-#: `testImplementation("g:a:v")`. The configuration says what it is for.
+#: `testImplementation("g:a:v")`, and any further quoted coordinates on
+#: the same line. The configuration says what it is for.
 _GRADLE = re.compile(r"^\s*(implementation|api|compileOnly|compileOnlyApi|runtimeOnly|testImplementation|"
-                     r"testCompileOnly|testRuntimeOnly|annotationProcessor|kapt|ksp|classpath)\s*\(?\s*"
-                     r"(?:group\s*[:=]\s*)?['\"]([^'\"]+)['\"]")
+                     r"testCompileOnly|testRuntimeOnly|annotationProcessor|kapt|ksp|classpath)\b\s*\(?(.*)$")
+_GRADLE_QUOTED = re.compile(r"""['"]([^'"]+)['"]""")
 _GRADLE_DEVELOPS = frozenset(("testImplementation", "testCompileOnly", "testRuntimeOnly", "annotationProcessor",
                               "kapt", "ksp", "classpath"))
+_GRADLE_PLUGINS = re.compile(r"^\s*plugins\s*\{")
 _GRADLE_PLUGIN = re.compile(r"^\s*id\s*\(?\s*['\"]([^'\"]+)['\"]")
+
+
+def _without_block_comments(lines: list[str]) -> list[str]:
+    """The same lines with `/* ... */` blanked, across lines too, so a
+    commented-out dependency is not a dependency."""
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        kept: list[str] = []
+        i = 0
+        while i < len(line):
+            if inside:
+                close = line.find("*/", i)
+                if close == -1:
+                    i = len(line)
+                else:
+                    inside = False
+                    i = close + 2
+            else:
+                open_ = line.find("/*", i)
+                if open_ == -1:
+                    kept.append(line[i:])
+                    i = len(line)
+                else:
+                    kept.append(line[i:open_])
+                    inside = True
+                    i = open_ + 2
+        out.append("".join(kept))
+    return out
 
 
 def _gradle(content: str, path: str) -> tuple[CodeClaim, ...]:
     text = _Claims(content, path)
-    for number, line in enumerate(text.lines, start=1):
+    plugins_depth: Optional[int] = None  # brace depth at which the plugins block opened, while inside it
+    depth = 0
+    for number, line in enumerate(_without_block_comments(text.lines), start=1):
         code = line.split("//", 1)[0]
+        if plugins_depth is None and _GRADLE_PLUGINS.match(code):
+            plugins_depth = depth
         found = _GRADLE.match(code)
         if found:
-            parts = found.group(2).split(":")
-            if len(parts) >= 2 and parts[0] and parts[1]:
-                predicate = DEVELOPS_WITH if found.group(1) in _GRADLE_DEVELOPS else DEPENDS_ON
-                text.say(path, predicate, f"{parts[0]}:{parts[1]}".lower(), number)
-            continue
-        plugin = _GRADLE_PLUGIN.match(code)
-        if plugin:
-            text.say(path, DEVELOPS_WITH, plugin.group(1).lower(), number)
+            for coordinate in _GRADLE_QUOTED.findall(found.group(2)):
+                parts = coordinate.split(":")
+                if len(parts) >= 2 and parts[0] and parts[1]:
+                    predicate = DEVELOPS_WITH if found.group(1) in _GRADLE_DEVELOPS else DEPENDS_ON
+                    text.say(path, predicate, f"{parts[0]}:{parts[1]}".lower(), number)
+        elif plugins_depth is not None:
+            # `id` names a plugin only inside `plugins { }`; elsewhere it
+            # is a developer's id in a publishing block, or anything.
+            plugin = _GRADLE_PLUGIN.match(code)
+            if plugin:
+                text.say(path, DEVELOPS_WITH, plugin.group(1).lower(), number)
+        depth += code.count("{") - code.count("}")
+        if plugins_depth is not None and depth <= plugins_depth:
+            plugins_depth = None
     return tuple(text.found)
 
 
 # --- Bundler ---------------------------------------------------------------
 
-_GEM = re.compile(r"^\s*gem\s+['\"]([^'\"]+)['\"](.*)$")
-_GEM_GROUP = re.compile(r"^\s*group\s+(.+?)\s+do\b")
-_DEVELOPMENT = re.compile(r":(?:test|development|ci|lint)\b")
+_GEM = re.compile(r"^\s*gem\s*\(?\s*['\"]([^'\"]+)['\"](.*)$")
+_GEM_GROUP = re.compile(r"^\s*group\s*\(?\s*(.+?)\)?\s+do\b")
+#: Ruby's block and clause openers, each closed by an `end`; only a
+#: `group` opener says anything about the gems inside it.
+_RUBY_OPENER = re.compile(r"^\s*(?:if|unless|case|begin|while|until|def|class|module|for)\b|\bdo\b(?:\s*\|[^|]*\|)?\s*$")
+_DEVELOPMENT = re.compile(r"(?::(?:test|development|ci|lint)\b|%[iw]\[[^\]]*\b(?:test|development|ci|lint)\b)")
 
 
 def _gemfile(content: str, path: str) -> tuple[CodeClaim, ...]:
     text = _Claims(content, path)
-    grouped: list[bool] = []  # for each open block, whether it is a development group
+    grouped: list[bool] = []  # for each open block or clause, whether it is a development group
+    commented = False  # inside =begin ... =end
     for number, line in enumerate(text.lines, start=1):
+        if line.startswith("=begin"):
+            commented = True
+            continue
+        if line.startswith("=end"):
+            commented = False
+            continue
+        if commented:
+            continue
         code = line.split("#", 1)[0]
-        opened = _GEM_GROUP.match(code)
-        if opened:
-            grouped.append(bool(_DEVELOPMENT.search(opened.group(1))))
-            continue
-        if re.match(r"^\s*\w[\w.]*.*\bdo\b\s*(?:\|[^|]*\|)?\s*$", code) and not opened:
-            grouped.append(False)  # some other block: `source ... do`, `platforms ... do`
-            continue
         if code.strip() == "end":
             if grouped:
                 grouped.pop()
+            continue
+        opened = _GEM_GROUP.match(code)
+        if opened:
+            grouped.append(bool(_DEVELOPMENT.search(opened.group(1))))
             continue
         gem = _GEM.match(code)
         if gem:
             inline = _DEVELOPMENT.search(gem.group(2)) if "group" in gem.group(2) else None
             development = any(grouped) or inline is not None
             text.say(path, DEVELOPS_WITH if development else DEPENDS_ON, gem.group(1).lower(), number)
+        if _RUBY_OPENER.search(code) and not code.strip().startswith("#"):
+            # Every opener is closed by an `end`, so every one is counted,
+            # or a clause inside a group would end the group early.
+            grouped.append(False)
     return tuple(text.found)
 
 
@@ -492,32 +622,41 @@ def _dotnet(content: str, path: str) -> tuple[CodeClaim, ...]:
     root = _xml(content)
     if root is None or _local(root.tag) != "Project":
         return ()
-    text = _Claims(content, path)
+    text = _Xml(content, path, ())
     subject = path
     for group in root:
         if _local(group.tag) != "PropertyGroup":
             continue
-        named = _child_text(group, "PackageId") or _child_text(group, "AssemblyName")
-        if named:
-            subject = named.lower()
-            text.say(path, DEFINES, subject, text.line_matching(re.compile(r"<(?:PackageId|AssemblyName)>")))
+        for tag in ("PackageId", "AssemblyName"):
+            named = _child_text(group, tag)
+            if named:
+                subject = named.lower()
+                # The line of the tag the name came from, not the other one.
+                text.say_at(path, DEFINES, subject, text.find(re.compile(_tag(tag) + r"\s*" + re.escape(named))))
+                break
+        if subject != path:
             break
     cursor = 0
     for group in root:
         if _local(group.tag) != "ItemGroup":
             continue
+        # A conditioned ItemGroup is read like any other: the condition is
+        # the build's to evaluate, and the reference is declared either way.
         for item in group:
             if _local(item.tag) != "PackageReference":
                 continue
-            package = item.get("Include") or item.get("Update")
+            # `Update=` changes an inherited reference's metadata; the
+            # reference itself was declared elsewhere.
+            package = item.get("Include")
             if not package:
                 continue
             # PrivateAssets="all" is a build-time package: an analyzer,
             # a source generator, a test SDK.
             private = (item.get("PrivateAssets") or _child_text(item, "PrivateAssets") or "").lower()
-            at = text.line_matching(re.compile(r'<PackageReference\s[^>]*(?:Include|Update)="' + re.escape(package) + '"'), cursor)
+            include = re.compile(r"""Include\s*=\s*["']""" + re.escape(package) + r"""["']""")
+            at = text.find(include, cursor) or text.find(re.compile(r"<(?:\w+:)?ItemGroup\b"), cursor)
             cursor = max(cursor, at)
-            text.say(subject, DEVELOPS_WITH if private == "all" else DEPENDS_ON, package.lower(), at)
+            text.say_at(subject, DEVELOPS_WITH if private == "all" else DEPENDS_ON, package.lower(), at)
     return tuple(text.found)
 
 
