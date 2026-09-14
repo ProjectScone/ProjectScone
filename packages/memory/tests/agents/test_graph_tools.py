@@ -31,10 +31,10 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-14:] == ["graph_context", "explain_entity", "connect_entities",
+    assert [tool.name for tool in MEMORY_TOOLS][-15:] == ["graph_context", "explain_entity", "connect_entities",
                                                           "graph_schema", "graph_match", "graph_overview",
                                                           "graph_changes", "find_duplicates", "graph_health",
-                                                          "temporal_answer",
+                                                          "graph_affected", "temporal_answer",
                                                           # The tree, which a toolbox offers read only
                                                           # unless its owner allowed writing.
                                                           "list_path", "read_path", "search_paths", "write_note"]
@@ -76,6 +76,9 @@ async def test_the_graph_tools_read_their_own_space_only(box):
     ("explain_entity", {"name": "x" * 201}, "200"),
     ("connect_entities", {"source": "alice chen", "target": "lisbon", "max_hops": 5}, "max_hops"),
     ("connect_entities", {"source": "", "target": "lisbon"}, "source"),
+    ("graph_affected", {"name": "x" * 201}, "200"),
+    ("graph_affected", {"name": "lib.py:run", "max_bytes": 100}, "max_bytes"),
+    ("graph_affected", {"name": "lib.py:run", "max_hops": 9}, "max_hops"),
 ])
 async def test_a_mistake_is_a_result_the_model_can_read(box, name, arguments, complaint):
     result = await box.run(name, arguments)
@@ -215,3 +218,17 @@ async def test_the_health_tool_answers_with_the_record_the_route_gives(box):
     assert result["ok"] is True and result["space"] == "alpha"
     assert result["status"] in ("clean", "concerns") and isinstance(result["concerns"], list)
     assert result["totals"]["entities"] >= 1
+
+
+async def test_the_blast_radius_tool_answers_with_the_record_the_command_gives(box):
+    await box.engine.assert_fact("alpha", "app.py:main", "calls", "lib.py:run", valid_from=DAY)
+    await box.engine.assert_fact("alpha", "cli.py:helper", "calls", "app.py:main", valid_from=DAY)
+    result = await box.run("graph_affected", {"name": "lib.py:run", "max_hops": 2})
+    assert result["ok"] is True and result["status"] == "found" and result["space"] == "alpha"
+    reached = {label: depth for label, depth, _, _ in result["entities"]}
+    assert reached == {"app.py:main": 1, "cli.py:helper": 2} and result["reached"] == 2, result
+    assert result["by_depth"] == {"1": 1, "2": 1}
+    nothing = await box.run("graph_affected", {"name": "cli.py:helper"})
+    assert nothing["ok"] is True and nothing["status"] == "nothing" and "nothing in this graph rests on" in nothing["why"]
+    unknown = await box.run("graph_affected", {"name": "nowhere.py:thing"})
+    assert unknown["ok"] is True and unknown["status"] == "unknown", "an unknown name is an answer the model can read"
