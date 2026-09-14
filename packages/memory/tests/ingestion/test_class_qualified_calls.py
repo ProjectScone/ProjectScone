@@ -84,7 +84,10 @@ def test_a_function_nested_in_a_function_or_a_method_is_not_reached_through_its_
               "def outer():\n    def helper():\n        return 2\n    return helper()\n\n"
               "def main():\n    outer.helper()\n    Shelf.put.inner()\n")
     made = {(c.subject, c.object) for c in code_claims(source, "m.py", language="python") if c.predicate == "calls"}
-    assert not any(target in ("m.py:outer.helper", "m.py:Shelf.put.inner") for _, target in made), made
+    # From main, through the holder's name; each holder's own call to its nested function is a real edge.
+    assert not any(target in ("m.py:outer.helper", "m.py:Shelf.put.inner") for caller, target in made
+                   if caller == "m.py:main"), made
+    assert ("m.py:outer", "m.py:outer.helper") in made and ("m.py:Shelf.put", "m.py:Shelf.put.inner") in made
     assert {"outer.helper", "Shelf.put.inner"} <= set(unresolved_calls(source, "m.py", language="python"))
 
 
