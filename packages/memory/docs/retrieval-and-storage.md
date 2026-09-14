@@ -1097,6 +1097,32 @@ interesting one: asked in a person's words, two in five questions do not
 return the function's own definition. That is an embedder question, not a
 chunker one, and it is where the next gain is.
 
+### Judging an answer with a local model
+
+Retrieval metrics say whether the right passages came back; `bench.evaluators`
+says what a local judge (any `ChatModel`) makes of the answer written from
+them, our way: the judge is handed the exact texts and asked for a small JSON
+verdict, the verdict is parsed strictly, and what could not be parsed, what
+the judge failed to produce, or what exceeded the input bound comes back as
+**unverified** — never a pass, never a fail. `faithfulness` (every claim in
+the answer, and whether a context supports it), `answer_relevancy`,
+`context_relevancy` and `correctness` (against a reference, on a five-point
+scale) are the four the reference framework also asks. Two more:
+
+- `pairwise(judge, question=…, answer_a=…, answer_b=…, reference=None)` asks
+  which of two answers is better, **in both orders**. A judge that prefers
+  whatever it read first gives two different verdicts; that disagreement is
+  reported as a tie with the reason, not resolved by a coin. The score is 1
+  when A wins, 0 when B wins, 0.5 for a tie; two calls per judgment.
+- `semantic_similarity(embedder, answer=…, reference=…, passing_similarity=0.8)`
+  is the cosine between the two embeddings, clamped to [0, 1], with no judge
+  called. It says nothing about truth — two fluent wrong answers can sit
+  close together — and what it says depends on the embedder, whose id is on
+  the reason.
+
+A judgment is the judge's opinion, not proof; the bench reports it beside the
+metrics that need no judge, and says which is which.
+
 ## Choosing settings by measuring them
 
 ```bash
