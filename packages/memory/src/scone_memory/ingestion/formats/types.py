@@ -17,7 +17,8 @@ class DocumentTextRegion(OrderedOcrRegion):
     start: int = Field(ge=0, le=2_000_000)
     end: int = Field(ge=0, le=2_000_000)
     coordinate_space: Literal['normalized_displayed_page_top_left',
-                              'normalized_displayed_frame_top_left'] = 'normalized_displayed_page_top_left'
+                              'normalized_displayed_frame_top_left',
+                              'normalized_text_grid'] = 'normalized_displayed_page_top_left'
 
 
 class DocumentLimits(BaseModel):
