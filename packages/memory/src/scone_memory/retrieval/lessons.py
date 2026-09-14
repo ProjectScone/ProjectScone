@@ -99,7 +99,8 @@ def fold_lessons(events: Iterable[Event], *, now: str, half_life_days: float = 3
                     for event in judged)
         state: State = ("contested" if useful and against else "dead_end" if against
                         else "preferred" if useful >= min_corroboration else "tentative")
-        folded[chunk] = Lesson(chunk, state, score, useful, against, max(event.ts for event in judged))
+        latest_judged = max(judged, key=lambda event: parse_rfc3339(event.ts))  # instants, not strings
+        folded[chunk] = Lesson(chunk, state, score, useful, against, latest_judged.ts)
     return folded
 
 
@@ -129,3 +130,10 @@ async def read_lessons(engine: "MemoryEngine", space: str, *, window_days: int =
                              lesson.last_at, "present" if chunk in present else "gone")
                for chunk, lesson in folded.items()}
     return Lessons(checked, now, window_days, float(half_life_days), min_corroboration, len(kept), cut)
+
+
+def read_summary(found: Lessons) -> dict[str, object]:
+    """What a set of lessons was read from, for an answer that shows them one passage at a time."""
+    return {"window_days": found.window_days, "half_life_days": found.half_life_days,
+            "min_corroboration": found.min_corroboration, "events_read": found.events_read,
+            "events_cut": found.events_cut}

@@ -1104,9 +1104,11 @@ class MemoryEngine:
                             entity_unavailable=unavailable,
                             entity_notes=notes)
         if lessons:
-            from ..retrieval.lessons import read_lessons
+            from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons, read_summary
 
-            found = await read_lessons(self, space, chunk_ids=[item.chunk_id for item in result.items])
+            found = await read_lessons(self, space, chunk_ids=[item.chunk_id for item in result.items],
+                                       max_events=MAX_FEEDBACK_EVENTS)
+            result.lessons_read = read_summary(found)
             result.items = [item.model_copy(update={"lessons": found.lessons[item.chunk_id].record()})
                             if item.chunk_id in found.lessons else item for item in result.items]
         return result

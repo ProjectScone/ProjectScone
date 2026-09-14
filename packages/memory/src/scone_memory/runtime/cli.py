@@ -1713,6 +1713,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0 if answered.status in ("computed", "recalled") else 1
 
     if args.command == "recall":
+        if args.lessons and args.merge:
+            # A merged passage keeps the best-scored chunk and drops its neighbours, so their
+            # lessons would vanish, or a judged-useless neighbour would ride under a good lesson.
+            raise InvalidInput("--lessons cannot be combined with --merge: a merged passage joins chunks "
+                               "judged separately, and one lesson cannot stand for them; ask for one or the other")
         policy: tuple[str, ...] = ()
         if args.withhold:
             from ..retrieval.withhold import chosen_kinds
@@ -1878,6 +1883,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             n = result.narrowing
             print(f"note: the narrowing removed {n.postfiltered_out} candidate(s) and a lane's window of "
                   f"{max(n.vector_window, n.text_window)} was full when it did; memories that fit may lie deeper", file=out)
+        if result.lessons_read is not None and result.lessons_read.get("events_cut"):
+            print(f"lessons were read from the newest {result.lessons_read['events_read']} judgement(s) only; "
+                  f"older ones in the window were left out", file=out)
         if result.low_confidence:
             top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)

@@ -157,3 +157,56 @@ async def test_a_cut_read_keeps_the_newest_judgements():
     finally:
         await engine.close()
     assert cut.events_cut and (cut.lessons[crane].useful, cut.lessons[crane].not_useful) == (0, 1)
+
+
+def test_the_last_judgement_is_the_latest_in_time_not_the_greatest_string():
+    """An offset timestamp and a Z one sort differently as text than as instants."""
+    folded = fold_lessons([judged(1, "2026-05-01T12:00:00Z", 3, True, recall=1),
+                           judged(2, "2026-05-01T08:00:00-05:00", 3, True, recall=2)],
+                          now=NOW, half_life_days=30, min_corroboration=2)
+    assert folded[3].last_at == "2026-05-01T08:00:00-05:00", "13:00 UTC is later than 12:00 UTC"
+
+
+async def test_a_recall_with_lessons_says_what_the_lessons_were_read_from_and_when_the_read_was_cut():
+    import scone_memory.retrieval.lessons as module
+
+    clock = Clock("2026-05-01T00:00:00.000Z")
+    engine = await engine_with_feedback(clock)
+    try:
+        first = await engine.recall("default", "crane survey booked")
+        crane = first.items[0].chunk_id
+        await engine.feedback("default", first.event_id, crane, True)
+        second = await engine.recall("default", "crane survey booked")
+        await engine.feedback("default", second.event_id, crane, True)
+        whole = await engine.recall("default", "crane survey booked", lessons=True)
+        original = module.MAX_FEEDBACK_EVENTS
+        module.MAX_FEEDBACK_EVENTS = 1
+        try:
+            cut = await engine.recall("default", "crane survey booked", lessons=True)
+        finally:
+            module.MAX_FEEDBACK_EVENTS = original
+        plain = await engine.recall("default", "crane survey booked")
+    finally:
+        await engine.close()
+    assert whole.lessons_read == {"window_days": 90, "half_life_days": 30.0, "min_corroboration": 2,
+                                  "events_read": 2, "events_cut": False}
+    assert cut.lessons_read["events_cut"] is True and cut.lessons_read["events_read"] == 1
+    assert plain.lessons_read is None and "lessons_read" not in json.dumps(plain.model_dump(mode="json"))
+
+
+async def test_the_command_line_refuses_lessons_with_merge():
+    import io
+
+    from scone_memory.core.errors import InvalidInput
+    from scone_memory.runtime.cli import build_parser, run
+
+    engine = await engine_with_feedback(Clock("2026-05-01T00:00:00.000Z"))
+    try:
+        code = await run(build_parser().parse_args(["recall", "crane survey", "--lessons", "--merge"]),
+                         engine, io.StringIO(""), io.StringIO())
+    except InvalidInput as error:
+        assert "merge" in str(error)
+        code = None
+    finally:
+        await engine.close()
+    assert code in (None, 2)
