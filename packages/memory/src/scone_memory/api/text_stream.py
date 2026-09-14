@@ -58,9 +58,15 @@ class TextWindow:
         self.changed.set()
 
     def finish(self) -> None:
+        """No more text will come. What the window holds stays readable:
+        the last chunk and the turn's receipt land microseconds apart, and
+        a reader one chunk behind at that moment was promised the text."""
         self.closed = True
-        self._chunks.clear()
-        self._bytes = 0
+        if self.failed:
+            # Text delivered before a failure may be wrong or partial; a
+            # failed window offers none of it.
+            self._chunks.clear()
+            self._bytes = 0
         self.changed.set()
 
     def next_after(self, cursor: int) -> tuple[int | None, tuple[int, str | None] | None]:
@@ -68,7 +74,7 @@ class TextWindow:
         withdrawal), or no available text."""
         if type(cursor) is not int or not 0 <= cursor <= self.last_sequence:
             raise ValueError("invalid stream cursor")
-        if self.closed or not self._chunks:
+        if not self._chunks:
             return None, None
         first = self._chunks[0][0]
         if cursor < first - 1:

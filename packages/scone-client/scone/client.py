@@ -112,6 +112,11 @@ class Scone:
         """Create a typed agent client, checking space without changing authority."""
         return AgentClient(self, expected_space=expected_space)
 
+    def conversations(self, *, expected_space: str) -> "ConversationClient":
+        """Sessions and turns of the conversation service, bound to one space."""
+        from .conversations import ConversationClient
+        return ConversationClient(self, expected_space=expected_space)
+
     def video_documents(self, *, expected_space: str) -> VideoDocuments:
         """Read verified video evidence and explicitly interpret retained frames."""
         return VideoDocuments(self, expected_space=expected_space)
