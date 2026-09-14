@@ -169,7 +169,8 @@ They are queued after body text instead of being concatenated into the anchor.
 Nested boxes receive nested locators; extraction order is not page layout order.
 For DOCX main/note/comment XML parts, alternate content selects the first choice
 whose required namespace URIs are supported for text extraction (Word main,
-Word 2010 wordprocessingShape, and VML), otherwise its fallback. Prefix aliases
+Word 2010 wordprocessingShape, VML, and the Office 2016 chart namespace, so a
+newer chart is read rather than its picture fallback), otherwise its fallback. Prefix aliases
 and local namespace shadowing are honored. Missing/invalid requirements, malformed
 branch ordering, or an unsupported choice without fallback are explicit errors.
 Unused alternatives still count against XML construction limits. This is text

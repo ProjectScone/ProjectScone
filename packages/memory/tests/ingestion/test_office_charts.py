@@ -43,9 +43,9 @@ BAR = chart("<c:barChart>" + series("2025", ["Q1", "Q2"], ["10", "12.5"]) + seri
             + "</c:barChart>")
 
 
-def deck(chart_xml: str, *, relationship: bool = True) -> bytes:
+def deck(chart_xml: str, *, relationship: bool = True, charts: int = 1) -> bytes:
     frame = (f'<p:graphicFrame><a:graphic><a:graphicData uri="{C}"><c:chart xmlns:c="{C}" xmlns:r="{R}" r:id="c1"/>'
-             "</a:graphicData></a:graphic></p:graphicFrame>")
+             "</a:graphicData></a:graphic></p:graphicFrame>") * charts
     slide = (f'<p:sld xmlns:p="{P}" xmlns:a="{A}"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Results</a:t></a:r>'
              f"</a:p></p:txBody></p:sp>{frame}</p:spTree></p:cSld></p:sld>")
     return ooxml_archive({
@@ -182,3 +182,40 @@ def test_an_office_2016_chart_with_nested_categories_reads_the_first_level_and_s
     segment = parse_office(extended_deck(extended("treemap", levels=2)), "results.pptx", DocumentLimits()).segments[1]
     assert segment.text == "Quarter (treemap chart)\nCash flow: Start 100; Sales 40"
     assert segment.metadata["chart_category_levels_cut"] == "1"
+
+
+def test_a_word_office_2016_chart_is_read_through_the_choice_word_writes_it_in():
+    # Word wraps a newer chart in alternate content with a picture as the fallback; choosing the
+    # fallback lost the chart without counting it.
+    wrapped = (f'<mc:AlternateContent xmlns:mc="{MC}"><mc:Choice xmlns:cx1="{CX}" Requires="cx1"><w:drawing>'
+               f'<cx:chart xmlns:cx="{CX}" r:id="chart"/></w:drawing></mc:Choice><mc:Fallback><w:drawing/></mc:Fallback>'
+               "</mc:AlternateContent>")
+    data = document(f"<w:p><w:r><w:t>Before.</w:t>{wrapped}</w:r></w:p>",
+                    relationships=('<Relationship Id="chart" Target="charts/chartEx1.xml" '
+                                   'Type="http://schemas.microsoft.com/office/2014/relationships/chartEx"/>'),
+                    extra={"content/charts/chartEx1.xml": extended()})
+    parsed = parse_office(data, "report.docx", DocumentLimits())
+    assert [(s.locator, s.text) for s in parsed.segments] == [
+        ("paragraph:1", "Before."), ("paragraph:1/chart:1", "Quarter (waterfall chart)\nCash flow: Start 100; Sales 40")]
+
+
+def test_a_chart_kind_that_is_not_a_plain_name_is_read_as_extended_not_a_refusal():
+    parsed = parse_office(extended_deck(extended("x" * 5000)), "results.pptx", DocumentLimits())
+    assert parsed.segments[1].metadata["chart_type"] == "extended"
+    assert parse_office(extended_deck(extended("box whisker")), "results.pptx", DocumentLimits()).segments[1].metadata[
+        "chart_type"] == "extended"
+
+
+def test_scanning_a_slide_for_charts_keeps_to_the_deadline(monkeypatch):
+    checks = []
+    original = office._Output.check
+
+    def counting(self):
+        checks.append(1)
+        return original(self)
+    monkeypatch.setattr(office._Output, "check", counting)
+    parse_office(deck(BAR, relationship=False), "results.pptx", DocumentLimits())
+    one = len(checks)
+    checks.clear()
+    parse_office(deck(BAR, relationship=False, charts=40), "results.pptx", DocumentLimits())
+    assert len(checks) - one >= 39, (one, len(checks))
