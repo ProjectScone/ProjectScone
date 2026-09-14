@@ -280,11 +280,15 @@ def _guarded(graph: Adjacency, parts: list[list[str]], resolution: float) -> tup
     large community whatever its structure. The resolution is never raised to
     force a split, because high enough it cuts a tight clique. A community a
     guard looked at and kept whole is counted, so a guard never reads as
-    having found structure it did not."""
+    having found structure it did not. The pieces of a split are looked at
+    in turn: a partition of one community can still leave a piece holding
+    two."""
     fired = {"split_oversized": 0, "split_nested": 0, "unsplittable": 0}
     largest = max(_MIN_SPLIT, len(graph) * _MAX_SHARE)
     guarded: list[list[str]] = []
-    for part in parts:
+    waiting = list(parts)
+    while waiting:
+        part = waiting.pop()
         oversized = len(part) > largest
         if not oversized and len(part) < _NESTED_MIN:
             guarded.append(part)
@@ -299,7 +303,7 @@ def _guarded(graph: Adjacency, parts: list[list[str]], resolution: float) -> tup
             guarded.append(part)
             continue
         fired["split_oversized" if oversized else "split_nested"] += 1
-        guarded.extend(pieces)
+        waiting.extend(pieces)  # each piece is smaller than its part, so this ends
     return sorted(guarded, key=lambda part: (-len(part), part[0])), fired
 
 
