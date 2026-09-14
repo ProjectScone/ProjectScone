@@ -188,11 +188,13 @@ def attribute_answer(answer: str, passages: Sequence[Passage]) -> Attribution:
 
 
 async def attribute_to_chunks(engine: "MemoryEngine", space: str, answer: str,
-                              chunk_ids: Sequence[int]) -> tuple[Attribution, tuple[int, ...]]:
-    """``answer`` attributed to the space's chunks named by id, and the ids the space does not hold.
+                              chunk_ids: Sequence[int]) -> tuple[Attribution, tuple[int, ...], tuple[int, ...]]:
+    """``answer`` attributed to the space's chunks named by id, the ids the
+    space does not hold, and the ids it holds whose text is blank.
 
     The passages are read from the space, never taken from the caller, so an
-    answer cannot be attributed to text the space does not hold."""
+    answer cannot be attributed to text the space does not hold. A blank
+    chunk holds nothing to attribute to, and is named rather than dropped."""
     from ..memory.engine import check_space
 
     check_space(space)
@@ -207,4 +209,5 @@ async def attribute_to_chunks(engine: "MemoryEngine", space: str, answer: str,
     passages = [Passage(f"chunk:{chunk_id}", found[chunk_id].text) for chunk_id in wanted
                 if chunk_id in found and found[chunk_id].text.strip()]
     missing = tuple(chunk_id for chunk_id in wanted if chunk_id not in found)
-    return attribute_answer(answer, passages), missing
+    empty = tuple(chunk_id for chunk_id in wanted if chunk_id in found and not found[chunk_id].text.strip())
+    return attribute_answer(answer, passages), missing, empty

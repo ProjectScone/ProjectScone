@@ -2055,9 +2055,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "attribute":
         from ..retrieval.attribution import OVERLAP_SHARE, QUOTE_WORDS, attribute_to_chunks
 
-        made, missing = await attribute_to_chunks(engine, space, args.answer, args.chunk)
+        made, missing, empty = await attribute_to_chunks(engine, space, args.answer, args.chunk)
         if getattr(args, "json", False):
-            print(json.dumps({**made.record(), "chunks_missing": list(missing)}, ensure_ascii=False), file=out)
+            print(json.dumps({**made.record(), "chunks_missing": list(missing), "chunks_empty": list(empty)},
+                             ensure_ascii=False), file=out)
             return 0
         for sentence in made.sentences:
             where = f" {sentence.passage}" if sentence.passage else ""
@@ -2065,6 +2066,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(f"{sentence.status}{where}: {sentence.text}{numbers}", file=out)
         if missing:
             print(f"not in this space: chunk {', '.join(map(str, missing))}", file=out)
+        if empty:
+            print(f"blank in this space: chunk {', '.join(map(str, empty))}", file=out)
         print(f"quoted means {QUOTE_WORDS}+ words in a row shared; overlapping means {OVERLAP_SHARE:.0%} of its "
               "words in one passage; both rules are unmeasured, and this is not a check that the answer is true",
               file=out)
