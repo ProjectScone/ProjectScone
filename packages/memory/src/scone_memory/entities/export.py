@@ -1589,7 +1589,15 @@ def export_graph(projection: EntityProjection, format: ExportFormat, *,
                  about: Mapping[str, object] | None = None, usage: "Usage | None" = None) -> Export:
     """``usage``, the recalls ``recall_usage`` read, puts on the SVG and the
     page how many of them returned each drawn entity; other formats ignore it."""
-    return _WRITERS[format](projection, {**(about or {}), **({"usage": usage} if usage is not None else {})})
+    # Only the two formats that draw the counts receive them: a format that
+    # serialises ``about`` would trip on them, and one that writes the notes
+    # would state the window without drawing a count.
+    drawn = usage is not None and format in _USAGE_FORMATS
+    return _WRITERS[format](projection, {**(about or {}), **({"usage": usage} if drawn else {})})
+
+
+#: The formats that draw recall use.
+_USAGE_FORMATS = frozenset({"svg", "html"})
 
 
 def _usage_of(about: Mapping[str, object]) -> "Usage | None":

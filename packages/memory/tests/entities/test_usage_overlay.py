@@ -100,3 +100,15 @@ def test_the_page_offers_no_switch_when_the_count_is_unknown():
     text = export_graph(projection, "html", usage=Usage(available=False)).body.decode()
     assert 'id="usage-dim"' not in text and "data-recalled" not in text.split('<script id="graph-code">')[0]
     assert "recall use unknown" in text
+
+
+def test_every_other_format_is_unchanged_by_usage():
+    """Only the SVG and the page draw the counts. A format that would carry
+    the note without the counts, or trip on the counts, must ignore them."""
+    from scone_memory.entities.export import EXPORT_FORMATS
+
+    projection = project_entities("alpha", LEDGER, revision=1)
+    for format in EXPORT_FORMATS:
+        if format in ("svg", "html"):
+            continue
+        assert export_graph(projection, format, usage=READ).body == export_graph(projection, format).body, format
