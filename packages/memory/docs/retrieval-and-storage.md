@@ -1125,6 +1125,26 @@ requests` lists the projects whose manifests declare it, through
 `depends_on`, beside the files that import it, and a test dependency's
 blast radius runs through `develops_with`.
 
+### Schemas as things code rests on
+
+A code graph that knows a project's files and packages still stopped at
+the database: a table is what half the functions read and write, and a
+migration that drops a column reaches every one of them. A `.sql` (or
+`.ddl`) file is now read as the schema it writes down — the reference
+graph introspects a live database; a repository holds the schema as text,
+a diff changes it, and nobody has to connect to anything. `scone map` and
+`remember()` with such a source record, each claim quoted from its line:
+the file `defines` each table and view (`db/schema.sql:orders`); a table
+`defines` each of its columns (`db/schema.sql:orders.customer_id`); a table
+with a foreign key — inline `REFERENCES`, a `FOREIGN KEY` constraint, or an
+`ALTER TABLE … ADD CONSTRAINT` — `depends_on` the table it references; a
+view `depends_on` the tables it selects from. Comments are not read, quotes
+and brackets around a name are not part of it, and a schema-qualified name
+is kept as written. `depends_on` is the predicate a manifest's dependencies
+already use, so `scone graph affected db/schema.sql:customers` lists the
+tables and views that rest on `customers`, nearest first, beside the code
+that imports a module. Nothing binds code to a table: a query is a string,
+and a string that names a table is a guess this graph does not make.
 ### What a diff reaches
 
 ```bash
