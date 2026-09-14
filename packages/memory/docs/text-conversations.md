@@ -108,6 +108,16 @@ carry no `query_formulation`. The same excerpting applies to
 `integrations.chat.recall_context` and the LangChain and LlamaIndex retrievers;
 direct `recall`, HTTP, MCP and CLI calls still refuse over-long queries.
 
+`MemoryContext(..., reading_order="ends")` and
+`TextConversation(..., reading_order="ends")` render the chosen passages with
+the best at both ends of the block and the weakest in the middle (rank 1
+first, rank 2 last, rank 3 second, inward), for a model that attends least to
+the middle of a long context; the receipt's `reading_order` says which order
+was used and each reference keeps its rank. Passages are still chosen in rank
+order under the byte budget; only their order in the block changes. Off by
+default (`"ranked"`): the benefit is the literature's ("lost in the middle"),
+not yet measured on this engine.
+
 `MemoryContext(..., neighbor_chunks=1)` and
 `TextConversation(..., neighbor_chunks=1)` optionally read one stored chunk on
 each side of a ranked passage. The radius accepts 0..4 and defaults to 0.
