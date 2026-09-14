@@ -19,6 +19,13 @@
 - ``wiki``: a zip an agent can crawl from ``index.md``: one article per
   topic (the report's communities) and one per entity, joined by plain
   relative Markdown links, every statement citing its facts.
+- ``explorer``: the whole graph as one interactive page (``explorer.py``):
+  laid out in the browser by the page's own force simulation, coloured
+  by community with a legend that turns each on and off, searched,
+  hovered, clicked for an entity's relations and their facts, filtered
+  by predicate; what the graph names but never reads hidden until the
+  legend shows it. Up to 5,000 entities; past that the busiest, and it
+  says so.
 
 Every format carries the fact ids behind each relation and value, the
 projection digest it came from and, when given, ``about``: the view's
@@ -47,9 +54,9 @@ if TYPE_CHECKING:
     from .layout import Drawing
 
 ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid", "svg",
-                       "canvas", "html"]
+                       "canvas", "html", "explorer"]
 EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
-                                            "mermaid", "svg", "canvas", "html")
+                                            "mermaid", "svg", "canvas", "html", "explorer")
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -1139,6 +1146,17 @@ _WRITERS: dict[str, Callable[[EntityProjection, Mapping[str, object]], Export]] 
     "json": _node_link, "graphml": _graphml, "gexf": _gexf, "cypher": _cypher, "csv": _csv, "jsonld": _json_ld,
     "obsidian": _obsidian, "wiki": _wiki, "mermaid": _mermaid, "svg": _svg, "canvas": _canvas, "html": _html,
 }
+
+
+def _explorer(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """The whole graph as one interactive page (`explorer.py`); listed
+    here so every format is dispatched from one table."""
+    from .explorer import explorer_page
+
+    return explorer_page(projection, about)
+
+
+_WRITERS["explorer"] = _explorer
 
 
 def export_graph(projection: EntityProjection, format: ExportFormat, *,
