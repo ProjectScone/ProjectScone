@@ -164,6 +164,19 @@ def test_the_region_budget_is_disclosed(monkeypatch):
     assert bounded.text == "\n".join(rows) and bounded.regions == ()
 
 
+def test_a_page_narrower_than_a_gutter_stays_as_extracted():
+    for rows in (["7"], ["II", "", "OK"], ["ab"]):
+        laid = lay_out_page(rows, 0)
+        assert laid.receipt == ReadingOrderReceipt(strategy='grid-columns-v1', columns=0, notes=('no_separating_gutter',))
+        assert laid.text == "\n".join(rows).rstrip() and laid.regions == ()
+
+
+async def test_a_document_with_a_nearly_blank_page_is_still_read():
+    parsed = await PypdfParser().parse(placed(two_column_page(1), [(300, 400, "II", 14)], two_column_page(3)), PdfLimits())
+    assert [page.reading_order.columns for page in parsed.pages] == [2, 0, 2]
+    assert rows_of(parsed, 2) == ["II"]
+
+
 def test_regions_carry_absolute_byte_spans_and_row_gaps():
     rows = grid("Café au lait for the first row        Über the second column's first",
                 "naïve second row of the left          façade of the right column here",
