@@ -236,3 +236,23 @@ async def test_shutdown_gate_rejects_new_work_and_interrupts_late_results(engine
                 await asyncio.sleep(0)
         assert (await client.get(url + "/turns/first")).json()["status"] == "interrupted"
         assert len(runtimes) == 1
+
+
+def test_a_finished_window_keeps_its_text_for_a_listening_reader_and_forgets_it_when_they_leave():
+    window = TextWindow()
+    window.attach()
+    window.append("the last chunk")
+    window.finish()
+    assert window.next_after(0) == (None, (1, "the last chunk")), "finished with a reader attached: the text stays"
+    window.detach()
+    assert window.readers == 0 and window.next_after(0) == (None, None), "the last reader leaving forgets it"
+    late = TextWindow()
+    late.append("gone")
+    late.finish()
+    assert late.next_after(0) == (None, None), "finished with nobody attached: forgotten at once"
+    failed = TextWindow()
+    failed.attach()
+    failed.append("partial")
+    failed.failed = True
+    failed.finish()
+    assert failed.next_after(0) == (None, None), "a failed window offers nothing, attached or not"

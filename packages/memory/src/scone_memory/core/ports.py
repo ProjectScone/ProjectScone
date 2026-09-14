@@ -12,6 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
 
 from .models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 
@@ -188,6 +192,41 @@ class SourcePage:
 
 
 @runtime_checkable
+@runtime_checkable
+class ContextIndex(Protocol):
+    """A document store that keeps, beside each chunk's text, the words the
+    chunk is under -- headings, title, source name, document terms -- and
+    searches them as a lane of their own. Optional: ``context_index(store)``
+    says whether a store has it, and the engine degrades honestly without."""
+
+    context_lane: bool
+
+    async def index_context(self, space: str, chunk_id: int, text: str) -> None: ...
+    async def search_context(self, space: str, query: str, limit: int, filter: "TextFilter") -> list[tuple[int, float]]: ...
+
+
+@runtime_checkable
+class PrefixSearch(Protocol):
+    """A document store whose text lane can search a term's family by prefix
+    (``bill*``) beside whole terms. Optional: ``prefix_search(store)`` says
+    whether a store has it, and a recall says whether prefixes applied."""
+
+    prefix_terms: bool
+
+    async def search_terms(self, space: str, query: str, limit: int, filter: "TextFilter", *,
+                           prefixes: Sequence[str]) -> list[tuple[int, float]]: ...
+
+
+def prefix_search(store: object) -> Optional[PrefixSearch]:
+    """``store`` as a prefix search when its text lane takes prefixes, else None."""
+    return store if getattr(store, "prefix_terms", False) and isinstance(store, PrefixSearch) else None
+
+
+def context_index(store: object) -> Optional[ContextIndex]:
+    """``store`` as a context index when it keeps one, else None."""
+    return store if getattr(store, "context_lane", False) and isinstance(store, ContextIndex) else None
+
+
 class DocumentStore(Protocol):
     """Truth: episodes, their chunks, and facts. Also the lexical lane,
     because full-text search wants to live next to the text."""
@@ -328,7 +367,7 @@ class RecordsVectorWriter(Protocol):
     async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None: ...
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
-                        writer: str) -> list[tuple[int, float]]:
+                        writer: str, conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         """Search only if the record vouches for ``writer``, checked in the same
         snapshot as the comparison; otherwise raise VectorsNotComparable."""
         ...

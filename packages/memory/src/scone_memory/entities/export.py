@@ -41,7 +41,7 @@ import xml.etree.ElementTree as ElementTree
 import zipfile
 
 from .markdown import literal
-from .project import Entity, EntityProjection, merged_periods
+from .project import Entity, EntityProjection, Support, backing_of, merged_periods
 
 if TYPE_CHECKING:
     from .layout import Drawing
@@ -460,9 +460,11 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
 
     for relation in projection.relations:
         outgoing[relation.subject_id].append(
-            f"- {literal(relation.predicate)} [[{names[relation.object_id]}]] ({cited(relation.fact_ids)})")
+            f"- {literal(relation.predicate)} [[{names[relation.object_id]}]] ({cited(relation.fact_ids)})"
+            f"{_weak_mark(relation.support)}")
         incoming[relation.object_id].append(
-            f"- [[{names[relation.subject_id]}]] {literal(relation.predicate)} ({cited(relation.fact_ids)})")
+            f"- [[{names[relation.subject_id]}]] {literal(relation.predicate)} ({cited(relation.fact_ids)})"
+            f"{_weak_mark(relation.support)}")
     for attribute in projection.attributes:
         values[attribute.entity_id].append(
             f"- {literal(attribute.predicate)}: {literal(attribute.value)} ({cited(attribute.fact_ids)})")
@@ -537,7 +539,7 @@ def _wiki(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     leading: dict[str, list[tuple[object, str]]] = defaultdict(list)
     for relation in projection.relations:
         order = (-len(relation.fact_ids), relation.relation_id)
-        predicate, cited = _wiki_text(relation.predicate), _cite(relation.fact_ids)
+        predicate, cited = _wiki_text(relation.predicate), _cite(relation.fact_ids) + _weak_mark(relation.support)
         outgoing[relation.subject_id].append((order, f"- {predicate} {page(relation.object_id, '')} {cited}"))
         incoming[relation.object_id].append((order, f"- {page(relation.subject_id, '')} {predicate} {cited}"))
         here, there = topic_of.get(relation.subject_id), topic_of.get(relation.object_id)
@@ -671,6 +673,29 @@ def _utf16(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def _backing_words(support: Support) -> str:
+    """The backing of an edge in words, with the count behind it."""
+    origin, standing, grounding = backing_of(support)
+    return f"{standing} · {origin} · {_many(support.facts, 'fact')} · {grounding}"
+
+
+def _weak_mark(support: Support) -> str:
+    """Nothing for an edge that holds and was stated or read from a source;
+    for any other, the words that say why it is weaker. A text line already cites its facts, and a ledger
+    whose claims were stated without sources would otherwise mark every
+    line alike, so grounding is left to the drawing and the data."""
+    origin, standing, _ = backing_of(support)
+    said = [word for word, weak in ((standing, standing != "active"), (origin, origin == "inferred")) if weak]
+    return f" [{', '.join(said)}]" if said else ""
+
+
+def _mermaid_arrow(support: Support) -> str:
+    """A solid arrow for a relation that holds and was stated or read from a
+    source; a dotted one for one only inferred, or no longer holding."""
+    origin, standing, _ = backing_of(support)
+    return "-->" if origin != "inferred" and standing == "active" else "-.->"
+
+
 def _mermaid_cite(fact_ids: tuple[int, ...]) -> str:
     shown = ", ".join(map(str, fact_ids[:3]))
     return (f"(fact {shown})" if len(fact_ids) == 1
@@ -692,7 +717,7 @@ def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Expor
                      key=lambda relation: (-len(relation.fact_ids), int(shown[relation.subject_id][1:]),
                                            relation.predicate, int(shown[relation.object_id][1:])))
     nodes = [f'  {shown[entity.entity_id]}["{_mermaid_text(entity.label)}"]' for entity in ranked[:_MERMAID_NODES]]
-    edges = [f'  {shown[relation.subject_id]} -->|"{_mermaid_text(relation.predicate, 60)} '
+    edges = [f'  {shown[relation.subject_id]} {_mermaid_arrow(relation.support)}|"{_mermaid_text(relation.predicate, 60)} '
              f'{_mermaid_cite(relation.fact_ids)}"| {shown[relation.object_id]}' for relation in between]
     edges = edges[:_MERMAID_EDGES]
     coverage = about.get("coverage")
@@ -811,7 +836,16 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
         "role": "img", "font-family": "system-ui, -apple-system, 'Segoe UI', sans-serif", "font-size": "11"})
     ElementTree.SubElement(root, f"{{{ns}}}title").text = f"Knowledge graph {_xml_text(projection.space)}"
     ElementTree.SubElement(root, f"{{{ns}}}desc").text = "; ".join(_xml_text(note) for note in notes)
-    marker = ElementTree.SubElement(ElementTree.SubElement(root, f"{{{ns}}}defs"), f"{{{ns}}}marker", {
+    defs = ElementTree.SubElement(root, f"{{{ns}}}defs")
+    # A hollow ring at the start of an edge no source backs: the one mark a
+    # reader cannot miss, for the one thing they must not assume.
+    unsourced = ElementTree.SubElement(defs, f"{{{ns}}}marker", {
+        "id": "unsourced", "viewBox": "0 0 10 10", "refX": "5", "refY": "5", "markerWidth": "6", "markerHeight": "6",
+        "orient": "auto"})
+    # Drawn as a path: every <circle> in the drawing is an entity.
+    ElementTree.SubElement(unsourced, f"{{{ns}}}path", {"d": "M 1.5 5 a 3.5 3.5 0 1 0 7 0 a 3.5 3.5 0 1 0 -7 0 z",
+                                                        "fill": "#ffffff", "stroke": "#b04a3a", "stroke-width": "1.5"})
+    marker = ElementTree.SubElement(defs, f"{{{ns}}}marker", {
         "id": "arrow", "viewBox": "0 0 10 10", "refX": "10", "refY": "5", "markerWidth": "7", "markerHeight": "7",
         "orient": "auto-start-reverse"})
     ElementTree.SubElement(marker, f"{{{ns}}}path", {"d": "M 0 0 L 10 5 L 0 10 z", "fill": "#6b6b6b"})
@@ -839,8 +873,23 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
         # the communities themselves stay legible.
         across = {"stroke-opacity": "0.35", "stroke-dasharray": "5 4"} if source.group_id != target.group_id \
             else {"stroke-opacity": "0.6"}
+        origin, standing, grounding = backing_of(relation.support)
+        across.update({"data-origin": origin, "data-status": standing, "data-grounding": grounding})
+        if origin == "inferred":
+            # Dotted, finer than the community dash: nothing a person stated and
+            # nothing read from a source backs it; the framework derived it.
+            # Extracted claims are read from a source and quoted from it, so
+            # they are drawn solid, as a code graph is almost nothing else.
+            across["stroke-dasharray"] = "2 3"
+        if standing != "active":
+            across["stroke-opacity"] = number(float(across["stroke-opacity"]) * 0.45)
+        if grounding == "unsourced":
+            across["marker-start"] = "url(#unsourced)"
         title = (f"{_xml_text(labels[relation.subject_id])} {_xml_text(relation.predicate)} "
                  f"{_xml_text(labels[relation.object_id])} {_cite(relation.fact_ids)}")
+        if origin == "inferred" or standing != "active":
+            # Grounding alone is shown by the ring and the data, as in the text formats.
+            title += f" — {_backing_words(relation.support)}"
         weight = number(1.0 + min(3.0, len(relation.fact_ids) - 1) * 0.6)
         if source is target:
             x, y, r = source.x + margin, source.y + margin, source.radius
@@ -1008,7 +1057,8 @@ def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
             "nodes": [{"id": node.entity_id, "label": node.label, "kind": node.kind, "group": node.group_id}
                       for node in drawing.nodes],
             "edges": [{"id": relation.relation_id, "source": relation.subject_id, "target": relation.object_id,
-                       "predicate": relation.predicate, "fact_ids": list(relation.fact_ids)}
+                       "predicate": relation.predicate, "fact_ids": list(relation.fact_ids),
+                       **dict(zip(("origin", "status", "grounding"), backing_of(relation.support)))}
                       for relation in drawing.edges]}
     block = (json.dumps(data, ensure_ascii=True, sort_keys=True)
              .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
@@ -1075,7 +1125,8 @@ def _canvas_text(projection: EntityProjection, about: Mapping[str, object],
         nodes.append(card)
     edges = [{"id": f"relation-{relation.relation_id}", "fromNode": relation.subject_id,
               "toNode": relation.object_id, "toEnd": "arrow",
-              "label": f"{literal(' '.join(relation.predicate.split())[:80])} {_cite(relation.fact_ids)}"}
+              "label": f"{literal(' '.join(relation.predicate.split())[:80])} {_cite(relation.fact_ids)}"
+                       f"{_weak_mark(relation.support)}"}
              for relation in drawing.edges]
     return json.dumps({"nodes": nodes, "edges": edges}, ensure_ascii=False, indent=1)
 
