@@ -1084,6 +1084,8 @@ def create_app(
                                     "surfaces": list(kept.surfaces), "why": kept.why}
         if opened is not None:
             response["widened"] = staged(opened.record())
+        if result.lessons_read is not None:
+            response["lessons_read"] = result.lessons_read
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
         if inferred is not None:

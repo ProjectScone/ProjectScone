@@ -188,8 +188,12 @@ per space, since no per-person identity is recorded yet.
 each passage's lesson beside it, and `GET /v1/lessons` lists them all.
 Lessons never change the order: nothing has measured that ranking by them
 answers better, so they are information beside the score, not part of it.
-A recall not asked for lessons answers exactly as before, with no `lessons`
-field.
+A recall asked for lessons also carries `lessons_read`: the window,
+half-life and corroboration used, and how many judgements were read and
+whether that read was cut. A recall not asked answers exactly as before,
+with no `lessons` or `lessons_read` field. `--lessons` is refused with
+`--merge`: a merged passage joins chunks that were judged separately, and
+one lesson cannot stand for them.
 
 ## Abstaining, by a floor that was measured
 

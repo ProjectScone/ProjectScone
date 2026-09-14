@@ -500,6 +500,15 @@ class RecallResult(BaseModel):
     #: With stem prefixes on: the prefixes added to the text lane's query
     #: (``added``) and whether the store could take them (``applied``).
     prefixes: Optional[dict[str, object]] = None
+    #: With ``lessons``: what the lessons beside the items were read from, and whether the read was cut.
+    lessons_read: Optional[dict[str, object]] = None
+
+    @model_serializer(mode="wrap")
+    def omit_unasked_lessons_read(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.lessons_read is None:
+            value.pop("lessons_read", None)
+        return value
 
     @property
     def context_reduction(self) -> float:
