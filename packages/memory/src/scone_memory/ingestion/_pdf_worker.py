@@ -5,10 +5,75 @@ from io import BytesIO
 import json
 import logging
 import sys
+from typing import Literal
 
 from ..core.errors import InvalidInput
 from .pdf import ParsedPdf, PdfLimits, PdfPage
 from .pdf_layout import lay_out_page, running_rows
+
+#: Bookmarks read from one PDF; past it the outline is read to here and said to be capped.
+MAX_OUTLINE_ITEMS = 2_000
+#: Levels of bookmarks followed.
+MAX_OUTLINE_DEPTH = 8
+MAX_TITLE_CHARS = 256
+
+
+def _outline(reader: object) -> tuple[list[tuple[int, str, int]], Literal['none', 'read', 'capped', 'unreadable']]:
+    """The bookmarks as (level, title, zero-based page) in outline order, and how they were read."""
+    try:
+        items = reader.outline  # type: ignore[attr-defined]
+    except Exception:
+        return [], 'unreadable'
+    if not items:
+        return [], 'none'
+    found: list[tuple[int, str, int]] = []
+    capped = False
+
+    def walk(level_items: list, level: int) -> None:
+        nonlocal capped
+        for item in level_items:
+            if capped:
+                return
+            if isinstance(item, list):
+                if level + 1 >= MAX_OUTLINE_DEPTH:
+                    capped = True
+                    return
+                walk(item, level + 1)
+                continue
+            if len(found) >= MAX_OUTLINE_ITEMS:
+                capped = True
+                return
+            try:
+                page = reader.get_destination_page_number(item)  # type: ignore[attr-defined]
+            except Exception:
+                continue
+            title = ' '.join(str(getattr(item, 'title', '') or '').split())
+            if page is None or page < 0 or not title:
+                continue
+            if len(title) > MAX_TITLE_CHARS:
+                title = title[:MAX_TITLE_CHARS - 1] + '…'
+            found.append((level, title, page))
+
+    try:
+        walk(list(items), 0)
+    except Exception:
+        return [], 'unreadable'
+    return found, 'capped' if capped else 'read'
+
+
+def _sections(entries: list[tuple[int, str, int]], count: int) -> list[tuple[str, ...]]:
+    """For each page, the last bookmark at each level that begins on or before it."""
+    ordered = sorted(enumerate(entries), key=lambda pair: (pair[1][2], pair[0]))
+    sections: list[tuple[str, ...]] = []
+    stack: list[str] = []
+    position = 0
+    for page in range(count):
+        while position < len(ordered) and ordered[position][1][2] <= page:
+            level, title, _ = ordered[position][1]
+            stack = stack[:level] + [title]
+            position += 1
+        sections.append(tuple(stack))
+    return sections
 
 
 def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metadata_only: bool = False,
@@ -67,7 +132,12 @@ def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metada
         strategy = 'pages-v1' if metadata_only else ('layout-fallback-v1' if recovered_text_error else 'layout-v1')
         if columns and not metadata_only:
             strategy += '+grid-columns-v1'
-        return ParsedPdf(text='\n\n'.join(texts), parser=f'pypdf/{pypdf.__version__}:{strategy}', pages=tuple(pages))
+        entries, outline = _outline(reader)
+        sections = _sections(entries, len(pages))
+        pages = [page.model_copy(update={'section': sections[index]}) if sections[index] else page
+                 for index, page in enumerate(pages)]
+        return ParsedPdf(text='\n\n'.join(texts), parser=f'pypdf/{pypdf.__version__}:{strategy}', pages=tuple(pages),
+                         outline=outline)
     except InvalidInput:
         raise
     except Exception as error:
