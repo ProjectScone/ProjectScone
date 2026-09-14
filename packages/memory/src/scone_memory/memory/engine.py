@@ -43,6 +43,7 @@ from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
 from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
+from ..retrieval.synonyms import Synonyms
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core import extracted
@@ -187,10 +188,16 @@ class MemoryEngine:
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
         table_context_embeddings: bool = False,
+        synonyms: "Synonyms | None" = None,
     ) -> None:
         if type(table_context_embeddings) is not bool:
             raise InvalidInput('table_context_embeddings must be a boolean')
         self._table_context_embeddings = table_context_embeddings
+        if synonyms is not None and not isinstance(synonyms, Synonyms):
+            raise InvalidInput(f"synonyms must be a Synonyms list, not {type(synonyms).__name__}")
+        #: The caller's synonym list; the text lane's query gains the other
+        #: members of every group a query term is in. None leaves it alone.
+        self.synonyms = synonyms
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
@@ -945,6 +952,7 @@ class MemoryEngine:
             similarity_floor=self.similarity_floor,
             floor_dim=self.abstention.dim if self.abstention is not None else None,
             vector_block=self.vector_block,
+            synonyms=self.synonyms,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,

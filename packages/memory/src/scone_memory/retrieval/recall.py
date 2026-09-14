@@ -23,6 +23,7 @@ from .entity_lane import ENTITY_WEIGHT, entity_lane
 from .episode_scope import episode_fits
 from .filters import parse_filter
 if TYPE_CHECKING:
+    from .synonyms import Synonyms
     from ..entities.project import EntityProjection
 from .reranking import (Reranker, RerankCandidate, candidate_is_retained,
     rerank_candidates, validate_candidate_limit, validate_rerank_options)
@@ -62,6 +63,8 @@ class RecallRuntime:
     floor_dim: int | None = None
     #: Why stored vectors cannot be compared with this embedder's, if so.
     vector_block: str | None = None
+    #: The caller's synonym list, applied to the text lane's query only.
+    synonyms: "Synonyms | None" = None
 
 
 def _ms(since: float) -> float:
@@ -117,6 +120,10 @@ async def recall(
     if not query or len(query) > MAX_QUERY:
         raise InvalidInput(f"query must be 1..={MAX_QUERY} chars")
     limit = max(1, min(limit, MAX_LIMIT))
+    expansion = runtime.synonyms.expand(query) if runtime.synonyms is not None else None
+    if expansion is not None and not expansion.matched:
+        expansion = None
+    text_query = expansion.text_query if expansion is not None else query
     candidate_limit = validate_candidate_limit(runtime.candidate_limit if candidate_limit is None else candidate_limit)
     if type(rerank) is not bool:
         raise InvalidInput("rerank must be a boolean")
@@ -154,6 +161,8 @@ async def recall(
         "where": clean_where,
         "embedder": runtime.embedder.id,
         "contextual_embeddings": runtime.contextual_embeddings,
+        "synonyms": (None if expansion is None
+                     else {"matched": len(expansion.matched), "added": len(expansion.added), "capped": expansion.capped}),
         "similarity_floor": runtime.similarity_floor,
         "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
                    "conditions": dict(conditions) if conditions is not None else None,
@@ -192,7 +201,7 @@ async def recall(
     try:
         t0 = time.perf_counter()
         text_lane = await runtime.documents.search_text(
-            space, query, depth,
+            space, text_query, depth,
             TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
                        kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
         )
@@ -410,6 +419,7 @@ async def recall(
         low_confidence=low_confidence,
         returned_bytes=sum(len(i.text.encode()) for i in result_items),
         space_bytes=counts.bytes,
+        expansion=expansion.record() if expansion is not None else None,
     )
     latency["total"] = _ms(started)
     if candidate_limit is not None:

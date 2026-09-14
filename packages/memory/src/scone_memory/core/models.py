@@ -421,6 +421,10 @@ class RecallResult(BaseModel):
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
     space_bytes: int = 0
+    #: What the caller's synonym list added to the text lane's query, when
+    #: a term matched: ``matched``, ``added``, ``offered``, ``capped``. None
+    #: when no list is configured or nothing in the query was on it.
+    expansion: Optional[dict[str, object]] = None
 
     @property
     def context_reduction(self) -> float:
