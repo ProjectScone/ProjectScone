@@ -165,8 +165,11 @@ async def _one_revision(engine: "MemoryEngine", space: str, limit: int,
     now = engine.clock()
     began = await documents.revision(space)
     read = await read_ledger(engine, space, max_facts=MAX_PROFILE_FACTS)
+    from ..entities.merges import is_decision
+
     active = [fact for fact in read.facts
-              if fact.status == "active" and not fact.excluded and fact.holds_at(now) and kept.keeps(fact)]
+              if fact.status == "active" and not fact.excluded and fact.holds_at(now) and kept.keeps(fact)
+              and not is_decision(fact)]
     # Newest first, and only as many as restatements will be counted for:
     # each count is a read of its own.
     active.sort(key=lambda fact: (fact.valid_from, fact.fact_id), reverse=True)
