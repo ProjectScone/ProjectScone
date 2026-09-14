@@ -594,12 +594,12 @@ def _calls(tree: ast.AST, path: str, named: dict[str, str],
     this package could not place, 37.2% had a head the file had itself
     imported, while 59.8% were methods on values of unstated type. This
     reaches the first group and cannot reach the second."""
-    for holder, inside in _holders(tree, None):
-        whole = f"{path}:{_qualified(holder, inside)}"
-        for call in ast.walk(holder):
-            if not isinstance(call, ast.Call):
-                continue
-            target = _target(call.func, inside, named, imported, classes)
+    for holder, qualified, inside in _callers(tree, None, None):
+        # Named as `defines` names it, and holding only the calls in its own body: a call inside a
+        # function written within it is that function's call, not this one's.
+        whole = f"{path}:{qualified}"
+        for call in _own_calls(holder):
+            target = _target(call.func, inside, named, imported, classes, scope=qualified)
             if target is None:
                 # Collected here rather than walked again elsewhere: a
                 # second copy of the name table is the one that drifts
@@ -632,6 +632,33 @@ def _spelling(func: ast.AST) -> Optional[str]:
     return None
 
 
+def _callers(node: ast.AST, parent: Optional[str], inside: Optional[str]):
+    """Every function in the file, qualified as ``defines`` qualifies it, with the class it
+    is most closely written in."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            qualified = f"{parent}.{child.name}" if parent else child.name
+            yield child, qualified, inside
+            yield from _callers(child, qualified, inside)
+        elif isinstance(child, ast.ClassDef):
+            qualified = f"{parent}.{child.name}" if parent else child.name
+            yield from _callers(child, qualified, qualified)
+        else:
+            yield from _callers(child, parent, inside)
+
+
+def _own_calls(function: ast.AST):
+    """The calls in a function's own body, not in the functions and classes written inside it."""
+    stack = list(ast.iter_child_nodes(function))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.Call):
+            yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
 def _holders(node: ast.AST, inside: Optional[str]):
     """Every function in the file, with the class it is written in."""
     for child in ast.iter_child_nodes(node):
@@ -652,7 +679,7 @@ def _qualified(holder: ast.AST, inside: Optional[str]) -> str:
 
 def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
             imported: Optional[dict[str, tuple[str, Optional[str]]]] = None,
-            classes: frozenset[str] = frozenset()) -> Optional[str]:
+            classes: frozenset[str] = frozenset(), scope: Optional[str] = None) -> Optional[str]:
     """What a call refers to, or nothing.
 
     The import table says which of two things a local name is, and the
@@ -674,6 +701,17 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
     a call through a class declared here under a name also imported here.
     """
     if isinstance(func, ast.Name):
+        if scope:
+            # From the innermost enclosing function outwards. A class body is not a scope the
+            # functions inside it can see, as Python reads names.
+            parts = scope.split(".")
+            for end in range(len(parts), 0, -1):
+                prefix = ".".join(parts[:end])
+                if prefix in classes:
+                    continue
+                enclosed = named.get(f"{prefix}.{func.id}")
+                if enclosed is not None:
+                    return enclosed
         here = named.get(func.id)
         if here is not None:
             return here
@@ -689,7 +727,7 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
             return named[spelt]
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
         if func.value.id in ("self", "cls"):
-            within = inside.split(".")[0] if inside else None
+            within = inside
             return named.get(f"{within}.{func.attr}") if within else None
         came = imported.get(func.value.id) if imported else None
         return _joined(came[0], func.attr) if came is not None and came[1] is None else None
