@@ -14,11 +14,11 @@ For explicit native callback suspension and restart, see
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same fourteen contracts: `search_memory`, `add_memory`, `read_profile`,
+render the same fifteen contracts: `search_memory`, `add_memory`, `read_profile`,
 `trace_memory`, the eight entity-graph reads `graph_context`,
 `explain_entity`, `connect_entities`, `graph_schema`, `graph_match`,
 `graph_overview`, `graph_changes` and `find_duplicates`, the graph's own
-`graph_health`, and the computed `temporal_answer`. Hosts can
+`graph_health` and `graph_affected`, and the computed `temporal_answer`. Hosts can
 allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
@@ -46,8 +46,9 @@ not certified. Source text remains untrusted data for the receiving model.
 
 The graph reads are the ones the MCP server offers as `memory_graph_context`,
 `memory_entity`, `memory_connections`, `memory_graph_schema`,
-`memory_graph_match`, `memory_graph_overview`, `memory_graph_changes` and
-`memory_entity_duplicates`, beside the computed `memory_temporal_answer`:
+`memory_graph_match`, `memory_graph_overview`, `memory_graph_changes`,
+`memory_entity_duplicates`, `memory_graph_health` and
+`memory_graph_affected`, beside the computed `memory_temporal_answer`:
 
 - `list_path`, `read_path` and `search_paths` walk the space's tree:
   `/episodes`, `/facts`, `/entities` and `/notes`. Listing and reading
@@ -118,6 +119,13 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
   on nothing, kinds that disagree or are missing, entities nothing links
   to, predicates used once, and names that may be one thing. It is the
   `/v1/graph/health` JSON, and changes nothing.
+- `graph_affected` says what rests on a symbol, module, file or package:
+  everything that calls, imports, inherits, mixes in, depends on or
+  develops with it, nearest first, with how deep it walked (`max_hops`,
+  1 to 8), what it could not list (`limit` 1 to 1000, `max_bytes` 1,024
+  to 64,000 for the record) and when nothing here rests on the name. A
+  name is at most 200 characters; an ambiguous one is refused with its
+  candidates. It is the `scone graph affected` JSON.
 - `temporal_answer` answers a question about dates by computation: how long
   between two events, how long ago one was, which came first, what order
   they were in. Each event is grounded to a passage and the day it records,
