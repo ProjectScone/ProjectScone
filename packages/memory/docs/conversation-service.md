@@ -106,6 +106,24 @@ app = create_conversation_app(
 )
 ```
 
+A conversation's history has a byte limit (`max_history_bytes`, 128000
+by default). By default a turn that would pass it is refused with
+"conversation history byte limit reached; start a new conversation",
+and a reply that would pass it fails the turn. `history_policy="window"`
+lets the conversation continue instead: whole oldest turns (a user
+message and its reply, together) leave the model's context until the
+next turn fits, the newest turn is always kept whole, and each turn's
+receipt carries `history` -- the policy, the limit, the bytes now held,
+and the ids of the turns that left. Nothing is lost: every turn was
+already captured as its own episode. A turn that has left the window
+is admitted to same-session recall from then on, so a question about
+it is answered from memory the way a question about another session
+would be; the memory-context receipt counts those under
+`same_session_items`. A single message that cannot fit on its own is
+still refused, explicitly. The tool-answer path's search still keeps
+the whole session out, and voice conversations keep the default; both
+are follow-ups, not silent gaps.
+
 ## Public-text stream (optional)
 
 `public_text_streaming=True` opts every configured runtime into
@@ -126,6 +144,8 @@ proxy buffering disabled. JSON `data` frames preserve literal text safely:
 | `text` | `{sequence, text, provisional: true}` | Public chunk, with matching SSE `id`; not a token or saved-reply receipt. |
 | `gap` | `{after, next_sequence}` | Earlier chunks left the bounded window. Do not synthesize the missing text. |
 | `terminal` | `{request_id, status, read_receipt: true}` | Fetch the existing turn receipt for final status and available saved text. |
+
+Text the window still holds goes out before any `terminal`: the last chunk and the receipt land microseconds apart, and a reader whose cursor is behind at that moment receives the rest, for as long as the window is held (the turn's window stays with its session). Only after the window is drained does the stream say what the turn became.
 | `end` | `{request_id, reason, read_receipt: true}` | Window unavailable, service shutting down, or session deleted; not proof of completion. |
 
 Reconnect with `after=<last-sequence>` or `Last-Event-ID`; both must agree if
@@ -141,8 +161,11 @@ Invalid observation is latched even if a custom runtime catches the callback
 error. Custom runtime side effects are not rolled back; configure capture so
 it does not persist unfinished replies as complete.
 Readers have no private chunk queue. A 10-second comment heartbeat keeps idle
-connections observable. Terminal/cancel/stop clears provisional text; reconnects
-after completion or restart yield receipt information, not reconstructed chunks.
+connections observable. A reader already listening when the turn ends is given
+every chunk that landed before the receipt (the last chunk and the receipt can
+be microseconds apart), and the text is dropped once the last such reader
+leaves; a reader who connects after completion, cancel, stop or a restart is
+given receipt information and no provisional text.
 Final text is read from the retained episode, so forgetting it cannot expose a
 stale streaming copy. Text already sent to clients cannot be revoked.
 

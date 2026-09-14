@@ -383,3 +383,78 @@ async def test_symlink_alias_cannot_get_a_second_owner(engine, tmp_path):
     with pytest.raises(Exception, match="hard-linked"):
         async with client_for(linked):
             pass
+
+
+class StreamingConversation(ControlledConversation):
+    """Publishes the reply in two pieces back to back and settles at once."""
+
+    async def reply(self, text, *, on_text=None):
+        self.calls += 1
+        answer = "Scripted response to " + text
+        if on_text is not None:
+            await on_text(answer[:8])
+            await on_text(answer[8:])
+        item = await self.engine.remember(self.space, answer, metadata={"session_id": self.sid})
+        return {"text": answer, "assistant_episode_id": item.episode_id, "provider_completion": "unverified"}
+
+
+def _frames(body: str):
+    out = []
+    for block in body.strip().split("\n\n"):
+        kind, data = None, None
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                kind = line[7:]
+            elif line.startswith("data: "):
+                data = __import__("json").loads(line[6:])
+        if kind is not None:
+            out.append((kind, data))
+    return out
+
+
+class HeldConversation(ControlledConversation):
+    """Publishes the first piece, waits to be released, then publishes the
+    rest and settles at once -- so the last chunk and the receipt land
+    together, with a reader already listening."""
+
+    async def reply(self, text, *, on_text=None):
+        self.calls += 1
+        answer = "Scripted response to " + text
+        await on_text(answer[:8])
+        self.started.set()
+        await self.release.wait()
+        await on_text(answer[8:])
+        item = await self.engine.remember(self.space, answer, metadata={"session_id": self.sid})
+        return {"text": answer, "assistant_episode_id": item.episode_id, "provider_completion": "unverified"}
+
+
+async def test_a_reader_already_listening_gets_the_last_chunk_that_lands_with_the_receipt(engine, tmp_path):
+    """The last chunk and the receipt land microseconds apart; a reader one
+    chunk behind at that moment was promised the text. One who arrives after
+    the end was not, and gets the receipt alone."""
+    runtimes = []
+
+    def held(space, sid):
+        runtimes.append(HeldConversation(engine, space, sid, blocked=True))
+        return runtimes[-1]
+
+    app = create_conversation_app(engine, {"alpha-key": "alpha"}, tmp_path / "sessions.db", held, public_text_streaming=True)
+    async with client_for(app) as client:
+        session = await create(client)
+        sid, revision = session["session_id"], session["revision"]
+        accepted = await client.post(f"/v1/conversations/{sid}/turns",
+                                     json={"request_id": "t1", "expected_revision": revision, "text": "hello"})
+        assert accepted.status_code == 202
+        async with asyncio.timeout(3):
+            await runtimes[0].started.wait()
+            reader = asyncio.create_task(client.get(f"/v1/conversations/{sid}/turns/t1/stream"))
+            while app.state.text_readers("alpha", sid, "t1") != 1:
+                await asyncio.sleep(0)
+            runtimes[0].release.set()
+            frames = _frames((await reader).text)
+        assert [kind for kind, _ in frames] == ["text", "text", "terminal"], frames
+        assert "".join(data["text"] for kind, data in frames if kind == "text") == "Scripted response to hello"
+        assert app.state.text_readers("alpha", sid, "t1") == 0, "the reader left"
+        late = await client.get(f"/v1/conversations/{sid}/turns/t1/stream", params={"after": 1})
+        assert [kind for kind, _ in _frames(late.text)] == ["terminal"], "after the end, the receipt and no provisional text"
+        assert app.state.text_readers("alpha", "nobody", "t1") is None
