@@ -12,6 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
 
 from .models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 
@@ -363,7 +367,7 @@ class RecordsVectorWriter(Protocol):
     async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None: ...
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
-                        writer: str) -> list[tuple[int, float]]:
+                        writer: str, conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         """Search only if the record vouches for ``writer``, checked in the same
         snapshot as the comparison; otherwise raise VectorsNotComparable."""
         ...
