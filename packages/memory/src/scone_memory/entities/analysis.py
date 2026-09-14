@@ -56,6 +56,10 @@ class Importance:
     betweenness: float
     #: How evenly an entity's links spread across communities: 0 inside one.
     participation: float
+    #: Named by the graph and never read by it: the object of imports,
+    #: dependencies or citations that is the subject of nothing (`typing`,
+    #: `pydantic.BaseModel`, `ADR-12`). Ranked apart from the graph's own.
+    external: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,10 @@ class AnalysisCoverage:
     levels: int
     #: The modularity resolution the communities were found at.
     resolution: float = 1.0
+    #: Entities named but never read (see `Importance.external`): kept out
+    #: of the partition and the central ranking, attached to the community
+    #: of what names them most, and listed apart.
+    external_entities: int = 0
 
     def record(self) -> dict[str, object]:
         """What the analysis covered, for a caller to show beside its scores:
@@ -98,7 +106,7 @@ class AnalysisCoverage:
                 "isolated_entities": self.isolated_entities, "truncated": self.truncated,
                 "reasons": list(self.reasons), "betweenness": self.betweenness,
                 "betweenness_estimated": self.betweenness != "exact", "levels": self.levels,
-                "resolution": self.resolution}
+                "resolution": self.resolution, "external_entities": self.external_entities}
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,26 @@ class GraphAnalysis:
     suggestions: tuple[Suggestion, ...]
     coverage: AnalysisCoverage
     version: str = ANALYSIS_VERSION
+    #: The entities named but never read, by id.
+    external: frozenset[str] = frozenset()
+
+
+#: A relation whose object can be something the graph only names: a module
+#: imported, a package depended on, a document cited, a type used.
+NAMED_ONLY = frozenset(("imports", "depends_on", "develops_with", "cites", "uses_type", "references"))
+
+
+def external_entities(projection: EntityProjection) -> frozenset[str]:
+    """The entities a graph names and never reads: objects of imports,
+    dependencies, citations or type uses that are the subject of no
+    relation at all. `typing` is imported by every file and defines
+    nothing here; a module of the codebase is imported too, but it also
+    defines its own things, so it is the graph's own. Deterministic, from
+    the relations alone, and the reason a report's central entities are
+    the codebase's and not the standard library's."""
+    subjects = {relation.subject_id for relation in projection.relations}
+    return frozenset(relation.object_id for relation in projection.relations
+                     if relation.predicate in NAMED_ONLY and relation.object_id not in subjects)
 
 
 Adjacency = dict[str, dict[str, int]]
@@ -323,8 +351,24 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
             graph[left][right] = weight
             graph[right][left] = weight
 
-    parts, levels = _partition(graph, resolution)
+    # What the graph names and never reads is kept out of the partition:
+    # `typing`, imported by every file, would otherwise be the strongest
+    # tie between any two communities and the most central thing in each.
+    external = external_entities(projection) & kept
+    own: Adjacency = {node: {other: weight for other, weight in graph[node].items() if other not in external}
+                      for node in graph if node not in external}
+    parts, levels = _partition(own, resolution)
     membership = {node: _community_id(part) for part in parts for node in part}
+    # An external belongs, for reading, with what names it most.
+    for node in sorted(external):
+        namers = {other: weight for other, weight in graph[node].items() if other in membership}
+        if namers:
+            membership[node] = membership[max(namers, key=lambda other: (namers[other], other))]
+    attached: dict[str, list[str]] = defaultdict(list)
+    for node in sorted(external):
+        if node in membership:
+            attached[membership[node]].append(node)
+    parts = [[*part, *attached[membership[part[0]]]] for part in parts]
     rank = _pagerank(graph)
     between, method = _betweenness(graph)
     predicates_by_node: dict[str, Counter[str]] = defaultdict(Counter)
@@ -338,7 +382,9 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         internal = sum(1 for node in part for neighbour in graph[node] if neighbour in inside) // 2
         boundary = sum(1 for node in part for neighbour in graph[node] if neighbour not in inside)
         local = {node: sum(weight for neighbour, weight in graph[node].items() if neighbour in inside) for node in part}
-        top = sorted(part, key=lambda node: (-local[node], -rank.get(node, 0.0), node))[:3]
+        # Named by the graph's own members: a community is not called `typing`.
+        top = sorted((node for node in part if node not in external),
+                     key=lambda node: (-local[node], -rank.get(node, 0.0), node))[:3] or sorted(part)[:3]
         kinds: Counter[str] = Counter(str(entities[node].kind) for node in part if entities[node].kind)
         predicates = sum((predicates_by_node[node] for node in part), Counter())
         communities.append(Community(
@@ -356,7 +402,7 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         total = sum(spread.values())
         participation = 1 - sum((value / total) ** 2 for value in spread.values()) if total else 0.0
         importance.append(Importance(node, membership[node], len(graph[node]), strength[node], rank[node],
-                                     between[node], _round(participation)))
+                                     between[node], _round(participation), node in external))
     importance.sort(key=lambda item: (-item.pagerank, item.entity_id))
 
     between_communities: Counter[tuple[str, str]] = Counter()
@@ -369,6 +415,10 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
     for relation in projection.relations:
         subject, obj = relation.subject_id, relation.object_id
         if subject not in kept or obj not in kept or membership[subject] == membership[obj]:
+            continue
+        if obj in external:
+            # Everything imports `typing`; that a second community does too
+            # is no surprise.
             continue
         ends = sorted((membership[subject], membership[obj]))
         links = between_communities[(ends[0], ends[1])]
@@ -384,7 +434,8 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         suggestions.append(Suggestion(
             "connection", f"How is {entities[surprise.subject_id].label} connected to {entities[surprise.object_id].label}?",
             (surprise.subject_id, surprise.object_id), (surprise.relation_id,), surprise.fact_ids))
-    for item in sorted(importance, key=lambda item: (-item.participation, -item.degree, item.entity_id))[:3]:
+    for item in sorted((item for item in importance if not item.external),
+                       key=lambda item: (-item.participation, -item.degree, item.entity_id))[:3]:
         if item.participation < 0.3 or item.degree < 2:
             continue
         touched = sorted({membership[neighbour] for neighbour in graph[item.entity_id]} - {item.community_id})
@@ -410,7 +461,8 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
             suggestions.append(Suggestion("isolated", f"What is {entity.label} connected to?", (entity.entity_id,),
                                           (), tuple(sorted(attributes_by_entity[entity.entity_id]))[:8]))
     return GraphAnalysis(
-        projection.digest, _modularity(graph, membership, resolution), tuple(communities), tuple(importance), surprising,
+        projection.digest, _modularity(own, {node: membership[node] for node in own}, resolution),
+        tuple(communities), tuple(importance), surprising,
         tuple(suggestions[:max_suggestions]),
         AnalysisCoverage(len(strength), len(kept), len(isolated), bool(reasons), tuple(reasons), method, levels,
-                         resolution))
+                         resolution, len(external)), external=frozenset(external))
