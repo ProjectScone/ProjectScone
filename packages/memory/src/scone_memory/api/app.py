@@ -923,11 +923,11 @@ def create_app(
         passage does not hold named. Found without a model. Word overlap is
         not support; the record states its unmeasured rules and never claims
         accuracy. Chunk ids this space does not hold are named in
-        ``chunks_missing``."""
+        ``chunks_missing``, and ones it holds with blank text in ``chunks_empty``."""
         from ..retrieval.attribution import attribute_to_chunks
 
-        made, missing = await attribute_to_chunks(engine, space, body.answer, body.chunk_ids)
-        return {**made.record(), "chunks_missing": list(missing)}
+        made, missing, empty = await attribute_to_chunks(engine, space, body.answer, body.chunk_ids)
+        return {**made.record(), "chunks_missing": list(missing), "chunks_empty": list(empty)}
 
     @app.get("/v1/answers/temporal")
     async def get_temporal_answer(

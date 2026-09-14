@@ -1204,7 +1204,8 @@ scone attribute --answer "Priya moved the launch to March because the audit ran 
 Over HTTP, `POST /v1/answers/attribute` with `{"answer": ..., "chunk_ids": [...]}`.
 The chunks are read from the space, never taken from the caller, so an
 answer cannot be attributed to text the space does not hold. An id the
-space does not hold is named in `chunks_missing`.
+space does not hold is named in `chunks_missing`, and one it holds whose
+text is blank, with nothing to attribute to, in `chunks_empty`.
 
 Each sentence gets one status:
 

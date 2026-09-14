@@ -82,3 +82,28 @@ async def test_naming_no_chunk_is_refused():
             await attribute_to_chunks(engine, "alpha", NOTE, [])
     finally:
         await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_holding_only_space_is_named_not_dropped():
+    """A chunk the space holds whose text is blank cannot be attributed to;
+    it is named apart from the ids the space does not hold, never left out."""
+    engine, (note, other, _) = await stored()
+    reading = engine.documents.get_chunks
+
+    async def blank_other(space, ids):
+        return [chunk.model_copy(update={"text": "  \n "}) if chunk.chunk_id == other else chunk for chunk in await reading(space, ids)]
+
+    engine.documents.get_chunks = blank_other
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        made = client.post("/v1/answers/attribute", json={"answer": NOTE, "chunk_ids": [note, other, 999]},
+                           headers=auth())
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--space", "alpha", "attribute", "--answer", NOTE, "--chunk",
+                                                 str(other)]), engine, io.StringIO(""), out)
+    await engine.close()
+    assert made.status_code == 200, made.text
+    assert made.json()["chunks_empty"] == [other] and made.json()["chunks_missing"] == [999]
+    assert made.json()["sentences"][0]["passage"] == f"chunk:{note}"
+    assert code == 0 and f"blank in this space: chunk {other}" in out.getvalue()
+    assert "unattributed" in out.getvalue()
