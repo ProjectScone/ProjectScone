@@ -198,7 +198,7 @@ class _HTML(HTMLParser):
         self.line = 1
         self.has_content = False
         self.title_parts: list[str] = []
-        self.tables = HtmlTables(out, prefix)
+        self.tables = HtmlTables(out, prefix, metadata)
 
     def flush(self) -> None:
         text = ''.join(self.parts)
@@ -336,19 +336,29 @@ def _email(data: bytes, out: _Collector) -> dict[str, str]:
 
 
 #: Messages a mailbox is read for before the rest are counted, not read.
-MAX_MAILBOX_MESSAGES = 5_000
-_MBOX_FROM = re.compile(rb'^From [^\r\n]*\r?\n', re.MULTILINE)
+#: The document's own limits come first: 20,000 segments and 2 MB of
+#: text refuse the document whole, as they do an `.eml`, so a mailbox
+#: of ordinary mail reaches this bound at about a thousand messages.
+MAX_MAILBOX_MESSAGES = 1_000
+#: A message's envelope line, the shape every mbox writer makes:
+#: `From sender Www Mmm dd hh:mm:ss yyyy`. A body line that merely
+#: begins with `From ` (an mboxcl writer leaves it unquoted) is not one.
+_MBOX_FROM = re.compile(rb'^From \S+ +[A-Za-z]{3} +[A-Za-z]{3} +\d{1,2} +\d\d:\d\d(?::\d\d)?'
+                        rb'(?: +[A-Za-z]{3,5}| +[+-]\d{4})? +\d{4}[^\r\n]*\r?\n', re.MULTILINE)
 
 
 def _mailbox(data: bytes, out: _Collector) -> dict[str, str]:
-    """A Unix mailbox: one message after another, each opened by a
-    `From ` line. Every message is read as an `.eml` is, its headers and
+    """A Unix mailbox: one message after another, each opened by an
+    envelope line. Every message is read as an `.eml` is, its headers and
     text parts under `message:N/`, and each segment carries the message's
     number, date and sender so a passage recalled from a mailbox says
-    which mail it came from. Past the bound the rest are counted."""
+    which mail it came from. A file not opened by an envelope line (an
+    `.eml` saved as `.mbox`, or one with text before its first message)
+    is read whole as one message, with nothing split and nothing
+    unquoted. A failure names the message it was in. Past the bound the
+    rest are counted."""
+    data = data.removeprefix(b'\xef\xbb\xbf')
     starts = [found.start() for found in _MBOX_FROM.finditer(data)]
-    # Not opened by a `From ` line (an .eml saved as .mbox, or text before
-    # the first message): read whole, as one message.
     bare = not starts or bool(data[:starts[0]].strip())
     if bare:
         starts = [0]
@@ -361,22 +371,28 @@ def _mailbox(data: bytes, out: _Collector) -> dict[str, str]:
         raw = data[start:end]
         if not bare:
             raw = raw.split(b'\n', 1)[1] if b'\n' in raw else b''
-        # `>From ` at a line start is mbox quoting of a body line that
-        # began with `From `; the original text had no `>`.
-        raw = re.sub(rb'^>(?=>*From )', b'', raw, flags=re.MULTILINE)
+            # mboxrd quoting: a body line that began with `From ` was
+            # written with one more `>` than it had. An mboxo writer
+            # quotes only the bare line, so a genuine `>From ...` reply
+            # line in such a file loses its `>` here; the two cannot be
+            # told apart from the bytes.
+            raw = re.sub(rb'^>(?=>*From )', b'', raw, flags=re.MULTILINE)
         try:
-            message = BytesParser(policy=policy.default).parsebytes(raw)
-        except (ValueError, RecursionError):
-            raise InvalidInput(f'mailbox message {number} contains malformed or excessively nested MIME') from None
-        about = {'message': str(number)}
-        for header in ('Date', 'From', 'Subject'):
-            value = message.get(header)
-            if value:
-                about[header.lower()] = str(value)[:200]
-        for header in ('Subject', 'From', 'To', 'Cc', 'Date', 'Message-ID'):
-            for value in message.get_all(header, []):
-                out.add(f'{header}: {value}', f'message:{number}/header:{header.lower()}', about)
-        skipped_attachments += _mime(message, '1', out, 0, f'message:{number}/', about)
+            try:
+                message = BytesParser(policy=policy.default).parsebytes(raw)
+            except (ValueError, RecursionError):
+                raise InvalidInput('message contains malformed or excessively nested MIME') from None
+            about = {'message': str(number)}
+            for header in ('Date', 'From', 'Subject'):
+                value = message.get(header)
+                if value:
+                    about[header.lower()] = str(value)[:200]
+            for header in ('Subject', 'From', 'To', 'Cc', 'Date', 'Message-ID'):
+                for value in message.get_all(header, []):
+                    out.add(f'{header}: {value}', f'message:{number}/header:{header.lower()}', about)
+            skipped_attachments += _mime(message, '1', out, 0, f'message:{number}/', about)
+        except InvalidInput as refused:
+            raise InvalidInput(f'mailbox message {number}: {refused}') from None
         read += 1
     return {'messages': str(read), 'messages_unread': str(max(0, len(starts) - read)),
             'attachments_skipped': str(skipped_attachments)}
