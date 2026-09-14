@@ -222,7 +222,25 @@ says which way it went and why**:
 `route=` insists on one instead, and the answer says it was asked for
 rather than chosen: a rule that cannot be overridden is a rule somebody
 will work around, and then the framework learns nothing from being
-wrong. `GET /v1/answer`, `scone answer`. Nothing here calls a model.
+wrong. `GET /v1/answer`, `scone answer`. Nothing here calls a model
+unless the fourth route is asked for by name:
+
+4. **`route=synthesize`**, which the rule never chooses. A broad question
+   ("what is known about the launch?") is not answered by five passages
+   and a score; this reads up to `limit` passages (fifty at most) and has
+   a model write a few sentences about them, each naming the passage it
+   came from and a quote from that passage **that the framework found
+   there**. A sentence without such a quote is not shown, and is counted.
+   Passages are packed into rounds by bytes, one model call each, so an
+   early passage cannot shape what a later one is allowed to say and a
+   model that fails costs only its round; when more than one round left
+   notes, one more call may fold them into a summary whose sentences cite
+   notes by id. `detail` counts what was read, unread, refused as too
+   large for a round, and dropped as unquoted or uncited, says whether the
+   sentences were cut, and carries `verified_accuracy: false` on every
+   record because only the quotes were checked, not the sentences. It
+   needs a model (`SCONE_CHAT_URL` and `SCONE_CHAT_MODEL`); without one
+   the route is refused. `scone answer --route synthesize --limit 30`.
 
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
@@ -515,7 +533,17 @@ scone graph match --pattern "?who" calls "retrieval/temporal.py:_spelled"
 ```
 
 `map` walks a directory, remembers every source file under the path it
-was read from, and with `--graph` records what each says. An answer
+was read from, and with `--graph` records what each says. A map is of the
+tree as it is now: a file is held under the identity `sync` uses for it,
+so mapping again after an edit updates the file's memory rather than
+adding a second, the receipt counts it as `updated`, and with `--graph`
+the claims the new version no longer makes are closed, naming the file
+(`claims_closed`). What `map` stored, `sync` recognises as its own, and
+the other way round, and both follow a relative import the same way: only
+to a file the walk actually read -- the ones walked now and the ones the
+marker already holds -- never guessed at, through one resolver
+(`code_resolution.file_resolver`) that a batch of files remembered together
+also uses among themselves. An answer
 carries the line it rests on, **re-read from the file** before it is
 shown: a graph of a codebase goes stale the moment somebody edits it, and
 a citation that was not checked is the thing least worth trusting.
@@ -953,6 +981,12 @@ Dependency names are not bound to import names. They differ often
 enough (`beautifulsoup4` and `bs4`, `Pillow` and `PIL`) that binding them
 would guess, and the graph does not.
 
+A package a manifest names is an entity, as a code symbol is, so the
+questions the graph answers about code reach it: `scone graph affected
+requests` lists the projects whose manifests declare it, through
+`depends_on`, beside the files that import it, and a test dependency's
+blast radius runs through `develops_with`.
+
 ### Claims read from files hold side by side
 
 A ledger predicate holds one value at a time unless configured
@@ -967,9 +1001,36 @@ The predicates the framework extracts -- `defines`, `imports`, `calls`,
 `develops_with` -- are many-valued by their nature, declared so in the
 core (`scone_memory.core.extracted.MANY_VALUED`), and no configuration
 takes one out of that set. `SCONE_MANY_VALUED` still adds predicates a
-person names; `GET /v1/graph/schema` marks both kinds as `many`. A file
-read again restates its claims; a claim a changed file no longer makes is
-not closed by this, which remains open.
+person names; `GET /v1/graph/schema` marks both kinds as `many`.
+
+### A claim read from a file holds while the file says it
+
+`replace` and `sync` store a changed file as an update: the old episode
+is forgotten, the new one stored, its claims read. Forget's contract
+leaves claims standing, rightly -- a person's memory of a fact survives
+deleting its source -- but for what a reader extracted that meant the
+ledger held what the file used to say beside what it says now: a module
+that dropped an import still imported it, a function that was removed
+was still defined.
+
+So on replacement, the extracted claims the old episode grounded that the
+new content did not restate are closed, reason `no longer stated by
+<path>`, event kind `source_changed`; a restated claim -- the same
+subject, predicate and object read out of the new content -- is one fact,
+still holding. When a sync asked to `remove` forgets a file that is gone,
+every extracted claim it grounded is closed, reason `<path> was removed`,
+kind `source_removed`. Neither is counted as a manual closure. What a
+person stated about the episode is left alone, a plain `forget` still
+touches no claim, and nothing happens with the code graph off.
+
+The receipts say what was done. `Replaced.claims_closed` counts the
+closures, `None` when the store cannot read claims by episode (nothing is
+closed on a guess); `claims_unread` is true when the old episode grounded
+more claims than one read returns, so some were not examined and may
+still stand. A sync receipt carries `claims_closed` and `claims_unread`
+only when there is something to say, so a sync without the code graph
+reads exactly as it did. The durable directory-sync service does not read
+claims and is untouched.
 
 ## Code: cut where the declarations are
 
@@ -1050,6 +1111,119 @@ environment says, so what it measures is the difference between the
 settings and nothing else: `SCONE_RECALL_CANDIDATES`,
 `SCONE_DEMOTE_RESTATED`, `SCONE_CONTEXTUAL_EMBEDDINGS`.
 
+### The context lane: found by what it is under
+
+A chunk under the heading "Refunds" in a document titled "Billing
+rules" need not say either word, and a query about billing refunds then
+misses it in the text lane, which finds the words a passage has and
+only those. With `SCONE_CONTEXT_LANE=1` (`MemoryEngine(...,
+context_lane=True)`) each chunk's context is derived at ingestion with
+no model — the headings enclosing it, the document's title (its top
+heading, or a short first line that does not read as a sentence) and
+the words of the source's name — keeping only what the chunk itself
+lacks, and indexed **beside** its text, never in it. Stored text and
+offsets do not change. At recall the same query the text lane got is
+searched over that index as a third lane and fused by rank at twice the
+weight of the others; `lanes.context` on each item says where the lane
+placed it.
+
+The weight is measured, not guessed. Rank fusion is flat, so a lane
+that finds what the others cannot needs weight to be heard at all: on
+the `under-v1` benchmark (`testing.context_lane_benchmark`: twenty
+passages under a heading whose words they never say, eight distractors
+each repeating the question's words) the passage reached the top five
+in 0 of 20 cases without the lane, and with it in 0 at weight 0.5, 1 at
+1.0 and 13 at 2.0 — where the distractor also lost first place in 13
+cases. The entity lane made the same choice for the same reason. The
+cost is on the record too: a passage under the words can now come
+before one that merely says them, which is what the benchmark's
+question wants and a literal search would not. A document's frequent
+words were tried as context and left out: spread over every chunk they
+make the lane fire on mentions rather than on structure.
+
+The words are bounded — at most 32 per chunk, headings first, then
+title, then source words, the rest counted as omitted — and the lane is
+honest about where it is not: the SQLite and in-memory stores keep the
+index, and an engine with the lane on over a store that does not
+reports `context lane: not kept by …` in `degraded` rather than
+pretending the lane ran.
+
+### The vector lane's voice in fusion
+
+Reciprocal rank fusion gives every lane the same voice. That is right
+when both lanes know something the other does not, and wrong when one
+is a weak echo of the other: an embedder whose vectors are hashed
+tokens ranks by word overlap, badly, and its confident wrong picks can
+outvote the text lane's right ones. Measured on LongMemEval-S with that
+embedder, the text lane alone was ahead of the fused ranking.
+`SCONE_VECTOR_WEIGHT` (`MemoryEngine(..., vector_weight=)`) is the
+vector lane's weight against the text lane's 1.0 — a number above 0 and
+at most 4, 1.0 by default — and every recall event records
+`fusion_weights`, so a ranking can always be read back to the voices
+that made it. Change it only on a number: the pull request that added it
+carries the measurement.
+
+### Both stores agree on every script
+
+Two stores that answer the same query differently are a bug a reader
+cannot see. The in-memory lane cuts an unspaced run — a Japanese or
+Thai phrase — into character grams and finds a part of it; SQLite's
+built-in tokenizer kept the run as one token and could not. The SQLite
+text lane now ranks our own tokens: a derived table holds each chunk's
+terms exactly as the lexical tokenizer makes them, diacritics folded as
+the in-memory lane folds them, searched through an FTS5 shadow that
+splits only on the spaces between them. It is versioned by the
+tokenizer and the Unicode data it ran under and rebuilt whole when
+either changes — lazily, so an old database opens at once and each
+space pays as it is read — and triggers keep it current on write and
+delete. A parity test pins that Japanese, Chinese, Thai, Korean and
+accented Latin queries find their passage through the text lane in
+both stores.
+
+### A word's family by prefix
+
+"bills", "billing" and "billed" are one word to a reader and three to the
+text lane. The usual answer is a stemmer over the index, and it is the
+wrong one here: it rewrites what every store holds, ties the tokenizer's
+version to a set of language rules, and puts a guess ("policies" and
+"police" as one) where a reader cannot see it. `SCONE_LEXICAL_STEMS=1`
+(`MemoryEngine(..., lexical_stems=True)`) does less: a query term that
+ends in a known English suffix also searches as a prefix of its stem —
+`bill*` for "billing", `invoic*` for "invoices" — so the family is found,
+the index is untouched, and the result's `prefixes` says which prefixes
+were added and whether the store could take them (`applied`; the SQLite
+and in-memory stores can, and a family counts as one term in the score,
+not several). A language the rules do not know, a short word, a number,
+is left exactly as it was. The rules keep a stem of at least three
+letters after a strong suffix and four after a plural or a final "e", do
+not strip a plural after "s", "u" or "i", and reduce a doubled consonant
+except where English keeps it. Measured on LongMemEval-S before it was
+a flag; the numbers are on the pull request that added it.
+
+### Synonyms the caller wrote down
+
+The lexical lane finds the words a passage has, and only those. A
+passage that says "automobile" is invisible to a query about a "car"
+unless somebody wrote down that in this corpus the two are one word.
+`SCONE_SYNONYMS=./synonyms.txt` names that list — one group per line,
+terms separated by commas, `#` for comments — and `MemoryEngine(...,
+synonyms=Synonyms(groups))` gives it in code. A query term that is in a
+group adds the group's other members to the **text lane's** query; the
+vector lane's query stays as written, because an embedder already knows
+what it knows about the two words and padding its input with a list
+would move the vector in ways nobody measured. The lanes are fused by
+rank, so a passage found only through an added word competes on rank,
+never on a score the addition inflated.
+
+No model proposes a synonym here, and nothing is guessed: matching uses
+the lane's own tokenizer, so case, possessives and stopwords are treated
+exactly as the index treats them, a phrase matches as a phrase, and the
+result's `expansion` says which terms matched and which words were
+added (`matched`, `added`, `offered`, `capped`; the recall event carries
+the counts). The list is bounded — 2,000 groups of up to 16 terms of up
+to 64 characters, at most 12 words added to one query, the rest left
+out with `capped: true` — and a list over a bound is refused, not cut.
+
 The rule for choosing is stated rather than implied: the setting that
 answered most wins; a tie goes to the quicker; and a change that only
 matches the default is no change at all, so the default stands and the
@@ -1113,10 +1287,12 @@ nothing parked in it — a CLI retry would report success and do nothing.
 
 ## Keeping a space in step with a directory
 
-`map` remembers the files under a directory and notices when it has seen
-one before. What it cannot notice is that a file has **changed** or that
-a file is **gone** — and those two are the difference between an import
-you run once and a sync you run on a schedule.
+`map` remembers the files under a directory, notices when it has seen
+one before, and updates one that has **changed**. What it cannot notice
+is that a file is **gone**, and it never plans before writing — those are
+the difference between an import you run once and a sync you run on a
+schedule. The two share one identity for a file, so either can follow the
+other.
 
 ```bash
 scone sync ~/work/notes                          # a plan: nothing is written

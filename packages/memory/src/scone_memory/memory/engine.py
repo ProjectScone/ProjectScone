@@ -15,7 +15,8 @@ from functools import partial
 from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Mapping, Optional,
                     Sequence, TypedDict, cast)
 
-from . import archive, catalog, fact_placement, fact_relationships, fact_review, retention, source_keys, vector_identity
+from . import (archive, catalog, fact_placement, fact_relationships, fact_review, file_claims, retention,
+               source_keys, vector_identity)
 from .identity import join_match
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
@@ -33,6 +34,7 @@ from ..retrieval import fact_recall
 from ..entities.meanings import RelationMeanings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..ingestion.code_graph import Resolve
     # Type-only: the vocabulary store needs cryptography, and a base
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
@@ -43,6 +45,10 @@ from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
 from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
+from ..retrieval.synonyms import Synonyms
+
+#: The vector lane's default voice when the embedder is a hash of tokens (see MemoryEngine).
+HASHED_VECTOR_WEIGHT = 0.25
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core import extracted
@@ -145,6 +151,13 @@ class Replaced:
     added: Added
     outcome: str
     replaced: Optional[ForgetReceipt] = None
+    #: Extracted claims the replaced episode grounded that the new content
+    #: no longer makes, closed. None when the store cannot read claims by
+    #: episode, in which case nothing was closed.
+    claims_closed: Optional[int] = 0
+    #: The replaced episode grounded more claims than one read returns;
+    #: some were not examined and may still stand.
+    claims_unread: bool = False
 
 
 class _RecallEventItem(TypedDict):
@@ -187,10 +200,42 @@ class MemoryEngine:
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
         table_context_embeddings: bool = False,
+        synonyms: "Synonyms | None" = None,
+        context_lane: bool = False,
+        lexical_stems: bool = True,
+        vector_weight: Optional[float] = None,
     ) -> None:
+        if vector_weight is None:
+            # A hashed-token embedder ranks by word overlap, badly: a weak
+            # echo of the text lane. Measured on LongMemEval-S, giving it a
+            # quarter voice moved the fused ranking from behind the text lane
+            # alone to level with the reference's best; a real embedder knows
+            # things the text lane does not and keeps its full voice.
+            vector_weight = HASHED_VECTOR_WEIGHT if embedder.id.startswith("hash-") else 1.0
+        if isinstance(vector_weight, bool) or not isinstance(vector_weight, (int, float)) or not 0 < vector_weight <= 4:
+            raise InvalidInput("vector_weight must be a number above 0 and at most 4")
+        #: The vector lane's voice in rank fusion against the text lane's 1.0,
+        #: resolved from the embedder when the caller did not say; on every
+        #: recall event as fusion_weights.
+        self.vector_weight = float(vector_weight)
+        if type(lexical_stems) is not bool:
+            raise InvalidInput("lexical_stems must be a boolean")
+        #: Whether a query term's family (bills, billing, billed) is searched
+        #: by stem prefix in the text lane; the index is untouched.
+        self.lexical_stems = lexical_stems
+        if type(context_lane) is not bool:
+            raise InvalidInput("context_lane must be a boolean")
+        #: Whether what each chunk is under is indexed beside its text and
+        #: searched as a lane of its own. Stored text never changes.
+        self.context_lane = context_lane
         if type(table_context_embeddings) is not bool:
             raise InvalidInput('table_context_embeddings must be a boolean')
         self._table_context_embeddings = table_context_embeddings
+        if synonyms is not None and not isinstance(synonyms, Synonyms):
+            raise InvalidInput(f"synonyms must be a Synonyms list, not {type(synonyms).__name__}")
+        #: The caller's synonym list; the text lane's query gains the other
+        #: members of every group a query term is in. None leaves it alone.
+        self.synonyms = synonyms
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
@@ -452,7 +497,8 @@ class MemoryEngine:
             await self.blobs.link(space, attachment_id, added.episode_id)
         return added
 
-    async def replace(self, space: str, record: Record) -> "Replaced":
+    async def replace(self, space: str, record: Record, *, map_code: bool = True,
+                      resolve: "Resolve | None" = None) -> "Replaced":
         """Store a keyed record as the current one under its key. A key
         nobody holds is accepted; the same content again is a duplicate
         and changes nothing; changed content is an update: the episode
@@ -462,7 +508,12 @@ class MemoryEngine:
         the old source available. The subsequent forget/store is not an
         atomic swap: a storage failure between them can leave the key empty,
         and its error reports the removed source. Competing writers still
-        need caller serialization across the commit phase."""
+        need caller serialization across the commit phase.
+
+        With the code graph on, the new content's claims are read and the
+        replaced episode's claims it no longer makes are closed. A caller
+        that reads claims itself, with a resolver this engine does not
+        have, passes ``map_code=False`` and does both."""
         await self._living(space)
         check_space(space)
         if not record.dedup_key:
@@ -510,9 +561,18 @@ class MemoryEngine:
             await ingestion_batch.write_batch(runtime, space, [pending], vectors, results)
             await self.documents.bump_revision(space)
             added = cast(Added, results[0])
-            if self.code_graph:
+            retired = file_claims.Retired(closed=0)
+            if self.code_graph and map_code:
                 prepared = Record(new.content, kind=new.kind, source=new.source, created_at=new.created_at)
-                await self._map_code(space, [prepared], [added])
+                mapped = await self._map_code(space, [prepared], [added], resolve=resolve)
+                if receipt is not None:
+                    # The old episode's claims stood through the forget, by
+                    # its contract. What the new content no longer says is
+                    # closed now, naming the file.
+                    retired = await self.close_unstated(
+                        space, receipt.episode_id,
+                        kept=[(fact.subject, fact.predicate, fact.object) for fact in mapped],
+                        reason=f"no longer stated by {new.source or record.dedup_key}", kind="source_changed")
         except Exception as error:
             await self._emit(space, "remember", {
                 "records": 1, "error": f"{type(error).__name__}: {error}", "latency_ms": _ms(started),
@@ -529,7 +589,8 @@ class MemoryEngine:
         })
         outcome = "updated" if receipt is not None else added.outcome
         added = added.model_copy(update={"outcome": outcome, "replaced": receipt})
-        return Replaced(added=added, outcome=outcome, replaced=receipt)
+        return Replaced(added=added, outcome=outcome, replaced=receipt,
+                        claims_closed=retired.closed, claims_unread=retired.unread)
 
     # -- attachments ------------------------------------------------------
 
@@ -618,6 +679,7 @@ class MemoryEngine:
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
+            context_lane=self.context_lane,
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
@@ -633,7 +695,8 @@ class MemoryEngine:
             await self._map_code(space, records, added)
         return added
 
-    async def _map_code(self, space: str, records: Sequence[Record], added: Sequence[Added]) -> None:
+    async def _map_code(self, space: str, records: Sequence[Record], added: Sequence[Added], *,
+                        resolve: "Resolve | None" = None) -> list[Fact]:
         """What a source file says about itself, recorded as claims like any
         other: quoted from the line they were read on, cited to the episode
         they came from, and marked extracted rather than stated, because
@@ -643,12 +706,35 @@ class MemoryEngine:
         already here, and asserting them again would say the same thing
         twice for no reason."""
         from ..ingestion.code_graph import record_claims
+        from ..ingestion.code_resolution import file_resolver
 
+        # A batch of files remembered together can follow relative imports
+        # among themselves; a caller that walked a tree passes its own. One
+        # file alone is no tree: a resolver over it would decline every
+        # relative import, where the reader's own path arithmetic still
+        # names a candidate, so a lone file keeps that.
+        if resolve is None:
+            # Only records the batch actually stored: a record refused by a
+            # partial batch has no episode and may not even carry a path.
+            sources = [record.source for record, outcome in zip(records, added)
+                       if isinstance(record.source, str) and record.source and outcome.episode_id >= 0]
+            resolve = file_resolver(sources) if len(sources) > 1 else None
+        mapped: list[Fact] = []
         for record, outcome in zip(records, added):
             if outcome.deduplicated or outcome.episode_id < 0 or not record.source:
                 continue
             await record_claims(self, space, episode_id=outcome.episode_id, content=record.content,
-                                path=record.source, when=record.created_at or self.clock())
+                                path=record.source, when=record.created_at or self.clock(), resolve=resolve,
+                                _facts=mapped)
+        return mapped
+
+    async def close_unstated(self, space: str, episode_id: int, *, kept: Sequence[tuple[str, str, str]] = (),
+                             reason: str, kind: str = "source_changed") -> "file_claims.Retired":
+        """Close the extracted claims an episode grounded that are not in
+        ``kept``: the file was replaced by content that no longer says
+        them, or removed. What a person stated is never touched here."""
+        return await file_claims.close_unstated(self._review_runtime(), space, episode_id, kept=kept,
+                                                reason=reason, kind=kind)
 
     def _embed_text(self, episode: NewEpisode, chunk_text: str) -> str:
         """What the embedder sees for a chunk. Stored text is never changed."""
@@ -945,6 +1031,10 @@ class MemoryEngine:
             similarity_floor=self.similarity_floor,
             floor_dim=self.abstention.dim if self.abstention is not None else None,
             vector_block=self.vector_block,
+            synonyms=self.synonyms,
+            context_lane=self.context_lane,
+            lexical_stems=self.lexical_stems,
+            vector_weight=self.vector_weight,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
