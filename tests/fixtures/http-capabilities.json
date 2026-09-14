@@ -83,6 +83,7 @@
       "graph.changes": true,
       "entities.duplicates": true,
       "answers.temporal": true,
+      "answers.attribution": true,
       "answers.routed": true,
       "recall.parts": true,
       "recall.withhold": true,

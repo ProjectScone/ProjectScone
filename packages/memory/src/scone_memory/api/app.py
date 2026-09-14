@@ -58,6 +58,13 @@ _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
 
 
+class AttributeBody(BaseModel):
+    """An answer, and the stored chunks it was composed from."""
+
+    answer: str = Field(min_length=1)
+    chunk_ids: list[int] = Field(min_length=1)
+
+
 class RetryBody(BaseModel):
     """Which parked records to let the next pass try again.
 
@@ -495,7 +502,7 @@ def create_app(
             "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
             "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
@@ -907,6 +914,20 @@ def create_app(
         applied = {name: value for name, value in narrowing.items() if value}
         return parted.record() | {"space": space, "applied": applied,
                                   "rerank": rerank, "graph_boost": graph_boost}
+
+    @app.post("/v1/answers/attribute")
+    async def post_attribution(body: AttributeBody, space: str = Depends(space_for)) -> dict[str, object]:
+        """Which of the named chunks each sentence of the answer came from:
+        quoted (a shared run of words, with its span), overlapping (most of
+        its content words in one passage) or unattributed, with numbers the
+        passage does not hold named. Found without a model. Word overlap is
+        not support; the record states its unmeasured rules and never claims
+        accuracy. Chunk ids this space does not hold are named in
+        ``chunks_missing``."""
+        from ..retrieval.attribution import attribute_to_chunks
+
+        made, missing = await attribute_to_chunks(engine, space, body.answer, body.chunk_ids)
+        return {**made.record(), "chunks_missing": list(missing)}
 
     @app.get("/v1/answers/temporal")
     async def get_temporal_answer(
