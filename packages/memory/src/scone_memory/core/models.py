@@ -476,6 +476,9 @@ class RecallResult(BaseModel):
     #: post-filtered lane's window was full when the filter removed
     #: candidates. None when nothing narrowed.
     narrowing: Optional[Narrowing] = None
+    #: How the lanes were fused: ``rank`` (reciprocal rank, the default) or
+    #: ``score`` (each lane's scores scaled to its own range, then added).
+    fusion: Literal["rank", "score"] = "rank"
     #: With ``graph_boost``: the entities the entity lane searched for.
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0

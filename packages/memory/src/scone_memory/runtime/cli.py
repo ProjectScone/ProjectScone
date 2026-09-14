@@ -104,6 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-rerank", action="store_true", help="skip the configured reranker for this search")
     p.add_argument("--graph-boost", action="store_true",
                    help="add the entity lane: passages naming what the question is about, or one relation away")
+    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
+                   help="fuse the lanes by rank (default) or by each lane's scores scaled to its own range")
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each")
@@ -271,6 +273,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them "
                         "before scoring, to measure what that changes")
+    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
+                   help="fuse recall's lanes by rank (default) or by score, to measure what that changes")
     p.add_argument("--window", type=int, default=0, metavar="BYTES",
                    help="widen every returned passage by this many bytes either side before "
                         "scoring, to measure what that changes")
@@ -967,7 +971,8 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
 
     report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
                              dataset=str(args.dataset), progress=progress, history=args.history,
-                             cross_queries=args.cross_queries, merge=args.merge, window=args.window)
+                             cross_queries=args.cross_queries, merge=args.merge, window=args.window,
+                             fusion=args.fusion)
     if not args.json:
         print("", file=sys.stderr)
     if args.out:
@@ -1454,7 +1459,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
-            rerank=not args.no_rerank, graph_boost=args.graph_boost,
+            rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
         )
         kept = None
         opened = None
