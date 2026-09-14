@@ -562,7 +562,7 @@ def create_app(
         from .directory_sync import mount_directory_sync_routes
         mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
-    mount_entity_routes(app, engine, space_for)
+    mount_entity_routes(app, engine, space_for, synthesis_factory=synthesis_factory)
     from .filesystem_routes import mount_filesystem_routes
     mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)
 
