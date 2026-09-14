@@ -11,7 +11,12 @@ Examples below run from `packages/memory/` unless a section names another workin
 Items carry `score` (rank within this query; the top item is always 1.0)
 and `similarity` (cosine from the vector lane, when that lane saw the
 chunk). Two lanes, vector and lexical, are fused by reciprocal rank with a
-small recency term, capped at two chunks per episode. A lane that fails is
+small recency term, capped at two chunks per episode. The recency term is
+`SCONE_RECENCY_WEIGHT` at age zero (default 0.005, small against a fused rank
+score, so it breaks near-ties toward newer memory and nothing else), halved
+every `SCONE_RECENCY_HALF_LIFE_DAYS` (default 30); a memory of a support queue
+can weight it up, and zero turns it off. The same knobs are
+`MemoryEngine(recency_weight=…, recency_half_life_days=…)`. A lane that fails is
 named in `degraded` and the other lane still answers. `context_reduction`
 is the share of the space's bytes that were left behind.
 

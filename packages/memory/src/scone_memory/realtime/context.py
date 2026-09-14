@@ -23,6 +23,7 @@ from ..retrieval.evidence_graph import MAX_FACTS, MAX_LINKS, QueryEvidenceGraph,
 from ..retrieval.evidence_records import EvidenceRecord, EvidenceRecords, canonical_evidence, fingerprint, restrict_graph
 from ..retrieval.multihop import MultiHopLimits, MultiHopResult, expand_multihop
 from ..retrieval.path_evidence import ordered_evidence_paths, path_records
+from ..retrieval.reading_order import READING_ORDERS, ReadingOrder, arranged
 from .passage_windows import PassageWindows, passage_windows
 
 _PREFIX = (
@@ -122,6 +123,9 @@ class ContextReceipt(TypedDict):
     path_omitted_count: NotRequired[int]
     path_search_truncated: NotRequired[bool]
     multihop_status: NotRequired[str]
+    #: How the passages were arranged for the model: "ranked" (best
+    #: first) or "ends" (best at both ends, weakest in the middle).
+    reading_order: NotRequired[str]
     multihop_coverage: NotRequired[dict[str, object]]
     adaptive_status: NotRequired[str]
     adaptive_evidence_basis: NotRequired[str]
@@ -165,7 +169,7 @@ class MemoryContext:
                  limit: int = 5, max_context_bytes: int = 8000, recall_timeout: float = 2.0,
                  structured_paths: bool = True, path_quotes: bool = False,
                  adaptive_retriever: AdaptiveRetriever | None = None,
-                 neighbor_chunks: int = 0) -> None:
+                 neighbor_chunks: int = 0, reading_order: str = "ranked") -> None:
         check_space(space)
         if not isinstance(session_id, str) or not 1 <= len(session_id) <= 128:
             raise ValueError("session_id must contain 1..128 characters")
@@ -181,6 +185,12 @@ class MemoryContext:
             raise ValueError("path_quotes must be a boolean")
         if type(neighbor_chunks) is not int or not 0 <= neighbor_chunks <= 4:
             raise ValueError("neighbor_chunks must be an integer from 0 to 4")
+        if reading_order not in READING_ORDERS:
+            raise ValueError(f"reading_order must be one of {', '.join(READING_ORDERS)}")
+        #: Passages are chosen in rank order and rendered in this order;
+        #: "ends" puts the best at both ends of the block for a model that
+        #: attends least to the middle. The rank stays on each passage.
+        self._reading_order: ReadingOrder = reading_order  # type: ignore[assignment]
         if adaptive_retriever is not None:
             if adaptive_retriever.memory is not memory:
                 raise ValueError("adaptive_retriever must use the same memory engine")
@@ -538,7 +548,13 @@ class MemoryContext:
                         adaptive_coverage.update(selection_complete=not omitted_ids, selected_omitted_count=len(omitted_ids))
                         adaptive_coverage.update({key: [identity for identity in ids if identity in supplied_ids]
                                                   for key, ids in adaptive_provenance.items()})
+                    if self._reading_order != "ranked":
+                        # Chosen in rank order under the byte budget; rendered
+                        # in the reading order. The same block, rearranged.
+                        sources = arranged(sources, self._reading_order)
+                        selected_items = arranged(selected_items, self._reading_order)
                     block = _source_block(sources, coverage, claims, relations, paths)
+                receipt["reading_order"] = self._reading_order
                 references = [dict(episode_id=item.episode_id, chunk_id=item.chunk_id) for item in selected_items]
                 if windows is not None:
                     retained_windows = {str(item.chunk_id): windows.anchors[item.chunk_id]

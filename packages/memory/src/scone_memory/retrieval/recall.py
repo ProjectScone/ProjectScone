@@ -56,6 +56,10 @@ class RecallRuntime:
     #: the reader actually got.
     demote_superseded: bool = True
     similarity_floor: float | None = None
+    #: How much newer memory is favoured in fusion: the term's size at age
+    #: zero and the age at which it halves. Zero weight favours nothing.
+    recency_weight: float = fusion.W_RECENCY
+    recency_half_life_days: float = fusion.RECENCY_HALF_LIFE_DAYS
     #: The width the floor was measured at, when it came from a measured
     #: policy. The query's own vector is checked against it, because an
     #: embedder that never reports a width still has one.
@@ -253,7 +257,8 @@ async def recall(
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
     now = runtime.clock()
     items = [
-        fusion.Fused(cid, score + fusion.recency_boost(chunks[cid].created_at, now), similarity.get(cid))
+        fusion.Fused(cid, score + fusion.recency_boost(chunks[cid].created_at, now, weight=runtime.recency_weight,
+                                                       half_life_days=runtime.recency_half_life_days), similarity.get(cid))
         for cid, score in fused.items()
         if cid in chunks
     ]

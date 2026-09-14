@@ -156,3 +156,32 @@ async def test_table_context_embedding_policy_reaches_standard_and_in_process_en
         assert local.table_context_embeddings is True
     finally:
         await local.close()
+
+
+def test_recency_settings_come_from_the_environment_reach_the_engine_and_refuse_bad_values(tmp_path):
+    import asyncio
+
+    import pytest
+
+    from scone_memory.core.errors import InvalidInput
+    from scone_memory.retrieval.fusion import RECENCY_HALF_LIFE_DAYS, W_RECENCY
+
+    base = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
+    plain = Settings.from_env(base)
+    assert (plain.recency_weight, plain.recency_half_life_days) == (W_RECENCY, RECENCY_HALF_LIFE_DAYS), "the defaults are the constants"
+    tuned = Settings.from_env(base | {"SCONE_RECENCY_WEIGHT": "0.02", "SCONE_RECENCY_HALF_LIFE_DAYS": "7"})
+    assert (tuned.recency_weight, tuned.recency_half_life_days) == (0.02, 7.0)
+    engine = asyncio.run(build_engine(tuned))
+    try:
+        assert (engine.recency_weight, engine.recency_half_life_days) == (0.02, 7.0)
+    finally:
+        asyncio.run(engine.close())
+    off = asyncio.run(build_engine(Settings.from_env(base | {"SCONE_RECENCY_WEIGHT": "0"})))
+    try:
+        assert off.recency_weight == 0.0
+    finally:
+        asyncio.run(off.close())
+    for env, named in (({"SCONE_RECENCY_WEIGHT": "-1"}, "SCONE_RECENCY_WEIGHT"), ({"SCONE_RECENCY_WEIGHT": "two"}, "SCONE_RECENCY_WEIGHT"),
+                       ({"SCONE_RECENCY_HALF_LIFE_DAYS": "0"}, "SCONE_RECENCY_HALF_LIFE_DAYS"), ({"SCONE_RECENCY_HALF_LIFE_DAYS": "inf"}, "SCONE_RECENCY_HALF_LIFE_DAYS")):
+        with pytest.raises(InvalidInput, match=named):
+            Settings.from_env(base | env)
