@@ -72,3 +72,124 @@ def test_a_bare_name_in_a_method_skips_the_class_body_as_python_does():
               "    def keep(self):\n        return helper()\n")
     calls = {(c.subject, c.object) for c in code_claims(source, "m.py", language="python") if c.predicate == "calls"}
     assert ("m.py:Shelf.keep", "m.py:helper") in calls and ("m.py:Shelf.keep", "m.py:Shelf.helper") not in calls
+
+
+def calls_in(source: str) -> set[tuple[str, str]]:
+    return {(c.subject, c.object) for c in code_claims(source, PATH, language="python") if c.predicate == "calls"}
+
+
+def test_a_parameter_or_local_of_the_same_name_is_not_the_declaration():
+    source = '''
+def load():
+    return 1
+
+
+def other():
+    return 2
+
+
+def run(load):
+    return load()
+
+
+def outer():
+    def load():
+        return 1
+
+    def by_parameter(load):
+        return load()
+
+    def by_assignment():
+        load = other
+        return load()
+
+    def by_import():
+        from pkg import load
+        return load()
+
+    def plain():
+        return load()
+    return plain
+'''
+    calls = calls_in(source)
+    assert ("m.py:run", "m.py:load") not in calls
+    assert not {pair for pair in calls if pair[0] in ("m.py:outer.by_parameter", "m.py:outer.by_assignment")}, calls
+    # An import inside the function is still what the import names.
+    assert ("m.py:outer.by_import", "pkg.load") in calls and ("m.py:outer.by_import", "m.py:outer.load") not in calls
+    assert ("m.py:outer.plain", "m.py:outer.load") in calls
+
+
+def test_what_a_def_statement_evaluates_is_called_by_the_function_it_is_written_in():
+    # Decorators, default values and a nested class's own body run when the enclosing
+    # function runs the statement, not when the function they belong to is called.
+    source = '''
+def make_default():
+    return 1
+
+
+def register():
+    return lambda function: function
+
+
+def keyword_default():
+    return 2
+
+
+def size():
+    return 3
+
+
+def seal():
+    return lambda kind: kind
+
+
+def outer():
+    @register()
+    def inner(y=make_default(), *, z=keyword_default()):
+        return None
+
+    @seal()
+    class Box:
+        size = size()
+
+        @register()
+        def open(self):
+            return None
+
+    def measure():
+        # `size` above is Box's, not a local of outer's hiding the module's function.
+        return size()
+    return inner
+
+
+def top(y=make_default()):
+    return None
+'''
+    calls = calls_in(source)
+    assert {("m.py:outer", "m.py:make_default"), ("m.py:outer", "m.py:keyword_default"), ("m.py:outer", "m.py:register"),
+            ("m.py:outer", "m.py:seal"), ("m.py:outer", "m.py:size"), ("m.py:outer.measure", "m.py:size")} <= calls
+    assert not {pair for pair in calls if pair[0] in ("m.py:outer.inner", "m.py:outer.Box.open", "m.py:top")}, calls
+
+
+def test_self_is_the_class_only_where_the_method_takes_it():
+    source = '''
+class Shelf:
+    def text(self):
+        return 1
+
+    def render(self):
+        def closure():
+            return self.text()
+
+        def takes_its_own(self):
+            return self.text()
+        return closure
+
+    @staticmethod
+    def still():
+        return self.text()
+'''
+    calls = calls_in(source)
+    assert ("m.py:Shelf.render.closure", "m.py:Shelf.text") in calls
+    assert ("m.py:Shelf.render.takes_its_own", "m.py:Shelf.text") not in calls
+    assert ("m.py:Shelf.still", "m.py:Shelf.text") not in calls
