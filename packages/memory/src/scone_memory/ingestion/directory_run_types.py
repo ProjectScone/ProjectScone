@@ -86,8 +86,9 @@ class SyncSourceOutcome(_Record):
     previous_episode_id: int | None = Field(default=None, gt=0, lt=2**63)
     #: Claims the stored revision makes, and claims of the previous revision
     #: closed by this outcome; None when the store could not read them.
-    claims: int = Field(default=0, ge=0, le=100_000)
-    claims_closed: int | None = Field(default=0, ge=0, le=100_000)
+    claims: int = Field(default=0, ge=0, le=2**31 - 1)
+    claims_closed: int | None = Field(default=0, ge=0, le=2**31 - 1)
+    claims_untracked: int = Field(default=0, ge=0, le=2**31 - 1)
     code: Identifier | None = None
 
     @field_validator('path')

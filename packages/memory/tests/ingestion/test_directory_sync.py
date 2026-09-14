@@ -7,8 +7,9 @@ from scone_memory.ingestion.files import document_provenance
 from scone_memory.ingestion.formats.types import DocumentSegment, ParsedDocument
 
 
-MODULE = "import os\nimport json\n\n\ndef read(path):\n    return json.load(open(path))\n\n\ndef write(path, value):\n    json.dump(value, open(path, 'w'))\n"
-SHORTER = "import json\n\n\ndef read(path):\n    return json.load(open(path))\n"
+MODULE = ("import os\nimport json\n\n\nclass Store:\n    def read(self, path):\n        return json.load(open(path))\n\n"
+          "    def write(self, path, value):\n        json.dump(value, open(path, 'w'))\n")
+SHORTER = "import json\n\n\nclass Store:\n    def read(self, path):\n        return json.load(open(path))\n"
 
 
 class CountingEmbedder(HashEmbedder):
@@ -557,7 +558,8 @@ async def test_directory_sync_records_claims_closes_what_a_revision_drops_and_cl
     assert receipt.status == "added" and receipt.claims >= 4 and receipt.claims_closed == 0
     assert first.claims == receipt.claims and first.claims_closed == 0 and not first.claims_unread
     facts = await memory.documents.facts_for_graph("alpha", receipt.episode_id, 500)
-    assert {f.object for f in facts if f.predicate == "defines"} == {"store.py:read", "store.py:write"}
+    assert {f.object for f in facts if f.predicate == "defines"} >= {"store.py:Store.read", "store.py:Store.write", "store.py:Store"}
+    assert any(f.subject == "store.py:store" for f in facts), "the ledger holds subjects as normalised terms"
     stored = await memory.episode("alpha", receipt.episode_id)
     assert facts and all(f.quote in stored.content for f in facts), "every claim quotes a line the episode holds"
 
@@ -570,10 +572,11 @@ async def test_directory_sync_records_claims_closes_what_a_revision_drops_and_cl
     old = await memory.documents.facts_for_graph("alpha", receipt.episode_id, 500)
     closed = {(f.predicate, f.object) for f in old if f.status != "active"}
     assert updated.status == "updated" and updated.claims_closed == len(closed) >= 2
-    assert {("defines", "store.py:write"), ("imports", "os")} <= closed, "write's definition and the os import are no longer stated"
+    assert {("defines", "store.py:Store.write"), ("imports", "os")} <= closed, "write's definition and the os import are no longer stated"
+    assert ("defines", "store.py:Store.read") not in closed, "a claim whose subject the ledger folded (Store) is kept when restated"
     assert closed.isdisjoint(still_said), "nothing the new revision still says was closed"
     assert {(f.predicate, f.object) for f in old if f.status == "active"} <= still_said, "what stayed open is what the new revision says"
-    assert ("defines", "store.py:read") in still_said and ("imports", "json") in still_said
+    assert ("defines", "store.py:Store.read") in still_said and ("imports", "json") in still_said
     with pytest.raises(Gone):
         await memory.episode("alpha", receipt.episode_id)
 
@@ -584,6 +587,7 @@ async def test_directory_sync_records_claims_closes_what_a_revision_drops_and_cl
     first_facts = await memory.documents.facts_for_graph("alpha", receipt.episode_id, 500)
     assert {(f.predicate, f.object) for f in first_facts if f.status == "active"} == {("imports", "json")}, \
         "read's definition, restated by the second revision and cited to the first episode, closes when the third drops it"
+    assert receipts(third)["store.py"].claims_untracked == 0
 
     (root / "store.py").unlink()
     fourth = await DirectorySync(memory, root, space="alpha", journal=tmp_path / "claims.journal", key=b"k" * 32,
@@ -632,3 +636,40 @@ async def test_a_store_that_cannot_read_claims_by_episode_says_unread_not_zero(e
     (root / "store.py").write_text(SHORTER)
     result = await DirectorySync(memory, root, **options).synchronize()
     assert receipts(result)["store.py"].claims_closed is None and result.claims_unread and result.claims_closed == 0
+
+
+async def test_the_lineage_bound_is_said_on_the_receipt_and_what_it_dropped_is_no_longer_closed(env, monkeypatch):
+    import scone_memory.ingestion.directory_sync as module
+    from scone_memory.ingestion.directory_sync import DirectorySync
+    monkeypatch.setattr(module, "MAX_CLAIMANTS", 1)
+    memory, root, tmp_path = env
+    options = dict(space="alpha", journal=tmp_path / "claims.journal", key=b"k" * 32, store_id="fixture-catalog", parser_revision="v1")
+    (root / "m.py").write_text("import a\n")
+    first = receipts(await DirectorySync(memory, root, **options).synchronize())["m.py"]
+    (root / "m.py").write_text("import a\nimport b\n")
+    second = receipts(await DirectorySync(memory, root, **options).synchronize())["m.py"]
+    assert second.claims_untracked == 0, "one earlier episode (a's) is within the bound"
+    (root / "m.py").write_text("import a\nimport b\nimport c\n")
+    third = receipts(await DirectorySync(memory, root, **options).synchronize())["m.py"]
+    assert third.claims_untracked == 1 and third.claims_closed == 0, "two earlier episodes still cited, one past the bound; nothing was closed, and the count says so"
+    (root / "m.py").unlink()
+    gone = receipts(await DirectorySync(memory, root, **options).synchronize(delete_missing=True))["m.py"]
+    assert gone.status == "deleted" and gone.claims_closed == 2, "a's (tracked) and c's (current) close; b's episode was dropped from the lineage"
+    b_facts = await memory.documents.facts_for_graph("alpha", second.episode_id, 50)
+    assert [f.object for f in b_facts if f.status == "active"] == ["b"], "what the dropped episode cites stands, as the receipt said it would"
+
+
+async def test_a_generated_line_is_quoted_by_its_start_and_a_json_manifest_declares_nothing_from_a_document(env):
+    from scone_memory.ingestion.directory_sync import DirectorySync
+    from scone_memory.ingestion.files import ingest_document
+    memory, root, tmp_path = env
+    options = dict(space="alpha", journal=tmp_path / "claims.journal", key=b"k" * 32, store_id="fixture-catalog", parser_revision="v1")
+    (root / "bundle.js").write_text('const react = require("react"); ' + "x".join([""] * 3000) + "var y = 1;\n")
+    result = await DirectorySync(memory, root, **options).synchronize()
+    receipt = receipts(result)["bundle.js"]
+    assert result.complete and receipt.status == "added" and receipt.claims >= 1
+    facts = await memory.documents.facts_for_graph("alpha", receipt.episode_id, 50)
+    stored = await memory.episode("alpha", receipt.episode_id)
+    assert facts and all(len(f.quote) <= 2000 and f.quote in stored.content for f in facts), "a long line is quoted by its first 2,000 characters"
+    package = await ingest_document(memory, "alpha", b'{"name": "app", "dependencies": {"react": "^18"}}', filename="package.json")
+    assert package.claims == 0, "walked as JSON, not kept as lines: nothing is read from it (map reads it)"

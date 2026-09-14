@@ -8,7 +8,7 @@ from scone_memory.core.errors import Gone
 from scone_memory.ingestion.files import DocumentIngested, ingest_document
 from scone_memory.memory.file_claims import Retired
 
-MODULE = "import os\nimport json\n\n\ndef read(path):\n    return json.load(open(path))\n\n\ndef write(path, value):\n    json.dump(value, open(path, 'w'))\n"
+MODULE = "import os\nimport json\n\n\nclass Store:\n    def read(self, path):\n        return json.load(open(path))\n"
 SHORTER = "import json\n\n\ndef read(path):\n    return json.load(open(path))\n"
 
 
@@ -30,7 +30,8 @@ async def test_a_stored_source_file_says_what_it_defines_and_imports_and_every_q
     episode = await memory.episode("code", ingested.added.episode_id)
     facts = await facts_of(memory, "code", episode.episode_id)
     said = {(s, p, o) for (s, p, o), f in facts.items() if f.status == "active"}
-    assert ("pkg/store.py", "defines", "pkg/store.py:read") in said and ("pkg/store.py", "imports", "json") in said
+    assert ("pkg/store.py", "defines", "pkg/store.py:Store") in said and ("pkg/store.py", "imports", "json") in said
+    assert ("pkg/store.py:store", "defines", "pkg/store.py:Store.read") in said, "a subject is held as a normalised term"
     assert all(f.origin == "extracted" for f in facts.values())
     assert all(f.quote and f.quote in episode.content for f in facts.values()), "every claim quotes a line the episode holds"
     again = await ingest_document(memory, "code", MODULE.encode(), filename="pkg/store.py")

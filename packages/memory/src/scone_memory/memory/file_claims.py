@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Collection, Optional
 
 from ..core import graph_read
+from ..core.validation import normalise_term
 from . import fact_review
 
 
@@ -55,7 +56,11 @@ async def close_unstated(runtime: fact_review.FactReviewRuntime, space: str, epi
     cap = graph_read.MAX_GRAPH_FACTS
     rows = await documents.facts_for_graph(space, episode_id, cap + 1)
     unread = len(rows) > cap
-    still = set(_triple(*item) for item in kept)
+    # A stored claim's subject and predicate are normalised terms (case
+    # folded, whitespace collapsed); what a caller keeps is compared the
+    # same way, so `Store.load` kept as written matches `store.load` held.
+    still = set(_triple(normalise_term(subject, "subject"), normalise_term(predicate, "predicate"), obj.strip())
+                for subject, predicate, obj in kept)
     closed = 0
     for fact in rows[:cap]:
         if (fact.space != space or fact.source_episode_id != episode_id or fact.origin != "extracted"

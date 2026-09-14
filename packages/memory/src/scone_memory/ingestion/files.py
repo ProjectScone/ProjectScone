@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import asyncio
 import hashlib
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -102,13 +103,25 @@ class DocumentIngested:
     claims: int = 0
 
 
+#: Manifests a stored document is read for: those the text reader keeps
+#: line by line (`pyproject.toml`, `Cargo.toml`, `requirements*.txt`),
+#: so every claim quotes a line the episode holds. `package.json` is
+#: walked as JSON into one segment per value, which is not the file's
+#: lines; `go.mod` is not a document format at all. Both read through
+#: `map`, not through a stored document.
+LINE_KEPT_MANIFEST_SUFFIXES = frozenset({'.toml', '.txt'})
+
+
 def says_claims(filename: str) -> bool:
     """Whether a stored document of this name is read for claims: a
-    source file in a language the code graph reads, or a manifest."""
+    source file in a language the code graph reads, or a manifest the
+    text reader keeps line by line."""
     from .code import code_language
     from .manifests import is_manifest
 
-    return code_language(filename) is not None or is_manifest(filename)
+    if code_language(filename) is not None:
+        return True
+    return is_manifest(filename) and PurePosixPath(filename).suffix.lower() in LINE_KEPT_MANIFEST_SUFFIXES
 
 
 def source_text(parsed: ParsedDocument) -> str:
