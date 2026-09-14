@@ -116,6 +116,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--code-context", action="store_true",
                    help="for a passage of code, also quote the signature it sits inside and the "
                         "imports of its file; the passage itself is not changed")
+    p.add_argument("--highlight", action="store_true",
+                   help="say which words of each passage the lexical lane matched; with --json, "
+                        "the code-point spans of each, beside the items")
     p.add_argument("--parts", action="store_true",
                    help="search each part of a multi-part question and give every part a turn "
                         "(measured to change nothing on LongMemEval; off by default)")
@@ -1496,6 +1499,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             result = result.model_copy(update={"items": list(inside.items)})
         if args.json:
             said = result.model_dump() | {"context_reduction": result.context_reduction}
+            if args.highlight:
+                from ..retrieval.highlights import highlights
+
+                said["highlights"] = [marks.model_dump() for marks in highlights(result.items, args.query)]
             emit(said | ({"merged": _staged(joined.record())} if joined else {})
                       | ({"widened": _staged(opened.record())} if opened else {})
                       | ({"withheld": _staged(kept.record())} if kept else {})
@@ -1525,9 +1532,18 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         for f in result.history:
             until = f.valid_until[:10] if f.valid_until else "?"
             print(f"was   {f.subject} {f.predicate} {f.object}  ({f.valid_from[:10]} to {until}; {f.closed_reason})", file=out)
-        for item in result.items:
+        marked = None
+        if args.highlight:
+            from ..retrieval.highlights import highlights
+
+            marked = highlights(result.items, args.query)
+        for position, item in enumerate(result.items):
             sim = f" sim={item.similarity:.2f}" if item.similarity is not None else ""
             print(f"{item.score:.2f}{sim}  {item.created_at[:10]}  #{item.episode_id}  {item.text.strip()[:200]}", file=out)
+            if marked is not None:
+                words = list(dict.fromkeys(item.text[span.start:span.end] for span in marked[position].spans))
+                more = " and more" if marked[position].truncated else ""
+                print(f"      matched: {', '.join(words) or 'no word of the question'}{more}", file=out)
         for d in result.degraded:
             print(f"degraded: {d}", file=sys.stderr)
         if result.narrowing is not None and result.narrowing.window_exhausted:
