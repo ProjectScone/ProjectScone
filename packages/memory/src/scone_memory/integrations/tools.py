@@ -256,6 +256,22 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
         }, []),
     ),
     ToolSpec(
+        name="graph_affected",
+        summary=("What rests on a symbol, module, file or package: everything that calls, imports, inherits, "
+                 "depends on or documents it, nearest first, through the code graph's recorded relations. "
+                 "Says how deep it walked, what it could not list, and when nothing here rests on the name."),
+        parameters=_schema({
+            "name": {"type": "string", "minLength": 1, "maxLength": 512,
+                     "description": "The symbol (`pkg/mod.py:Class.method`), module (`pkg.mod`), file or package."},
+            "max_hops": {"type": "integer", "minimum": 1, "maximum": 8,
+                         "description": "Relationship steps to follow, 1 to 8. Defaults to 4."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
+                      "description": "Entities to list, 1 to 1000. Defaults to 200."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer. Defaults to 16000."},
+        }, ["name"]),
+    ),
+    ToolSpec(
         name="temporal_answer",
         summary=("A question about dates answered by computation: how long between two events, how long ago one "
                  "was, which came first, what order they were in. Each event is grounded to a passage and the day "
@@ -319,7 +335,7 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
 )
 
 _GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
-                          "graph_overview", "graph_changes", "find_duplicates", "graph_health",
+                          "graph_overview", "graph_changes", "find_duplicates", "graph_health", "graph_affected",
                           "temporal_answer"})
 #: The tree. ``write_note`` is offered only when a policy allows writing:
 #: an absent tool is a clearer refusal than an error a model may argue
@@ -550,6 +566,13 @@ class ToolBox:
                                         limit=arguments.get("limit", DEFAULT_EXAMPLES),
                                         max_bytes=arguments.get("max_bytes", HEALTH_BYTES))
             return health.record(self.space, status="current", as_of=when)
+        if name == "graph_affected":
+            from ..entities.affected import affected
+
+            blast = await affected(self.engine, self.space, arguments["name"],
+                                   max_hops=arguments.get("max_hops", 4), limit=arguments.get("limit", 200),
+                                   max_bytes=arguments.get("max_bytes", 16_000))
+            return blast.record()
         if name == "temporal_answer":
             from ..retrieval.temporal import TemporalError, temporal_answer
 

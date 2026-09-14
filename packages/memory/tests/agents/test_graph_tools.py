@@ -31,10 +31,10 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-14:] == ["graph_context", "explain_entity", "connect_entities",
+    assert [tool.name for tool in MEMORY_TOOLS][-15:] == ["graph_context", "explain_entity", "connect_entities",
                                                           "graph_schema", "graph_match", "graph_overview",
                                                           "graph_changes", "find_duplicates", "graph_health",
-                                                          "temporal_answer",
+                                                          "graph_affected", "temporal_answer",
                                                           # The tree, which a toolbox offers read only
                                                           # unless its owner allowed writing.
                                                           "list_path", "read_path", "search_paths", "write_note"]
