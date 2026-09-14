@@ -45,6 +45,10 @@ from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
 from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
+from ..retrieval.synonyms import Synonyms
+
+#: The vector lane's default voice when the embedder is a hash of tokens (see MemoryEngine).
+HASHED_VECTOR_WEIGHT = 0.25
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core import extracted
@@ -196,10 +200,42 @@ class MemoryEngine:
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
         table_context_embeddings: bool = False,
+        synonyms: "Synonyms | None" = None,
+        context_lane: bool = False,
+        lexical_stems: bool = True,
+        vector_weight: Optional[float] = None,
     ) -> None:
+        if vector_weight is None:
+            # A hashed-token embedder ranks by word overlap, badly: a weak
+            # echo of the text lane. Measured on LongMemEval-S, giving it a
+            # quarter voice moved the fused ranking from behind the text lane
+            # alone to level with the reference's best; a real embedder knows
+            # things the text lane does not and keeps its full voice.
+            vector_weight = HASHED_VECTOR_WEIGHT if embedder.id.startswith("hash-") else 1.0
+        if isinstance(vector_weight, bool) or not isinstance(vector_weight, (int, float)) or not 0 < vector_weight <= 4:
+            raise InvalidInput("vector_weight must be a number above 0 and at most 4")
+        #: The vector lane's voice in rank fusion against the text lane's 1.0,
+        #: resolved from the embedder when the caller did not say; on every
+        #: recall event as fusion_weights.
+        self.vector_weight = float(vector_weight)
+        if type(lexical_stems) is not bool:
+            raise InvalidInput("lexical_stems must be a boolean")
+        #: Whether a query term's family (bills, billing, billed) is searched
+        #: by stem prefix in the text lane; the index is untouched.
+        self.lexical_stems = lexical_stems
+        if type(context_lane) is not bool:
+            raise InvalidInput("context_lane must be a boolean")
+        #: Whether what each chunk is under is indexed beside its text and
+        #: searched as a lane of its own. Stored text never changes.
+        self.context_lane = context_lane
         if type(table_context_embeddings) is not bool:
             raise InvalidInput('table_context_embeddings must be a boolean')
         self._table_context_embeddings = table_context_embeddings
+        if synonyms is not None and not isinstance(synonyms, Synonyms):
+            raise InvalidInput(f"synonyms must be a Synonyms list, not {type(synonyms).__name__}")
+        #: The caller's synonym list; the text lane's query gains the other
+        #: members of every group a query term is in. None leaves it alone.
+        self.synonyms = synonyms
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
@@ -643,6 +679,7 @@ class MemoryEngine:
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
+            context_lane=self.context_lane,
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
@@ -994,6 +1031,10 @@ class MemoryEngine:
             similarity_floor=self.similarity_floor,
             floor_dim=self.abstention.dim if self.abstention is not None else None,
             vector_block=self.vector_block,
+            synonyms=self.synonyms,
+            context_lane=self.context_lane,
+            lexical_stems=self.lexical_stems,
+            vector_weight=self.vector_weight,
         )
         return await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,

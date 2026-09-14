@@ -1111,6 +1111,119 @@ environment says, so what it measures is the difference between the
 settings and nothing else: `SCONE_RECALL_CANDIDATES`,
 `SCONE_DEMOTE_RESTATED`, `SCONE_CONTEXTUAL_EMBEDDINGS`.
 
+### The context lane: found by what it is under
+
+A chunk under the heading "Refunds" in a document titled "Billing
+rules" need not say either word, and a query about billing refunds then
+misses it in the text lane, which finds the words a passage has and
+only those. With `SCONE_CONTEXT_LANE=1` (`MemoryEngine(...,
+context_lane=True)`) each chunk's context is derived at ingestion with
+no model — the headings enclosing it, the document's title (its top
+heading, or a short first line that does not read as a sentence) and
+the words of the source's name — keeping only what the chunk itself
+lacks, and indexed **beside** its text, never in it. Stored text and
+offsets do not change. At recall the same query the text lane got is
+searched over that index as a third lane and fused by rank at twice the
+weight of the others; `lanes.context` on each item says where the lane
+placed it.
+
+The weight is measured, not guessed. Rank fusion is flat, so a lane
+that finds what the others cannot needs weight to be heard at all: on
+the `under-v1` benchmark (`testing.context_lane_benchmark`: twenty
+passages under a heading whose words they never say, eight distractors
+each repeating the question's words) the passage reached the top five
+in 0 of 20 cases without the lane, and with it in 0 at weight 0.5, 1 at
+1.0 and 13 at 2.0 — where the distractor also lost first place in 13
+cases. The entity lane made the same choice for the same reason. The
+cost is on the record too: a passage under the words can now come
+before one that merely says them, which is what the benchmark's
+question wants and a literal search would not. A document's frequent
+words were tried as context and left out: spread over every chunk they
+make the lane fire on mentions rather than on structure.
+
+The words are bounded — at most 32 per chunk, headings first, then
+title, then source words, the rest counted as omitted — and the lane is
+honest about where it is not: the SQLite and in-memory stores keep the
+index, and an engine with the lane on over a store that does not
+reports `context lane: not kept by …` in `degraded` rather than
+pretending the lane ran.
+
+### The vector lane's voice in fusion
+
+Reciprocal rank fusion gives every lane the same voice. That is right
+when both lanes know something the other does not, and wrong when one
+is a weak echo of the other: an embedder whose vectors are hashed
+tokens ranks by word overlap, badly, and its confident wrong picks can
+outvote the text lane's right ones. Measured on LongMemEval-S with that
+embedder, the text lane alone was ahead of the fused ranking.
+`SCONE_VECTOR_WEIGHT` (`MemoryEngine(..., vector_weight=)`) is the
+vector lane's weight against the text lane's 1.0 — a number above 0 and
+at most 4, 1.0 by default — and every recall event records
+`fusion_weights`, so a ranking can always be read back to the voices
+that made it. Change it only on a number: the pull request that added it
+carries the measurement.
+
+### Both stores agree on every script
+
+Two stores that answer the same query differently are a bug a reader
+cannot see. The in-memory lane cuts an unspaced run — a Japanese or
+Thai phrase — into character grams and finds a part of it; SQLite's
+built-in tokenizer kept the run as one token and could not. The SQLite
+text lane now ranks our own tokens: a derived table holds each chunk's
+terms exactly as the lexical tokenizer makes them, diacritics folded as
+the in-memory lane folds them, searched through an FTS5 shadow that
+splits only on the spaces between them. It is versioned by the
+tokenizer and the Unicode data it ran under and rebuilt whole when
+either changes — lazily, so an old database opens at once and each
+space pays as it is read — and triggers keep it current on write and
+delete. A parity test pins that Japanese, Chinese, Thai, Korean and
+accented Latin queries find their passage through the text lane in
+both stores.
+
+### A word's family by prefix
+
+"bills", "billing" and "billed" are one word to a reader and three to the
+text lane. The usual answer is a stemmer over the index, and it is the
+wrong one here: it rewrites what every store holds, ties the tokenizer's
+version to a set of language rules, and puts a guess ("policies" and
+"police" as one) where a reader cannot see it. `SCONE_LEXICAL_STEMS=1`
+(`MemoryEngine(..., lexical_stems=True)`) does less: a query term that
+ends in a known English suffix also searches as a prefix of its stem —
+`bill*` for "billing", `invoic*` for "invoices" — so the family is found,
+the index is untouched, and the result's `prefixes` says which prefixes
+were added and whether the store could take them (`applied`; the SQLite
+and in-memory stores can, and a family counts as one term in the score,
+not several). A language the rules do not know, a short word, a number,
+is left exactly as it was. The rules keep a stem of at least three
+letters after a strong suffix and four after a plural or a final "e", do
+not strip a plural after "s", "u" or "i", and reduce a doubled consonant
+except where English keeps it. Measured on LongMemEval-S before it was
+a flag; the numbers are on the pull request that added it.
+
+### Synonyms the caller wrote down
+
+The lexical lane finds the words a passage has, and only those. A
+passage that says "automobile" is invisible to a query about a "car"
+unless somebody wrote down that in this corpus the two are one word.
+`SCONE_SYNONYMS=./synonyms.txt` names that list — one group per line,
+terms separated by commas, `#` for comments — and `MemoryEngine(...,
+synonyms=Synonyms(groups))` gives it in code. A query term that is in a
+group adds the group's other members to the **text lane's** query; the
+vector lane's query stays as written, because an embedder already knows
+what it knows about the two words and padding its input with a list
+would move the vector in ways nobody measured. The lanes are fused by
+rank, so a passage found only through an added word competes on rank,
+never on a score the addition inflated.
+
+No model proposes a synonym here, and nothing is guessed: matching uses
+the lane's own tokenizer, so case, possessives and stopwords are treated
+exactly as the index treats them, a phrase matches as a phrase, and the
+result's `expansion` says which terms matched and which words were
+added (`matched`, `added`, `offered`, `capped`; the recall event carries
+the counts). The list is bounded — 2,000 groups of up to 16 terms of up
+to 64 characters, at most 12 words added to one query, the rest left
+out with `capped: true` — and a list over a bound is refused, not cut.
+
 The rule for choosing is stated rather than implied: the setting that
 answered most wins; a tie goes to the quicker; and a change that only
 matches the default is no change at all, so the default stands and the
