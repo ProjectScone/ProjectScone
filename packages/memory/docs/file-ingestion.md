@@ -186,6 +186,20 @@ Current-text filtering also applies inside notes. Dangling, ambiguous and invali
 part references are rejected. All extracted parts share the document's text and
 segment budgets, and nested reference locators are bounded.
 
+A link in a DOCX paragraph (body, textbox, note or comment) or in a slide or
+notes paragraph keeps its words in the text, and the segment's `links`
+metadata says where they point: a JSON list of `text`, `target` and the
+link's `start`/`end` in the segment's UTF-8 bytes, with the link's own
+surrounding spaces left out of the span. An internal bookmark is `#name`. A
+target lives in the part's relationships, which are external for a web or
+mail address; they are read only as addresses and never followed. A link
+whose relationship is missing, is not a hyperlink, is blank or is longer
+than 2,048 characters is counted in `links_unresolved` and not recorded. At
+most 200 links are recorded per segment; `links_cut` counts the rest. Links
+in table cells and in field codes (`HYPERLINK` fields) are not read yet.
+Targets are recorded data: a page showing them must not make them live
+without the reader choosing to follow one.
+
 DOCX, XLSX and PPTX locate their main document through `_rels/.rels` and resolve
 child relationships relative to that selected part. Nonstandard main-part paths
 are supported. An unreferenced conventional filename does not supply document
