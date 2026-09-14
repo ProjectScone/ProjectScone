@@ -25,6 +25,7 @@ from ..core.errors import InvalidInput
 from ..providers.llm import ChatError, ChatModel
 
 if TYPE_CHECKING:
+    from ..ingestion.pdf import PdfParser
     from ..memory.engine import MemoryEngine
 
 VERSION = "questions-v1"
@@ -264,10 +265,12 @@ async def measure(engine: "MemoryEngine", space: str, questions: QuestionSet, *,
 
 
 async def store_corpus(engine: "MemoryEngine", space: str, root: str | Path,
-                       suffixes: Sequence[str] = TEXT_SUFFIXES) -> dict[str, int]:
+                       suffixes: Sequence[str] = TEXT_SUFFIXES, pdf_parser: Optional["PdfParser"] = None) -> dict[str, int]:
     """Every text file under a root, and every PDF where the optional
     parser is installed, stored with its path as its source; in a settled
-    order, so two stores of one root hold the same text."""
+    order, so two stores of one root hold the same text. ``pdf_parser``
+    chooses how PDFs are read, so one question set can measure two
+    readers of the same documents."""
     from .code import sources
 
     files, total = sources(root, tuple(suffixes) + (".pdf",))
@@ -281,7 +284,7 @@ async def store_corpus(engine: "MemoryEngine", space: str, root: str | Path,
             try:
                 from ..ingestion.documents import ingest_pdf
 
-                await ingest_pdf(engine, space, path.read_bytes(), filename=path.name)
+                await ingest_pdf(engine, space, path.read_bytes(), filename=path.name, parser=pdf_parser)
             except InvalidInput:
                 counts["pdf_unread"] += 1
                 continue
