@@ -584,7 +584,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
     @tool(server, "memory_graph_affected")
     async def memory_graph_affected(
         name: Annotated[str, Field(description="The symbol (`pkg/mod.py:Class.method`), module, file or package",
-                                   min_length=1, max_length=512)],
+                                   min_length=1, max_length=200)],
         max_hops: Annotated[
             Optional[StrictInt], Field(description=f"Relationship steps to follow (1..={AFFECTED_HOPS}); defaults to 4")
         ] = None,
@@ -592,15 +592,17 @@ def create_server(engine: MemoryEngine, space: str = "default",
             Optional[StrictInt], Field(description=f"Entities to list (1..={MAX_REACHED}); defaults to 200")
         ] = None,
         max_bytes: Annotated[
-            Optional[StrictInt], Field(description=f"Byte budget for the answer (512..={AFFECTED_BYTES}); defaults to 16000")
+            Optional[StrictInt], Field(description=f"Byte budget for the answer's record (1024..={AFFECTED_BYTES}); "
+                                                   "its framing takes most of a kilobyte; defaults to 16000")
         ] = None,
         space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
     ) -> CallToolResult:
         """What rests on a symbol, module, file or package: everything that
-        calls, imports, inherits, depends on or documents it, nearest first,
-        through the code graph's recorded relations. Says how deep it walked,
-        what it could not list, and when nothing here rests on the name; an
-        unknown or ambiguous name is refused with the candidates."""
+        calls, imports, inherits, mixes in, depends on or develops with it,
+        nearest first, through the code graph's recorded relations. Says how
+        deep it walked, what it could not list, and when nothing here rests
+        on the name; an ambiguous name is refused with its candidates, an
+        unknown one plainly."""
         blast = await affected(engine, space or default_space, name,
                                max_hops=max_hops if max_hops is not None else 4,
                                limit=limit if limit is not None else 200,
@@ -615,7 +617,8 @@ def create_server(engine: MemoryEngine, space: str = "default",
         if blast.not_listed:
             lines.append(f"{blast.not_listed} more reached but not listed (limit or byte budget)")
         if blast.stopped_at_depth:
-            lines.append(f"stopped at {blast.deepest} hop(s) with more to follow; raise max_hops to go further")
+            lines.append(f"stopped at {blast.deepest} hop(s) with more to follow"
+                         + ("; raise max_hops to go further" if blast.deepest < AFFECTED_HOPS else ""))
         return ok_text("\n".join(lines))
 
     @tool(server, "memory_graph_health")
