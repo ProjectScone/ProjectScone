@@ -1340,8 +1340,6 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return await run_directory_sync(args, engine, out)
 
     if args.command == "import-chat":
-        from dataclasses import asdict
-
         from ..ingestion.chat_exports import ingest_chat_export
 
         import math
