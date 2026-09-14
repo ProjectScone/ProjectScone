@@ -35,11 +35,16 @@ from ..core.errors import InvalidInput
 from ..core.validation import check_space
 
 if TYPE_CHECKING:
+    from ..providers.llm import ChatModel
+    from .synthesis import SynthesisLimits
     from ..memory.engine import MemoryEngine
 
 #: The ways a question can be answered, in the order they are tried.
 ROUTES = ("temporal", "graph", "recall")
 Route = Literal["temporal", "graph", "recall"]
+#: The routes a caller may ask for by name: the rule's three, and the one
+#: the rule never chooses because it calls a model.
+NAMED_ROUTES = (*ROUTES, "synthesize")
 #: Passages an ordinary search answers with, by default and at most.
 DEFAULT_LIMIT = 5
 MAX_LIMIT = 50
@@ -71,12 +76,18 @@ class Answered:
 
 async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
                           now: Optional[str] = None, limit: int = DEFAULT_LIMIT,
-                          route: Optional[str] = None, max_item_chars: int = DEFAULT_ITEM_CHARS) -> Answered:
+                          route: Optional[str] = None, max_item_chars: int = DEFAULT_ITEM_CHARS,
+                          synthesis: Optional["ChatModel"] = None,
+                          synthesis_limits: Optional["SynthesisLimits"] = None) -> Answered:
     """Answer a question with whichever machinery suits it, and say which.
 
     ``max_item_chars`` bounds each passage shown in an ordinary answer's
     text (zero shows them whole); the answer's ``shown`` says how many
-    were cut and by how much, and ``detail`` always holds them whole."""
+    were cut and by how much, and ``detail`` always holds them whole.
+
+    ``route="synthesize"`` is the one route the rule never chooses: it
+    reads up to ``limit`` passages and has ``synthesis``, a model, write
+    cited sentences about them. Without a model it is refused."""
     check_space(space)
     if not isinstance(max_item_chars, int) or isinstance(max_item_chars, bool) or max_item_chars < 0:
         raise InvalidInput(f"max_item_chars must be a whole number of characters (0 for whole passages), not {max_item_chars!r}")
@@ -84,8 +95,13 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
         raise InvalidInput("a question must have something in it")
     if not 1 <= limit <= MAX_LIMIT:
         raise InvalidInput(f"limit must be from 1 to {MAX_LIMIT}")
-    if route is not None and route not in ROUTES:
-        raise InvalidInput(f"route must be one of {', '.join(ROUTES)}, not {route!r}")
+    if route is not None and route not in NAMED_ROUTES:
+        raise InvalidInput(f"route must be one of {', '.join(NAMED_ROUTES)}, not {route!r}")
+    if route == "synthesize":
+        if synthesis is None:
+            raise InvalidInput("the synthesize route needs a model; none is configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
+        return await _synthesize(engine, space, question, synthesis, limit, synthesis_limits,
+                                 why="the synthesize route was asked for")
     when = now or engine.clock()
     if route is not None:
         return await _by(engine, space, question, route, when, limit,
@@ -164,6 +180,20 @@ def _labels(text: str) -> list[str]:
         if line.startswith("entity: "):
             found.append(line[len("entity: "):].split(" (")[0])
     return found
+
+
+async def _synthesize(engine: "MemoryEngine", space: str, question: str, model: "ChatModel", limit: int,
+                      limits: Optional["SynthesisLimits"], why: str) -> Answered:
+    """Many passages read, a few cited sentences written; only ever asked for by name."""
+    from .synthesis import SynthesisLimits, synthesize
+
+    made = await synthesize(engine, model, space, question, limits=limits or SynthesisLimits(max_passages=limit))
+    text = made.text()
+    if not text:
+        text = f"nothing to say: {made.status.replace('_', ' ')}"
+        if made.reasons:
+            text += f" ({'; '.join(made.reasons)})"
+    return Answered(question, "synthesize", why, text, made.record())
 
 
 async def _recall(engine: "MemoryEngine", space: str, question: str, limit: int, why: str,
