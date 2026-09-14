@@ -154,3 +154,23 @@ async def test_a_file_episode_whose_manifest_does_not_match_its_text_is_refused(
                                             ("document_format", "document_original", "document_manifest")})
     finally:
         await memory.close()
+
+
+async def test_one_import_reads_its_manifest_for_headings_once(monkeypatch):
+    """The cut, its receipt and the embedding inputs all want the same headings. Each read fetches
+    the original and the manifest, hashes both and validates the manifest, so it is done once."""
+    from scone_memory.ingestion import document_outline
+
+    reads = []
+    checked = document_outline.retained_manifest
+
+    async def counting(episode, **options):
+        reads.append(episode.content_hash)
+        return await checked(episode, **options)
+    monkeypatch.setattr(document_outline, "retained_manifest", counting)
+    memory, _ = await engine_with(structure_aware=True, heading_context=True)
+    try:
+        await ingest_document(memory, "default", HTML, filename="terms.html")
+        assert len(reads) == 1, reads
+    finally:
+        await memory.close()
