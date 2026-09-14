@@ -211,9 +211,17 @@ async def llamaindex_session_ranking(item: BenchItem, embedder: Embedder, *, k: 
 
 @dataclass(frozen=True)
 class SideScores:
+    """One side's numbers at every k: whether any answer session was in
+    the top k, whether all were, the mean reciprocal rank, and -- the
+    reference framework's own retrieval measures -- precision at k (the
+    share of the top k that answer) and NDCG at k (the answers' places,
+    discounted by rank)."""
+
     recall_any: dict[int, float]
     recall_all: dict[int, float]
     mrr: float
+    precision: dict[int, float] = field(default_factory=dict)
+    ndcg: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -252,7 +260,9 @@ class Comparison:
     def record(self) -> dict[str, Any]:
         def side(scores: SideScores) -> dict[str, Any]:
             return {"recall_any": {str(k): v for k, v in scores.recall_any.items()},
-                    "recall_all": {str(k): v for k, v in scores.recall_all.items()}, "mrr": scores.mrr}
+                    "recall_all": {str(k): v for k, v in scores.recall_all.items()}, "mrr": scores.mrr,
+                    "precision": {str(k): v for k, v in scores.precision.items()},
+                    "ndcg": {str(k): v for k, v in scores.ndcg.items()}}
 
         ks = sorted(self.delta.recall_any)
         return {"protocol": "comparative-retrieval-v1", "n": self.n,
@@ -267,11 +277,15 @@ class Comparison:
 
 def _scores(rankings: Sequence[tuple[Sequence[str], set[str]]], ks: Sequence[int]) -> SideScores:
     if not rankings:
-        return SideScores({k: 0.0 for k in ks}, {k: 0.0 for k in ks}, 0.0)
+        return SideScores({k: 0.0 for k in ks}, {k: 0.0 for k in ks}, 0.0, {k: 0.0 for k in ks}, {k: 0.0 for k in ks})
     recall_any = {k: round(bench_metrics.hit_rate(rankings, k), 4) for k in ks}
     recall_all = {k: round(sum(1.0 for retrieved, relevant in rankings if relevant <= set(retrieved[:k])) / len(rankings), 4)
                   for k in ks}
-    return SideScores(recall_any, recall_all, round(bench_metrics.mrr(rankings), 4))
+    precision = {k: round(sum(bench_metrics.precision_at(retrieved, relevant, k) for retrieved, relevant in rankings)
+                          / len(rankings), 4) for k in ks}
+    ndcg = {k: round(sum(bench_metrics.ndcg_at(retrieved, relevant, k) for retrieved, relevant in rankings)
+                     / len(rankings), 4) for k in ks}
+    return SideScores(recall_any, recall_all, round(bench_metrics.mrr(rankings), 4), precision, ndcg)
 
 
 def side_delta(ours: SideScores, theirs: SideScores) -> SideScores:
@@ -280,7 +294,9 @@ def side_delta(ours: SideScores, theirs: SideScores) -> SideScores:
         raise ValueError("both sides must be scored at the same ks")
     return SideScores({k: round(ours.recall_any[k] - theirs.recall_any[k], 4) for k in ours.recall_any},
                       {k: round(ours.recall_all[k] - theirs.recall_all[k], 4) for k in ours.recall_all},
-                      round(ours.mrr - theirs.mrr, 4))
+                      round(ours.mrr - theirs.mrr, 4),
+                      {k: round(ours.precision.get(k, 0.0) - theirs.precision.get(k, 0.0), 4) for k in ours.recall_any},
+                      {k: round(ours.ndcg.get(k, 0.0) - theirs.ndcg.get(k, 0.0), 4) for k in ours.recall_any})
 
 
 async def compare(items: Iterable[BenchItem], make_engine: Callable[[], Any], embedder: Embedder, *,
