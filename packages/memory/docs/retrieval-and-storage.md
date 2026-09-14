@@ -1107,6 +1107,54 @@ request, and nothing is re-embedded.
 
 Advertised as `recall.window` and `recall.sentence_window`.
 
+## Cutting a window back to what bears on the question
+
+A window of sentences either side of a hit holds the answer more often
+than the hit alone, and it holds a good deal besides. `compress` keeps
+the sentences the passage was retrieved for, always, and at most a share
+of the sentences the window added around them:
+
+```
+GET /v1/recall?q=what+was+wrong+with+the+crane+jib&window=3&window_unit=sentences&compress=0.5
+scone recall "what was wrong with the crane jib" --window 3 --window-unit sentences --compress 0.5
+```
+
+The reference's sentence optimizer embeds every sentence of a node and
+drops the ones least like the question, so a node found by a sentence
+that happens to score low can lose that sentence. Here the retrieved
+span is never scored, only what widening added around it.
+
+- **Two scorers.** `terms`, the default, needs no model. A sentence
+  scores the weight of the question's words it names, each word weighted
+  by how few of the passage's sentences name it, so a word the whole
+  passage repeats counts for less than one it names once. A sentence
+  naming none is never kept. `embedding` scores a sentence by its cosine
+  to the question under the space's embedder, every sentence in one call,
+  at most 400 per recall.
+- **`compress` is a ceiling.** 0.5 of five sentences keeps at most two,
+  never rounded up; 0 keeps only what was retrieved. Between sentences of
+  equal score, the one nearer the hit is kept.
+- **Kept text is quoted in runs, never spliced.** Adjacent kept sentences
+  are one run of the episode's own bytes, listed in `compressed.runs` as
+  byte offsets per chunk. Runs that are not adjacent are joined by ` … `,
+  so the text never reads as one quote. The item's `start` and `end`
+  bound the first and last run.
+- **What was not cut says so.** A passage with no retrieved span inside
+  it is left whole and counted in `unpinned`; a passage past the
+  embedding budget is left whole and counted in `unscored`; a question
+  naming no word the terms scorer can weigh cuts nothing, and `why` says
+  each in words. `bytes_before` and `bytes_after` count what was saved.
+- **Refused without a window of sentences**, where there is nothing it
+  may cut, and on the command line alongside `--merge` or `--parts`,
+  which answer from the episode again and would put back what was cut.
+  It runs after widening and before withholding, so what withholding
+  scans is what is returned.
+
+Neither scorer is measured. Which share keeps the answer while saving the
+most is an answer-bench question, and until that number exists `compress`
+stays opt-in and its record says `measured: false`. Advertised as
+`recall.compress`.
+
 ## What a codebase says about itself beyond who calls whom
 
 Call edges are not a code graph. Two questions people actually ask are

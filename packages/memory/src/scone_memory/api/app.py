@@ -477,7 +477,7 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.sentence_window": True, "recall.code_context": True,
+            "recall.window": True, "recall.sentence_window": True, "recall.compress": True, "recall.code_context": True,
             "recall.highlights": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
@@ -959,6 +959,15 @@ def create_app(
             description="What window counts. With sentences, each passage grows to the whole "
                         "sentences it touches and then this many more either side (at most 20); "
                         "0 completes only the sentences it touches."),
+        compress: Optional[float] = Query(
+            default=None, ge=0, le=1,
+            description="Cut what a sentence window added back to at most this share of its "
+                        "sentences, those naming the most of the question; the sentences "
+                        "retrieved are never cut. Needs window_unit=sentences. Unmeasured."),
+        compress_scorer: Literal["terms", "embedding"] = Query(
+            default="terms",
+            description="How compress scores a sentence: the question's words it names, "
+                        "or its cosine to the question under this space's embedder."),
         code_context: bool = Query(default=False,
                                    description="Quote the declaration's signature and the file's "
                                                "imports beside a code passage, with their line "
@@ -1031,6 +1040,12 @@ def create_app(
                     "withhold cannot be combined with code_context: code context quotes the "
                     "file again after withholding, which would hand back what was withheld; "
                     "ask for one or the other")
+        if compress is not None and window_unit != "sentences":
+            # Checked before the search. Without a window of sentences
+            # there is nothing compress may cut, and an answer returned
+            # unchanged would read as though it had been applied.
+            raise InvalidInput("compress cuts what a window of sentences added around a hit; "
+                               "ask for window_unit=sentences with it")
         result = await engine.recall(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
@@ -1038,6 +1053,7 @@ def create_app(
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
         )
         opened = None
+        retrieved = list(result.items)
         if window or window_unit == "sentences":
             from ..retrieval.window import widen
 
@@ -1048,6 +1064,16 @@ def create_app(
             result = result.model_copy(update={
                 "items": list(opened.items),
                 "returned_bytes": sum(len(one.text.encode()) for one in opened.items)})
+        cut = None
+        if compress is not None:
+            from ..retrieval.compress import compress as compress_passages
+
+            # After widening, which is what it cuts, and before
+            # withholding, so what withholding scans is what is returned.
+            cut = await compress_passages(result.items, q, hits=retrieved, keep=compress, scorer=compress_scorer,
+                                          embedder=engine.embedder)
+            result = result.model_copy(update={
+                "items": list(cut.items), "returned_bytes": cut.bytes_after})
         kept = None
         if policy:
             from ..retrieval.withhold import withhold
@@ -1087,6 +1113,8 @@ def create_app(
                                     "surfaces": list(kept.surfaces), "why": kept.why}
         if opened is not None:
             response["widened"] = staged(opened.record())
+        if cut is not None:
+            response["compressed"] = cut.record()
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
         if inferred is not None:

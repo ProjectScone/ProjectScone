@@ -128,6 +128,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "hit that --merge cannot")
     p.add_argument("--window-unit", choices=["bytes", "sentences"], default="bytes",
                    help="what --window counts: bytes, or whole sentences with both edges on a sentence boundary")
+    p.add_argument("--compress", type=float, metavar="SHARE",
+                   help="cut what a sentence window added back to at most this share (0 to 1) of its sentences, "
+                        "those naming the most of the question; the sentences retrieved are never cut (unmeasured)")
+    p.add_argument("--compress-scorer", choices=["terms", "embedding"], default="terms",
+                   help="how --compress scores a sentence: the question's words it names, or cosine under the embedder")
     p.add_argument("--withhold", metavar="KINDS",
                    help="withhold matches of these kinds from the answer, comma separated "
                         "(email,phone,ip,card,secret); a net of patterns, never a guarantee")
@@ -1710,6 +1715,16 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
     if args.command == "recall":
         policy: tuple[str, ...] = ()
+        if args.compress is not None:
+            # Checked before the search. --merge and --parts both answer
+            # from the episode again, which would put back what was cut.
+            if args.window_unit != "sentences":
+                raise InvalidInput("--compress cuts what a window of sentences added around a hit; "
+                                   "ask for --window-unit sentences with it")
+            clashing = [name for name, asked_for in (("--merge", args.merge), ("--parts", args.parts)) if asked_for]
+            if clashing:
+                raise InvalidInput(f"--compress cannot be combined with {', '.join(clashing)}: each answers from "
+                                   f"the episode again, which would put back what was cut")
         if args.withhold:
             from ..retrieval.withhold import chosen_kinds
 
@@ -1771,12 +1786,20 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         )
         kept = None
         opened = None
+        shortened = None
+        retrieved = list(result.items)
         if args.window or args.window_unit == "sentences":
             from ..retrieval.window import widen
 
             opened = await widen(engine, space, result.items,
                                  before=args.window or 0, after=args.window or 0, unit=args.window_unit)
             result = result.model_copy(update={"items": list(opened.items)})
+        if args.compress is not None:
+            from ..retrieval.compress import compress
+
+            shortened = await compress(result.items, args.query, hits=retrieved, keep=args.compress,
+                                 scorer=args.compress_scorer, embedder=engine.embedder)
+            result = result.model_copy(update={"items": list(shortened.items)})
         if policy:
             from ..retrieval.withhold import withhold
 
@@ -1818,6 +1841,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 said["highlights"] = [marks.model_dump() for marks in highlights(result.items, args.query)]
             emit(said | ({"merged": _staged(joined.record())} if joined else {})
                       | ({"widened": _staged(opened.record())} if opened else {})
+                      | ({"compressed": shortened.record()} if shortened else {})
                       | ({"withheld": _staged(kept.record())} if kept else {})
                       | ({"code_context": _staged(inside.record())} if inside else {})
                       | ({"inferred": inferred} if inferred is not None else {}))
@@ -1831,6 +1855,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(kept.why, file=out)
         if opened is not None:
             print(opened.why, file=out)
+        if shortened is not None:
+            print(f"compressed {shortened.compressed} passage(s): {shortened.sentences_dropped} sentences left out, "
+                  f"{shortened.bytes_before} bytes to {shortened.bytes_after}; the rule is unmeasured", file=out)
+            if shortened.why:
+                print(shortened.why, file=out)
         if inside is not None:
             print(inside.why, file=out)
             for chunk, context in inside.by_chunk.items():
