@@ -749,7 +749,19 @@ scone recall "write to ana about the deploy" --withhold email,secret
 ```
 
 `GET /v1/recall?withhold=email,secret` (capability `recall.withhold`).
-Kinds: `email`, `phone`, `ip`, `card`, `secret`.
+Kinds: `email`, `phone`, `ip`, `card`, `secret`, and the name kinds
+`person`, `organisation`, `place`.
+
+The name kinds withhold the names the space's graph holds for entities of
+that kind, matched whole on word boundaries, without regard to case or
+spacing: `Acme Robotics` is withheld in `ACME  Robotics`, not in
+`Acmeville`, and a longer name goes before a shorter one inside it. Names
+shorter than three characters are too easily a word and are not used; the
+report counts them in `names_skipped` and the names it did use per kind in
+`names_known`. A name the graph does not hold is not found. Someone never
+recorded as an entity, or recorded without a kind, is not withheld, and
+the report says so. The graph is read before the search, and a graph still
+being built refuses the request rather than withholding nothing.
 
 Four things it does deliberately:
 
