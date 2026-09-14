@@ -526,12 +526,20 @@ given (a contextual prefix included), so a hit is the vector the embedder
 would have returned, and a different embedder, width or prefix is a
 different key. `SCONE_EMBEDDING_CACHE=memory` keeps vectors for the
 process; a path keeps them in a file every process that opens it shares,
-so tomorrow's `scone sync` reuses what today's embedded. Unset, nothing
-is cached. A cache holds at most 20,000 vectors (`max_entries`; about
-120 MB at 768 doubles each) and drops the least recently used past that;
-its record says how many it dropped. A vector read back from the file is
-checked for width and finiteness, and a row that fails is removed rather
-than served.
+so tomorrow's `scone sync` reuses what today's embedded. Unset (or
+`none`), nothing is cached. A file cache holds at most 20,000 vectors
+(`max_entries`; about 120 MB on disk at 768 doubles each) and the
+in-memory one 5,000 (a Python list of floats is about four times the
+packed size); both drop the least recently used past that, evicting as
+they write, and their record says how many they dropped. A vector read
+back from the file is checked for width and finiteness, and a row that
+fails is removed rather than served. A cache is not evidence and cannot
+refuse a write: one that fails (a full disk, a damaged or read-only
+file, a locked database) is a miss, counted as `failures` in its record
+with the last failure named, and the embedder answers instead. A path
+that cannot be opened is refused by name before any store is opened.
+`reembed_vectors` clears the cache first, since a model can change
+behind an id that did not; the engine closes the cache with its stores.
 
 Every receipt says what it did not pay for: `Added.embeddings_reused` on
 the record, `embeddings_reused` in `map`'s and `sync`'s receipts.

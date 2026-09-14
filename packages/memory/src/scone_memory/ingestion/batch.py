@@ -48,17 +48,31 @@ async def _embed_chunks(embedder: Embedder, texts: Sequence[str], *,
     identifier, dimension = embedder.id, embedder.dim
     if cache is not None and dimension:
         keys = [cache_key(identifier, dimension, text) for text in texts]
-        found = cache.take(keys, dimension)
-        missing = [at for at, key in enumerate(keys) if key not in found]
+        # A cache is not evidence and may not refuse a write: one that
+        # fails is a miss, told so, and the embedder answers instead.
+        try:
+            found = cache.take(keys, dimension)
+        except Exception as error:  # noqa: BLE001 - whatever the store raised, the record is still stored
+            cache.failed("taking", error)
+            found = {}
         if reused is not None:
             reused.extend(key in found for key in keys)
-        fresh = (await _embed_chunks(embedder, [texts[at] for at in missing], checkpoint=checkpoint, binding=binding)
-                 if missing else [])
+        # Each missing text once, however many chunks share it.
+        wanted = list(dict.fromkeys(key for key in keys if key not in found))
+        first_text: dict[str, str] = {}
+        for key, text in zip(keys, texts):
+            first_text.setdefault(key, text)
+        fresh = (await _embed_chunks(embedder, [first_text[key] for key in wanted], checkpoint=checkpoint, binding=binding)
+                 if wanted else [])
         # Kept once the whole batch is validated: a partial batch fails
         # before this line and leaves nothing behind.
-        cache.keep({keys[at]: vector for at, vector in zip(missing, fresh)}, dimension)
-        answered = dict(zip(missing, fresh))
-        return [answered[at] if at in answered else found[keys[at]] for at in range(len(texts))]
+        answered = dict(zip(wanted, fresh))
+        if answered:
+            try:
+                cache.keep(answered, dimension)
+            except Exception as error:  # noqa: BLE001
+                cache.failed("keeping", error)
+        return [list(answered[key]) if key in answered else found[key] for key in keys]
     if reused is not None:
         reused.extend(False for _ in texts)
     prefix = ''
