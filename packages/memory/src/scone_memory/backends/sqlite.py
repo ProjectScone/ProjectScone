@@ -509,11 +509,17 @@ class SqliteDocumentStore:
     narrows_metadata = True
     #: This store keeps a context index beside chunk text (see ContextIndex).
     context_lane = True
+    #: This store can search a term's family by prefix (see PrefixSearch).
+    prefix_terms = True
 
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
-        match = _match(query)
+        return await self.search_terms(space, query, limit, filter, prefixes=())
+
+    async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
+                           prefixes: Sequence[str]) -> list[tuple[int, float]]:
+        match = _match(query, prefixes)
         if match is None:
             return []
         sql = (
@@ -1171,9 +1177,10 @@ class SqliteVectorIndex:
         self.conn.commit()
 
 
-def _match(query: str) -> str | None:
-    """The FTS5 expression for ``query``'s tokens, OR-joined and quoted; None when it has none."""
-    terms = tokenize(query)
+def _match(query: str, prefixes: Sequence[str] = ()) -> str | None:
+    """The FTS5 expression for ``query``'s tokens and any prefixes, OR-joined and quoted; None when empty."""
+    terms = ['"' + t.replace('"', '""') + '"' for t in tokenize(query)]
+    terms += ['"' + p.replace('"', '""') + '"*' for p in prefixes if p]
     if not terms:
         return None
-    return " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
+    return " OR ".join(terms)

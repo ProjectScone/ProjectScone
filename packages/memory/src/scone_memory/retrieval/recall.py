@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Optional
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
 from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, RerankTrace
-from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index
+from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
 from . import fact_recall, fusion, supersession
@@ -77,6 +77,8 @@ class RecallRuntime:
     synonyms: "Synonyms | None" = None
     #: Whether the words a chunk is under are searched as a lane of their own.
     context_lane: bool = False
+    #: Whether a query term's family is searched by stem prefix in the text lane.
+    lexical_stems: bool = False
 
 
 def _ms(since: float) -> float:
@@ -136,6 +138,12 @@ async def recall(
     if expansion is not None and not expansion.matched:
         expansion = None
     text_query = expansion.text_query if expansion is not None else query
+    stem_prefixes: list[str] = []
+    prefix_store = prefix_search(runtime.documents) if runtime.lexical_stems else None
+    if runtime.lexical_stems:
+        from .lexical import tokenize as _tokenize
+        from .stems import prefixes as _prefixes
+        stem_prefixes = _prefixes(_tokenize(text_query))
     candidate_limit = validate_candidate_limit(runtime.candidate_limit if candidate_limit is None else candidate_limit)
     if type(rerank) is not bool:
         raise InvalidInput("rerank must be a boolean")
@@ -176,6 +184,7 @@ async def recall(
         "synonyms": (None if expansion is None
                      else {"matched": len(expansion.matched), "added": len(expansion.added), "capped": expansion.capped}),
         "context_lane": runtime.context_lane,
+        "prefixes": ({"added": len(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
         "similarity_floor": runtime.similarity_floor,
         "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
                    "conditions": dict(conditions) if conditions is not None else None,
@@ -213,11 +222,12 @@ async def recall(
     text_lane: list[tuple[int, float]] = []
     try:
         t0 = time.perf_counter()
-        text_lane = await runtime.documents.search_text(
-            space, text_query, depth,
-            TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
-                       kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
-        )
+        text_filter = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                                 kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
+        if prefix_store is not None and stem_prefixes:
+            text_lane = await prefix_store.search_terms(space, text_query, depth, text_filter, prefixes=stem_prefixes)
+        else:
+            text_lane = await runtime.documents.search_text(space, text_query, depth, text_filter)
         latency["text"] = _ms(t0)
     except Exception as e:  # noqa: BLE001
         degraded.append(f"text: {type(e).__name__}: {e}")
@@ -460,6 +470,7 @@ async def recall(
         returned_bytes=sum(len(i.text.encode()) for i in result_items),
         space_bytes=counts.bytes,
         expansion=expansion.record() if expansion is not None else None,
+        prefixes=({"added": list(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
     )
     latency["total"] = _ms(started)
     if candidate_limit is not None:

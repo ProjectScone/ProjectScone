@@ -1087,6 +1087,26 @@ index, and an engine with the lane on over a store that does not
 reports `context lane: not kept by …` in `degraded` rather than
 pretending the lane ran.
 
+### A word's family by prefix
+
+"bills", "billing" and "billed" are one word to a reader and three to the
+text lane. The usual answer is a stemmer over the index, and it is the
+wrong one here: it rewrites what every store holds, ties the tokenizer's
+version to a set of language rules, and puts a guess ("policies" and
+"police" as one) where a reader cannot see it. `SCONE_LEXICAL_STEMS=1`
+(`MemoryEngine(..., lexical_stems=True)`) does less: a query term that
+ends in a known English suffix also searches as a prefix of its stem —
+`bill*` for "billing", `invoic*` for "invoices" — so the family is found,
+the index is untouched, and the result's `prefixes` says which prefixes
+were added and whether the store could take them (`applied`; the SQLite
+and in-memory stores can, and a family counts as one term in the score,
+not several). A language the rules do not know, a short word, a number,
+is left exactly as it was. The rules keep a stem of at least three
+letters after a strong suffix and four after a plural or a final "e", do
+not strip a plural after "s", "u" or "i", and reduce a doubled consonant
+except where English keeps it. Measured on LongMemEval-S before it was
+a flag; the numbers are on the pull request that added it.
+
 ### Synonyms the caller wrote down
 
 The lexical lane finds the words a passage has, and only those. A

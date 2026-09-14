@@ -425,6 +425,9 @@ class RecallResult(BaseModel):
     #: a term matched: ``matched``, ``added``, ``offered``, ``capped``. None
     #: when no list is configured or nothing in the query was on it.
     expansion: Optional[dict[str, object]] = None
+    #: With stem prefixes on: the prefixes added to the text lane's query
+    #: (``added``) and whether the store could take them (``applied``).
+    prefixes: Optional[dict[str, object]] = None
 
     @property
     def context_reduction(self) -> float:

@@ -159,24 +159,31 @@ class Bm25:
                 del self._df[term]
 
     def search(
-        self, query: str, limit: int, allowed: Iterable[int] | None = None
+        self, query: str, limit: int, allowed: Iterable[int] | None = None, prefixes: Iterable[str] = ()
     ) -> list[tuple[int, float]]:
+        """Documents by BM25 over the query's terms; a prefix counts every
+        vocabulary term that starts with it as one term, so a word's family
+        ("bill" for billing, billed, bills) is one signal, not several."""
         terms = tokenize(query)
-        if not terms or not self._docs:
+        families = [(prefix, [term for term in self._df if term.startswith(prefix)]) for prefix in prefixes]
+        families = [(prefix, members) for prefix, members in families if members]
+        if (not terms and not families) or not self._docs:
             return []
         n = len(self._docs)
         avg_len = sum(self._lengths.values()) / n
+        family_df = {prefix: min(n, sum(self._df[member] for member in members)) for prefix, members in families}
         candidates = self._docs.keys() if allowed is None else [d for d in allowed if d in self._docs]
         scored: list[tuple[int, float]] = []
         for doc_id in candidates:
             counts = self._docs[doc_id]
             length = self._lengths[doc_id]
             score = 0.0
-            for term in terms:
-                tf = counts.get(term)
-                if not tf:
-                    continue
-                df = self._df[term]
+            weighed: list[tuple[int, int]] = [(counts[term], self._df[term]) for term in terms if counts.get(term)]
+            for prefix, members in families:
+                tf = sum(counts.get(member, 0) for member in members)
+                if tf:
+                    weighed.append((tf, family_df[prefix]))
+            for tf, df in weighed:
                 idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
                 denom = tf + self.k1 * (1 - self.b + self.b * length / avg_len)
                 score += idf * tf * (self.k1 + 1) / denom
