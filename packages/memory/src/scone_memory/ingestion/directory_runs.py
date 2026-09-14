@@ -162,7 +162,8 @@ class DirectoryRunStore:
                 'status': 'completed' if result.complete else 'partial', 'finished_at': datetime.now(timezone.utc),
                 'collection_instance': result.collection_id, 'source_count': len(result.receipts),
                 'issue_count': len(result.issues), 'outcome_count': len(result.receipts) + len(result.issues),
-                'skipped': result.skipped})
+                'skipped': result.skipped, 'claims': result.claims, 'claims_closed': result.claims_closed,
+                'claims_unread': result.claims_unread})
             for index, source in enumerate(result.receipts):
                 outcome = SyncOutcome(index=index, source=SyncSourceOutcome.model_validate(asdict(source)))
                 self._insert_outcome(db, token, outcome)

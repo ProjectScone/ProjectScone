@@ -93,6 +93,21 @@ existing serialized attachment identities; existing version 1 evidence stays
 readable. Re-extract an old OCR document to obtain typed regions. When using a
 workflow, change its `parser_revision` and use a new run for that re-extraction.
 
+## Claims from stored source files
+
+A source file, or a manifest the text reader keeps line by line
+(`pyproject.toml`, `Cargo.toml`, `requirements*.txt`), ingested as a document
+says what it defines, imports, calls and depends on, recorded as claims cited
+to the document's episode and quoted from its lines (at most 2,000 characters
+of a line), under the filename it was stored with; the receipt's `claims`
+counts them, and it is zero for every other document. A `package.json` is
+walked as JSON, not kept as lines, so its dependencies are read through `map`
+rather than from a stored document.
+The reader sees the document's segments one per line, so every quote is a
+line the episode holds. A name given bare (`utils.py`) names a bare module;
+give the path from the project root, as the directory sync does, for the
+module the graph's other files name.
+
 ## Coverage
 
 | Reader | Evidence retained | Limits |
