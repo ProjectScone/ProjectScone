@@ -355,9 +355,12 @@ It is off unless the server is started with `SCONE_URL_IMPORT=1`, because
 a server that fetches whatever URL it is told to will fetch its own
 metadata service, its database, or the neighbour on its subnet. When on,
 three rules hold, each with a test: every address a hostname resolves to
-must be on the public internet, at the first URL and at every redirect
-(`SCONE_URL_IMPORT_PRIVATE=1`, or `WebLimits(allow_private=True)` in
-code, is for a lab and says so); a page is read up to `max_bytes`
+must be on the public internet, at the first URL and at every redirect,
+and the connection is made to the address that was checked rather than to
+the name again, so a name that changes its answer between the check and
+the connection gains nothing (`SCONE_URL_IMPORT_PRIVATE=1`, or
+`WebLimits(allow_private=True)` in code, is for a lab and says so); a page
+is read up to `max_bytes`
 (10 MiB by default) and refused past it rather than cut, a redirect chain
 past `max_redirects` (5) is refused, and the fetch has a deadline; a media
 type the document lane does not read is refused, not guessed at. Only
