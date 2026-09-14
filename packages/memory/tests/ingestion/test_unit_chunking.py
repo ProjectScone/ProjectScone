@@ -164,3 +164,10 @@ async def test_over_http_a_file_import_can_ask_for_units(memory):
         wrong = await client.post("/v1/documents", json={"attachment_id": stored.json()["attachment_id"],
                                                          "chunking": "pages"})
         assert wrong.status_code == 400
+
+
+async def test_a_file_imported_again_asking_for_units_keeps_its_first_cut(memory):
+    first = await ingest_document(memory, "default", ROWS, filename="people.csv")
+    again = await ingest_document(memory, "default", ROWS, filename="people.csv", chunking="unit")
+    assert again.added.deduplicated and again.added.episode_id == first.added.episode_id
+    assert len(await memory.documents.chunks_of("default", first.added.episode_id)) == 1
