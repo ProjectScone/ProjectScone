@@ -340,6 +340,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
     g.add_argument("--limit", type=int, default=200, help="entities to list (1 to 1000)")
     g.add_argument("--max-bytes", type=int, default=16000, help="byte budget for the answer")
+    g = graph.add_parser("impact", help="what rests on the changes in a diff (git diff's output): the "
+                                        "declarations its hunks touch, and everything here that depends on them")
+    g.add_argument("diff", nargs="?", default="-", help="a unified diff file, or - for stdin (default)")
+    g.add_argument("--root", default=".", help="the tree after the change (the diff's b side), where the changed files are read (default .)")
+    g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
+    g.add_argument("--limit", type=int, default=200, help="dependants to list (1 to 1000)")
     g = graph.add_parser("health", help="what in the graph wants attention, counted with examples")
     g.add_argument("--limit", type=int, default=None, help="examples shown for each concern")
     g.add_argument("--max-bytes", type=int, default=None)
@@ -1172,7 +1178,7 @@ def _ledger_json(value: object, indent: int | None = 2) -> str:
     return json.dumps(value, ensure_ascii=False, indent=indent).encode("utf-8", "backslashreplace").decode("utf-8")
 
 
-async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
+async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, stdin=None) -> int:
     """The graph subcommands, on the same projection as the HTTP routes.
     Each reads the clock once, so what it shows and the instant it says it
     was read at agree. Exits 1 when a name is ambiguous or unknown."""
@@ -1306,6 +1312,26 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         print(_ledger_json(found_pairs.record(space, status="current", as_of=when)) if getattr(args, "json", False)
               else found_pairs.text, file=out)
         return 0
+    if command == "impact":
+        from ..entities.impact import impact
+
+        try:
+            text = read_source(args.diff, stdin if stdin is not None else sys.stdin)
+        except (OSError, UnicodeDecodeError) as error:
+            raise InvalidInput(f"cannot read a diff from {args.diff}: {error}") from error
+        result = await impact(engine, space, text, root=args.root, max_hops=args.max_hops, limit=args.limit)
+        if args.json:
+            print(json.dumps(result.record()), file=out)
+            return 0
+        print(result.why, file=out)
+        for touched in result.targets:
+            where = f" (lines {touched.lines[0]}-{touched.lines[1]})" if touched.name else ""
+            print(f"  touched  {touched.asked}{where}: {touched.status}, {touched.reached} rest on it", file=out)
+        for reach in result.reached:
+            print(f"  {reach.depth}  {reach.label}  ({reach.through} {reach.via})", file=out)
+        if result.by_depth:
+            print("reached: " + ", ".join(f"{count} at {depth} hop(s)" for depth, count in sorted(result.by_depth.items())), file=out)
+        return 0
     if command == "affected":
         from ..entities.affected import affected
 
@@ -1394,7 +1420,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     space = args.space
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
     if args.command == "graph":
-        return await graph_command(args, engine, out)
+        return await graph_command(args, engine, out, stdin)
 
     if args.command == "sync-directory":
         from .directory_cli import run_directory_sync
