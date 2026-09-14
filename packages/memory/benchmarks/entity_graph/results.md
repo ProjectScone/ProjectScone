@@ -62,16 +62,17 @@ unmeasured, and its threshold fails.
 | Path false positives | 0 | at most 0 |
 | Fragmentation | 1.2 | at most 1.2 |
 | Alias B-cubed F1 | 0.935 | at least 0.9 |
-| View bytes (knowledge, report, context) | 9,366, 5,586, 684 | recorded |
+| View bytes (knowledge, report, context) | 9,366, 5,721, 684 | recorded |
 | Build time per 10,000 facts | about 0.5 s | recorded |
 
-Artefact: `60f8be688577a19d50f42f9e44b734e2c3c48b02c72a24cbdacb6145932444f3`. The scores
-match the first recording (`44ceae91…`). The hash has moved four times
+Artefact: `baac3a0baa964ed0918c29bd0fe93c2d359a838c958d77f26c16711e972876db`. The scores
+match the first recording (`44ceae91…`). The hash has moved five times
 since, and no score has changed on any of them: when the
 missing-evidence and out-of-view counts joined the report
 (`daceac58…`); when the knowledge view began saying when things held
 (`e92a2920…`); when it said where its relation vocabulary came from
-(`74c9275f…`); and now that the report counts externals.
+(`74c9275f…`); when the report began counting externals (`60f8be68…`);
+and now that the analysis says what its community guards did.
 
 The second move added 465 bytes, both of them the view saying what it
 used to leave a reader to assume: every relation now lists the stretches
@@ -95,7 +96,7 @@ its own vocabulary says so here instead; this fixture configures none,
 and the point of the field is that "none" is stated rather than left as
 the reader's assumption.
 
-**This recording is late.** The fields landed with the vocabulary work
+**The third recording was late.** The fields landed with the vocabulary work
 and the baseline was not re-recorded, so
 `test_the_recorded_artefact_is_the_one_the_fixture_gives` failed for
 several commits — which is the test doing precisely its job. It went
@@ -112,6 +113,20 @@ diffing the report the fixture gives before and after that merge:
 those three lines are the whole difference. It was late the same way
 the third was: #38 merged without re-recording, and main's suite
 failed this test until now.
+
+The fifth move adds **135 bytes** to the report and nothing to the
+knowledge view or the context packet. The analysis is now
+`scone.analysis/2`, a string of the same length, and its coverage carries
+six more fields, every one zero or null on this fixture, whose ten
+entities give no community a guard would look at:
+
+```json
+"split_oversized": 0, "split_nested": 0, "unsplittable": 0,
+"detach_hubs": null, "hubs_detached": 0, "modularity_before_guards": null
+```
+
+Checked as the third was: removing those six keys and writing the old
+version back gives 5,586 bytes, the previous recording.
 
 ## What the numbers say
 
