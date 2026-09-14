@@ -156,3 +156,58 @@ async def test_table_context_embedding_policy_reaches_standard_and_in_process_en
         assert local.table_context_embeddings is True
     finally:
         await local.close()
+
+
+async def test_a_synonym_file_is_read_at_build_time_and_reaches_every_engine(tmp_path):
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import FILE_SETTINGS, build_in_process_engine, build_synonyms
+
+    path = tmp_path / "synonyms.txt"
+    path.write_text("car, automobile\n")
+    settings = Settings.from_env({"SCONE_SYNONYMS": str(path)})
+    assert settings.synonyms == str(path) and "synonyms" in FILE_SETTINGS
+    assert Settings.from_env({}).synonyms is None and build_synonyms(Settings.from_env({})) is None
+    engine = await build_engine(settings)
+    try:
+        assert engine.synonyms is not None and engine.synonyms.record() == {"groups": 1, "terms": 2}
+    finally:
+        await engine.close()
+    in_process = await build_in_process_engine(settings, HashEmbedder())
+    assert in_process.synonyms is not None and in_process.synonyms.expand("a car").added == ("automobile",)
+    with pytest.raises(InvalidInput, match="not found"):
+        await build_engine(Settings.from_env({"SCONE_SYNONYMS": str(tmp_path / "missing.txt")}))
+
+
+async def test_the_context_lane_is_a_flag_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_CONTEXT_LANE": "1"})
+    assert settings.context_lane is True and Settings.from_env({}).context_lane is False
+    assert "context_lane" in ENGINE_SETTINGS
+    engine = await build_engine(settings)
+    try:
+        assert engine.context_lane is True
+    finally:
+        await engine.close()
+    assert (await build_in_process_engine(settings, HashEmbedder())).context_lane is True
+    with pytest.raises(InvalidInput, match="SCONE_CONTEXT_LANE"):
+        Settings.from_env({"SCONE_CONTEXT_LANE": "maybe"})
+
+
+async def test_the_vector_weight_is_a_number_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_VECTOR_WEIGHT": "0.5"})
+    assert settings.vector_weight == 0.5 and Settings.from_env({}).vector_weight is None and "vector_weight" in ENGINE_SETTINGS
+    assert (await build_in_process_engine(Settings.from_env({}), HashEmbedder())).vector_weight == 0.25, "unset follows the embedder"
+    engine = await build_engine(settings)
+    try:
+        assert engine.vector_weight == 0.5
+    finally:
+        await engine.close()
+    assert (await build_in_process_engine(settings, HashEmbedder())).vector_weight == 0.5
+    for bad in ("0", "5", "many", "nan"):
+        with pytest.raises(InvalidInput, match="SCONE_VECTOR_WEIGHT"):
+            Settings.from_env({"SCONE_VECTOR_WEIGHT": bad})

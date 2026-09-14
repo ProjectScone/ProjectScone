@@ -148,6 +148,7 @@ async def test_failures_are_evidence_too():
 
     engine.vectors.search = explode
     engine.documents.search_text = explode
+    engine.documents.search_terms = explode  # the text lane's prefix path is the same lane
     with pytest.raises(RuntimeError):
         await engine.recall("default", "anything")
     with pytest.raises(NotFound):

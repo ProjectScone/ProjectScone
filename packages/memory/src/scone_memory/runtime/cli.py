@@ -77,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--key", dest="dedup_key", help="identity across writes: the same key again is a duplicate, not a second record")
     p.add_argument("--replace", action="store_true", help="with --key: changed content replaces the record the key names")
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
+    p.add_argument("--chunking", choices=("length", "code", "structure", "semantic"),
+                   help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
     p = sub.add_parser("when", help="a question about dates answered by computation, with its working")
@@ -102,6 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-rerank", action="store_true", help="skip the configured reranker for this search")
     p.add_argument("--graph-boost", action="store_true",
                    help="add the entity lane: passages naming what the question is about, or one relation away")
+    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
+                   help="fuse the lanes by rank (default) or by each lane's scores scaled to its own range")
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each")
@@ -114,6 +118,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--code-context", action="store_true",
                    help="for a passage of code, also quote the signature it sits inside and the "
                         "imports of its file; the passage itself is not changed")
+    p.add_argument("--highlight", action="store_true",
+                   help="say which words of each passage the lexical lane matched; with --json, "
+                        "the code-point spans of each, beside the items")
     p.add_argument("--parts", action="store_true",
                    help="search each part of a multi-part question and give every part a turn "
                         "(measured to change nothing on LongMemEval; off by default)")
@@ -154,6 +161,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="show the impact and remove nothing")
     p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
                    help="exclude: take the claims only this source supported out of recall, reversibly (default keep)")
+
+    p = sub.add_parser("forget-matching", help="forget every source a filter selects: previews unless --apply")
+    p.add_argument("--source-prefix", help="sources whose name starts with this text")
+    p.add_argument("--tag", action="append", default=[], help="a tag every selected source carries, repeatable")
+    p.add_argument("--conditions", help='metadata filter as JSON, e.g. {"field": "sync", "is": "old"}')
+    p.add_argument("--kind", help="only episodes of this kind")
+    p.add_argument("--limit", type=int, default=100, help="episodes one pass forgets (1 to 1000, default 100)")
+    p.add_argument("--apply", action="store_true", help="forget; needs --selection from a preview")
+    p.add_argument("--selection", help="the selection digest a preview printed")
+    p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
+                   help="exclude: take the claims only these sources supported out of recall, reversibly")
 
     p = sub.add_parser("facts", help="list facts")
     p.add_argument("--all", action="store_true", help="include closed facts")
@@ -255,6 +273,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them "
                         "before scoring, to measure what that changes")
+    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
+                   help="fuse recall's lanes by rank (default) or by score, to measure what that changes")
     p.add_argument("--window", type=int, default=0, metavar="BYTES",
                    help="widen every returned passage by this many bytes either side before "
                         "scoring, to measure what that changes")
@@ -320,6 +340,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
     g.add_argument("--limit", type=int, default=200, help="entities to list (1 to 1000)")
     g.add_argument("--max-bytes", type=int, default=16000, help="byte budget for the answer")
+    g = graph.add_parser("impact", help="what rests on the changes in a diff (git diff's output): the "
+                                        "declarations its hunks touch, and everything here that depends on them")
+    g.add_argument("diff", nargs="?", default="-", help="a unified diff file, or - for stdin (default)")
+    g.add_argument("--root", default=".", help="the tree after the change (the diff's b side), where the changed files are read (default .)")
+    g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
+    g.add_argument("--limit", type=int, default=200, help="dependants to list (1 to 1000)")
     g = graph.add_parser("health", help="what in the graph wants attention, counted with examples")
     g.add_argument("--limit", type=int, default=None, help="examples shown for each concern")
     g.add_argument("--max-bytes", type=int, default=None)
@@ -426,6 +452,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fan-in", type=int, default=6, help="nodes one summary is written from (2 to 24, default 6)")
     p.add_argument("--max-levels", type=int, default=5, help="levels above the chunks (1 to 5, default 5)")
     p.add_argument("--dry-run", action="store_true", help="write the tree and print it without storing it")
+    p = sub.add_parser("bench-questions",
+                       help="write questions a corpus answers with the local model, anchored to quotes, "
+                            "or measure retrieval on the corpus with a set written before")
+    p.add_argument("root", help="a directory of text files (.md, .txt, .rst) and PDFs")
+    p.add_argument("--set", required=True, help="the question set file to write (--write) or to measure with")
+    p.add_argument("--write", action="store_true",
+                   help="write the set with the configured chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL)")
+    p.add_argument("--per-chunk", type=int, default=2, help="questions asked per chunk when writing (default 2)")
+    p.add_argument("--max-chunks", type=int, default=200, help="chunks sampled when writing (default 200)")
+    p.add_argument("--seed", type=int, default=42, help="the sample's seed (default 42)")
+    p.add_argument("--k", default="1,5,10", help="comma-separated k values when measuring (default 1,5,10)")
+    p.add_argument("--chunk-target", type=int, default=DEFAULT_CHUNK_TARGET,
+                   help=f"the chunk size the corpus is stored at (default {DEFAULT_CHUNK_TARGET})")
 
     p = sub.add_parser("tune",
                        help="measure retrieval settings against each other on a dataset, and say which to take")
@@ -899,6 +938,41 @@ async def filesystem_command(args: argparse.Namespace, engine: MemoryEngine, std
         raise InvalidInput(str(refused)) from None
 
 
+async def bench_questions_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Write a question set for a corpus, or measure the corpus with one.
+    Its own in-process store; the configured model is used only to write."""
+    from .. import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from ..bench.questions import QuestionSet, measure, store_corpus, write_questions
+    from .config import build_chat
+
+    if not pathlib.Path(args.root).is_dir():
+        raise InvalidInput(f"{args.root} is not a directory of documents")
+    if args.chunk_target < 1:
+        raise InvalidInput("--chunk-target must be a positive number of characters")
+    try:
+        ks = tuple(int(part) for part in args.k.split(",") if part.strip())
+    except ValueError:
+        raise InvalidInput("--k must be comma-separated integers") from None
+    model = build_chat(settings) if args.write else None
+    if args.write and model is None:
+        raise InvalidInput("writing questions needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                chunk_target=args.chunk_target).open()
+    try:
+        stored = await store_corpus(engine, "corpus", args.root)
+        if model is not None:
+            written = await write_questions(engine, "corpus", model, corpus=args.root, model_name=settings.chat_model or "",
+                                            per_chunk=args.per_chunk, max_chunks=args.max_chunks, seed=args.seed)
+            written.save(args.set)
+            print(json.dumps({**written.as_payload(), "stored": stored}) if args.json else written.text(), file=out)
+            return 0
+        report = await measure(engine, "corpus", QuestionSet.load(args.set), ks=ks)
+        print(json.dumps({**report.as_payload(), "stored": stored}) if args.json else report.text(), file=out)
+        return 0
+    finally:
+        await engine.close()
+
+
 async def bench_code_command(args: argparse.Namespace, settings: Settings, out) -> int:
     """Measure code retrieval on a corpus of files. Its own in-process
     store, so the configured one is neither read nor written."""
@@ -958,7 +1032,8 @@ async def bench_command(args: argparse.Namespace, settings: Settings, out) -> in
 
     report = await run_bench(make, items, ks=ks, limit=args.limit, include_abstention=args.include_abstention,
                              dataset=str(args.dataset), progress=progress, history=args.history,
-                             cross_queries=args.cross_queries, merge=args.merge, window=args.window)
+                             cross_queries=args.cross_queries, merge=args.merge, window=args.window,
+                             fusion=args.fusion)
     if not args.json:
         print("", file=sys.stderr)
     if args.out:
@@ -1109,7 +1184,7 @@ def _ledger_json(value: object, indent: int | None = 2) -> str:
     return json.dumps(value, ensure_ascii=False, indent=indent).encode("utf-8", "backslashreplace").decode("utf-8")
 
 
-async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
+async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, stdin=None) -> int:
     """The graph subcommands, on the same projection as the HTTP routes.
     Each reads the clock once, so what it shows and the instant it says it
     was read at agree. Exits 1 when a name is ambiguous or unknown."""
@@ -1243,6 +1318,26 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out) -> 
         print(_ledger_json(found_pairs.record(space, status="current", as_of=when)) if getattr(args, "json", False)
               else found_pairs.text, file=out)
         return 0
+    if command == "impact":
+        from ..entities.impact import impact
+
+        try:
+            text = read_source(args.diff, stdin if stdin is not None else sys.stdin)
+        except (OSError, UnicodeDecodeError) as error:
+            raise InvalidInput(f"cannot read a diff from {args.diff}: {error}") from error
+        result = await impact(engine, space, text, root=args.root, max_hops=args.max_hops, limit=args.limit)
+        if args.json:
+            print(json.dumps(result.record()), file=out)
+            return 0
+        print(result.why, file=out)
+        for touched in result.targets:
+            where = f" (lines {touched.lines[0]}-{touched.lines[1]})" if touched.name else ""
+            print(f"  touched  {touched.asked}{where}: {touched.status}, {touched.reached} rest on it", file=out)
+        for reach in result.reached:
+            print(f"  {reach.depth}  {reach.label}  ({reach.through} {reach.via})", file=out)
+        if result.by_depth:
+            print("reached: " + ", ".join(f"{count} at {depth} hop(s)" for depth, count in sorted(result.by_depth.items())), file=out)
+        return 0
     if command == "affected":
         from ..entities.affected import affected
 
@@ -1353,6 +1448,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         if tree.root is not None:
             print(tree.root.text, file=out)
         return 0
+        return await graph_command(args, engine, out, stdin)
 
     if args.command == "sync-directory":
         from .directory_cli import run_directory_sync
@@ -1385,7 +1481,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     space, raw, kind=args.kind, source=args.source, tags=args.tag,
                     created_at=args.created_at, metadata=metadata,
                     attachment_ids=[attachment.attachment_id] if attachment else [],
-                    dedup_key=args.dedup_key, replace=args.replace,
+                    dedup_key=args.dedup_key, replace=args.replace, chunking=args.chunking,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)
@@ -1466,7 +1562,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
-            rerank=not args.no_rerank, graph_boost=args.graph_boost,
+            rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
         )
         kept = None
         opened = None
@@ -1511,6 +1607,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             result = result.model_copy(update={"items": list(inside.items)})
         if args.json:
             said = result.model_dump() | {"context_reduction": result.context_reduction}
+            if args.highlight:
+                from ..retrieval.highlights import highlights
+
+                said["highlights"] = [marks.model_dump() for marks in highlights(result.items, args.query)]
             emit(said | ({"merged": _staged(joined.record())} if joined else {})
                       | ({"widened": _staged(opened.record())} if opened else {})
                       | ({"withheld": _staged(kept.record())} if kept else {})
@@ -1540,11 +1640,24 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         for f in result.history:
             until = f.valid_until[:10] if f.valid_until else "?"
             print(f"was   {f.subject} {f.predicate} {f.object}  ({f.valid_from[:10]} to {until}; {f.closed_reason})", file=out)
-        for item in result.items:
+        marked = None
+        if args.highlight:
+            from ..retrieval.highlights import highlights
+
+            marked = highlights(result.items, args.query)
+        for position, item in enumerate(result.items):
             sim = f" sim={item.similarity:.2f}" if item.similarity is not None else ""
             print(f"{item.score:.2f}{sim}  {item.created_at[:10]}  #{item.episode_id}  {item.text.strip()[:200]}", file=out)
+            if marked is not None:
+                words = list(dict.fromkeys(item.text[span.start:span.end] for span in marked[position].spans))
+                more = " and more" if marked[position].truncated else ""
+                print(f"      matched: {', '.join(words) or 'no word of the question'}{more}", file=out)
         for d in result.degraded:
             print(f"degraded: {d}", file=sys.stderr)
+        if result.narrowing is not None and result.narrowing.window_exhausted:
+            n = result.narrowing
+            print(f"note: the narrowing removed {n.postfiltered_out} candidate(s) and a lane's window of "
+                  f"{max(n.vector_window, n.text_window)} was full when it did; memories that fit may lie deeper", file=out)
         if result.low_confidence:
             top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)
@@ -1626,6 +1739,27 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             return 2
         receipt = await engine.delete_space(space)
         emit({"deleted": space, **receipt.model_dump()}) if args.json else print(f"deleted space {space}: {space_line(receipt)}", file=out)
+        return 0
+
+    if args.command == "forget-matching":
+        conditions = json.loads(args.conditions) if args.conditions else None
+        bulk = await engine.forget_matching(space, source_prefix=args.source_prefix, tags=args.tag,
+                                              conditions=conditions, kind=args.kind, limit=args.limit, apply=args.apply,
+                                              selection=args.selection, with_claims=args.with_claims)
+        if args.json:
+            emit(bulk.model_dump())
+            return 0
+        verb = "forgot" if bulk.applied else "would forget"
+        count = len(bulk.forgotten) if bulk.applied else len(bulk.episode_ids)
+        print(f"{verb} {count} of {bulk.matched} matching source(s): {bulk.chunks} chunk(s), "
+              f"{bulk.attachments_released} attachment(s) released, {bulk.facts_citing} claim(s) and "
+              f"{bulk.links_citing} link(s) cite them", file=out)
+        if bulk.pass_limited:
+            print(f"the pass limit of {args.limit} bit; run again for the rest", file=out)
+        if not bulk.selection_complete:
+            print("the walk stopped before reading every source; more may match", file=out)
+        if not bulk.applied:
+            print(f"to forget exactly these, run again with --apply --selection {bulk.selection}", file=out)
         return 0
 
     if args.command == "forget":
@@ -1928,9 +2062,10 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         serve(settings)  # same SQLite default as the other commands
         return 0
     if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "bench-route",
-                        "bench-parts", "calibrate", "tune"):
+                        "bench-parts", "bench-questions", "calibrate", "tune"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
+                   "bench-questions": bench_questions_command,
                    "bench-route": route_command, "bench-parts": parts_command,
                    "calibrate": calibrate_command, "tune": tune_command}[args.command]
         try:
