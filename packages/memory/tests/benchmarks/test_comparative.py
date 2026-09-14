@@ -20,6 +20,13 @@ from scone_memory.bench.runner import BenchItem
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture
+def reference() -> None:
+    """The reference framework is an optional extra; a test that runs it
+    skips where it is not installed, and the tests of our own scoring
+    still run there, as the CI lane without the extra found out."""
+    pytest.importorskip("llama_index.core")
+
 def item(question_id: str, question: str, sessions: list[list[str]], answer: list[str]) -> BenchItem:
     ids = [f"{question_id}-s{index}" for index in range(len(sessions))]
     return BenchItem(question_id=question_id, question_type="single-hop", question=question, question_date="2026-09-13",
@@ -48,7 +55,7 @@ ITEMS = [
 ]
 
 
-async def test_the_embedding_adapter_hands_llamaindex_our_vectors():
+async def test_the_embedding_adapter_hands_llamaindex_our_vectors(reference):
     embedder = HashEmbedder()
     adapter = SconeEmbedding(embedder)
     ours = (await embedder.embed(["calibration notes"]))[0]
@@ -57,13 +64,13 @@ async def test_the_embedding_adapter_hands_llamaindex_our_vectors():
     assert adapter.model_name == embedder.id
 
 
-async def test_llamaindex_ranks_sessions_for_a_question_with_our_embedder():
+async def test_llamaindex_ranks_sessions_for_a_question_with_our_embedder(reference):
     ranked = await llamaindex_session_ranking(ITEMS[0], HashEmbedder(), k=3)
     assert ranked[0] == "q1-s1", ranked
     assert len(ranked) == len(set(ranked)) <= 3 and set(ranked) <= {"q1-s0", "q1-s1", "q1-s2"}
 
 
-async def test_a_session_cut_into_many_nodes_is_one_session_in_the_ranking():
+async def test_a_session_cut_into_many_nodes_is_one_session_in_the_ranking(reference):
     """Small chunks make several nodes per session; the ranking folds them
     to the session, once, in the order its best node came."""
     long = item("q9", "Where are the calibration notes kept?", [
@@ -85,7 +92,7 @@ def test_the_delta_is_ours_minus_theirs_at_every_k():
         side_delta(ours, SideScores({1: 0.5}, {1: 0.5}, 0.5))
 
 
-async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_it_ran():
+async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_it_ran(reference):
     def make_engine():
         return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
 
@@ -104,7 +111,7 @@ async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_i
     assert config["llamaindex"]["version"], "the version of the framework we ran against is on the record"
 
 
-async def test_the_report_records_and_serialises_every_item_ranking():
+async def test_the_report_records_and_serialises_every_item_ranking(reference):
     def make_engine():
         return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
 
@@ -115,7 +122,7 @@ async def test_the_report_records_and_serialises_every_item_ranking():
     assert record["protocol"] == "comparative-retrieval-v1"
 
 
-async def test_the_reference_synthesizer_writes_with_our_model_over_the_same_passages():
+async def test_the_reference_synthesizer_writes_with_our_model_over_the_same_passages(reference):
     """LlamaIndex's TreeSummarize runs over the passages we hand it, through
     our ChatModel port, so the two synthesizers share one local model."""
     from scone_memory.providers.llm import FakeChat
@@ -131,7 +138,7 @@ async def test_the_reference_synthesizer_writes_with_our_model_over_the_same_pas
     assert "Priya moved the launch to March." in prompt and "What happened with the launch?" in prompt
 
 
-async def test_a_reference_synthesizer_whose_model_fails_says_so_instead_of_raising():
+async def test_a_reference_synthesizer_whose_model_fails_says_so_instead_of_raising(reference):
     from scone_memory.providers.llm import ChatError, FakeChat
     from scone_memory.bench.comparative import llamaindex_summary
 
@@ -139,7 +146,7 @@ async def test_a_reference_synthesizer_whose_model_fails_says_so_instead_of_rais
     assert summary.text == "" and summary.failed == "ChatError" and summary.model_calls == 1
 
 
-async def test_the_reference_at_its_best_fuses_its_bm25_and_vector_retrievers():
+async def test_the_reference_at_its_best_fuses_its_bm25_and_vector_retrievers(reference):
     """The default vector index misses a session that shares only rare exact
     words with the question; the reference's own hybrid (BM25 fused with the
     vector retriever by reciprocal rank) finds it, and the record says so."""
