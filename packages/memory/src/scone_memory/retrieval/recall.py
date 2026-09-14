@@ -100,6 +100,22 @@ def _ms(since: float) -> float:
     return round((time.perf_counter() - since) * 1000, 3)
 
 
+#: The lanes a recall may be asked for, in the order they are named.
+LANES: tuple[str, ...] = ("vector", "text")
+
+
+def asked_lanes(lanes: object) -> tuple[str, ...]:
+    """``lanes`` as the known lanes asked for, in their own order; refused when empty or unknown."""
+    if not isinstance(lanes, (list, tuple)):
+        raise InvalidInput(f"lanes is a list naming {' and '.join(LANES)}, not {lanes!r}")
+    unknown = sorted({str(lane) for lane in lanes} - set(LANES))
+    if unknown:
+        raise InvalidInput(f"recall has no lane named {', '.join(unknown)}; its lanes are {', '.join(LANES)}")
+    if not lanes:
+        raise InvalidInput(f"ask for at least one lane: {', '.join(LANES)}")
+    return tuple(lane for lane in LANES if lane in lanes)
+
+
 async def recall(
     runtime: RecallRuntime,
     space: str,
@@ -121,6 +137,7 @@ async def recall(
     entity_projection: "EntityProjection | None" = None,
     entity_unavailable: str | None = None,
     entity_notes: Sequence[str] = (),
+    lanes: Sequence[str] = LANES,
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -219,10 +236,19 @@ async def recall(
                    "conditions_in_store": None if narrow_by is None else in_store},
     }
 
+    asked = asked_lanes(lanes)
+    # The lanes asked for that failed, recorded where they fail: degraded
+    # also carries notes on lanes that ran (a lexical index behind, the
+    # context lane unkept), which are not failures.
+    failed: set[str] = set()
     vector_lane: list[tuple[int, float]] = []
     width: int | None = None
-    if runtime.vector_block is not None:
+    if "vector" not in asked:
+        # Not asked for, so not run: no embedding call, and nothing degraded.
+        pass
+    elif runtime.vector_block is not None:
         degraded.append(f"vectors: {runtime.vector_block}")
+        failed.add("vector")
     else:
         try:
             t0 = time.perf_counter()
@@ -238,6 +264,7 @@ async def recall(
             latency["vector"] = _ms(t0)
         except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
             degraded.append(f"vectors: {type(e).__name__}: {e}")
+            failed.add("vector")
 
     # A floor is a number on one embedder's scale. The query it is about
     # to judge says what scale this really is, whatever the embedder said
@@ -252,24 +279,26 @@ async def recall(
         vector_lane = vector_lane[:vector_depth]
 
     text_lane: list[tuple[int, float]] = []
-    try:
-        t0 = time.perf_counter()
-        text_filter = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
-                                 kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
-        if prefix_store is not None and stem_prefixes:
-            text_lane = await prefix_store.search_terms(space, text_query, depth, text_filter, prefixes=stem_prefixes)
-        else:
-            text_lane = await runtime.documents.search_text(space, text_query, depth, text_filter)
-        latency["text"] = _ms(t0)
-        # A store that keeps a derived lexical index brings it up to date a
-        # bounded amount per query; what is still behind is said, since a
-        # passage not yet indexed is a passage this lane could not find.
-        backlog = getattr(runtime.documents, "lexical_backlog", None)
-        behind = backlog(space) if callable(backlog) else 0
-        if behind:
-            degraded.append(f"text: {behind} chunk(s) not yet in the lexical index; the text lane is behind")
-    except Exception as e:  # noqa: BLE001
-        degraded.append(f"text: {type(e).__name__}: {e}")
+    if "text" in asked:
+        try:
+            t0 = time.perf_counter()
+            text_filter = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                                     kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
+            if prefix_store is not None and stem_prefixes:
+                text_lane = await prefix_store.search_terms(space, text_query, depth, text_filter, prefixes=stem_prefixes)
+            else:
+                text_lane = await runtime.documents.search_text(space, text_query, depth, text_filter)
+            latency["text"] = _ms(t0)
+            # A store that keeps a derived lexical index brings it up to date a
+            # bounded amount per query; what is still behind is said, since a
+            # passage not yet indexed is a passage this lane could not find.
+            backlog = getattr(runtime.documents, "lexical_backlog", None)
+            behind = backlog(space) if callable(backlog) else 0
+            if behind:
+                degraded.append(f"text: {behind} chunk(s) not yet in the lexical index; the text lane is behind")
+        except Exception as e:  # noqa: BLE001
+            degraded.append(f"text: {type(e).__name__}: {e}")
+            failed.add("text")
 
     # The context lane: what each passage is under, searched with the same
     # query the text lane got, fused at a lower weight so a passage that
@@ -294,11 +323,15 @@ async def recall(
     if candidate_limit is not None or active_reranker is not None:
         text_lane = text_lane[:depth]
 
-    if len(degraded) == 2:
+    answered = [lane for lane in asked if lane not in failed]
+    evidence["lanes"] = answered
+    if not answered:
+        said = "both lanes failed" if len(asked) == 2 else f"the {asked[0]} lane asked for failed"
         latency["total"] = _ms(started)
         await runtime.emit(space, "recall", {**evidence, "degraded": degraded, "latency_ms": latency,
-                                           "error": "both lanes failed", "fact_ids": [], "history_fact_ids": []})
-        raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
+                                           "error": said, "fact_ids": [], "history_fact_ids": []})
+        raise RuntimeError(("both recall lanes failed: " if len(asked) == 2
+                            else f"the only recall lane asked for, {asked[0]}, failed: ") + "; ".join(degraded))
 
     # The entity lane, only when asked for: passages naming the question's
     # entities or their neighbours, under the same filter as the text lane.
@@ -329,7 +362,7 @@ async def recall(
     # confidence signal. A degraded vector lane cannot judge (None); a
     # lane that ran and found nothing is as weak as evidence gets.
     top_similarity = round(vector_lane[0][1], 6) if vector_lane and not math.isnan(vector_lane[0][1]) else None
-    vector_ran = not any(d.startswith("vectors:") for d in degraded)
+    vector_ran = "vector" in answered
     low_confidence: Optional[bool] = None
     if runtime.similarity_floor is not None and vector_ran and (top_similarity is not None or not vector_lane):
         low_confidence = top_similarity is None or top_similarity < runtime.similarity_floor
@@ -337,18 +370,18 @@ async def recall(
         "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
         "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
     }
-    lanes: list[list[tuple[int, float]]] = [vector_lane, text_lane]
+    lane_hits: list[list[tuple[int, float]]] = [vector_lane, text_lane]
     weights = [runtime.vector_weight, 1.0]
     if graph_boost:
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
-        lanes.append(entity_hits)
+        lane_hits.append(entity_hits)
         weights.append(ENTITY_WEIGHT)
     if runtime.context_lane:
         ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
-        lanes.append(context_hits)
+        lane_hits.append(context_hits)
         weights.append(CONTEXT_WEIGHT)
     fuse = fusion.relative_scores if fusion_mode == "score" else fusion.rrf
-    fused = fuse(lanes, weights=weights)
+    fused = fuse(lane_hits, weights=weights)
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
     now = runtime.clock()
     items = [
@@ -504,7 +537,7 @@ async def recall(
     counts = await runtime.documents.counts(space)
     narrowing_report: Optional[Narrowing] = None
     if narrowing:
-        text_ran = not any(d.startswith("text:") for d in degraded)
+        text_ran = "text" in asked and not any(d.startswith("text:") for d in degraded)
         narrowing_report = Narrowing(
             conditions=narrow_by is not None, kind_or_source_or_dates=episode_bound,
             text_lane="off" if not text_ran else ("in_store" if in_store else "postfiltered"),
@@ -529,6 +562,7 @@ async def recall(
         degraded=degraded,
         narrowing=narrowing_report,
         fusion=cast(Literal["rank", "score"], fusion_mode),
+        lanes=answered,
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,

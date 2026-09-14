@@ -479,6 +479,10 @@ class RecallResult(BaseModel):
     #: How the lanes were fused: ``rank`` (reciprocal rank, the default) or
     #: ``score`` (each lane's scores scaled to its own range, then added).
     fusion: Literal["rank", "score"] = "rank"
+    #: The lanes that answered, of those asked for ("vector", "text"). A lane
+    #: not asked for did not run; one that failed is in ``degraded`` instead.
+    #: Empty on a result recall did not build.
+    lanes: list[str] = Field(default_factory=list)
     #: With ``graph_boost``: the entities the entity lane searched for.
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
