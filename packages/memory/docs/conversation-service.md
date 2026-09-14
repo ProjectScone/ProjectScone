@@ -106,6 +106,24 @@ app = create_conversation_app(
 )
 ```
 
+A conversation's history has a byte limit (`max_history_bytes`, 128000
+by default). By default a turn that would pass it is refused with
+"conversation history byte limit reached; start a new conversation",
+and a reply that would pass it fails the turn. `history_policy="window"`
+lets the conversation continue instead: whole oldest turns (a user
+message and its reply, together) leave the model's context until the
+next turn fits, the newest turn is always kept whole, and each turn's
+receipt carries `history` -- the policy, the limit, the bytes now held,
+and the ids of the turns that left. Nothing is lost: every turn was
+already captured as its own episode. A turn that has left the window
+is admitted to same-session recall from then on, so a question about
+it is answered from memory the way a question about another session
+would be; the memory-context receipt counts those under
+`same_session_items`. A single message that cannot fit on its own is
+still refused, explicitly. The tool-answer path's search still keeps
+the whole session out, and voice conversations keep the default; both
+are follow-ups, not silent gaps.
+
 ## Public-text stream (optional)
 
 `public_text_streaming=True` opts every configured runtime into
