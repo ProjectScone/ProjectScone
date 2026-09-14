@@ -187,3 +187,25 @@ def test_a_chain_of_single_directories_below_a_branch_is_one_node_too():
                  fact(2, "pkg/deep/er/b.py", "defines", "pkg/deep/er/b.py:two")])
     assert shape(made.root) == ["directory pkg", "  directory deep/er", "    file b.py", "      declaration two",
                                 "  file a.py", "    declaration one"]
+
+
+def test_a_package_named_like_a_file_is_not_placed_as_one():
+    """`lodash.merge`, `socket.io` and `chart.js` are packages a manifest
+    depends on or a file imports, not files in this tree: a name with no
+    directory is placed only when the graph read it or it holds a declaration."""
+    made = tree([fact(1, "package.json", "depends_on", "lodash.merge"),
+                 fact(2, "web/app.js", "imports", "socket.io"),
+                 fact(3, "web/app.js", "imports", "chart.js"),
+                 fact(4, "web/app.js", "defines", "web/app.js:start"),
+                 fact(5, "setup.py", "defines", "setup.py:main"),
+                 # A path with a directory is a file even when only imported and holding nothing.
+                 fact(6, "web/app.js", "imports", "web/lib/util.js"),
+                 # A name with no directory, not read, is still the file that holds what is called in it.
+                 fact(7, "web/app.js", "imports", "tasks.py"),
+                 fact(8, "web/app.js:start", "calls", "tasks.py:run")])
+    assert shape(made.root) == ["directory ", "  directory web", "    directory lib", "      file util.js",
+                                "    file app.js", "      declaration start",
+                                "  file package.json", "  file setup.py", "    declaration main",
+                                "  file tasks.py", "    declaration run"]
+    assert made.not_code == 3
+    assert find(made.root, "tasks.py").entity_id is not None, "its own entity, not a stand-in"
