@@ -171,6 +171,38 @@ failures return an unavailable result without partial quotes. Direct adapter
 writes require adapter transaction discipline. Coverage describes this seed's
 bounded neighborhood, never completeness of an answer to an arbitrary query.
 
+## Offering a few tools of many
+
+A host with eighteen tools puts eighteen schemas in front of the model
+on every turn; a host with two hundred cannot, and a model shown two
+hundred chooses worse than one shown eight. `ToolBox.offer(query,
+limit=8, always=(...))` chooses the tools a turn needs the way the
+reference framework's object index retrieves tools: each tool is
+embedded once as its name and its sentence with the engine's embedder,
+the query the same way, and the closest are offered, with a word of the
+query that is in a tool's name or sentence counting too (up to 0.2 per
+word against a perfect vector match of 1.0, by how few tools share the
+word; the lexical lane's stopwords count for nothing) and a tool named
+whole in the query (`search_memory`) given 0.5 on top. Under the hash
+embedder the vectors are the words too, so "search memory for …" offers
+`search_memory`; under a model embedder a tool the vectors put clearly
+closer can still come first. The `always` tools come first whatever
+the query, and past `limit` if there are more of them than that. The
+selection says each offered tool's score, similarity, matched words and
+whether it was named, the score of every tool left out, the embedder,
+and, when no tool scored above nothing, that the order beyond the
+always-on tools is not a ranking (`record()`); `box.openai(selection.names)`
+/ `box.anthropic(selection.names)` render just those. An offer is a
+suggestion to the host, never a gate: `run` runs any tool the toolbox
+holds.
+
+```python
+box = ToolBox(engine, "default")
+chosen = await box.offer("what is connected to Acme in the graph?", limit=6, always=["search_memory"])
+schema = box.openai(chosen.names)        # six schemas, search_memory first
+print(chosen.record()["left_out"])       # the tools not offered, so a host can see why
+```
+
 ## Scoped read tools
 
 For read tools that must preserve a conversation or application's narrower

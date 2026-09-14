@@ -17,7 +17,7 @@ place to widen a key's reach.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
 from ..core.errors import InvalidInput, SconeError
 from ..core.validation import KINDS, normalise_time
@@ -37,6 +37,10 @@ from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as 
                                   MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT,
                                   MAX_LIMIT as TEMPORAL_MAX_LIMIT)
 from ..entities.view import STATUS_MODES  # noqa: E402
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .tool_offering import Selection, ToolIndex
 
 
 @dataclass(frozen=True)
@@ -444,12 +448,34 @@ class ToolBox:
         self.tools = tuple(tool for tool in chosen
                            if tool.name != "write_note" or self.filesystem.policy.writable)
         self._by_name = {tool.name: tool for tool in self.tools}
+        self._index: Optional["ToolIndex"] = None
 
-    def openai(self) -> list[dict]:
-        return [tool.as_openai() for tool in self.tools]
+    def _named(self, names: Optional[Sequence[str]]) -> tuple[ToolSpec, ...]:
+        if names is None:
+            return self.tools
+        unknown = [name for name in names if name not in self._by_name]
+        if unknown:
+            raise InvalidInput(f"not in this toolbox: {', '.join(unknown)}")
+        return tuple(self._by_name[name] for name in names)
 
-    def anthropic(self) -> list[dict]:
-        return [tool.as_anthropic() for tool in self.tools]
+    def openai(self, names: Optional[Sequence[str]] = None) -> list[dict]:
+        """Every tool, or the named ones in that order (`offer` names them)."""
+        return [tool.as_openai() for tool in self._named(names)]
+
+    def anthropic(self, names: Optional[Sequence[str]] = None) -> list[dict]:
+        return [tool.as_anthropic() for tool in self._named(names)]
+
+    async def offer(self, query: str, *, limit: Optional[int] = None, always: Sequence[str] = ()) -> "Selection":
+        """The few tools this turn needs, chosen from the ones held by the
+        query (`tool_offering.py`): a suggestion for what to put in front
+        of the model, never a gate on what `run` will run. The tools are
+        embedded once per toolbox, with the engine's embedder; the always
+        tools come first and past the limit if there are more of them."""
+        from .tool_offering import DEFAULT_LIMIT, ToolIndex
+
+        if self._index is None:
+            self._index = await ToolIndex.build(self.tools, self.engine.embedder)
+        return await self._index.select(query, limit=limit if limit is not None else DEFAULT_LIMIT, always=always)
 
     async def run(self, name: str, arguments: Mapping[str, Any]) -> dict:
         """Run one tool call. The answer is always a dict with ``ok``:
