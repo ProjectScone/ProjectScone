@@ -298,6 +298,15 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     app.state.begin_conversation_shutdown = begin_shutdown
     app.state.worker = worker
 
+    def text_readers(space: str, sid: str, request_id: str) -> int | None:
+        """How many readers a turn's text window is serving right now, or
+        None when there is no window: an operator's view of who is still
+        listening to a finished turn."""
+        window = text_window(owned.get((space, sid)), request_id)
+        return None if window is None else window.readers
+
+    app.state.text_readers = text_readers
+
     roles = dict(roles or {})
 
     async def space_for(request: Request):
@@ -816,8 +825,24 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         if window is not None and not window.closed and cursor > window.last_sequence:
             raise HTTPException(409, "stream cursor is ahead of observed text")
 
+        # A reader who arrives while the turn runs is promised its text; one
+        # who arrives after the end gets the receipt and no provisional text.
+        listening = window is not None and not window.closed
+        if listening:
+            window.attach()
+
+        after = cursor
+
         async def output():
-            after = cursor
+            try:
+                async for event in events():
+                    yield event
+            finally:
+                if listening:
+                    window.detach()
+
+        async def events():
+            nonlocal after
             while True:
                 if shutting_down or journal is None:
                     yield sse("end", {"request_id": request_id, "reason": "service_shutdown", "read_receipt": True})
@@ -828,6 +853,19 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 except NotFound:
                     yield sse("end", {"request_id": request_id, "reason": "deleted", "read_receipt": True})
                     return
+                # What the window still holds goes out before any verdict on
+                # the turn: the last chunk and the receipt land microseconds
+                # apart, and a reader one chunk behind at that moment was
+                # promised the text, not a terminal that swallows it.
+                gap, chunk = window.next_after(after) if listening else (None, None)
+                if gap is not None:
+                    yield sse("gap", {"after": after, "next_sequence": gap})
+                    after = gap - 1
+                    continue
+                if chunk is not None:
+                    after, text = chunk
+                    yield sse("text", {"sequence": after, "text": text, "provisional": True}, sequence=after)
+                    continue
                 live = entry.turns.get(request_id, {}).get("receipt") if entry else None
                 status = live["status"] if live else ("pending" if kept["status"] == "accepted" else kept["status"])
                 if status != "pending":
@@ -836,22 +874,17 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 if current["state"] != "running" or window is None or window.closed:
                     yield sse("end", {"request_id": request_id, "reason": "window_unavailable", "read_receipt": True})
                     return
-                gap, chunk = window.next_after(after)
-                if gap is not None:
-                    yield sse("gap", {"after": after, "next_sequence": gap})
-                    after = gap - 1
-                elif chunk is not None:
-                    after, text = chunk
-                    yield sse("text", {"sequence": after, "text": text, "provisional": True}, sequence=after)
-                else:
-                    try:
-                        await asyncio.wait_for(window.wait_after(after), 10)
-                    except asyncio.TimeoutError:
-                        yield ": keep-alive\n\n"
+                try:
+                    await asyncio.wait_for(window.wait_after(after), 10)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
 
-        return StreamingResponse(output(), media_type="text/event-stream", headers={
-            "Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff",
-        })
+        # A send bounded in time and a generator closed on the way out: a
+        # client that stops reading cannot hold the window's text, or its
+        # place among the readers, past the bound.
+        from .agent_history import _HistoryResponse
+
+        return _HistoryResponse(output())
 
     @app.delete("/v1/conversations/{sid}", status_code=204)
     async def delete(sid: str, space=Depends(space_for)):
