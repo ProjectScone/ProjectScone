@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 import math
 import time
-from typing import Mapping, Optional, Protocol, Sequence, TYPE_CHECKING, cast
+from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING, cast
 
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
@@ -113,6 +113,7 @@ async def recall(
     candidate_limit: int | None = None,
     rerank: bool = True,
     graph_boost: bool = False,
+    fusion_mode: str = "rank",
     entity_projection: "EntityProjection | None" = None,
     entity_unavailable: str | None = None,
     entity_notes: Sequence[str] = (),
@@ -141,6 +142,8 @@ async def recall(
     signals, not confidence. A failed reranker retains baseline ordering;
     ``rerank=False`` explicitly disables the configured adapter."""
     check_space(space)
+    if fusion_mode not in fusion.FUSIONS:
+        raise InvalidInput(f"fusion must be one of {', '.join(fusion.FUSIONS)}, not {fusion_mode!r}")
     query = query.strip()
     if not query or len(query) > MAX_QUERY:
         raise InvalidInput(f"query must be 1..={MAX_QUERY} chars")
@@ -194,6 +197,7 @@ async def recall(
     latency: dict[str, float] = {}
     evidence = {
         **runtime.query_for_evidence(query),
+        "fusion": fusion_mode,
         "limit": limit,
         "as_of": boundary,
         "tags": list(clean_tags),
@@ -333,6 +337,9 @@ async def recall(
     weights = [runtime.vector_weight, 1.0]
     if graph_boost:
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
+    fuse = fusion.relative_scores if fusion_mode == "score" else fusion.rrf
+    fused = (fuse([vector_lane, text_lane, entity_hits], weights=[1.0, 1.0, ENTITY_WEIGHT]) if graph_boost
+             else fuse([vector_lane, text_lane]))
         lanes.append(entity_hits)
         weights.append(ENTITY_WEIGHT)
     if runtime.context_lane:
@@ -518,6 +525,7 @@ async def recall(
         history=previous,
         degraded=degraded,
         narrowing=narrowing_report,
+        fusion=cast(Literal["rank", "score"], fusion_mode),
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,
