@@ -914,6 +914,48 @@ with its file and the declarations it sits inside.
   done yet. Both halves and their limits are in
   `bench-runs/heading-context-2026-09-13/results.md`.
 
+### Keeping that context inside the embedder's window
+
+A model embeds at most so many tokens and drops the rest without saying
+so: the local BGE models read 512. What goes in front of a chunk -- the
+heading line, a table's header row, the source and date -- comes first,
+so a long enough prefix cuts off the end of the chunk it explains.
+`embedding_budget=True` (`SCONE_EMBEDDING_BUDGET=1`) shortens the context
+until the whole input fits:
+
+1. the outermost headings, one at a time;
+2. then the whole heading line;
+3. then the table context.
+
+The chunk itself is never cut. A chunk too long on its own is embedded
+without context and counted in `body_over`. The receipt's
+`embedding_context.budget` gives the window (`tokens`), how each chunk
+came out (`fits`, `shortened`, `dropped`, `body_over`) and the `method`
+that counted.
+
+- **Counted by the model's own tokenizer where it has one.** The local
+  embedder counts with an untruncated copy of its tokenizer
+  (`tokenizer-v1`).
+- **Estimated otherwise** (`estimate-v1`): a word counts one token per
+  four letters of each camel-case part, a digit run one per two, each
+  mark one, each character of a script written without spaces one, and
+  two for the markers a model adds. On this project's 1,173 documentation
+  chunks it never counted fewer tokens than BGE's tokenizer, and 1.36 times
+  as many at the median. That margin has a cost on long chunks. At a
+  2,000-character target with heading lines, the tokenizer found 332 of 371
+  inputs fit, 9 shortened, 10 dropped and 20 bodies over 512. The estimate
+  called 252 bodies over. Read `body_over` under `estimate-v1` as "might
+  be over".
+- **It bites rarely at the default target.** At 700 characters, no chunk of
+  those documents came near 512 tokens with its heading line. It matters
+  for long chunks and wide table headers.
+- **It needs an embedder that declares its window** (`max_input_tokens`).
+  The local BGE models do; one that does not is refused, rather than
+  budgeted against a number nobody stated.
+- **It is part of the vector writer's identity** (`;budget=tokenizer-v1`
+  or `;budget=estimate-v1`), so turning it on over an existing store reads
+  as a mismatch until the vectors are rebuilt. Off by default.
+
 ## A recalled body, with the signature and imports that make it readable
 
 A chunk of code already says which declaration it came from —
