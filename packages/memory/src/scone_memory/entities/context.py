@@ -396,6 +396,8 @@ async def graph_context(engine: "MemoryEngine", space: str, *, names: Sequence[s
                 if relation.relation_id in taken:
                     continue
                 if len(walked) >= limits.max_relations:
+                    # Seen, so the walk from its other end a hop later does not cut it again.
+                    taken.add(relation.relation_id)
                     cut += 1
                     outward = relation.subject_id == entity_id
                     far_end = relation.object_id if outward else relation.subject_id
