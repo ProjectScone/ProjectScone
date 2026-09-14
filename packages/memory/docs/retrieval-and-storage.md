@@ -2333,7 +2333,28 @@ the same `status` and `as_of`:
 - **Communities**: found by modularity optimisation over recorded
   relations, weighted by the facts behind each pair, and split into
   connected parts. Each is named after its most central members, with
-  cohesion, kinds and predicates.
+  cohesion, kinds and predicates. Two guards then look again at the
+  communities a reader cannot use, each re-partitioning one community on
+  its own links at the same resolution:
+  - one holding over a quarter of the analysed entities (and at least 10)
+    is split into what its links give, since a map by community draws it
+    as one blob;
+  - one of 50 or more is split when its own partition reaches modularity
+    0.3, because over a large graph modularity merges small modules into
+    one community that holds several. The share of member pairs linked is
+    not the test: in a sparse graph it falls with size, and on this
+    project's own code graph it fired on 12 of the 17 communities of 50
+    or more.
+
+  The resolution is never raised to force a split. A community a guard
+  looked at and kept whole (one piece, or a weak split of a large one) is
+  counted in `unsplittable`, and splits in `split_oversized` and
+  `split_nested`. Finer communities often score lower on modularity over
+  the whole graph, so `modularity_before_guards` gives the modularity
+  before any split beside the final `modularity`. On this project's
+  retrieval, entities, API and ingestion code (2,712 entities) the guards
+  split 17 communities: 28 communities became 148, the largest 337
+  entities became 62, and modularity went from 0.701 to 0.589.
 - **Central entities**: by PageRank, with degree, fact weight,
   betweenness (exact up to 500 entities, from 64 evenly spaced sources
   beyond) and participation across communities.
@@ -2365,6 +2386,15 @@ Two parameters tune the analysis:
   entities, and lists them under `hubs_excluded` instead. A hub that
   everything links to otherwise leads every ranking. Excluded hubs stay
   in their communities.
+- `detach_hubs` (a degree percentile, 50 to 100; CLI `--detach-hubs`)
+  leaves those entities out while communities are found, so an entity
+  everything links to does not pull unrelated groups into one; each then
+  joins the community most of its link weight goes to. Unlike
+  `exclude_hubs` it changes the communities, and `hubs_detached` counts
+  them. Removing hubs can leave groups with no link between them, so
+  expect more communities. Hubs are picked among the graph's own
+  entities, by their links to each other: externals (below) are already
+  out of the partition.
 
 **What the graph names and never reads is kept apart, without asking.**
 In a code graph every file imports `typing`, so `typing` was the most
@@ -2388,8 +2418,9 @@ The drawing spends its room on the graph's own entities first. The
 coverage says how many were set apart (`external_entities`); a graph of
 people and places has none.
 
-The report echoes both under `analysis`, and `analysis.coverage` carries
-`resolution`.
+The report echoes these under `analysis`, and `analysis.coverage` carries
+`resolution`, `external_entities` and what the guards and `detach_hubs`
+did.
 
 Results are deterministic: the same facts give the same report. The report
 states the projection digest and analysis version it came from, and
