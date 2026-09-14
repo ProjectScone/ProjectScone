@@ -136,8 +136,10 @@ def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metada
         sections = _sections(entries, len(pages))
         pages = [page.model_copy(update={'section': sections[index]}) if sections[index] else page
                  for index, page in enumerate(pages)]
-        return ParsedPdf(text='\n\n'.join(texts), parser=f'pypdf/{pypdf.__version__}:{strategy}', pages=tuple(pages),
-                         outline=outline)
+        # An extraction carrying bookmark sections names that, so its manifest is told apart from one before them.
+        marked = '+outline-v1' if outline != 'none' else ''
+        return ParsedPdf(text='\n\n'.join(texts), parser=f'pypdf/{pypdf.__version__}:{strategy}{marked}',
+                         pages=tuple(pages), outline=outline)
     except InvalidInput:
         raise
     except Exception as error:
