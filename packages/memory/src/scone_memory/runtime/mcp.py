@@ -50,6 +50,7 @@ from ..entities.health import (DEFAULT_EXAMPLES as HEALTH_EXAMPLES, MAX_BYTES as
 from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
                                     DuplicatesError, likely_duplicates)
 from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
+from ..entities.affected import MAX_BYTES as AFFECTED_BYTES, MAX_HOPS as AFFECTED_HOPS, MAX_REACHED, affected
 from ..entities.overview import (DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_BYTES as OVERVIEW_BYTES,
                                   MAX_COMMUNITIES, MAX_FACTS_EACH, OverviewError, graph_overview)
 from ..entities.match import DEFAULT_ROWS, MAX_BYTES as MATCH_BYTES, MAX_PATTERNS, MAX_ROWS, MatchQueryError, graph_match
@@ -579,6 +580,46 @@ def create_server(engine: MemoryEngine, space: str = "default",
         except DuplicatesError as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
+
+    @tool(server, "memory_graph_affected")
+    async def memory_graph_affected(
+        name: Annotated[str, Field(description="The symbol (`pkg/mod.py:Class.method`), module, file or package",
+                                   min_length=1, max_length=200)],
+        max_hops: Annotated[
+            Optional[StrictInt], Field(description=f"Relationship steps to follow (1..={AFFECTED_HOPS}); defaults to 4")
+        ] = None,
+        limit: Annotated[
+            Optional[StrictInt], Field(description=f"Entities to list (1..={MAX_REACHED}); defaults to 200")
+        ] = None,
+        max_bytes: Annotated[
+            Optional[StrictInt], Field(description=f"Byte budget for the answer's record (1024..={AFFECTED_BYTES}); "
+                                                   "its framing takes most of a kilobyte; defaults to 16000")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """What rests on a symbol, module, file or package: everything that
+        calls, imports, inherits, mixes in, depends on or develops with it,
+        nearest first, through the code graph's recorded relations. Says how
+        deep it walked, what it could not list, and when nothing here rests
+        on the name; an ambiguous name is refused with its candidates, an
+        unknown one plainly."""
+        blast = await affected(engine, space or default_space, name,
+                               max_hops=max_hops if max_hops is not None else 4,
+                               limit=limit if limit is not None else 200,
+                               max_bytes=max_bytes if max_bytes is not None else 16_000)
+        if blast.status not in ("found", "nothing"):
+            return tool_error(blast.why)
+        lines = [blast.why]
+        lines += [f"{one.depth}: {one.label} ({one.through} {one.depends_on})" for one in blast.reached]
+        if blast.by_depth:
+            lines.append("by depth: " + ", ".join(f"{depth} hop(s): {count}"
+                                                  for depth, count in sorted(blast.by_depth.items())))
+        if blast.not_listed:
+            lines.append(f"{blast.not_listed} more reached but not listed (limit or byte budget)")
+        if blast.stopped_at_depth:
+            lines.append(f"stopped at {blast.deepest} hop(s) with more to follow"
+                         + ("; raise max_hops to go further" if blast.deepest < AFFECTED_HOPS else ""))
+        return ok_text("\n".join(lines))
 
     @tool(server, "memory_graph_health")
     async def memory_graph_health(

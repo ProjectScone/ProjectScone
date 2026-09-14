@@ -2732,7 +2732,12 @@ The MCP server offers the same reads as tools:
 - `memory_graph_context`: names or a question;
 - `memory_entity`: one entity, with its relations in both directions;
 - `memory_connections`: the paths between two entities;
-- `memory_graph_schema`: the kinds and predicates the graph holds.
+- `memory_graph_schema`: the kinds and predicates the graph holds;
+- `memory_graph_affected`: what rests on a symbol, module, file or
+  package -- everything that calls, imports, inherits, mixes in, depends
+  on or develops with it, nearest first -- with how deep it walked and
+  what it could not list; the ToolBox tool `graph_affected` gives the
+  same.
 
 These sit beside the six tools shared with the Rust server, and none of
 them writes.
