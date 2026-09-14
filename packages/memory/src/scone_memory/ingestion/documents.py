@@ -84,7 +84,7 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
     has_order = any(page.reading_order is not None for page in parsed.pages)
     manifest = PdfManifest(schema_version=3 if has_order else 2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()),
         parser=parsed.parser, pages=parsed.pages)
-    encoded = manifest.model_dump_json(exclude=None if has_ocr else {
+    encoded = manifest.model_dump_json(exclude=None if has_ocr or has_order else {
         'pages': {'__all__': {'extraction', 'region_geometry', 'regions', 'ocr_engine'}}}).encode()
     if len(encoded) > memory.max_attachment_bytes:
         raise InvalidInput('PDF manifest exceeds its attachment byte limit')
