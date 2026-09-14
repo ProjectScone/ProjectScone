@@ -77,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--key", dest="dedup_key", help="identity across writes: the same key again is a duplicate, not a second record")
     p.add_argument("--replace", action="store_true", help="with --key: changed content replaces the record the key names")
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
+    p.add_argument("--chunking", choices=("length", "code", "structure", "semantic"),
+                   help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
     p = sub.add_parser("when", help="a question about dates answered by computation, with its working")
@@ -1357,7 +1359,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     space, raw, kind=args.kind, source=args.source, tags=args.tag,
                     created_at=args.created_at, metadata=metadata,
                     attachment_ids=[attachment.attachment_id] if attachment else [],
-                    dedup_key=args.dedup_key, replace=args.replace,
+                    dedup_key=args.dedup_key, replace=args.replace, chunking=args.chunking,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)

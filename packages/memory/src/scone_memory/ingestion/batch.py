@@ -20,7 +20,7 @@ from .chunker import Span, byte_spans, chunk_spans
 from .semantic_chunks import semantic_spans
 from .structure_chunks import structured_spans
 from .code import code_language, code_spans
-from .records import Record, RetainedVideoRecord, RecoveryReport, _DupOf, _Pending, content_hash
+from .records import Chunking, Record, RetainedVideoRecord, RecoveryReport, _DupOf, _Pending, content_hash
 
 from .vectors import validated_vectors
 
@@ -100,6 +100,10 @@ class IngestionRuntime:
     #: -- its sentences are embedded to find the boundaries.
     semantic_aware: bool = False
     context_inputs: Callable[[NewEpisode, Sequence[tuple[int, int]]], Awaitable[list[str]]] | None = None
+    #: Whether each chunk's context -- what it is under and does not say --
+    #: is indexed beside its text for the context lane. Stored text is
+    #: never changed by it; a store without the index is left alone.
+    context_lane: bool = False
     # With an episode id, verification also repairs its original/manifest links.
     verify_visual: Callable[[str, Record, int | None], Awaitable[None]] | None = None
 
@@ -117,7 +121,15 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
     if record.source is not None and not isinstance(record.source, str):
         raise InvalidInput("source must be a string or None")
     clean_tags = normalise_tags(record.tags)
-    clean_meta = normalise_metadata(record.metadata or {})
+    clean_meta = dict(normalise_metadata(record.metadata or {}))
+    asked, held = record.chunking, clean_meta.get("chunking")
+    if asked is not None and held is not None and asked != held:
+        raise InvalidInput(f"metadata says chunking={held!r} but the record asks for {asked!r}")
+    mode = asked if asked is not None else held
+    if mode is not None:
+        # Whether the mode exists and fits the source is `cut_for`'s to say,
+        # and it says so before anything is stored.
+        clean_meta["chunking"] = mode
     try:
         for value in (record.source or '', *clean_tags, *clean_meta.values()):
             value.encode('utf-8')
@@ -142,9 +154,10 @@ async def _validated_record(runtime: IngestionRuntime, space: str, record: Recor
 
 
 async def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
-    spans = await spans_for(runtime, new.content, new.source)
-    return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in spans],
-                    spans=[(sp.start, sp.end) for sp in byte_spans(new.content, spans)])
+    cut = await cut_for(runtime, new.content, new.source, new.metadata.get("chunking"))
+    return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in cut.spans],
+                    spans=[(sp.start, sp.end) for sp in byte_spans(new.content, cut.spans)],
+                    chunking=cut.chunking, structure=cut.structure)
 
 
 async def embedding_inputs(runtime: IngestionRuntime, new: NewEpisode, spans: Sequence[tuple[int, int]],
@@ -205,26 +218,56 @@ async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]
 
 
 
-async def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
-    """Where to cut: at declarations when the source is code and the name
-    it was stored under says which language, at the document's own
-    headings and clauses when asked, where its subject changes when asked,
-    and by length otherwise.
+#: The ways one record can ask to be cut.
+CHUNKINGS: tuple[str, ...] = ("length", "code", "structure", "semantic")
+
+
+@dataclass(frozen=True)
+class Cut:
+    """Where a record was cut, which way, and the structure chunker's own
+    counts when that was the way."""
+
+    spans: list[Span]
+    chunking: Chunking
+    structure: dict[str, object] | None = None
+
+
+async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
+                  chunking: str | None = None) -> Cut:
+    """Where to cut, and which way it was: at declarations when the source
+    is code and the name it was stored under says which language, at the
+    document's own headings and clauses when asked, where its subject
+    changes when asked, and by length otherwise. An explicit ``chunking``
+    is the record's own choice and wins over the engine's rule; None is
+    the rule as it was.
 
     The one dispatch point, and awaitable even though only one branch
     needs it. A synchronous twin would let a caller reach chunking
     without an embedder and receive length-cut chunks believing they
     were something else."""
-    language = code_language(source) if runtime.code_aware else None
-    if language is not None:
-        return list(code_spans(content, runtime.chunk_target, language=language))
-    if runtime.structure_aware:
+    if chunking is not None and chunking not in CHUNKINGS:
+        raise InvalidInput(f"chunking must be one of {', '.join(CHUNKINGS)}, not {chunking!r}")
+    language = code_language(source) if (runtime.code_aware or chunking == "code") else None
+    if chunking == "code" and language is None:
+        raise InvalidInput("chunking=code needs a source whose name says its language")
+    if language is not None and chunking in (None, "code"):
+        return Cut(list(code_spans(content, runtime.chunk_target, language=language)), "code")
+    mode = cast(Chunking, chunking or ("structure" if runtime.structure_aware else "semantic" if runtime.semantic_aware else "length"))
+    if mode == "structure":
         # Prose only. Code has a better boundary than a heading, and the
-        # branch above already took it.
-        return list(structured_spans(content, runtime.chunk_target).spans)
-    if runtime.semantic_aware:
-        return list(await semantic_spans(content, runtime.embedder, runtime.chunk_target))
-    return chunk_spans(content, runtime.chunk_target)
+        # branch above already took it unless the record said otherwise.
+        found = structured_spans(content, runtime.chunk_target)
+        receipt = {key: value for key, value in found.record().items() if key not in ("spans", "chunks")}
+        return Cut(list(found.spans), "structure", receipt)
+    if mode == "semantic":
+        return Cut(list(await semantic_spans(content, runtime.embedder, runtime.chunk_target)), "semantic")
+    return Cut(chunk_spans(content, runtime.chunk_target), "length")
+
+
+async def spans_for(runtime: IngestionRuntime, content: str, source: str | None,
+                    chunking: str | None = None) -> list[Span]:
+    """The spans of ``cut_for``, for callers that need only where."""
+    return (await cut_for(runtime, content, source, chunking)).spans
 
 
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record], *,
@@ -325,6 +368,10 @@ async def write_batch(
                     for i, ((a, b), text) in enumerate(zip(pending.spans, pending.texts))
                 ]
             )
+            if chunks and runtime.context_lane:
+                from .context_terms import index_episode_context
+
+                await index_episode_context(runtime.documents, space, pending.new, chunks)
             if chunks:
                 await runtime.vectors.upsert([
                     VectorPoint(
@@ -336,7 +383,8 @@ async def write_batch(
                 ])
             offset += len(chunks)
             await runtime.documents.clear_inflight(space, pending.new.content_hash)
-            results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks))
+            results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks),
+                                          chunking=pending.chunking, structure=pending.structure)
     except Exception:
         # Undo the partial batch so a retry starts clean.
         for episode_id in written:
@@ -374,7 +422,7 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
                 report.completed += 1
                 continue
             if not chunks:
-                spans = await spans_for(runtime, episode.content, episode.source)
+                spans = await spans_for(runtime, episode.content, episode.source, episode.metadata.get("chunking"))
                 chunks = await runtime.documents.insert_chunks(
                     [
                         NewChunk(
