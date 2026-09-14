@@ -122,9 +122,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each")
-    p.add_argument("--window", type=int, metavar="BYTES",
-                   help="return each passage with this many bytes of its episode either side; "
-                        "serves the single precise hit that --merge cannot")
+    p.add_argument("--window", type=int, metavar="COUNT",
+                   help="return each passage with this many bytes of its episode either side "
+                        "(or sentences, with --window-unit sentences); serves the single precise "
+                        "hit that --merge cannot")
+    p.add_argument("--window-unit", choices=["bytes", "sentences"], default="bytes",
+                   help="what --window counts: bytes, or whole sentences with both edges on a sentence boundary")
     p.add_argument("--withhold", metavar="KINDS",
                    help="withhold matches of these kinds from the answer, comma separated "
                         "(email,phone,ip,card,secret); a net of patterns, never a guarantee")
@@ -1768,11 +1771,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         )
         kept = None
         opened = None
-        if args.window:
+        if args.window or args.window_unit == "sentences":
             from ..retrieval.window import widen
 
             opened = await widen(engine, space, result.items,
-                                 before=args.window, after=args.window)
+                                 before=args.window or 0, after=args.window or 0, unit=args.window_unit)
             result = result.model_copy(update={"items": list(opened.items)})
         if policy:
             from ..retrieval.withhold import withhold

@@ -477,7 +477,8 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.code_context": True, "recall.highlights": True,
+            "recall.window": True, "recall.sentence_window": True, "recall.code_context": True,
+            "recall.highlights": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -953,6 +954,11 @@ def create_app(
         window: int = Query(default=0, ge=0, le=MAX_WINDOW,
                             description="Widen every returned passage by this many bytes either "
                                         "side, read from the episode. 0 leaves them as indexed."),
+        window_unit: Literal["bytes", "sentences"] = Query(
+            default="bytes",
+            description="What window counts. With sentences, each passage grows to the whole "
+                        "sentences it touches and then this many more either side (at most 20); "
+                        "0 completes only the sentences it touches."),
         code_context: bool = Query(default=False,
                                    description="Quote the declaration's signature and the file's "
                                                "imports beside a code passage, with their line "
@@ -1032,13 +1038,13 @@ def create_app(
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
         )
         opened = None
-        if window:
+        if window or window_unit == "sentences":
             from ..retrieval.window import widen
 
             # Before withholding, so the bytes it opens are scanned like
             # any other. After it, a window would be an unscanned surface
             # holding exactly the text the policy was asked to remove.
-            opened = await widen(engine, space, result.items, before=window, after=window)
+            opened = await widen(engine, space, result.items, before=window, after=window, unit=window_unit)
             result = result.model_copy(update={
                 "items": list(opened.items),
                 "returned_bytes": sum(len(one.text.encode()) for one in opened.items)})

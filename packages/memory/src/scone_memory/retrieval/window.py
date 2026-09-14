@@ -27,16 +27,26 @@ Three rules, each with a test:
   merging learned: the fragment we happen to be holding is deleted text,
   and handing it back under a clean reason is worse than returning less.
 
+A window may also be counted in sentences (``unit="sentences"``): the
+hit grows to the whole sentences it touches, then by ``before`` and
+``after`` whole sentences, so both edges sit on sentence boundaries
+instead of wherever a byte count lands. Sentences are read from the
+episode at retrieval, not stored one per node at ingestion. The same
+reach bounds it: a sentence running past ``MAX_WINDOW`` bytes from the hit
+is cut there, and ``capped`` counts it apart from ``clipped``.
+
 No model is called and nothing is re-embedded.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Literal, Optional, Sequence
 
 from ..core.errors import Gone, InvalidInput, NotFound, SconeError
 from ..core.models import RecallItem
+from ..ingestion.semantic_chunks import _ends_a_sentence
 from ..memory.engine import check_space
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -50,6 +60,75 @@ MAX_WINDOW = 100_000
 #: successes bounded nothing. Past the budget the rest are returned
 #: unwidened and counted in ``not_read`` rather than dropped.
 MAX_EPISODES = 100
+#: Sentences a window may reach in either direction.
+MAX_SENTENCES = 20
+
+WindowUnit = Literal["bytes", "sentences"]
+WINDOW_UNITS: tuple[WindowUnit, ...] = ("bytes", "sentences")
+
+#: Stops that end a sentence with no space after them, as CJK text writes them.
+_FULL_STOPS = "。！？"
+_CLOSERS = "\"')]」』）"
+_BLANK_LINE = re.compile(r"\n[^\S\n]*\n\s*")
+
+
+def sentence_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans of the sentences in ``text``, each without the space after it.
+
+    A sentence ends at ``.``, ``!`` or ``?`` (with any closing quote or
+    bracket) followed by space or the end, unless the stop sits after an
+    initial or a title or before a lower-case word, the rules the semantic
+    chunker cuts by. It also ends at a CJK full stop, which needs no space
+    after it, and at a blank line, so a heading or list line with no stop
+    is a sentence of its own rather than the start of the next one."""
+    spans: list[tuple[int, int]] = []
+    start: Optional[int] = None
+    index, size = 0, len(text)
+
+    def close(end: int) -> None:
+        nonlocal start
+        if start is not None:
+            stop = end
+            while stop > start and text[stop - 1].isspace():
+                stop -= 1
+            if stop > start:
+                spans.append((start, stop))
+        start = None
+
+    while index < size:
+        blank = _BLANK_LINE.match(text, index) if text[index] == "\n" else None
+        if blank:
+            close(index)
+            index = blank.end()
+            continue
+        if start is None:
+            if text[index].isspace():
+                index += 1
+                continue
+            start = index
+        character = text[index]
+        if character in _FULL_STOPS:
+            after = index + 1
+            while after < size and text[after] in _CLOSERS + _FULL_STOPS:
+                after += 1
+            close(after)
+            index = after
+            continue
+        if character in ".!?":
+            after = index + 1
+            while after < size and text[after] in ".!?" + _CLOSERS:
+                after += 1
+            if after >= size or text[after].isspace():
+                following = after
+                while following < size and text[following].isspace():
+                    following += 1
+                if _ends_a_sentence(text, index, following):
+                    close(after)
+                    index = following
+                    continue
+        index += 1
+    close(size)
+    return spans
 
 
 def _tail(byte: int) -> bool:
@@ -86,9 +165,15 @@ class Widened:
     #: was read rather than trust that it was.
     by_chunk: dict[int, tuple[int, int]] = field(default_factory=dict)
     why: str = ""
+    #: What ``before`` and ``after`` counted: bytes, or whole sentences.
+    unit: WindowUnit = "bytes"
+    #: Sentence windows cut at ``MAX_WINDOW`` bytes from the hit because a
+    #: sentence ran past it; not the edge of the episode.
+    capped: int = 0
 
     def record(self) -> dict[str, object]:
-        return {"widened": self.widened, "clipped": self.clipped, "aligned": self.aligned,
+        return {"unit": self.unit, "widened": self.widened, "clipped": self.clipped, "capped": self.capped,
+                "aligned": self.aligned,
                 "gone": self.gone, "unread": self.unread, "not_read": self.not_read,
                 "why": self.why,
                 "by_chunk": {str(k): list(v) for k, v in self.by_chunk.items()},
@@ -97,20 +182,27 @@ class Widened:
 
 async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem], *,
                 before: int = 500, after: int = 500,
-                episodes: int = MAX_EPISODES) -> Widened:
-    """Return each item with the episode's text around it."""
+                episodes: int = MAX_EPISODES, unit: WindowUnit = "bytes") -> Widened:
+    """Return each item with the episode's text around it, ``before`` and
+    ``after`` counted in ``unit``: bytes, or whole sentences."""
     check_space(space)
     # Byte distances, checked as exact integers at the door. A fractional
     # window passed the `< 0` test and then failed much later as a
     # TypeError from a byte slice, which tells a caller nothing about
     # what they asked for. `bool` is excluded deliberately: `True` is an
     # integer to `isinstance` and is not a distance.
+    if not isinstance(unit, str) or unit not in WINDOW_UNITS:
+        raise InvalidInput(f"a window is counted in {' or '.join(WINDOW_UNITS)}, not {unit!r}")
     for name, value in (("before", before), ("after", after)):
         if type(value) is not int:
-            raise InvalidInput(f"{name} is a whole number of bytes, not {value!r}")
+            raise InvalidInput(f"{name} is a whole number of {unit}, not {value!r}")
     if before < 0 or after < 0:
         raise InvalidInput("a window cannot reach a negative distance")
-    if before == 0 and after == 0:
+    if unit == "sentences":
+        if before > MAX_SENTENCES or after > MAX_SENTENCES:
+            raise InvalidInput(f"a window may reach at most {MAX_SENTENCES} sentences either way, not "
+                               f"{max(before, after)}")
+    elif before == 0 and after == 0:
         raise InvalidInput("a window of nothing is not a window: give before or after")
     if before > MAX_WINDOW or after > MAX_WINDOW:
         raise InvalidInput(f"a window may reach at most {MAX_WINDOW} bytes either way, not "
@@ -123,8 +215,10 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
 
     kept: list[RecallItem] = []
     by_chunk: dict[int, tuple[int, int]] = {}
-    widened = clipped = moved = vanished = unread = unbudgeted = 0
+    widened = clipped = moved = vanished = unread = unbudgeted = capped = 0
     read: dict[int, Optional[str]] = {}
+    # Each episode's sentences as byte spans, found once however many hits it holds.
+    sentences_of: dict[int, list[tuple[int, int]]] = {}
     # An episode we tried and could not read. Held apart from `read`
     # because "we could not read it" is not "it is not there", and held
     # at all because a read that failed is still a read: leaving it out
@@ -154,16 +248,40 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
             vanished += 1
             continue
         raw = content.encode()
-        start, stop = max(0, item.start - before), min(len(raw), item.end + after)
-        first, last = start, stop
-        if first >= last or item.end > len(raw):
+        if item.end > len(raw) or item.start >= item.end:
             # The span does not sit in the text we just read, so this is
             # not the episode the chunk came from any more.
             unread += 1
             kept.append(item)
             continue
-        if first > item.start - before or last < item.end + after:
-            clipped += 1
+        if unit == "sentences":
+            if item.episode_id not in sentences_of:
+                sentences_of[item.episode_id] = [
+                    (len(content[:begin].encode()), len(content[:end].encode())) for begin, end in sentence_spans(content)]
+            spans = sentences_of[item.episode_id]
+            touched = [index for index, (begin, end) in enumerate(spans) if begin < item.end and end > item.start]
+            if not touched and spans:
+                # The hit is only the space between sentences: it takes the sentence after it,
+                # or the last one when nothing follows.
+                touched = [next((index for index, (begin, _) in enumerate(spans) if begin >= item.end),
+                                len(spans) - 1)]
+            if not touched:
+                # An episode with no sentence at all is only space; there is nothing to widen to.
+                kept.append(item)
+                continue
+            low, high = touched[0] - before, touched[-1] + after
+            if low < 0 or high >= len(spans):
+                clipped += 1
+            start, stop = spans[max(0, low)][0], spans[min(len(spans) - 1, high)][1]
+            start, stop = min(start, item.start), max(stop, item.end)
+            if item.start - start > MAX_WINDOW or stop - item.end > MAX_WINDOW:
+                capped += 1
+                start, stop = max(start, item.start - MAX_WINDOW), min(stop, item.end + MAX_WINDOW)
+        else:
+            start, stop = max(0, item.start - before), min(len(raw), item.end + after)
+            if start > item.start - before or stop < item.end + after:
+                clipped += 1
+        first, last = start, stop
         # A window is counted in bytes and read as text, so an edge can
         # land inside a character. Both edges move inward to the nearest
         # character start; the chunk's own span is one, so neither edge
@@ -185,6 +303,11 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
         widened += 1
 
     why = f"{widened} item(s) widened" if widened else "nothing to widen"
+    if widened and unit == "sentences":
+        why += f" by whole sentences, {before} before and {after} after"
+    if capped:
+        why += (f"; {capped} ran into a sentence longer than the reach of {MAX_WINDOW} bytes, so those "
+                f"windows stop there, inside a sentence")
     if clipped:
         why += (f"; {clipped} met the start or end of their episode, so those windows are "
                 f"shorter than asked for")
@@ -203,4 +326,5 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
                 f"episode(s) was spent before theirs was reached -- nobody looked at those, "
                 f"which is not a finding about them either")
     return Widened(items=tuple(kept), widened=widened, clipped=clipped, aligned=moved,
-                   gone=vanished, unread=unread, not_read=unbudgeted, by_chunk=by_chunk, why=why)
+                   gone=vanished, unread=unread, not_read=unbudgeted, by_chunk=by_chunk, why=why,
+                   unit=unit, capped=capped)
