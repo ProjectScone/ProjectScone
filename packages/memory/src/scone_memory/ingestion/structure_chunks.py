@@ -78,7 +78,16 @@ _CLAUSE = re.compile(
     r"|[IVXLC]+[.)]"                                       # IV. or XI)
     r"|§ ?\d+"                                             # § 12
     r"|(?i:Article|Section|Chapter|Clause|Rule|Schedule|Appendix|Part)[ \t]+\d+"
-    r")(?=[ \t]+\S|[ \t]*$)")
+    r")(?=[ \t]+\S|[ \t]*$)"
+    # Chinese and Japanese numbering, which needs no space before its text:
+    # 第三条, 第2章, 一、, （二）, 1、. A numeral alone is not enough -- 第一次 is
+    # "the first time" -- so the counter word or the mark after it is required.
+    r"|^ {0,3}(?:"
+    r"第[0-9０-９一二三四五六七八九十百千零〇两]+[章节節条條款篇部编編项項回]"
+    r"|[一二三四五六七八九十]+、"
+    r"|[（(][0-9０-９一二三四五六七八九十]+[）)]"
+    r"|[0-9０-９]+、"
+    r")(?=[ \t]*\S|[ \t]*$)")
 #: A question or an answer opening a pair.
 _PAIR = re.compile(r"^ {0,3}(?:Q|A|Question|Answer)[ \t]*[:.][ \t]*\S")
 
