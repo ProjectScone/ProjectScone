@@ -97,6 +97,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source-prefix", help="only episodes whose source starts with this text (literal)")
     p.add_argument("--since", help="only episodes that happened at or after this instant")
     p.add_argument("--until", help="only episodes that happened at or before this instant")
+    p.add_argument("--infer", action="store_true",
+                   help="read the question's own words for a scope (a date, a kind of memory, tags, a place) and "
+                        "search with it where no filter was given; what was read and applied is printed")
     p.add_argument("--candidate-limit", type=int,
                    help="how many candidates each lane fetches before fusion (1 to 1000)")
     p.add_argument("--no-rerank", action="store_true", help="skip the configured reranker for this search")
@@ -1434,6 +1437,19 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             for lane in {lane for part in parted.per_part for lane in part.degraded}:
                 print(f"degraded: {lane}", file=sys.stderr)
             return 0
+        inferred = None
+        if args.infer:
+            from datetime import datetime, timezone
+
+            from ..retrieval.hints import apply_scope, infer_scope
+
+            asked_scope = infer_scope(args.query, now=datetime.now(timezone.utc))
+            searched = apply_scope(asked_scope, since=args.since, until=args.until, kind=args.kind, tags=list(args.tag),
+                                   source_prefix=args.source_prefix)
+            args.since, args.until, args.kind = searched.since, searched.until, searched.kind
+            args.source_prefix, args.tag = searched.source_prefix, list(searched.tags)
+            inferred = searched.record(asked_scope)
+            inferred_rows: list[dict[str, str]] = [r.record() for r in searched.applied]
         result = await engine.recall(
             space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
@@ -1486,8 +1502,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             emit(said | ({"merged": _staged(joined.record())} if joined else {})
                       | ({"widened": _staged(opened.record())} if opened else {})
                       | ({"withheld": _staged(kept.record())} if kept else {})
-                      | ({"code_context": _staged(inside.record())} if inside else {}))
+                      | ({"code_context": _staged(inside.record())} if inside else {})
+                      | ({"inferred": inferred} if inferred is not None else {}))
             return 0
+        if inferred is not None:
+            print("inferred: " + (", ".join(f"{r['filter']}={r['value']} ({r['words']})" for r in inferred_rows) if inferred_rows
+                                  else "nothing applied" + (" (the caller's filters stand)" if inferred["readings"] else "")), file=out)
         if kept is not None:
             print(kept.why, file=out)
         if opened is not None:
