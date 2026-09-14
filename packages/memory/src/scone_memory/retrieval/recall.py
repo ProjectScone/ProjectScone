@@ -14,7 +14,7 @@ from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING
 
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
-from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
+from ..core.models import Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
@@ -32,6 +32,7 @@ from .entity_lane import ENTITY_WEIGHT, entity_lane
 CONTEXT_WEIGHT = 2.0
 from .episode_scope import episode_fits
 from .filters import Filter, parse_filter
+from .phrases import checked_phrases, passes
 if TYPE_CHECKING:
     from .synonyms import Synonyms
     from ..entities.project import EntityProjection
@@ -100,6 +101,18 @@ def _ms(since: float) -> float:
     return round((time.perf_counter() - since) * 1000, 3)
 
 
+def _finished(trace: "PhraseTrace | None", returned: int, limit: int) -> "PhraseTrace | None":
+    """``trace`` told whether the answer came back short after the phrases dropped passages."""
+    if trace is None:
+        return None
+    dropped = trace.dropped_required + trace.dropped_excluded
+    short = returned < limit and dropped > 0
+    why = (f"{dropped} of the {trace.checked} candidates checked were dropped by the phrases"
+           + (f"; {returned} of {limit} came back, and passages beyond the candidate window were not checked"
+              if short else ""))
+    return trace.model_copy(update={"short": short, "why": why})
+
+
 #: The lanes a recall may be asked for, in the order they are named.
 LANES: tuple[str, ...] = ("vector", "text")
 
@@ -138,6 +151,8 @@ async def recall(
     entity_unavailable: str | None = None,
     entity_notes: Sequence[str] = (),
     lanes: Sequence[str] = LANES,
+    require: Sequence[str] = (),
+    exclude: Sequence[str] = (),
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -241,6 +256,7 @@ async def recall(
     # also carries notes on lanes that ran (a lexical index behind, the
     # context lane unkept), which are not failures.
     failed: set[str] = set()
+    required, excluded = checked_phrases(require, exclude)
     vector_lane: list[tuple[int, float]] = []
     width: int | None = None
     if "vector" not in asked:
@@ -391,6 +407,21 @@ async def recall(
         if cid in chunks
     ]
     items = fusion.order(items)
+    phrase_trace: PhraseTrace | None = None
+    if required or excluded:
+        # Across every fused candidate and before the per-episode cap and the
+        # limit, so a passage that fails gives its place to one that holds.
+        dropped = {"required": 0, "excluded": 0}
+        kept_items = []
+        for item in items:
+            fits, rule = passes(chunks[item.chunk_id].text, required, excluded)
+            if fits:
+                kept_items.append(item)
+            else:
+                dropped[rule] += 1
+        phrase_trace = PhraseTrace(required=required, excluded=excluded, checked=len(items),
+                                   dropped_required=dropped["required"], dropped_excluded=dropped["excluded"])
+        items = kept_items
     episode_of = {cid: c.episode_id for cid, c in chunks.items()}
     capped_items = fusion.cap_per_episode(items, episode_of)
     baseline_allowed = {item.chunk_id for item in capped_items}
@@ -563,6 +594,7 @@ async def recall(
         narrowing=narrowing_report,
         fusion=cast(Literal["rank", "score"], fusion_mode),
         lanes=answered,
+        phrases=_finished(phrase_trace, len(result_items), limit),
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,
@@ -597,6 +629,7 @@ async def recall(
         "history_fact_ids": [f.fact_id for f in previous],
         "returned_bytes": result.returned_bytes,
         "space_bytes": result.space_bytes,
+        **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
     })
     if event is not None:
         result.event_id = event.event_id

@@ -1029,6 +1029,8 @@ class MemoryEngine:
         graph_boost: bool = False,
         fusion: str = "rank",
         lanes: Sequence[str] = ("vector", "text"),
+        require: Sequence[str] = (),
+        exclude: Sequence[str] = (),
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -1057,6 +1059,11 @@ class MemoryEngine:
         ``lanes`` names the lanes to run, "vector" and "text" by default. A
         lane not named is not run, and the result's ``lanes`` names the
         ones that answered.
+
+        ``require`` and ``exclude`` are phrases a passage must all hold, or
+        must hold none of, matched as whole words; they are checked across
+        the fused candidates before the limit, and ``phrases`` says what
+        they dropped and whether the answer came back short.
 
         ``graph_boost`` adds the entity lane: passages naming the question's
         entities or their neighbours in the knowledge graph. The projection
@@ -1100,7 +1107,8 @@ class MemoryEngine:
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
-                            entity_notes=notes, lanes=lanes)
+                            entity_notes=notes, lanes=lanes,
+                            require=require, exclude=exclude)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its
