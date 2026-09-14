@@ -117,3 +117,50 @@ def test_recall_at_k_is_the_share_of_relevant_items_in_the_top_k():
     assert recall_at(["a"], set(), 5) == 0.0
     with pytest.raises(ValueError):
         recall_at(["a"], {"a"}, 0)
+
+
+async def test_pairwise_asks_in_both_orders_and_believes_only_agreement():
+    from scone_memory.bench.evaluators import pairwise
+
+    steady = FakeChat(['{"winner": "first", "reason": "A is grounded"}', '{"winner": "second", "reason": "still A"}'])
+    verdict = await pairwise(steady, question="Q?", answer_a="A says", answer_b="B says", reference="the truth")
+    assert (verdict.score, verdict.passing, verdict.verified, verdict.judge_calls) == (1.0, True, True, 2)
+    assert verdict.reasons == ("A is grounded", "still A")
+    assert "A right answer says:\nthe truth" in steady.calls[0][1] and steady.calls[1][1].index("B says") < steady.calls[1][1].index("A says")
+    biased = FakeChat(['{"winner": "first"}', '{"winner": "first"}'])
+    verdict = await pairwise(biased, question="Q?", answer_a="A", answer_b="B")
+    assert (verdict.score, verdict.passing, verdict.verified) == (0.5, False, True)
+    assert "in one order" in verdict.reasons[-1], "a judge that prefers whatever it read first is a tie, not a coin"
+    b_wins = FakeChat(['{"winner": "second"}', '{"winner": "first"}'])
+    assert (await pairwise(b_wins, question="Q?", answer_a="A", answer_b="B")).score == 0.0
+    tie = FakeChat(['{"winner": "tie"}', '{"winner": "tie"}'])
+    assert (await pairwise(tie, question="Q?", answer_a="A", answer_b="B")).score == 0.5
+    unreadable = FakeChat(['{"winner": "first"}', '{"winner": "maybe"}'])
+    verdict = await pairwise(unreadable, question="Q?", answer_a="A", answer_b="B")
+    assert not verdict.verified and verdict.passing is None and verdict.judge_calls == 2
+    assert not (await pairwise(FakeChat([ChatError("down")]), question="Q?", answer_a="A", answer_b="B")).verified
+    assert "bound" in (await pairwise(FakeChat(), question="Q?", answer_a="x" * 70_000, answer_b="B")).reasons[0]
+
+
+async def test_semantic_similarity_needs_no_judge_and_says_what_it_is_not():
+    from scone_memory import HashEmbedder
+    from scone_memory.bench.evaluators import semantic_similarity
+
+    embedder = HashEmbedder()
+    same = await semantic_similarity(embedder, answer="the harbour closes in November", reference="the harbour closes in November")
+    assert same.score == pytest.approx(1.0) and same.passing and same.verified and same.judge_calls == 0
+    assert "not correctness" in same.reasons[0] and embedder.id in same.reasons[0]
+    other = await semantic_similarity(embedder, answer="apples grow on the ridge", reference="the harbour closes in November",
+                                      passing_similarity=0.9)
+    assert 0.0 <= other.score < 0.9 and other.passing is False
+    assert (await semantic_similarity(embedder, answer="", reference="x")).verified is False
+    with pytest.raises(ValueError):
+        await semantic_similarity(embedder, answer="a", reference="b", passing_similarity=2)
+
+    class Broken:
+        id, dim = "broken", 3
+
+        async def embed(self, texts):
+            raise RuntimeError("no model")
+
+    assert "embedder failed" in (await semantic_similarity(Broken(), answer="a", reference="b")).reasons[0]
