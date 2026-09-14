@@ -3,10 +3,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
-from typing import Mapping, Optional, Sequence
+from typing import Literal, Mapping, Optional, Sequence
 
 from ..core.errors import InvalidInput
 from ..core.ports import NewEpisode
+
+
+#: The ways one record can ask to be cut.
+Chunking = Literal["length", "code", "structure", "semantic"]
 
 
 @dataclass(frozen=True)
@@ -28,10 +32,14 @@ class Record:
     #: The identity a dump carries. Import passes it through so a moved
     #: store deduplicates exactly as its source did; callers leave it None.
     content_hash: Optional[str] = None
+    #: How this one record is cut: length, code, structure or semantic.
+    #: None keeps the engine's rule. Kept on the episode's metadata under
+    #: ``chunking`` so a recovery cuts the way the record asked.
+    chunking: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Mapping) -> "Record":
-        known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata", "dedup_key", "content_hash") if k in data}
+        known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata", "dedup_key", "content_hash", "chunking") if k in data}
         if "content" not in known:
             raise InvalidInput("a record needs content")
         return cls(**known)
@@ -72,6 +80,12 @@ class _Pending:
     texts: list[str]
     #: The same spans as UTF-8 byte offsets (spec rule 1.2).
     spans: list[tuple[int, int]]
+    #: The way the record was cut, and the structure chunker's own counts
+    #: when that was the way.
+    chunking: Chunking = "length"
+    structure: Optional[dict[str, object]] = None
+    #: What the heading context added to the embedding inputs, when on.
+    embedding_context: Optional[dict[str, object]] = None
 
 
 @dataclass(frozen=True)
