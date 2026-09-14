@@ -94,3 +94,51 @@ async def test_what_rests_on_a_table_is_answered_by_the_graph():
         assert said == len(recorded) == len(schema_claims(SCHEMA, "db/schema.sql"))
     finally:
         await engine.close()
+
+
+def test_strings_functions_ctes_and_keywords_are_not_read_as_syntax():
+    text = '''CREATE TABLE t (
+  id int,
+  name text DEFAULT 'The name, if any',
+  note text DEFAULT 'see references manual',
+  paren text DEFAULT ')',
+  body text DEFAULT 'it\\'s fine; really',
+  b int
+);
+-- CREATE TABLE ghosts (id int);
+CREATE TABLE cache (key text, value text, check_flag int, CHECK (value <> ''));
+CREATE VIEW monthly AS
+  WITH ranked AS (SELECT * FROM orders)
+  SELECT EXTRACT(MONTH FROM placed_at) AS mo, COUNT(*)
+  FROM ranked r, customers c
+  JOIN LATERAL (SELECT 1) x ON true
+  JOIN generate_series(1, 10) g ON true
+  WHERE sep = ';' GROUP BY mo
+  UNION SELECT 1, 2 FROM archive;
+'''
+    said = [(c.subject, c.predicate, c.object) for c in schema_claims(text, "s.sql")]
+    columns = [o.rsplit(".", 1)[-1] for s, p, o in said if s == "s.sql:t" and p == "defines"]
+    assert columns == ["id", "name", "note", "paren", "body", "b"], "a comma, a paren or a semicolon inside a string is not syntax"
+    assert not any(p == "depends_on" and s == "s.sql:t" for s, p, o in said), "the word references inside a string is not a foreign key"
+    assert not any("ghosts" in o for _, _, o in said)
+    assert [o.rsplit(".", 1)[-1] for s, p, o in said if s == "s.sql:cache" and p == "defines"] == ["key", "value", "check_flag"], \
+        "a column called key is a column; CHECK ( is a constraint"
+    sources = {o for s, p, o in said if s == "s.sql:monthly" and p == "depends_on"}
+    assert sources == {"s.sql:orders", "s.sql:customers", "s.sql:archive"}, sources
+    # not placed_at (a FROM inside a function), not ranked (a WITH name), not LATERAL or generate_series
+
+
+def test_statements_without_semicolons_end_at_the_next_statement():
+    text = "ALTER TABLE a ADD CONSTRAINT f FOREIGN KEY (x) REFERENCES b(id)\nGO\nALTER TABLE c ADD CONSTRAINT g FOREIGN KEY (y) REFERENCES d(id)\nGO\nCREATE VIEW v AS SELECT * FROM e\nCREATE VIEW w AS SELECT * FROM f\n"
+    said = {(s, p, o) for s, p, o in ((c.subject, c.predicate, c.object) for c in schema_claims(text, "s.sql"))}
+    assert ("s.sql:a", "depends_on", "s.sql:b") in said and ("s.sql:c", "depends_on", "s.sql:d") in said
+    assert ("s.sql:a", "depends_on", "s.sql:d") not in said, "one statement's scan does not run into the next"
+    assert ("s.sql:v", "depends_on", "s.sql:e") in said and ("s.sql:v", "depends_on", "s.sql:f") not in said
+    assert ("s.sql:w", "depends_on", "s.sql:f") in said
+
+
+def test_a_backslash_escaped_quote_does_not_swallow_the_file():
+    text = "CREATE TABLE notes (id int, body text DEFAULT 'it\\'s fine');\n-- CREATE TABLE ghosts (id int);\nCREATE TABLE orders (id int);\n"
+    said = [(c.subject, c.predicate, c.object) for c in schema_claims(text, "s.sql")]
+    assert ("s.sql", "defines", "s.sql:orders") in said and not any("ghosts" in o for _, _, o in said)
+    assert [o.rsplit(".", 1)[-1] for s, p, o in said if s == "s.sql:notes" and p == "defines"] == ["id", "body"]
