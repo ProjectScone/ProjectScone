@@ -30,7 +30,7 @@ TEXT_EXTENSIONS = frozenset({
     '.swift', '.kt', '.kts', '.scala', '.sh', '.bash', '.zsh', '.sql', '.css',
     '.scss', '.sass', '.less', '.r', '.lua', '.pl', '.ex', '.exs', '.erl', '.hs',
     '.vue', '.svelte', '.graphql', '.gql', '.csv', '.tsv', '.json', '.jsonl',
-    '.ndjson', '.xml', '.html', '.htm', '.eml', '.ipynb',
+    '.ndjson', '.xml', '.html', '.htm', '.eml', '.mbox', '.ipynb',
     '.ldjson', '.qmd', '.skill', '.mts', '.cts', '.mjs', '.cjs', '.ejs', '.ets',
     '.groovy', '.gradle', '.cxx', '.cu', '.cuh', '.metal', '.rake', '.luau', '.toc',
     '.zig', '.ps1', '.psm1', '.psd1', '.m', '.mm', '.ml', '.mli', '.jl', '.astro',
@@ -95,9 +95,9 @@ def _decode(data: bytes) -> str:
     return text
 
 
-def _lines(text: str, out: _Collector, prefix: str = '') -> None:
+def _lines(text: str, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None) -> None:
     for line, value in enumerate(StringIO(text, newline=None), 1):
-        out.add(value.removesuffix('\n'), f'{prefix}line:{line}')
+        out.add(value.removesuffix('\n'), f'{prefix}line:{line}', metadata)
 
 
 def _table(text: str, delimiter: str, out: _Collector) -> None:
@@ -252,16 +252,17 @@ _SCOPE_BOUNDARIES = frozenset({'applet', 'caption', 'html', 'table', 'td', 'th',
 
 
 class _HTML(HTMLParser):
-    def __init__(self, out: _Collector, prefix: str = '') -> None:
+    def __init__(self, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self.out = out
         self.prefix = prefix
+        self.metadata = metadata
         self.stack: list[tuple[str, bool]] = []
         self.parts: list[str] = []
         self.line = 1
         self.has_content = False
         self.title_parts: list[str] = []
-        self.tables = HtmlTables(out, prefix)
+        self.tables = HtmlTables(out, prefix, metadata)
 
     def flush(self) -> None:
         text = ''.join(self.parts)
@@ -269,7 +270,7 @@ class _HTML(HTMLParser):
             text = re.sub(r'[ \t\r\f]+', ' ', text).strip(' \t\r\n\f')
         self.parts.clear()
         self.has_content = False
-        self.out.add(text, f'{self.prefix}line:{self.line}')
+        self.out.add(text, f'{self.prefix}line:{self.line}', self.metadata)
 
     def preformatted(self) -> bool:
         return any(tag == 'pre' for tag, _ in self.stack)
@@ -357,8 +358,8 @@ class _HTML(HTMLParser):
         self.tables.data(normalized, self.preformatted())
 
 
-def _html(text: str, out: _Collector, prefix: str = '') -> str:
-    parser = _HTML(out, prefix)
+def _html(text: str, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None) -> str:
+    parser = _HTML(out, prefix, metadata)
     parser.feed(text)
     parser.close()
     parser.flush()
@@ -398,7 +399,71 @@ def _email(data: bytes, out: _Collector) -> dict[str, str]:
     return {'attachments_skipped': str(skipped)}
 
 
-def _mime(message: Message, path: str, out: _Collector, depth: int) -> int:
+#: Messages a mailbox is read for before the rest are counted, not read.
+#: The document's own limits come first: 20,000 segments and 2 MB of
+#: text refuse the document whole, as they do an `.eml`, so a mailbox
+#: of ordinary mail reaches this bound at about a thousand messages.
+MAX_MAILBOX_MESSAGES = 1_000
+#: A message's envelope line, the shape every mbox writer makes:
+#: `From sender Www Mmm dd hh:mm:ss yyyy`. A body line that merely
+#: begins with `From ` (an mboxcl writer leaves it unquoted) is not one.
+_MBOX_FROM = re.compile(rb'^From \S+ +[A-Za-z]{3} +[A-Za-z]{3} +\d{1,2} +\d\d:\d\d(?::\d\d)?'
+                        rb'(?: +[A-Za-z]{3,5}| +[+-]\d{4})? +\d{4}[^\r\n]*\r?\n', re.MULTILINE)
+
+
+def _mailbox(data: bytes, out: _Collector) -> dict[str, str]:
+    """A Unix mailbox: one message after another, each opened by an
+    envelope line. Every message is read as an `.eml` is, its headers and
+    text parts under `message:N/`, and each segment carries the message's
+    number, date and sender so a passage recalled from a mailbox says
+    which mail it came from. A file not opened by an envelope line (an
+    `.eml` saved as `.mbox`, or one with text before its first message)
+    is read whole as one message, with nothing split and nothing
+    unquoted. A failure names the message it was in. Past the bound the
+    rest are counted."""
+    data = data.removeprefix(b'\xef\xbb\xbf')
+    starts = [found.start() for found in _MBOX_FROM.finditer(data)]
+    bare = not starts or bool(data[:starts[0]].strip())
+    if bare:
+        starts = [0]
+    read = skipped_attachments = 0
+    for number, start in enumerate(starts, 1):
+        out.check()
+        if number > MAX_MAILBOX_MESSAGES:
+            break
+        end = starts[number] if number < len(starts) else len(data)
+        raw = data[start:end]
+        if not bare:
+            raw = raw.split(b'\n', 1)[1] if b'\n' in raw else b''
+            # mboxrd quoting: a body line that began with `From ` was
+            # written with one more `>` than it had. An mboxo writer
+            # quotes only the bare line, so a genuine `>From ...` reply
+            # line in such a file loses its `>` here; the two cannot be
+            # told apart from the bytes.
+            raw = re.sub(rb'^>(?=>*From )', b'', raw, flags=re.MULTILINE)
+        try:
+            try:
+                message = BytesParser(policy=policy.default).parsebytes(raw)
+            except (ValueError, RecursionError):
+                raise InvalidInput('message contains malformed or excessively nested MIME') from None
+            about = {'message': str(number)}
+            for header in ('Date', 'From', 'Subject'):
+                value = message.get(header)
+                if value:
+                    about[header.lower()] = str(value)[:200]
+            for header in ('Subject', 'From', 'To', 'Cc', 'Date', 'Message-ID'):
+                for value in message.get_all(header, []):
+                    out.add(f'{header}: {value}', f'message:{number}/header:{header.lower()}', about)
+            skipped_attachments += _mime(message, '1', out, 0, f'message:{number}/', about)
+        except InvalidInput as refused:
+            raise InvalidInput(f'mailbox message {number}: {refused}') from None
+        read += 1
+    return {'messages': str(read), 'messages_unread': str(max(0, len(starts) - read)),
+            'attachments_skipped': str(skipped_attachments)}
+
+
+def _mime(message: Message, path: str, out: _Collector, depth: int, prefix: str = '',
+          about: dict[str, str] | None = None) -> int:
     out.check(depth)
     if message.get_content_disposition() == 'attachment' or message.get_filename():
         return 1
@@ -408,7 +473,7 @@ def _mime(message: Message, path: str, out: _Collector, depth: int) -> int:
         payload = message.get_payload()
         if not isinstance(payload, list):
             raise InvalidInput('message contains malformed multipart content')
-        return sum(_mime(part, f'{path}.{i}', out, depth + 1)
+        return sum(_mime(part, f'{path}.{i}', out, depth + 1, prefix, about)
                    for i, part in enumerate(cast(list[Message], payload), 1))
     if message.get_content_type() not in {'text/plain', 'text/html'}:
         return 0
@@ -423,9 +488,9 @@ def _mime(message: Message, path: str, out: _Collector, depth: int) -> int:
         raise InvalidInput('message text has an invalid charset or encoding') from None
     _valid_unicode(text)
     if message.get_content_type() == 'text/html':
-        _html(text, out, f'mime:{path}/')
+        _html(text, out, f'{prefix}mime:{path}/', about)
     else:
-        _lines(text, out, f'mime:{path}/')
+        _lines(text, out, f'{prefix}mime:{path}/', about)
     return 0
 
 
@@ -443,6 +508,8 @@ def parse_text(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocu
     metadata: dict[str, str] = {}
     if suffix == '.eml':
         metadata = _email(data, out)
+    elif suffix == '.mbox':
+        metadata = _mailbox(data, out)
     else:
         text = _decode(data)
         if suffix in {'.csv', '.tsv'}:
