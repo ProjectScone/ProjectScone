@@ -122,3 +122,41 @@ def test_a_target_that_is_not_a_hyperlink_blank_or_too_long_is_unresolved():
     [segment] = parse_office(docx(body, relationships), "t.docx", DocumentLimits()).segments
     assert [link["text"] for link in links(segment)] == ["fine"]
     assert segment.metadata["links_unresolved"] == "3"
+
+
+def test_long_links_are_recorded_while_they_fit_a_metadata_value_and_the_rest_counted():
+    """A metadata value holds 4,096 bytes; two presigned links of about 2,000
+    characters each do not fit in one, and the document must still be read."""
+    first, second = "https://example.com/a?" + "x" * 1_990, "https://example.com/b?" + "y" * 1_990
+    body = (f'<w:p><w:hyperlink r:id="r1">{run("first")}</w:hyperlink> '
+            f'<w:hyperlink r:id="r2">{run("second")}</w:hyperlink></w:p>')
+    [segment] = parse_office(docx(body, external("r1", first) + external("r2", second)), "long.docx", DocumentLimits()).segments
+    assert [link["target"] for link in links(segment)] == [first]
+    assert segment.metadata["links_cut"] == "1" and len(segment.metadata["links"].encode()) <= 4096
+
+
+def test_a_notes_part_with_broken_relationships_is_still_read():
+    """Only the links in that part are lost, and they are counted; before links were read,
+    a notes part's relationships were never opened, so they must not fail the document now."""
+    data = ooxml_archive({
+        "ppt/presentation.xml": f'<p:presentation xmlns:p="{P}" xmlns:r="{R}"><p:sldIdLst><p:sldId id="200" r:id="r1"/></p:sldIdLst></p:presentation>',
+        "ppt/_rels/presentation.xml.rels": f'<Relationships xmlns="{REL}"><Relationship Id="r1" Target="slides/slide1.xml" Type="{R}/slide"/></Relationships>',
+        "ppt/slides/slide1.xml": f'<p:sld xmlns:p="{P}" xmlns:a="{A}"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Slide</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
+        "ppt/slides/_rels/slide1.xml.rels": f'<Relationships xmlns="{REL}"><Relationship Id="n1" Target="../notesSlides/notesSlide1.xml" Type="{R}/notesSlide"/></Relationships>',
+        "ppt/notesSlides/notesSlide1.xml": (f'<p:notes xmlns:p="{P}" xmlns:a="{A}" xmlns:r="{R}"><p:cSld><p:spTree><p:sp><p:txBody><a:p>'
+                                            f'<a:r><a:rPr><a:hlinkClick r:id="h1"/></a:rPr><a:t>Speaker link</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:notes>'),
+        "ppt/notesSlides/_rels/notesSlide1.xml.rels": (f'<Relationships xmlns="{REL}">{external("h1", "https://example.com/a")}'
+                                                       f'{external("h1", "https://example.com/b")}</Relationships>'),
+    }, main_part="ppt/presentation.xml")
+    slide, notes = parse_office(data, "deck.pptx", DocumentLimits()).segments
+    assert notes.text == "Speaker link" and "links" not in notes.metadata and notes.metadata["links_unresolved"] == "1"
+
+
+def test_the_recorded_links_never_exceed_a_metadata_value_whatever_their_lengths():
+    for extra in range(1_280, 1_380, 3):
+        body = "<w:p>" + "".join(f'<w:hyperlink r:id="r{n}">{run(f"l{n} ")}</w:hyperlink>' for n in range(3)) + "</w:p>"
+        relationships = "".join(external(f"r{n}", f"https://example.com/{n}?" + "z" * extra) for n in range(3))
+        [segment] = parse_office(docx(body, relationships), "sweep.docx", DocumentLimits()).segments
+        recorded = links(segment)
+        assert len(segment.metadata["links"].encode()) <= 4096, extra
+        assert len(recorded) + int(segment.metadata.get("links_cut", "0")) == 3
