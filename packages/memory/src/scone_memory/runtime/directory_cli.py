@@ -62,4 +62,9 @@ async def run_directory_sync(args: argparse.Namespace, engine: MemoryEngine, out
             print(f'{issue.code}: {json.dumps(issue.path or ".", ensure_ascii=True)}', file=out)
         if result.skipped:
             print(f'{result.skipped} unsupported file(s) skipped', file=out)
+        if result.claims or result.claims_closed:
+            print(f'{result.claims} claim(s) recorded from source files and manifests; '
+                  f'{result.claims_closed} closed that changed or removed files no longer make', file=out)
+        if result.claims_unread:
+            print('some claims could not be read by episode and were not closed; the receipts say which files', file=out)
     return 0 if result.complete else 1
