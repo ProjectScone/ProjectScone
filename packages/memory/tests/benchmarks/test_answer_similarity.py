@@ -42,6 +42,8 @@ async def test_the_score_is_the_best_cosine_to_any_reference():
     assert found.score == pytest.approx(0.8) and found.reference == 1
     blank_first = await answer_similarity(Fixed(VECTORS), answer="Paris", references=["  ", "Lyon", "Paris"])
     assert blank_first.reference == 2, "the index is into the references given, blanks included"
+    best_first = await answer_similarity(Fixed(VECTORS), answer="The capital is Paris.", references=["Paris", "Lyon"])
+    assert best_first.reference == 0 and best_first.score == pytest.approx(0.8)
     assert found.passing is None and "no threshold" in found.why
     assert found.embedder == "fixed-test" and found.dim == 2
 
