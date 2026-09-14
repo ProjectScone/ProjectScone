@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Literal, Optional, Sequence
 
 from ..core.errors import Gone, InvalidInput, NotFound, SconeError
 from ..core.models import RecallItem
-from ..ingestion.semantic_chunks import _ends_a_sentence
+from ..ingestion.semantic_chunks import ends_a_sentence
 from ..memory.engine import check_space
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -70,6 +70,22 @@ WINDOW_UNITS: tuple[WindowUnit, ...] = ("bytes", "sentences")
 _FULL_STOPS = "。！？"
 _CLOSERS = "\"')]」』）"
 _BLANK_LINE = re.compile(r"\n[^\S\n]*\n\s*")
+
+
+def _byte_spans(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Ordered character spans as byte offsets, in one walk along ``text``.
+
+    Encoding the whole prefix before each span is quadratic in the
+    episode; only the text between one edge and the next is encoded."""
+    found: list[tuple[int, int]] = []
+    at = offset = 0
+    for begin, end in spans:
+        offset += len(text[at:begin].encode())
+        start = offset
+        offset += len(text[begin:end].encode())
+        found.append((start, offset))
+        at = end
+    return found
 
 
 def sentence_spans(text: str) -> list[tuple[int, int]]:
@@ -122,7 +138,7 @@ def sentence_spans(text: str) -> list[tuple[int, int]]:
                 following = after
                 while following < size and text[following].isspace():
                     following += 1
-                if _ends_a_sentence(text, index, following):
+                if ends_a_sentence(text, index, following):
                     close(after)
                     index = following
                     continue
@@ -256,8 +272,7 @@ async def widen(engine: "MemoryEngine", space: str, items: Sequence[RecallItem],
             continue
         if unit == "sentences":
             if item.episode_id not in sentences_of:
-                sentences_of[item.episode_id] = [
-                    (len(content[:begin].encode()), len(content[:end].encode())) for begin, end in sentence_spans(content)]
+                sentences_of[item.episode_id] = _byte_spans(content, sentence_spans(content))
             spans = sentences_of[item.episode_id]
             touched = [index for index, (begin, end) in enumerate(spans) if begin < item.end and end > item.start]
             if not touched and spans:
