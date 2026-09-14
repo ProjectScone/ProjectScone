@@ -1197,6 +1197,26 @@ so a sync on a timer does not churn the store. A changed file is an
 update through the engine's keyed `replace`, so a source that changed
 leaves **one** memory and not two.
 
+**What the tree says not to read is left unread.** A repository walked
+whole is a repository with its `node_modules`, `build`, `dist`, `target`
+and `vendor` in it: thousands of files nobody wrote, embedded and put in
+the graph ahead of the source. So `sync` and `map` read every
+`.gitignore` below the root and leave what it excludes unread, with
+git's own rules (`ingestion/ignore.py`, written here rather than
+borrowed): a blank line or `#` comment says nothing; `!` re-includes; a
+trailing `/` matches only a directory; a pattern with a slash anywhere
+but its end is anchored to its file's directory and one without matches
+at any depth below it; `*` and `?` never cross a slash and `**` does;
+the last matching pattern wins, and a deeper file's patterns come after
+a shallower one's. A `.sconeignore` in any directory is read after the
+`.gitignore` beside it and can only exclude more: what `.gitignore`
+excludes stays excluded whatever it says, and a file under an excluded
+directory is never re-included, as in git. The receipt says what the
+rules did (`ignored`, `ignored_directories`, `ignore_files`), at most
+500 files and 20,000 patterns are read and the record says when that
+bound bit, and `--no-ignore` reads the tree whole. Dot directories and
+`__pycache__` are never walked, rules or no rules.
+
 ### Deletion is opt-in, previewed, and refused when the path looks wrong
 
 Forgetting memory because a file is missing is destructive, and a

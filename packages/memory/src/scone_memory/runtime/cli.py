@@ -377,6 +377,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also forget memories whose file is gone from disk (destructive; needs --apply)")
     p.add_argument("--limit", type=int, default=100_000, help="files to read (1 to 100000)")
     p.add_argument("--max-bytes", type=int, default=1_000_000, help="bytes read from one file")
+    p.add_argument("--no-ignore", action="store_true",
+                   help="read the tree whole; by default what its .gitignore and .sconeignore files exclude is left unread")
 
     p = sub.add_parser("map", help="remember every source file under a directory as it is now -- a changed file "
                                     "updates its memory -- and optionally what each says")
@@ -388,6 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-bytes", type=int, default=400_000, help="bytes of one file to read (default 400000)")
     p.add_argument("--include-sensitive", action="store_true",
                    help="take a source that screens as a credential anyway; off, it is withheld and named")
+    p.add_argument("--no-ignore", action="store_true",
+                   help="read the tree whole; by default what its .gitignore and .sconeignore files exclude is left unread")
 
     p = sub.add_parser("fs", help="the space as a tree: ls, cat, find and write a note")
     tree = p.add_subparsers(dest="fs_command", required=True)
@@ -652,7 +656,7 @@ async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> i
     chosen = {"suffixes": tuple(args.suffix)} if args.suffix else {}
     done = await sync_directory(engine, args.space, args.directory, marker=args.marker,
                                 apply=args.apply, remove=args.remove, limit=args.limit,
-                                max_bytes=args.max_bytes, **chosen)
+                                max_bytes=args.max_bytes, ignore=not args.no_ignore, **chosen)
     if args.json:
         print(json.dumps(done.record()), file=out)
         return 0
@@ -693,10 +697,14 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
     # is about a repository's own `.git`, and a root reached through a
     # dot-segment would otherwise skip its entire tree and report nothing
     # read -- exactly the quietly-skipped map this command warns about.
-    found = [path for path in sorted(root.rglob("*"))
-             if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES) or is_manifest(path.name))
-             and not any(part.startswith(".") or part == "__pycache__"
-                         for part in path.relative_to(root).parts)]
+    # What the tree's own ignore files exclude is left unread and counted:
+    # a repository's node_modules is not the repository.
+    from ..ingestion.ignore import Ignore, walk_files
+
+    rules = None if args.no_ignore else Ignore.load(root)
+    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES)
+                        or is_manifest(path.name), ignore=rules)
+    found = list(walked.files)
     # Resolution belongs here, because this is what knows which files
     # exist: a relative import is followed only to a file actually read,
     # and one that leads anywhere else is left out rather than guessed at.
@@ -800,6 +808,12 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         parts.append(f"{updated} updated")
     if again:
         parts.append(f"{again} already here")
+    if walked.ignored_files or walked.ignored_directories:
+        parts.append(f"{walked.ignored_files} file(s) and {walked.ignored_directories} directory(ies) left unread by "
+                     f"{', '.join(rules.files) if rules is not None and rules.files else 'the ignore rules'}"
+                     " (pass --no-ignore to read them)")
+    if walked.unreadable:
+        parts.append(f"{walked.unreadable} directory(ies) could not be read")
     if args.graph:
         parts.append(f"{claims} claim(s)")
         if closed:
@@ -829,6 +843,9 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         print(_ledger_json({"read": read, "updated": updated, "deduplicated": again, "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
+                            "ignored": walked.ignored_files, "ignored_directories": walked.ignored_directories,
+                            "ignore_files": list(rules.files) if rules is not None else [],
+                            "unreadable_directories": walked.unreadable, "links": walked.links,
                             "withheld": [{"path": where, "reason": reason}
                                          for where, reason in sorted(withheld)],
                             # Candidates, not claims: nothing here was written
