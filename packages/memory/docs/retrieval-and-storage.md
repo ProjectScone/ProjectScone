@@ -2505,6 +2505,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
 | `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
 | `html` | one page: the drawing, search by name, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
+| `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate; what the graph names but never reads (`typing`, a package) drawn small and hideable; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
@@ -2520,6 +2521,16 @@ the view it shows without opening a zip or parsing XML:
 
 How each format places values and escapes its own syntax:
 
+- **The explorer** is the one format laid out by simulation: the page
+  runs its own force layout (repulsion through a grid, springs along
+  relations, a pull toward each community's centre) from a start seeded
+  by each entity's id, so the same graph opens the same way, and settles
+  after a few hundred steps; Fit, Pause and Resume are on the page. The
+  drawing's room goes to the graph's own entities first (`typing` and
+  `json`, imported everywhere, are drawn last and hidden by default);
+  every name reaches the page as text through one JSON block, and the
+  page's content security policy allows only its own style and code,
+  pinned by hash.
 - **The drawings** (`svg`, `canvas`, and the canvas in the vault) are laid
   out by construction, not simulated, so the same graph always draws
   the same way.
