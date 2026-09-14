@@ -31,7 +31,7 @@ from typing import Mapping, Optional, Sequence
 
 from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Record
-from ..core.errors import InvalidInput, SconeError
+from ..core.errors import InvalidInput, NotFound, SconeError
 from ..retrieval.filters import read_conditions
 from ..ingestion.chunker import DEFAULT_TARGET as DEFAULT_CHUNK_TARGET
 
@@ -685,20 +685,28 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         raise InvalidInput("--every is at least 0.1 seconds and --rounds is 0 or more")
     rounds = 0
     code = 0
+    # What the last pass saw, so the next can forget what is gone.
+    watched: dict[str, set[str]] = {}
     try:
         while True:
             rounds += 1
-            print(f"pass {rounds} at {datetime.now(timezone.utc).strftime('%H:%M:%S')}Z", file=out)
-            code = await map_pass(args, engine, out)
+            stamp = datetime.now(timezone.utc).strftime("%H:%M:%S") + "Z"
+            if getattr(args, "json", False):
+                print(_ledger_json({"pass": rounds, "at": stamp}, indent=None), file=out)
+            else:
+                print(f"pass {rounds} at {stamp}", file=out)
+            code = await map_pass(args, engine, out, watched=watched)
             if code != 0 or (args.rounds and rounds >= args.rounds):
                 return code
             await asyncio.sleep(args.every)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Under asyncio.run a Ctrl-C reaches the sleeping task as a
+        # cancellation; either way the watch ends with its last receipt.
         print(f"watch ended after {rounds} pass(es)", file=out)
         return code
 
 
-async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
+async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched: dict[str, set[str]] | None = None) -> int:
     """Remember every source file under a directory, stored under the path
     it was read from. With --graph, also record what each file says about
     itself. What was read and what was not is said: a map that quietly
@@ -708,7 +716,7 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
     from ..ingestion.records import Record
     from ..ingestion.code_resolution import file_resolver
     from ..ingestion.sync import default_marker, sync_key
-    from ..ingestion.code_graph import DEFINES, record_claims, unresolved_call_sites
+    from ..ingestion.code_graph import DEFINES, code_claims, record_claims, unresolved_call_sites
     from ..ingestion.sensitive import screen
     from ..ingestion.code_resolution import REACHABLE_DEPTH, unmistakable, resolve_across_files
 
@@ -771,6 +779,20 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
         added = done.added
         if done.outcome == "duplicate":
             again += 1
+            if args.graph:
+                # Unchanged, so nothing is recorded again -- but what it
+                # declares and calls is still part of this tree, and a
+                # call in a changed file must still find it.
+                for claim in code_claims(text, where, language=code_language(where), resolve=resolve):
+                    if claim.predicate != DEFINES:
+                        continue
+                    qualified = claim.object.rsplit(":", 1)[-1]
+                    simple = qualified.rsplit(".", 1)[-1]
+                    if qualified.count(".") <= REACHABLE_DEPTH and unmistakable(simple):
+                        declared.setdefault(simple, []).append(claim.object)
+                for caller, spelt in unresolved_call_sites(text, where, language=code_language(where)):
+                    sites.append((caller, spelt))
+                    episode_of.setdefault(caller, added.episode_id)
             continue
         read += 1
         updated += done.outcome == "updated"
@@ -822,12 +844,26 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
                     quiet += 1
                 else:
                     unread += 1
+    # Under --watch, a file the last pass saw and this one did not is gone:
+    # its memory is forgotten and its claims closed, as sync does.
+    removed = 0
+    if watched is not None:
+        for gone in sorted(watched.get("seen", set()) - seen):
+            try:
+                episode = await engine.episode_by_key(args.space, sync_key(marker, gone))
+            except NotFound:
+                continue
+            await engine.forget(args.space, episode.episode_id, with_claims="exclude")
+            removed += 1
+        watched["seen"] = set(seen)
     # Reported, never asserted. See `code_resolution`: a single matching
     # declaration is a candidate, not evidence, and sampling said so.
     settled = resolve_across_files(sites, declared) if args.graph else None
     parts = [f"{read} file(s) read"]
     if updated:
         parts.append(f"{updated} updated")
+    if removed:
+        parts.append(f"{removed} gone since the last pass, forgotten")
     if again:
         parts.append(f"{again} already here")
     if args.graph:
@@ -856,7 +892,7 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out) -> int:
         parts.append(f"{len(withheld)} withheld as sensitive: "
                      + ", ".join(where for where, _ in sorted(withheld)))
     if getattr(args, "json", False):
-        print(_ledger_json({"read": read, "updated": updated, "deduplicated": again, "claims": claims,
+        print(_ledger_json({"read": read, "updated": updated, "removed": removed, "deduplicated": again, "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
                             "withheld": [{"path": where, "reason": reason}
@@ -1956,6 +1992,8 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
     except SconeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":
