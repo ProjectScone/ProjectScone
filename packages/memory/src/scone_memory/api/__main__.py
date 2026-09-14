@@ -108,6 +108,8 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
         install_http_diagnostics(app)
         return app
 
+    from ..ingestion.web import WebLimits
+    url_import = WebLimits(allow_private=settings.url_import_private) if settings.url_import else None
     if not settings.conversations_journal:
         return finish(create_app(engine, settings.keys, worker=worker,
                           document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media, document_video=document_video,
@@ -117,7 +119,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                           agent_run_service=agents.service if agents else None,
                           ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                           model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory,
-                          synthesis_factory=synthesis_factory))
+                          synthesis_factory=synthesis_factory, url_import=url_import))
     from .conversation_server import journal_path, load_model_factory
     from .conversations import create_conversation_app
     from ..runtime.conversation_review import build_conversation_review
@@ -170,7 +172,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                                    ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                                    runtime_available=runtime_available,
                                    model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory,
-                                   synthesis_factory=synthesis_factory,
+                                   synthesis_factory=synthesis_factory, url_import=url_import,
                                    answer_review=answer_review, adaptive_retriever=adaptive_retriever,
                                    tool_retrieval=conversation_tools))
 
