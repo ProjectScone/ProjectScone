@@ -799,7 +799,8 @@ _PALETTE = ("#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#
 
 
 #: A style per entity kind: a border in the drawings' colours, so a chart
-#: coloured by kind can be told apart in any colour vision.
+#: coloured by kind can be told apart in any colour vision. In the drawings
+#: those colours are communities; in the Mermaid chart they are kinds.
 _MERMAID_KINDS: dict[str, str] = dict(zip(get_args(EntityKind), _PALETTE))
 
 
