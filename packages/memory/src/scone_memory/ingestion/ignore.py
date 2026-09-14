@@ -23,9 +23,12 @@ it says, and a file under an excluded directory is never re-included,
 as in git.
 
 Bounded and disclosed: at most `MAX_IGNORE_FILES` files and `MAX_RULES`
-patterns are read, and the walk's receipt says how many files the rules
-skipped and which ignore files were read; `--no-ignore` reads the tree
-whole.
+patterns are read, and when that bound bit the record and the walk's
+receipt say so; a pattern that cannot be read is counted; the receipt
+says how many files the rules skipped and which ignore files were read;
+`--no-ignore` reads the tree whole. One thing that is git's and not
+here: git matches case-insensitively where `core.ignorecase` is set (a
+Mac's default file system); these rules match as written.
 """
 
 from __future__ import annotations
@@ -96,7 +99,9 @@ def _translate(glob: str) -> str:
                     out.append(".*")  # trailing `/**` — everything inside
                     i += 2
                     continue
-                out.append(".*")  # `**` elsewhere: like git, any run of characters
+                # `**` not beside a slash: as in git, ordinary asterisks,
+                # which never cross a slash.
+                out.append("[^/]*")
                 i += 2
             else:
                 out.append("[^/]*")
@@ -105,7 +110,7 @@ def _translate(glob: str) -> str:
             out.append("[^/]")
             i += 1
         elif c == "[":
-            close = glob.find("]", i + 2)
+            close = _class_end(glob, i)
             if close == -1:
                 out.append(re.escape(c))
                 i += 1
@@ -113,6 +118,8 @@ def _translate(glob: str) -> str:
             body = glob[i + 1:close]
             if body.startswith("!"):
                 body = "^" + body[1:]
+            for posix, python in _POSIX_CLASSES.items():
+                body = body.replace(posix, python)
             out.append("[" + body.replace("\\", "\\\\") + "]")
             i = close + 1
         else:
@@ -121,16 +128,53 @@ def _translate(glob: str) -> str:
     return "".join(out)
 
 
+#: POSIX bracket expressions git accepts, as Python spells them.
+_POSIX_CLASSES = {"[:alpha:]": "a-zA-Z", "[:digit:]": "0-9", "[:alnum:]": "a-zA-Z0-9", "[:upper:]": "A-Z",
+                  "[:lower:]": "a-z", "[:space:]": " \\t\\n\\r\\f\\v", "[:punct:]": "!-/:-@\\[-`{-~",
+                  "[:xdigit:]": "0-9A-Fa-f", "[:blank:]": " \\t"}
+
+
+def _class_end(glob: str, start: int) -> int:
+    """Where the class opened at ``start`` closes: a `]` first in the
+    class (or after `!`/`^`) is a member, and a POSIX `[:name:]` inside
+    is skipped over."""
+    i = start + 1
+    if i < len(glob) and glob[i] in "!^":
+        i += 1
+    if i < len(glob) and glob[i] == "]":
+        i += 1
+    while i < len(glob):
+        if glob.startswith("[:", i):
+            end = glob.find(":]", i + 2)
+            if end == -1:
+                return -1
+            i = end + 2
+            continue
+        if glob[i] == "]":
+            return i
+        i += 1
+    return -1
+
+
 def _trimmed(line: str) -> str:
-    """Trailing spaces are not part of a pattern unless escaped."""
+    """Trailing spaces are not part of a pattern unless escaped: a space
+    behind an odd number of backslashes stays."""
     end = len(line)
-    while end and line[end - 1] == " " and not (end >= 2 and line[end - 2] == "\\"):
+    while end and line[end - 1] == " ":
+        slashes = 0
+        while end - 2 - slashes >= 0 and line[end - 2 - slashes] == "\\":
+            slashes += 1
+        if slashes % 2 == 1:
+            break
         end -= 1
     return line[:end]
 
 
-def parse_rules(text: str, *, base: str = "", source: str = GIT_IGNORE) -> list[Rule]:
-    """The rules one ignore file holds, in the order they are written."""
+def parse_rules(text: str, *, base: str = "", source: str = GIT_IGNORE,
+                unusable: Optional[list[str]] = None) -> list[Rule]:
+    """The rules one ignore file holds, in the order they are written. A
+    pattern that cannot be read as one is appended to ``unusable`` when
+    that list is given, so the reader can say a rule was passed over."""
     rules: list[Rule] = []
     for raw in text.splitlines():
         line = _trimmed(raw.rstrip("\r"))
@@ -151,6 +195,8 @@ def parse_rules(text: str, *, base: str = "", source: str = GIT_IGNORE) -> list[
         try:
             regex = re.compile(expression)
         except re.error:
+            if unusable is not None:
+                unusable.append(f"{source}: {raw.strip()}")
             continue
         rules.append(Rule(raw.strip(), negated, directory_only, base, source, regex))
     return rules
@@ -169,11 +215,17 @@ class Ignore:
     """Every ignore file under a root, read once, asked per path."""
 
     def __init__(self, git: Sequence[Rule] = (), own: Sequence[Rule] = (), *, files: Sequence[str] = (),
-                 truncated: bool = False) -> None:
+                 truncated: bool = False, unusable: Sequence[str] = (), links: int = 0) -> None:
         self.git = tuple(git)
         self.own = tuple(own)
         self.files = tuple(files)
+        #: An ignore file or a pattern past the bound was left unread, so
+        #: the tree's exclusions are not all known.
         self.truncated = truncated
+        #: Patterns that could not be read as one, by file.
+        self.unusable = tuple(unusable)
+        #: Ignore files that were symbolic links, left unread and counted.
+        self.links = links
         self._known: dict[tuple[str, bool], bool] = {}
 
     def ignored(self, relative: str, *, directory: bool = False) -> bool:
@@ -196,7 +248,8 @@ class Ignore:
         return answer
 
     def record(self) -> dict[str, object]:
-        return {"files": list(self.files), "rules": len(self.git) + len(self.own), "truncated": self.truncated}
+        return {"files": list(self.files), "rules": len(self.git) + len(self.own), "truncated": self.truncated,
+                "unusable": list(self.unusable), "links": self.links}
 
     @classmethod
     def load(cls, root: str | Path, *, git_name: str = GIT_IGNORE, own_name: str = OWN_IGNORE) -> "Ignore":
@@ -206,7 +259,9 @@ class Ignore:
         git: list[Rule] = []
         own: list[Rule] = []
         files: list[str] = []
+        unusable: list[str] = []
         truncated = False
+        links = 0
         partial = cls()
         stack = [Path("")]
         while stack:
@@ -214,18 +269,23 @@ class Ignore:
             base = here.as_posix() if str(here) != "." else ""
             for name, into in ((git_name, git), (own_name, own)):
                 path = top / here / name
-                if len(files) >= MAX_IGNORE_FILES:
-                    truncated = True
-                    break
                 try:
-                    if not path.is_file() or path.is_symlink():
+                    if path.is_symlink():
+                        links += 1
                         continue
+                    if not path.is_file():
+                        continue
+                    # The bound is said only when a file is actually left
+                    # unread, not when the last one fits exactly.
+                    if len(files) >= MAX_IGNORE_FILES:
+                        truncated = True
+                        break
                     text = path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
                 source = f"{base}/{name}" if base else name
                 files.append(source)
-                read = parse_rules(text, base=base, source=source)
+                read = parse_rules(text, base=base, source=source, unusable=unusable)
                 if len(git) + len(own) + len(read) > MAX_RULES:
                     read = read[: max(0, MAX_RULES - len(git) - len(own))]
                     truncated = True
@@ -250,7 +310,7 @@ class Ignore:
                 if partial.ignored(relative, directory=True):
                     continue
                 stack.append(below)
-        return cls(git, own, files=files, truncated=truncated)
+        return cls(git, own, files=files, truncated=truncated, unusable=unusable, links=links)
 
 
 @dataclass(frozen=True)
@@ -295,9 +355,11 @@ def walk_files(root: str | Path, *, keep: Callable[[Path], bool], ignore: Option
                 unreadable += 1
                 continue
             relative = entry.relative_to(top).as_posix()
+            # A dot-name is skipped whether directory or file, as `sync`
+            # skips it: the two commands walk one tree the same way.
+            if entry.name.startswith(".") or entry.name in ALWAYS_SKIPPED:
+                continue
             if directory:
-                if entry.name.startswith(".") or entry.name in ALWAYS_SKIPPED:
-                    continue
                 if ignore is not None and ignore.ignored(relative, directory=True):
                     ignored_directories += 1
                     continue
