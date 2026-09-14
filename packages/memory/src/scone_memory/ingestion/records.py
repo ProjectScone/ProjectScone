@@ -84,6 +84,8 @@ class _Pending:
     #: when that was the way.
     chunking: Chunking = "length"
     structure: Optional[dict[str, object]] = None
+    #: What the heading context added to the embedding inputs, when on.
+    embedding_context: Optional[dict[str, object]] = None
 
 
 @dataclass(frozen=True)
