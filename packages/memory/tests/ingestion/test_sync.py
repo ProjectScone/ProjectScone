@@ -473,7 +473,7 @@ async def test_a_named_pipe_is_never_opened(tmp_path):
 
     tree(tmp_path, **{"real.md": "the real note"})
     os.mkfifo(tmp_path / "stream.md")
-    reading, there, unreadable, links, special = _files(tmp_path, (".md",), 100)
+    reading, there, unreadable, links, special, ignored, pruned = _files(tmp_path, (".md",), 100)
     assert [path.name for path in reading] == ["real.md"], reading
     assert (there, special) == (1, 1), (there, special)
 

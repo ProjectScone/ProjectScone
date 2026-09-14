@@ -411,6 +411,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also forget memories whose file is gone from disk (destructive; needs --apply)")
     p.add_argument("--limit", type=int, default=100_000, help="files to read (1 to 100000)")
     p.add_argument("--max-bytes", type=int, default=1_000_000, help="bytes read from one file")
+    p.add_argument("--no-ignore", action="store_true",
+                   help="read the tree whole; by default what its .gitignore and .sconeignore files exclude is left unread")
 
     p = sub.add_parser("map", help="remember every source file under a directory as it is now -- a changed file "
                                     "updates its memory -- and optionally what each says")
@@ -422,6 +424,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-bytes", type=int, default=400_000, help="bytes of one file to read (default 400000)")
     p.add_argument("--include-sensitive", action="store_true",
                    help="take a source that screens as a credential anyway; off, it is withheld and named")
+    p.add_argument("--no-ignore", action="store_true",
+                   help="read the tree whole; by default what its .gitignore and .sconeignore files exclude is left unread")
     p.add_argument("--watch", action="store_true",
                    help="keep mapping: after the pass, read the tree again every --every seconds and record what "
                         "changed, until interrupted or --rounds passes are done")
@@ -711,7 +715,7 @@ async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> i
     chosen = {"suffixes": tuple(args.suffix)} if args.suffix else {}
     done = await sync_directory(engine, args.space, args.directory, marker=args.marker,
                                 apply=args.apply, remove=args.remove, limit=args.limit,
-                                max_bytes=args.max_bytes, **chosen)
+                                max_bytes=args.max_bytes, ignore=not args.no_ignore, **chosen)
     if args.json:
         print(json.dumps(done.record()), file=out)
         return 0
@@ -786,6 +790,14 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     # is about a repository's own `.git`, and a root reached through a
     # dot-segment would otherwise skip its entire tree and report nothing
     # read -- exactly the quietly-skipped map this command warns about.
+    # What the tree's own ignore files exclude is left unread and counted:
+    # a repository's node_modules is not the repository.
+    from ..ingestion.ignore import Ignore, walk_files
+
+    rules = None if args.no_ignore else Ignore.load(root)
+    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES)
+                        or is_manifest(path.name), ignore=rules)
+    found = list(walked.files)
     found = [path for path in sorted(root.rglob("*"))
              if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES) or is_manifest(path.name) or is_schema(path.name))
              and not any(part.startswith(".") or part == "__pycache__"
@@ -943,6 +955,19 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
         parts.append(f"{removed} gone since the last pass, forgotten")
     if again:
         parts.append(f"{again} already here")
+    if walked.ignored_files or walked.ignored_directories:
+        parts.append(f"{walked.ignored_files} file(s) and {walked.ignored_directories} directory(ies) left unread by "
+                     f"{', '.join(rules.files) if rules is not None and rules.files else 'the ignore rules'}"
+                     " (pass --no-ignore to read them)")
+    if walked.unreadable:
+        parts.append(f"{walked.unreadable} directory(ies) could not be read")
+    if walked.links:
+        parts.append(f"{walked.links} symbolic link(s) left alone: what a link points at is outside the root")
+    if rules is not None and rules.truncated:
+        parts.append("the ignore rules were read only as far as the bound allows, so this map may have read "
+                     "what the tree said not to")
+    if rules is not None and rules.unusable:
+        parts.append(f"{len(rules.unusable)} ignore pattern(s) could not be read and were passed over")
     if reused_vectors:
         parts.append(f"{reused_vectors} chunk embedding(s) reused, unchanged since last stored")
     if args.graph:
@@ -979,6 +1004,11 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
         print(_ledger_json({"read": read, "updated": updated, "removed": removed, "deduplicated": again, "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
+                            "ignored": walked.ignored_files, "ignored_directories": walked.ignored_directories,
+                            "ignore_files": list(rules.files) if rules is not None else [],
+                            "ignore_truncated": rules.truncated if rules is not None else False,
+                            "ignore_unusable": list(rules.unusable) if rules is not None else [],
+                            "unreadable_directories": walked.unreadable, "links": walked.links,
                             "unresolved_links": sorted(unresolved_links), "ambiguous_links": sorted(ambiguous_links),
                             "outside_links": outside_links, "long_document_lines": long_lines,
                             "withheld": [{"path": where, "reason": reason}

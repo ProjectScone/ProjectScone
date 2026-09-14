@@ -1647,6 +1647,35 @@ leaves **one** memory and not two — and with `SCONE_EMBEDDING_CACHE` set,
 only the chunks whose text changed reach the embedder; the receipt's
 `embeddings_reused` counts the rest (see [file ingestion](file-ingestion.md#reusing-embeddings-across-updates)).
 
+**What the tree says not to read is left unread.** A repository walked
+whole is a repository with its `node_modules`, `build`, `dist`, `target`
+and `vendor` in it: thousands of files nobody wrote, embedded and put in
+the graph ahead of the source. So `sync` and `map` read every
+`.gitignore` below the root and leave what it excludes unread, with
+git's own rules (`ingestion/ignore.py`, written here rather than
+borrowed): a blank line or `#` comment says nothing; `!` re-includes; a
+trailing `/` matches only a directory; a pattern with a slash anywhere
+but its end is anchored to its file's directory and one without matches
+at any depth below it; `*` and `?` never cross a slash and `**` does;
+the last matching pattern wins, and a deeper file's patterns come after
+a shallower one's. A `.sconeignore` in any directory is read after the
+`.gitignore` beside it and can only exclude more: what `.gitignore`
+excludes stays excluded whatever it says, and a file under an excluded
+directory is never re-included, as in git. The receipt says what the
+rules did (`ignored`, `ignored_directories`, `ignore_files`); at most
+500 files and 20,000 patterns are read, and when that bound bit the
+receipt says so (`ignore_truncated`), since a run past it may have read
+what the tree said not to; a pattern that cannot be read is passed over
+and named (`ignore_unusable`). A memory `sync` holds for a file the rules
+now exclude is not a file that is gone: it is left alone, neither read
+nor removed, and counted (`ignored_memories`). `--no-ignore` reads the
+tree whole. Dot-named directories and files and `__pycache__` are never
+walked, rules or no rules, and a symbolic link is left alone and counted
+(`links`): what it points at is outside the root. One thing that is
+git's and not here: git matches case-insensitively where
+`core.ignorecase` is set, as it is on a Mac's default file system; these
+rules match as written.
+
 ### Deletion is opt-in, previewed, and refused when the path looks wrong
 
 Forgetting memory because a file is missing is destructive, and a
