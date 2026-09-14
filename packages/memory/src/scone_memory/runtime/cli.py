@@ -1444,12 +1444,14 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             from ..retrieval.hints import apply_scope, infer_scope
 
             asked_scope = infer_scope(args.query, now=datetime.now(timezone.utc))
+            known_tags = await engine.tags(space) if asked_scope.tags else None
             searched = apply_scope(asked_scope, since=args.since, until=args.until, kind=args.kind, tags=list(args.tag),
-                                   source_prefix=args.source_prefix)
+                                   source_prefix=args.source_prefix, known_tags=known_tags)
             args.since, args.until, args.kind = searched.since, searched.until, searched.kind
             args.source_prefix, args.tag = searched.source_prefix, list(searched.tags)
             inferred = searched.record(asked_scope)
             inferred_rows: list[dict[str, str]] = [r.record() for r in searched.applied]
+            withheld_rows: list[str] = [f"{r.filter}={r.value} ({r.words}): {why}" for r, why in searched.withheld]
         result = await engine.recall(
             space, args.query, limit=args.limit, as_of=args.as_of, tags=args.tag, where=parse_pairs(args.where, "--where"),
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
@@ -1507,7 +1509,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             return 0
         if inferred is not None:
             print("inferred: " + (", ".join(f"{r['filter']}={r['value']} ({r['words']})" for r in inferred_rows) if inferred_rows
-                                  else "nothing applied" + (" (the caller's filters stand)" if inferred["readings"] else "")), file=out)
+                                  else "nothing applied"), file=out)
+            for row in withheld_rows:
+                print(f"withheld: {row}", file=out)
         if kept is not None:
             print(kept.why, file=out)
         if opened is not None:

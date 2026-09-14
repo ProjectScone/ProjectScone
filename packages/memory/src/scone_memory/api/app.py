@@ -922,7 +922,10 @@ def create_app(
             from ..retrieval.hints import apply_scope, infer_scope
 
             asked_scope = infer_scope(q, now=datetime.now(timezone.utc))
-            searched = apply_scope(asked_scope, since=since, until=until, kind=kind, tags=tag_list, source_prefix=source_prefix)
+            # Only a question that names a tag pays for the space's tag list.
+            known_tags = await engine.tags(space) if asked_scope.tags else None
+            searched = apply_scope(asked_scope, since=since, until=until, kind=kind, tags=tag_list, source_prefix=source_prefix,
+                                   known_tags=known_tags)
             since, until, kind, source_prefix = searched.since, searched.until, searched.kind, searched.source_prefix
             tag_list = list(searched.tags)
             inferred = searched.record(asked_scope)

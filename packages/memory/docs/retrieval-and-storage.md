@@ -266,9 +266,15 @@ recorded with the words that said it, and — with `--infer` or
 question's date becomes `since`/`until` (the readings `dates.py` already
 makes for temporal questions), its kind `kind`, its tags `tags`, its place
 `source_prefix`. A filter the caller set is never replaced, and a caller's
-window, whichever end they set, is theirs whole. The answer carries
-`inferred`: every reading and which were applied, so a wrong reading is
-visible rather than a silent narrowing. The words stay in the question the
+window, whichever end they set, is theirs whole; a tag filter is "all of",
+so a question's tag is never added to tags the caller set. The answer
+carries `inferred`: every reading, which were applied, and which were
+`withheld` with the reason, so a wrong reading is visible rather than a
+silent narrowing. A tag is the one reading whose mistake empties an answer
+outright (`#include` has the shape of a tag), so a tag the space holds no
+memory under is withheld and said, and one it holds is applied in its
+stored spelling; a hashtag begins a word, so the `#install` of a URL is not
+one. The words stay in the question the
 lanes search, since a word that names a scope can still name what the
 passage says. A kind is read only after a word that places the question in
 it ("in my notes"), a tag begins with a letter (`#12` is an issue, not a
