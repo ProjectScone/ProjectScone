@@ -41,13 +41,14 @@ import csv
 import io
 import json
 import re
-from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence, get_args
 import unicodedata
 from urllib.parse import quote
 import xml.etree.ElementTree as ElementTree
 import zipfile
 
 from .markdown import literal
+from .kinds import EntityKind
 from .project import Entity, EntityProjection, Support, backing_of, merged_periods
 
 if TYPE_CHECKING:
@@ -713,9 +714,14 @@ def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Expor
     """The most connected entities, up to ``_MERMAID_NODES``, and the best
     supported relations between them, up to ``_MERMAID_EDGES`` and the text
     budget, each edge naming its predicate and facts. Node ids are the
-    chart's own (n1, n2, ...), so no stored text is ever syntax. The first
-    line says what view it draws, what the read left out and what the
-    chart left out."""
+    chart's own (n1, n2, ...), so no stored text is ever syntax. Entities of
+    one community drawn together sit in a subgraph named for it (c1, c2,
+    ...); an entity drawn without another of its community sits outside
+    any. Each entity is styled by its kind, a class named for the kind,
+    and one of unknown kind is left plain. The first line says what view it
+    draws, what the read left out and what the chart left out."""
+    from .analysis import cached_analysis
+
     degree = _degrees(projection)
     ranked = sorted(projection.entities, key=lambda entity: (-degree[entity.entity_id], entity.label, entity.entity_id))
     shown = {entity.entity_id: f"n{index}" for index, entity in enumerate(ranked[:_MERMAID_NODES], start=1)}
@@ -723,10 +729,14 @@ def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Expor
                       if relation.subject_id in shown and relation.object_id in shown),
                      key=lambda relation: (-len(relation.fact_ids), int(shown[relation.subject_id][1:]),
                                            relation.predicate, int(shown[relation.object_id][1:])))
-    nodes = [f'  {shown[entity.entity_id]}["{_mermaid_text(entity.label)}"]' for entity in ranked[:_MERMAID_NODES]]
+    nodes = {entity.entity_id: f'["{_mermaid_text(entity.label)}"]' for entity in ranked[:_MERMAID_NODES]}
     edges = [f'  {shown[relation.subject_id]} {_mermaid_arrow(relation.support)}|"{_mermaid_text(relation.predicate, 60)} '
              f'{_mermaid_cite(relation.fact_ids)}"| {shown[relation.object_id]}' for relation in between]
     edges = edges[:_MERMAID_EDGES]
+    community_of: dict[str, tuple[str, str]] = {}
+    for community in cached_analysis(projection).communities:
+        for member in community.members:
+            community_of[member] = (community.community_id, community.label)
     coverage = about.get("coverage")
     reasons = coverage.get("reasons") if isinstance(coverage, Mapping) else None
 
@@ -741,16 +751,42 @@ def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Expor
         return f"%% Knowledge graph {_mermaid_text(projection.space)}: " + "; ".join(
             _mermaid_text(note, 300) for note in notes)
 
+    def chart(drawn_nodes: int, drawn_edges: int) -> str:
+        kept = ranked[:drawn_nodes]
+        together: dict[str, list[Entity]] = {}
+        for entity in kept:
+            if entity.entity_id in community_of:
+                together.setdefault(community_of[entity.entity_id][0], []).append(entity)
+        # Largest first, as the drawings pack their boxes.
+        grouped = sorted((members for members in together.values() if len(members) > 1),
+                         key=lambda members: (-len(members), community_of[members[0].entity_id][0]))
+        inside = {entity.entity_id for members in grouped for entity in members}
+        lines = [header_for(drawn_nodes, drawn_edges), "flowchart LR"]
+        for number, members in enumerate(grouped, start=1):
+            lines.append(f'  subgraph c{number}["{_mermaid_text(community_of[members[0].entity_id][1])}"]')
+            lines.extend(f"    {shown[entity.entity_id]}{nodes[entity.entity_id]}" for entity in members)
+            lines.append("  end")
+        lines.extend(f"  {shown[entity.entity_id]}{nodes[entity.entity_id]}" for entity in kept
+                     if entity.entity_id not in inside)
+        lines.extend(edges[:drawn_edges])
+        for kind, colour in _MERMAID_KINDS.items():
+            styled = [shown[entity.entity_id] for entity in kept if entity.kind == kind]
+            if styled:
+                lines.append(f"  classDef {kind} fill:#ffffff,stroke:{colour},stroke-width:3px,color:#1d1d1f")
+                lines.append(f"  class {','.join(styled)} {kind}")
+        return "\n".join(lines)
+
     # Mermaid counts its limit in the browser's UTF-16 units, where an emoji
     # is two: the whole chart is measured that way, edges giving way first.
-    sizes = [_utf16(line) + 1 for line in nodes + edges]
-    body = sum(sizes) + _utf16("flowchart LR") + 1
-    while nodes and _utf16(header_for(len(nodes), len(edges))) + body > _MERMAID_TEXT:
-        body -= sizes.pop()
-        (edges if edges else nodes).pop()
-    header = header_for(len(nodes), len(edges))
-    return Export("\n".join([header, "flowchart LR", *nodes, *edges]).encode() + b"\n", "text/vnd.mermaid",
-                  "graph.mmd")
+    drawn_nodes, drawn_edges = len(nodes), len(edges)
+    text = chart(drawn_nodes, drawn_edges)
+    while drawn_nodes and _utf16(text) + 1 > _MERMAID_TEXT:
+        if drawn_edges:
+            drawn_edges -= 1
+        else:
+            drawn_nodes -= 1
+        text = chart(drawn_nodes, drawn_edges)
+    return Export(text.encode() + b"\n", "text/vnd.mermaid", "graph.mmd")
 
 
 #: What the drawings show at most: the most connected entities, and the
@@ -760,6 +796,11 @@ _SVG_LABEL = 32
 #: Okabe and Ito's colours, told apart with any colour vision; the last,
 #: grey, is for entities in no community.
 _PALETTE = ("#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#999999")
+
+
+#: A style per entity kind: a border in the drawings' colours, so a chart
+#: coloured by kind can be told apart in any colour vision.
+_MERMAID_KINDS: dict[str, str] = dict(zip(get_args(EntityKind), _PALETTE))
 
 
 def _community_colour(box: "Box") -> str:
