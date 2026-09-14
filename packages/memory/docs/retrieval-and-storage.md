@@ -55,7 +55,9 @@ not reported as degraded, because nothing failed. The answer's `lanes`
 names the lanes that answered, so with both asked and one failed it
 names the other, and the recall event records the same list. A vector
 lane that did not run judges no confidence: `top_similarity` and
-`low_confidence` are `null`. When the only lane asked for fails, recall
+`low_confidence` are `null`. `lanes` names only these two; the entity
+lane is asked for with `graph_boost`, and whether it ran shows on the
+items (`lanes.entity`) and in `degraded`, not in `lanes`. When the only lane asked for fails, recall
 fails rather than returning an empty answer that reads as nothing found.
 Advertised as `recall.lanes`.
 
