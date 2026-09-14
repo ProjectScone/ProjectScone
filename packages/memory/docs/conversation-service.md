@@ -143,8 +143,11 @@ Invalid observation is latched even if a custom runtime catches the callback
 error. Custom runtime side effects are not rolled back; configure capture so
 it does not persist unfinished replies as complete.
 Readers have no private chunk queue. A 10-second comment heartbeat keeps idle
-connections observable. Terminal/cancel/stop clears provisional text; reconnects
-after completion or restart yield receipt information, not reconstructed chunks.
+connections observable. A reader already listening when the turn ends is given
+every chunk that landed before the receipt (the last chunk and the receipt can
+be microseconds apart), and the text is dropped once the last such reader
+leaves; a reader who connects after completion, cancel, stop or a restart is
+given receipt information and no provisional text.
 Final text is read from the retained episode, so forgetting it cannot expose a
 stale streaming copy. Text already sent to clients cannot be revoked.
 

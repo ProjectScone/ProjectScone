@@ -298,6 +298,15 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     app.state.begin_conversation_shutdown = begin_shutdown
     app.state.worker = worker
 
+    def text_readers(space: str, sid: str, request_id: str) -> int | None:
+        """How many readers a turn's text window is serving right now, or
+        None when there is no window: an operator's view of who is still
+        listening to a finished turn."""
+        window = text_window(owned.get((space, sid)), request_id)
+        return None if window is None else window.readers
+
+    app.state.text_readers = text_readers
+
     roles = dict(roles or {})
 
     async def space_for(request: Request):
@@ -815,8 +824,24 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         if window is not None and not window.closed and cursor > window.last_sequence:
             raise HTTPException(409, "stream cursor is ahead of observed text")
 
+        # A reader who arrives while the turn runs is promised its text; one
+        # who arrives after the end gets the receipt and no provisional text.
+        listening = window is not None and not window.closed
+        if listening:
+            window.attach()
+
+        after = cursor
+
         async def output():
-            after = cursor
+            try:
+                async for event in events():
+                    yield event
+            finally:
+                if listening:
+                    window.detach()
+
+        async def events():
+            nonlocal after
             while True:
                 if shutting_down or journal is None:
                     yield sse("end", {"request_id": request_id, "reason": "service_shutdown", "read_receipt": True})
@@ -831,7 +856,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 # the turn: the last chunk and the receipt land microseconds
                 # apart, and a reader one chunk behind at that moment was
                 # promised the text, not a terminal that swallows it.
-                gap, chunk = window.next_after(after) if window is not None else (None, None)
+                gap, chunk = window.next_after(after) if listening else (None, None)
                 if gap is not None:
                     yield sse("gap", {"after": after, "next_sequence": gap})
                     after = gap - 1
