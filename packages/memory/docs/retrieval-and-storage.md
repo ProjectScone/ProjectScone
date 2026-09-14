@@ -266,6 +266,54 @@ naming how many of how many were shortened and that `detail` holds them
 whole. `scone answer --whole`, `GET /v1/answer?whole=true` and
 `answer_question(..., max_item_chars=0)` show them whole instead.
 
+### Summary trees for long documents
+
+```bash
+scone summarize 42 --fan-in 6          # store the tree as notes beside the document
+scone summarize 42 --dry-run --json    # write it and show it, store nothing
+```
+
+A long document answers a broad question badly in chunks: "what does this
+report conclude?" is spread over forty passages, and the five that score
+best are five fragments. The leading frameworks build a tree of summaries
+at ingestion (RAPTOR: cluster, summarize, repeat) and index the summaries
+beside the leaves, so a broad question finds a summary and a narrow one
+finds a chunk; the summaries are the model's word. `summarize` builds that
+tree with the synthesizer above, so every sentence rests on a quote the
+framework found in the level below: level zero is the document's chunks in
+their order, each level above groups `--fan-in` adjacent nodes and writes
+one node from them, and a citation resolves downward to the chunk quotes it
+rests on. Adjacency is the grouping, not a clustering — a document's own
+order is a structure nobody has to guess at. A group the model wrote
+nothing about leaves no node and is counted; a lone remainder is carried
+up, not summarized from itself; a level nothing was written at stops the
+tree and says so; `--max-levels` (five at most) can leave the top level
+unjoined, and the record says so.
+
+The nodes are stored as notes the framework wrote, with the document's
+source and `#summary/<level>/<index>` as theirs (the index is the group's
+position at its level, so a group the model left empty leaves a gap rather
+than renaming what follows) and metadata saying what they are:
+`summary_of` (the episode), `summary_level`, `summary_index`,
+`summary_fan_in`, `summary_chunks` with `summary_first_chunk` and
+`summary_last_chunk`, `summary_model`, `summary_content_hash` of the
+document at the time, and `summary_detail`, the attachment the note links
+that holds the full account — every chunk under it, what it was written
+from, every sentence with its citations and quotes — since that account is
+longer than a metadata value may be. The ordinary lanes then retrieve a
+summary beside the chunks and a reader can see what a passage is. `GET
+/v1/episodes/{id}/summaries` lists a document's summaries top level first;
+`POST /v1/episodes/{id}/summaries` builds and stores the tree with the
+synthesis model, and without one it is refused. Building a tree again for
+the same episode replaces the tree that was there, whatever its shape (a
+different `fan_in`, a group the model left empty this time), so a document
+never holds two trees. A document that changes is a new episode, with no
+summaries until its own are built; the old episode's tree stays with it.
+Forgetting a document does not yet forget its summaries; they carry
+`summary_of`, so they can be found and forgotten by it. Not yet measured:
+coverage on broad questions with and without stored summaries waits for a
+run with the local model.
+
 ### Checking the rule instead of asserting it
 
 A routing rule written down is only better than one a model invents if
