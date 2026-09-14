@@ -66,18 +66,22 @@ async def answer_similarity(embedder: _Embeds, *, answer: str, references: Seque
     def unmeasured(why: str) -> AnswerSimilarity:
         return AnswerSimilarity(None, None, None, None, embedder.id, embedder.dim, why)
 
-    kept = [reference for reference in references if reference.strip()]
+    kept = [(index, reference) for index, reference in enumerate(references) if reference.strip()]
     if not answer.strip():
         return unmeasured("the answer is empty")
     if not kept:
         return unmeasured("there is no reference to compare with")
-    vectors = await embedder.embed([answer, *kept])
-    scores = [_cosine(vectors[0], vector) for vector in vectors[1:]]
-    known = [(score, index) for index, score in enumerate(scores) if score is not None]
+    vectors = await embedder.embed([answer, *(reference for _, reference in kept)])
+    # One bad vector makes every comparison suspect: a NaN cosine compares false with everything.
+    if any(len(vector) != embedder.dim for vector in vectors):
+        return unmeasured(f"the embedder returned a vector that is not its declared width of {embedder.dim}")
+    if not all(math.isfinite(value) for vector in vectors for value in vector):
+        return unmeasured("the embedder returned a value that is not finite")
+    scores = [(_cosine(vectors[0], vector), index) for (index, _), vector in zip(kept, vectors[1:])]
+    known = [(score, index) for score, index in scores if score is not None]
     if not known:
         return unmeasured("the embedder gave a zero vector, which has no direction to compare")
-    score, index = max(known, key=lambda pair: (pair[0], -pair[1]))
-    reference = references.index(kept[index])
+    score, reference = max(known, key=lambda pair: (pair[0], -pair[1]))
     if threshold is None:
         return AnswerSimilarity(score, reference, None, None, embedder.id, embedder.dim,
                                 "no threshold was given, so nothing passes or fails")
@@ -105,6 +109,8 @@ def measure_threshold(matched: Sequence[float], mismatched: Sequence[float], *, 
     when the only such threshold passes no matched answer, which would measure nothing."""
     if not 0.0 <= target_false_pass < 1.0:
         raise ValueError("target_false_pass is a share from 0 up to 1")
+    if not all(math.isfinite(score) for score in (*matched, *mismatched)):
+        raise ValueError("every score must be a finite number")
     if not matched or not mismatched:
         return ThresholdMeasurement(None, None, None, "a threshold needs matched and mismatched pairs to measure")
     allowed = math.floor(target_false_pass * len(mismatched))

@@ -99,3 +99,20 @@ def test_a_measurement_needs_pairs_on_both_sides():
     measured = measure_threshold([], [0.3], embedder_id="fixed-test", dim=2)
     assert measured.threshold is None and "needs matched and mismatched" in measured.why
     assert measure_threshold([0.3], [], embedder_id="fixed-test", dim=2).threshold is None
+
+
+async def test_a_vector_that_is_not_finite_or_not_the_embedders_width_measures_nothing():
+    """A NaN cosine compares false with everything, so it could win a maximum and read as a fail."""
+    nan, inf = float("nan"), float("inf")
+    for broken in ([nan, nan], [inf, 1.0], [1.0, 0.0, 0.0]):
+        vectors = {**VECTORS, "bad": broken}
+        threshold = SimilarityThreshold(value=0.75, embedder_id="fixed-test", dim=2)
+        found = await answer_similarity(Fixed(vectors), answer="The capital is Paris.", references=["bad", "Paris"],
+                                        threshold=threshold)
+        assert found.score is None and found.passing is None, broken
+        assert "finite" in found.why or "width" in found.why
+
+
+def test_a_score_that_is_not_finite_is_refused_by_the_measurement():
+    with pytest.raises(ValueError, match="finite"):
+        measure_threshold([0.9, float("nan")], [0.1], embedder_id="fixed-test", dim=2)
