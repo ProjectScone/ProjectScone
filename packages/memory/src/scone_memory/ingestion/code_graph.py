@@ -659,24 +659,6 @@ def _own_calls(function: ast.AST):
         stack.extend(ast.iter_child_nodes(node))
 
 
-def _holders(node: ast.AST, inside: Optional[str]):
-    """Every function in the file, with the class it is written in."""
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield child, inside
-            yield from _holders(child, inside)
-        elif isinstance(child, ast.ClassDef):
-            within = f"{inside}.{child.name}" if inside else child.name
-            yield from _holders(child, within)
-        else:
-            yield from _holders(child, inside)
-
-
-def _qualified(holder: ast.AST, inside: Optional[str]) -> str:
-    name = getattr(holder, "name", "")
-    return f"{inside}.{name}" if inside else name
-
-
 def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
             imported: Optional[dict[str, tuple[str, Optional[str]]]] = None,
             classes: frozenset[str] = frozenset(), scope: Optional[str] = None) -> Optional[str]:
