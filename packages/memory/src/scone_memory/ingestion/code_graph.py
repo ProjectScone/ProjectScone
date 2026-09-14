@@ -696,7 +696,7 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     elif is_document(path):
         # The import resolver also follows a document's links when it can
         # (`file_resolver`); a resolver that cannot leaves them unresolved.
-        claims = doc_claims(content, path, resolve=resolve if hasattr(resolve, "link") else None)
+        claims = doc_claims(content, path, resolve=resolve if hasattr(resolve, "links") else None)
     else:
         claims = code_claims(content, path, language=code_language(path), resolve=resolve)
     for claim in claims:

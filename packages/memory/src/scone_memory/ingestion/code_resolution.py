@@ -124,7 +124,7 @@ def resolve_across_files(
     return Resolution(edges=tuple(sorted(found)), ambiguous=ambiguous, unknown=unknown)
 
 
-def file_resolver(paths: Iterable[str]) -> "Resolve":
+def file_resolver(paths: Iterable[str]) -> "_FileResolver":
     """How a relative import is followed: only to a file the walk actually
     read, and never guessed at otherwise.
 
@@ -146,6 +146,11 @@ class _FileResolver:
 
     def __init__(self, seen: set[str]) -> None:
         self.seen = seen
+
+    def links(self, path: str, target: str) -> list[str]:
+        from .doc_graph import link_targets
+
+        return link_targets(self.seen, path, target)
 
     def link(self, path: str, target: str) -> Optional[str]:
         from .doc_graph import link_target

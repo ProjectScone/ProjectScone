@@ -8,7 +8,8 @@ import pytest
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.ingestion.code_graph import CITES, MAX_LINES, REFERENCES, record_claims
 from scone_memory.ingestion.code_resolution import file_resolver
-from scone_memory.ingestion.doc_graph import DOC_SUFFIXES, doc_claims, doc_links, is_document, link_target
+from scone_memory.ingestion.doc_graph import (DOC_SUFFIXES, MAX_LINE_CHARS, doc_claims, doc_links, is_document, link_target,
+                                              link_targets)
 
 TREE = {"README.md", "docs/design.md", "docs/adr/ADR-0012-ledger.md", "docs/guide/index.md", "src/pkg/engine.py",
         "src/pkg/util.py", "src/other/util.py", "notes.txt", "CHANGELOG.rst"}
@@ -38,6 +39,7 @@ def test_every_way_a_page_links_a_file_is_one_reference_to_it():
         ("docs/design.md", REFERENCES, "src/pkg/util.py"),
     ], "one edge per file however often it is linked; a link to itself and an image are not edges"
     assert links.unresolved == ("gone.md", "No Such Page", "src/pkg/missing.py"), "said once each, never guessed"
+    assert links.ambiguous == () and links.record()["references"] == 4 and links.record()["unresolved"][0] == "gone.md"
     assert links.outside == 1, "a URL leads outside the tree; a mailto is not a link the page makes"
     first = links.claims[0]
     assert first.quote == "See [the engine](../src/pkg/engine.py) and the [guide](guide/) for the rest." and first.first_line == 2
@@ -61,6 +63,10 @@ def test_a_bare_name_is_the_one_file_with_that_name_anywhere():
     assert link_target(TREE, "docs/design.md", "pkg/util.py") == "src/pkg/util.py", "and src/pkg/util.py alone ends in pkg/util.py"
     assert link_target(TREE | {"lib/pkg/engine.py"}, "docs/design.md", "pkg/engine.py") is None, "two would answer"
     assert link_target(TREE, "docs/design.md", "kg/engine.py") is None, "a tail is whole path segments"
+    assert link_targets(TREE | {"lib/pkg/engine.py"}, "docs/design.md", "pkg/engine.py") == ["lib/pkg/engine.py", "src/pkg/engine.py"]
+    assert link_target(TREE, "docs/api/x.md", "./README.md") is None, "a link that says where it is is followed only there"
+    assert link_target(TREE, "docs/api/x.md", "../design.md") == "docs/design.md"
+    assert link_target(TREE, "docs/api/x.md", "README.md") == "README.md", "a bare name is looked for everywhere"
 
 
 def test_rst_links_and_includes_are_read_too():
@@ -84,6 +90,50 @@ def test_links_inside_fenced_code_are_examples_not_references():
                       "~~~", "[[README]]", "~~~", "But [this](../src/pkg/engine.py) is."])
     assert said(doc_claims(page, "docs/design.md", resolve=file_resolver(TREE))) == [
         ("docs/design.md", REFERENCES, "src/pkg/engine.py")]
+    # A fence closes only with at least as many of its own character and
+    # nothing after; a fence with an info string inside a block is content.
+    nested = "\n".join(["````text", "```json", "[x](../src/pkg/engine.py)", "````", "[real](../src/pkg/util.py)",
+                         "```python", "[y](../src/pkg/engine.py)", "```", "[[README]]"])
+    assert said(doc_claims(nested, "docs/design.md", resolve=file_resolver(TREE))) == [
+        ("docs/design.md", REFERENCES, "src/pkg/util.py"), ("docs/design.md", REFERENCES, "README.md")]
+    indented = "\n".join(["- item", "    ```", "    [x](../src/pkg/engine.py)", "    ```", "[z](../src/pkg/util.py)"])
+    assert said(doc_claims(indented, "docs/design.md", resolve=file_resolver(TREE))) == [
+        ("docs/design.md", REFERENCES, "src/pkg/util.py")], "an indented fence is a fence"
+    unclosed = "\n".join(["```", "[x](../src/pkg/engine.py)"])
+    assert doc_claims(unclosed, "docs/design.md", resolve=file_resolver(TREE)) == ()
+
+
+def test_a_badge_inside_a_link_leaves_the_link_it_wraps():
+    page = "[![Docs](https://img.shields.io/badge/docs-blue.svg)](guide/index.md) and ![alone](../src/pkg/engine.py)"
+    links = doc_links(page, "docs/design.md", resolve=file_resolver(TREE))
+    assert said(links.claims) == [("docs/design.md", REFERENCES, "docs/guide/index.md")] and links.outside == 0
+
+
+def test_an_ambiguous_name_is_said_apart_from_an_unresolved_one():
+    links = doc_links("See `util.py` and `nowhere.py`.", "docs/design.md", resolve=file_resolver(TREE))
+    assert links.claims == () and links.ambiguous == ("util.py",) and links.unresolved == ("nowhere.py",)
+
+
+def test_a_record_does_not_cite_itself():
+    page = "# ADR-0012: the ledger\n\nSupersedes ADR-3.\n"
+    assert said(doc_links(page, "docs/adr/ADR-0012-ledger.md").claims) == [("docs/adr/ADR-0012-ledger.md", CITES, "ADR-3")]
+
+
+def test_the_bounds_are_said_not_read_as_no_links(monkeypatch):
+    long_line = "[x](../src/pkg/engine.py) " + "a" * MAX_LINE_CHARS
+    links = doc_links(long_line + "\n[y](../src/pkg/util.py)", "docs/design.md", resolve=file_resolver(TREE))
+    assert links.long_lines == 1 and said(links.claims) == [("docs/design.md", REFERENCES, "src/pkg/util.py")]
+    over = doc_links("[x](../src/pkg/engine.py)\n" * (MAX_LINES + 2), "docs/design.md", resolve=file_resolver(TREE))
+    assert over.claims == () and over.lines_exceeded is True and over.record()["lines_exceeded"] is True
+    monkeypatch.setattr("scone_memory.ingestion.doc_graph.MAX_CLAIMS", 1)
+    capped = doc_links("[a](../src/pkg/engine.py) [b](../src/pkg/util.py)", "docs/design.md", resolve=file_resolver(TREE))
+    assert len(capped.claims) == 1 and capped.claims_capped is True
+    # Adversarial brackets on one line stay linear: a run the length of
+    # the bound is read in well under a second.
+    import time
+    started = time.perf_counter()
+    doc_links("[" * MAX_LINE_CHARS + "\n" + "[[" * (MAX_LINE_CHARS // 2), "docs/design.md", resolve=file_resolver(TREE))
+    assert time.perf_counter() - started < 1.0
 
 
 def test_without_a_resolver_links_are_unresolved_and_citations_still_read():
@@ -117,6 +167,7 @@ async def test_a_mapped_tree_puts_its_documents_in_the_graph_and_the_blast_radiu
     code = await run(build_parser().parse_args(["--json", "map", str(root), "--graph"]), memory, io.StringIO(""), out)
     receipt = json.loads(out.getvalue())
     assert code == 0 and receipt["read"] == 4, "two source files and two documents"
+    assert receipt["unresolved_links"] == [] and receipt["ambiguous_links"] == [] and receipt["outside_links"] == 0
     facts = await memory.facts("default")
     references = sorted((f.subject, f.object) for f in facts if f.predicate == REFERENCES)
     # A subject is an entity key, which the ledger folds to lower case, as
@@ -130,6 +181,38 @@ async def test_a_mapped_tree_puts_its_documents_in_the_graph_and_the_blast_radiu
     body = json.loads(out.getvalue())
     named = {name.lower() for name in _affected_names(body)}
     assert {"src/pkg/cli.py", "docs/engine.md", "readme.md"} <= named, body
+    await memory.close()
+
+
+async def test_a_document_with_nothing_to_say_is_quiet_and_its_lost_links_are_named(tmp_path):
+    from scone_memory.runtime.cli import build_parser, run
+
+    root = tmp_path / "repo"
+    (root / "docs").mkdir(parents=True)
+    (root / "src").mkdir()
+    (root / "src" / "engine.py").write_text("import json\n\ndef open_engine():\n    return 1\n", encoding="utf-8")
+    (root / "docs" / "engine.md").write_text("See `src/engine.py`, [gone](gone.md) and <https://example.org>.\n", encoding="utf-8")
+    (root / "docs" / "notes.md").write_text("Nothing links anywhere here.\n", encoding="utf-8")
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--json", "map", str(root), "--graph"]), memory, io.StringIO(""), out)
+    receipt = json.loads(out.getvalue())
+    assert code == 0 and receipt["quiet"] == 1 and receipt["unread"] == 0, "a document with no links had nothing to say"
+    assert receipt["unresolved_links"] == ["gone.md"] and receipt["outside_links"] == 0, "an autolink in angle brackets is not a link the page makes"
+    # Said in prose too, on a fresh space: a second pass over an unchanged
+    # tree reads nothing again and so has nothing to say about links.
+    fresh = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["map", str(root), "--graph"]), fresh, io.StringIO(""), out)
+    assert "documents: 1 link(s) to files not read, 0 that two files would answer, 0 outside the tree" in out.getvalue()
+    await fresh.close()
+    # No file here imports another file, yet the page that describes the
+    # engine rests on it: the blast radius says so without the notice
+    # that nothing does.
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--json", "graph", "affected", "src/engine.py"]), memory, io.StringIO(""), out)
+    body = out.getvalue()
+    assert code == 0 and "docs/engine.md" in body and "no file in this graph imports another" not in body, body
     await memory.close()
 
 

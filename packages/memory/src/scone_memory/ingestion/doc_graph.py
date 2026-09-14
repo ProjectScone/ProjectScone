@@ -19,12 +19,18 @@ three things and records them as claims like every other file's:
   the document and the code that follow one decision from either side.
 - Nothing else. A link that leads outside the tree (a URL) is counted,
   not claimed: there is nothing there to bind to. A link to a file the
-  walk did not read is unresolved and said so, like a call the code graph
-  cannot place, never guessed at.
+  walk did not read is unresolved and said so (`map`'s receipt names
+  them), like a call the code graph cannot place, never guessed at; a
+  bare name or title that two files would answer is ambiguous and said
+  so apart. A link that says where it is (`./x.md`, `../x.md`) is
+  followed only there.
 
 Links inside fenced code blocks are examples, not references, and are
 skipped. Every claim quotes the line it came from with its byte span, so
-it can be checked against the document the way every quote is.
+it can be checked against the document the way every quote is. Bounded:
+a document past `MAX_LINES`, a line past `MAX_LINE_CHARS`, or claims
+past `MAX_CLAIMS` are not read further, and the result says which bound
+bit rather than reading as a document with no links.
 """
 
 from __future__ import annotations
@@ -45,21 +51,34 @@ PATH_SUFFIXES = ("py", "pyi", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "rs"
                  "c", "h", "cc", "cpp", "hpp", "rb", "php", "swift", "md", "markdown", "rst", "txt", "toml",
                  "json", "yaml", "yml")
 
-_INLINE = re.compile(r"(?<!\\)(!?)\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
-_DEFINITION = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*<?(\S+?)>?\s*(?:\"[^\"]*\")?\s*$")
-_WIKI = re.compile(r"\[\[([^\]|#]+?)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
+#: Characters a line is read for links up to. A longer line is prose
+#: nobody wrote by hand -- minified data, a pasted blob -- and the link
+#: patterns below are quadratic on adversarial runs of brackets.
+MAX_LINE_CHARS = 4_000
+
+#: An image is not a link: it is replaced by its alt text before links
+#: are read, so a badge inside a link (`[![Docs](img)](docs/x.md)`)
+#: leaves the link it wraps.
+_IMAGE = re.compile(r"!\[([^\]\[]*)\]\([^)]*\)")
+_INLINE = re.compile(r"(?<!\\)\[[^\]\[]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+_DEFINITION = re.compile(r"^\s{0,3}\[[^\]\[]+\]:\s*<?(\S+?)>?\s*(?:\"[^\"]*\")?\s*$")
+_WIKI = re.compile(r"\[\[([^\]|#\[]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 _BACKTICKED = re.compile(r"`([A-Za-z0-9_][\w./-]*\.(?:" + "|".join(PATH_SUFFIXES) + r"))`")
 _RST_DOC = re.compile(r":doc:`(?:[^`<]*<)?([^`>]+)>?`")
 _RST_LINK = re.compile(r"`[^`<]*<([^>`]+)>`_")
 _RST_INCLUDE = re.compile(r"^\s*\.\.\s+(?:include|literalinclude)::\s+(\S+)")
-_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+#: A fence opens with three or more of one character and closes with at
+#: least as many of the same and nothing after them; a backtick fence
+#: whose info string holds a backtick is not a fence (CommonMark).
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 _SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 class LinkResolve(Protocol):
-    """How a document's link is followed to a file the walk read."""
+    """How a document's link is followed to files the walk read: every
+    file that would answer, so one is bound and two are said to be two."""
 
-    def link(self, path: str, target: str) -> Optional[str]: ...
+    def links(self, path: str, target: str) -> list[str]: ...
 
 
 def is_document(path: str) -> bool:
@@ -70,11 +89,26 @@ def is_document(path: str) -> bool:
 @dataclass(frozen=True)
 class DocLinks:
     """What a document's links came to: the claims for those that bound,
-    the targets that did not, and how many led outside the tree."""
+    the targets that did not, the ones two files would answer, how many
+    led outside the tree, and which bound bit."""
 
     claims: tuple[CodeClaim, ...]
     unresolved: tuple[str, ...]
     outside: int
+    ambiguous: tuple[str, ...] = ()
+    #: Lines longer than MAX_LINE_CHARS, not read for links.
+    long_lines: int = 0
+    #: The document was longer than MAX_LINES and was not read at all.
+    lines_exceeded: bool = False
+    #: MAX_CLAIMS was reached; later links were not claimed.
+    claims_capped: bool = False
+
+    def record(self) -> dict[str, object]:
+        return {"references": sum(1 for c in self.claims if c.predicate == REFERENCES),
+                "cites": sum(1 for c in self.claims if c.predicate == CITES),
+                "unresolved": list(self.unresolved), "ambiguous": list(self.ambiguous), "outside": self.outside,
+                "long_lines": self.long_lines, "lines_exceeded": self.lines_exceeded,
+                "claims_capped": self.claims_capped}
 
 
 def _targets(line: str) -> list[tuple[str, bool]]:
@@ -84,9 +118,8 @@ def _targets(line: str) -> list[tuple[str, bool]]:
     definition = _DEFINITION.match(line)
     if definition:
         found.append((definition.group(1), False))
-    for image, target in _INLINE.findall(line):
-        if not image:
-            found.append((target, False))
+    line = _IMAGE.sub(lambda image: image.group(1), line)
+    found.extend((target, False) for target in _INLINE.findall(line))
     found.extend((name.strip(), True) for name in _WIKI.findall(line))
     found.extend((target, False) for target in _BACKTICKED.findall(line))
     found.extend((target.strip(), False) for target in _RST_DOC.findall(line))
@@ -106,35 +139,52 @@ def _bare(target: str) -> Optional[str]:
 
 def doc_links(content: str, path: str, *, resolve: Optional[LinkResolve] = None) -> DocLinks:
     """What a document references and cites, with what it could not bind."""
-    if not content or content.count("\n") > MAX_LINES:
+    if not content:
         return DocLinks((), (), 0)
+    if content.count("\n") > MAX_LINES:
+        return DocLinks((), (), 0, lines_exceeded=True)
     lines = content.split("\n")
     claims: list[CodeClaim] = []
     bound: set[tuple[str, str]] = set()
     unresolved: list[str] = []
-    outside = 0
-    inside_fence: Optional[str] = None
+    ambiguous: list[str] = []
+    outside = long_lines = 0
+    capped = False
+    # A decision record does not cite itself: its own number in its name
+    # is its name, not a citation.
+    own = set(cited(posixpath.basename(path)))
+    opened: Optional[tuple[str, int]] = None  # the open fence's character and length
     offset = 0
     for number, line in enumerate(lines, start=1):
         begins = offset
         offset += len(line.encode("utf-8")) + 1
         fence = _FENCE.match(line)
         if fence:
-            marker = fence.group(1)
-            if inside_fence is None:
-                inside_fence = marker[0]
-            elif marker[0] == inside_fence:
-                inside_fence = None
+            marker, info = fence.group(1), fence.group(2)
+            if opened is None:
+                if not (marker[0] == "`" and "`" in info):
+                    opened = (marker[0], len(marker))
+                    continue
+            elif marker[0] == opened[0] and len(marker) >= opened[1] and not info.strip():
+                opened = None
+                continue
+        if opened is not None:
             continue
-        if inside_fence is not None:
+        if len(line) > MAX_LINE_CHARS:
+            long_lines += 1
             continue
         quote = line.strip()
         ends = begins + len(line.encode("utf-8"))
 
         def say(predicate: str, obj: str) -> None:
-            if len(claims) < MAX_CLAIMS and (predicate, obj) not in bound:
-                bound.add((predicate, obj))
-                claims.append(CodeClaim(path, predicate, obj, quote, number, begins, ends))
+            nonlocal capped
+            if (predicate, obj) in bound:
+                return
+            if len(claims) >= MAX_CLAIMS:
+                capped = True
+                return
+            bound.add((predicate, obj))
+            claims.append(CodeClaim(path, predicate, obj, quote, number, begins, ends))
 
         for target, by_title in _targets(line):
             if _SCHEME.match(target) and not by_title:
@@ -143,17 +193,19 @@ def doc_links(content: str, path: str, *, resolve: Optional[LinkResolve] = None)
             named = target if by_title else _bare(target)
             if named is None:
                 continue
-            where = None
-            if resolve is not None:
-                where = resolve.link(path, f"[[{named}]]" if by_title else named)
-            if where is None or where == path:
-                if where is None:
-                    unresolved.append(named)
-                continue
-            say(REFERENCES, where)
+            answers = resolve.links(path, f"[[{named}]]" if by_title else named) if resolve is not None else []
+            if len(answers) == 1:
+                if answers[0] != path:
+                    say(REFERENCES, answers[0])
+            elif answers:
+                ambiguous.append(named)
+            else:
+                unresolved.append(named)
         for document in cited(line):
-            say(CITES, document)
-    return DocLinks(tuple(claims), tuple(dict.fromkeys(unresolved)), outside)
+            if document not in own:
+                say(CITES, document)
+    return DocLinks(tuple(claims), tuple(dict.fromkeys(unresolved)), outside, tuple(dict.fromkeys(ambiguous)),
+                    long_lines, False, capped)
 
 
 def doc_claims(content: str, path: str, *, resolve: Optional[LinkResolve] = None) -> tuple[CodeClaim, ...]:
@@ -161,35 +213,44 @@ def doc_claims(content: str, path: str, *, resolve: Optional[LinkResolve] = None
     return doc_links(content, path, resolve=resolve).claims
 
 
-def link_target(paths: set[str], path: str, target: str) -> Optional[str]:
-    """The file a document's link names, among the files a walk read.
+def link_targets(paths: set[str], path: str, target: str) -> list[str]:
+    """The files a document's link could name, among the files a walk
+    read: one to bind, two to refuse, none to say so.
 
-    Relative to the document first, then from the root, then the one
-    file whose path ends in the target (a page that names
-    ``retrieval/recall.py`` means the one file spelt that way, wherever
-    the package root is), and none when two would answer. ``[[Title]]``
-    names a document by its stem, case folded. Without a suffix a link
-    tries the document suffixes and an index page.
+    Relative to the document first, then from the root, then every file
+    whose path ends in the target (a page that names
+    ``retrieval/recall.py`` means the file spelt that way, wherever the
+    package root is). A link that says where it is (``./x``, ``../x``)
+    is followed only there. ``[[Title]]`` names a document by its stem,
+    case folded. Without a suffix a link tries the document suffixes
+    and an index page.
     """
     if target.startswith("[[") and target.endswith("]]"):
         title = target[2:-2].strip().lower()
-        pages = [seen for seen in paths if is_document(seen)
-                 and posixpath.splitext(posixpath.basename(seen))[0].lower() == title]
-        return pages[0] if len(pages) == 1 else None
+        return sorted(seen for seen in paths if is_document(seen)
+                      and posixpath.splitext(posixpath.basename(seen))[0].lower() == title)
     here = posixpath.dirname(path)
+    explicit = target.startswith(("./", "../"))
     relative = posixpath.normpath(posixpath.join(here, target)) if not target.startswith("/") else None
-    rooted = posixpath.normpath(target.lstrip("/"))
+    rooted = None if explicit else posixpath.normpath(target.lstrip("/"))
     for candidate in dict.fromkeys(c for c in (relative, rooted) if c is not None and not c.startswith("..")):
         if candidate in paths:
-            return candidate
+            return [candidate]
         for suffix in DOC_SUFFIXES:
             if f"{candidate}{suffix}" in paths:
-                return f"{candidate}{suffix}"
+                return [f"{candidate}{suffix}"]
         for index in ("index.md", "README.md", "index.rst"):
             if f"{candidate}/{index}" in paths:
-                return f"{candidate}/{index}"
+                return [f"{candidate}/{index}"]
+    if explicit:
+        return []
     tail = posixpath.normpath(target.strip("/"))
     if tail.startswith(".."):
-        return None
-    ending = [seen for seen in paths if seen == tail or seen.endswith("/" + tail)]
-    return ending[0] if len(ending) == 1 else None
+        return []
+    return sorted(seen for seen in paths if seen == tail or seen.endswith("/" + tail))
+
+
+def link_target(paths: set[str], path: str, target: str) -> Optional[str]:
+    """The one file a link names, or None when none or two would."""
+    found = link_targets(paths, path, target)
+    return found[0] if len(found) == 1 else None
