@@ -143,7 +143,11 @@ named `heading N`, whatever the style's id is in the document's language. For
 ODT it is 1 to 10, from `text:h` and its outline level (1 when none is given).
 For HTML it is 1 to 6, from `h1` to `h6`. A DOCX without a readable styles part
 still reads, with levels only from paragraphs that carry their own outline
-level. The levels are recorded so section boundaries can be cut from them;
+level. A style is followed through at most 16 styles it is based on. A paragraph
+whose style's chain runs longer, or round in a circle, carries
+`heading_level_unresolved: style_chain` instead of a level. Headings inside
+text boxes keep their level; headings inside table cells become part of their
+row's text and carry none. The levels are recorded so section boundaries can be cut from them;
 chunking does not yet use them.
 
 OpenDocument extraction uses current content: `text:tracked-changes` revision

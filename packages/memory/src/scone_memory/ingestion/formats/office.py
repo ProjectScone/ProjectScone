@@ -266,8 +266,11 @@ def _row_text(row: Element, output: _Output) -> str:
 
 #: A built-in Word heading style, by the name Word gives it in every language.
 _HEADING_STYLE = re.compile(r'^heading ([1-9])$', re.IGNORECASE)
-#: How many styles a basedOn chain is followed through.
+#: How many styles a basedOn chain is followed through. A paragraph whose style's chain
+#: runs longer, or round in a circle, says ``heading_level_unresolved``.
 _STYLE_DEPTH = 16
+#: The level a style gives when its chain was not followed to its end.
+_UNRESOLVED = -1
 
 
 def _outline_level(properties: Element | None) -> int | None:
@@ -276,12 +279,13 @@ def _outline_level(properties: Element | None) -> int | None:
     if marker is None:
         return None
     value = _word_attribute(marker, 'val')
-    return int(value) + 1 if value.isdigit() and int(value) <= 8 else 0
+    return int(value) + 1 if value.isdecimal() and int(value) <= 8 else 0
 
 
 def _word_heading_styles(bundle: SafeArchive, source: str, relations: dict[str, tuple[str, str]]) -> dict[str, int]:
-    """The heading level each paragraph style gives, through the styles it is based on. A document
-    without a readable styles part gives none, and its paragraphs carry no level."""
+    """The heading level each paragraph style gives, through the styles it is based on, or
+    ``_UNRESOLVED`` for a chain not followed to its end. A document without a readable styles
+    part gives none, and its paragraphs carry no level."""
     identifiers = [key for key, (_, kind) in relations.items() if kind == 'styles']
     if len(identifiers) != 1:
         return {}
@@ -309,12 +313,13 @@ def _word_heading_styles(bundle: SafeArchive, source: str, relations: dict[str, 
             based[identifier] = _word_attribute(parent, 'val')
     levels: dict[str, int] = {}
     for identifier in {*own, *based}:
-        current, level = identifier, None
+        current, level = identifier, _UNRESOLVED
         for _ in range(_STYLE_DEPTH):
             if current in own:
                 level = own[current]
                 break
             if current not in based:
+                level = 0
                 break
             current = based[current]
         if level:
@@ -339,9 +344,12 @@ def _paragraph_levels(root: Element, styles: Mapping[str, int]) -> dict[int, int
 
 def _word_content(
     root: Element, output: _Output, prefix: str, metadata: dict[str, str],
-    styles: Mapping[str, int] | None = None,
+    styles: Mapping[str, int] | None = None, levels: dict[int, int] | None = None,
 ) -> Iterator[tuple[Element, str, list[Element]]]:
-    levels = _paragraph_levels(root, styles or {})
+    # Pruning the first root prunes the text boxes inside it too, before they are detached, so
+    # levels read here are kept in ``levels`` for the boxes' own turn.
+    levels = {} if levels is None else levels
+    levels.update(_paragraph_levels(root, styles or {}))
     _prune_run_metadata(root, output)
     paragraphs = tables = 0
     for block in _blocks(root, {'p', 'tbl'}, include_tags=frozenset(_WORD_REFERENCES)):
@@ -366,7 +374,9 @@ def _word_content(
             locator = f'{prefix}paragraph:{paragraphs}'
             boxes = _detach_textboxes(block, output)
             level = levels.get(id(block))
-            output.add(_run_text(block, output), locator, {**metadata, 'heading_level': str(level)} if level else metadata)
+            details = ({**metadata, 'heading_level_unresolved': 'style_chain'} if level == _UNRESOLVED
+                       else {**metadata, 'heading_level': str(level)} if level else metadata)
+            output.add(_run_text(block, output), locator, details)
             yield block, locator, boxes
 
 
@@ -436,12 +446,13 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
         raise InvalidInput('DOCX is missing its document body')
     relations = _relationships(bundle, source)
     styles = _word_heading_styles(bundle, source, relations)
+    levels: dict[int, int] = {}
     parts: dict[str, tuple[str, dict[str, Element]]] = {}
     emitted: set[tuple[str, str]] = set()
     pending = deque([(body, '', {'member': source})])
     while pending:
         content, prefix, metadata = pending.popleft()
-        for block, locator, boxes in _word_content(content, output, prefix, metadata, styles):
+        for block, locator, boxes in _word_content(content, output, prefix, metadata, styles, levels):
             for number, box in enumerate(boxes, 1):
                 details = {'member': metadata['member'], 'content_role': 'textbox', 'parent_locator': locator}
                 pending.append((box, _word_prefix(locator, f'/textbox:{number}/'), details))
@@ -760,7 +771,7 @@ def _odf_content(
             details = metadata
             if _local(block.tag) == 'h':
                 written = next((value for key, value in block.attrib.items() if key.endswith('}outline-level')), '1')
-                details = {**metadata, 'heading_level': str(int(written)) if written.isdigit() and 1 <= int(written) <= 10 else '1'}
+                details = {**metadata, 'heading_level': str(int(written)) if written.isdecimal() and 1 <= int(written) <= 10 else '1'}
             output.add(_visible_text(block, output, odf=True), locator, details)
             _odf_annotations(block, output, locator, metadata)
             continue
