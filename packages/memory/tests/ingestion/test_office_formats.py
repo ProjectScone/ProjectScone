@@ -193,3 +193,50 @@ def test_timeout_is_checked_during_native_extraction(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(office, 'monotonic', lambda: next(readings))
     with pytest.raises(InvalidInput, match='timeout'):
         parse_office(docx(), 'slow.docx', DocumentLimits(timeout_seconds=1.0))
+
+
+@pytest.mark.parametrize('extension', ['docm', 'dotx', 'dotm'])
+def test_word_family_reads_the_same_package_under_its_own_extension_and_says_when_macros_were_there(extension: str) -> None:
+    result = parse_office(docx('Macro text'), f'memo.{extension}', DocumentLimits())
+    assert [item.text for item in result.segments] == ['Macro text', 'First\tSecond'] and result.format == extension
+    assert 'macros' not in result.metadata, "a package without vbaProject.bin carried no macros"
+    with_macros = ooxml_archive({
+        'word/document.xml': f'<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:t>Macro text</w:t></w:r></w:p></w:body></w:document>',
+        'word/vbaProject.bin': 'Sub Auto_Open() MsgBox "never run" End Sub',
+    }, main_part='word/document.xml')
+    result = parse_office(with_macros, f'memo.{extension}', DocumentLimits())
+    assert [item.text for item in result.segments] == ['Macro text'], "the macro member is neither read nor run"
+    assert result.metadata == {'macros': 'present, not read'}
+
+
+@pytest.mark.parametrize('extension', ['xlsm', 'xltx', 'xltm'])
+def test_sheet_family_reads_as_a_workbook(extension: str) -> None:
+    data = ooxml_archive({
+        'xl/workbook.xml': f'<workbook xmlns="{S}" xmlns:r="{R}"><sheets><sheet name="Budget" sheetId="1" r:id="r1"/></sheets></workbook>',
+        'xl/_rels/workbook.xml.rels': f'<Relationships xmlns="{REL}"><Relationship Id="r1" Target="worksheets/sheet1.xml" Type="{R}/worksheet"/></Relationships>',
+        'xl/worksheets/sheet1.xml': f'<worksheet xmlns="{S}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Cost</t></is></c></row></sheetData></worksheet>',
+        'xl/vbaProject.bin': 'binary',
+    }, main_part='xl/workbook.xml')
+    result = parse_office(data, f'report.{extension}', DocumentLimits())
+    assert [(item.text, item.locator) for item in result.segments] == [('Cost', 'sheet:Budget/cell:A1')]
+    assert result.format == extension and result.metadata == {'macros': 'present, not read'}
+
+
+@pytest.mark.parametrize('extension', ['pptm', 'potx', 'potm', 'ppsx', 'ppsm'])
+def test_slides_family_reads_as_a_presentation(extension: str) -> None:
+    data = ooxml_archive({
+        'ppt/presentation.xml': f'<p:presentation xmlns:p="{P}" xmlns:r="{R}"><p:sldIdLst><p:sldId id="200" r:id="r1"/></p:sldIdLst></p:presentation>',
+        'ppt/_rels/presentation.xml.rels': f'<Relationships xmlns="{REL}"><Relationship Id="r1" Target="slides/slide1.xml" Type="{R}/slide"/></Relationships>',
+        'ppt/slides/slide1.xml': f'<p:sld xmlns:p="{P}" xmlns:a="{A}"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Only slide</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
+    }, main_part='ppt/presentation.xml')
+    result = parse_office(data, f'deck.{extension}', DocumentLimits())
+    assert [item.text for item in result.segments] == ['Only slide'] and result.segments[0].locator.startswith('slide:1/')
+    assert result.format == extension and 'macros' not in result.metadata
+
+
+def test_the_capability_listing_and_source_scan_name_every_office_family_member() -> None:
+    from scone_memory.ingestion.formats.office import OFFICE_EXTENSIONS, OFFICE_FAMILIES
+    from scone_memory.ingestion.source_scan import default_extensions
+
+    members = set().union(*OFFICE_FAMILIES.values())
+    assert members <= OFFICE_EXTENSIONS and {'.' + member for member in members} <= set(default_extensions())

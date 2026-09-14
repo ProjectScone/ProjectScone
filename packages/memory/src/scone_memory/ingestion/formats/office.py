@@ -24,7 +24,20 @@ from .table_types import DocumentTableCell
 from .word_tables import word_children, word_table
 from .xlsx_tables import cell_position, spreadsheet_tables, spreadsheet_text_supported
 
-OFFICE_EXTENSIONS = frozenset({'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp', 'epub'})
+#: Word, Excel and PowerPoint packages by family. The macro-enabled
+#: (`.docm`, `.xlsm`, `.pptm`), template (`.dotx`, `.xltx`, `.potx`, and
+#: their macro-enabled twins) and slideshow (`.ppsx`, `.ppsm`) variants
+#: are the same package as the plain one with another content type on
+#: the main part; the reader finds the main part by its relationship,
+#: so they read alike. Macros a package carries (`vbaProject.bin`) are
+#: neither run nor read, and the document's metadata says they were there.
+OFFICE_FAMILIES: dict[str, frozenset[str]] = {
+    'word': frozenset({'docx', 'docm', 'dotx', 'dotm'}),
+    'sheet': frozenset({'xlsx', 'xlsm', 'xltx', 'xltm'}),
+    'slides': frozenset({'pptx', 'pptm', 'potx', 'potm', 'ppsx', 'ppsm'}),
+}
+_FAMILY_OF = {member: family for family, members in OFFICE_FAMILIES.items() for member in members}
+OFFICE_EXTENSIONS = frozenset(_FAMILY_OF) | frozenset({'odt', 'ods', 'odp', 'epub'})
 _ODF_REVISION_METADATA = frozenset({
     '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}tracked-changes',
     '{urn:oasis:names:tc:opendocument:xmlns:office:1.0}change-info',
@@ -714,13 +727,15 @@ def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDo
     if extension not in OFFICE_EXTENSIONS:
         raise InvalidInput('unsupported native Office or EPUB format')
     output = _Output(limits)
+    family = _FAMILY_OF.get(extension)
     try:
         with SafeArchive(data, limits) as bundle:
-            if extension == 'docx':
+            macros = any(PurePosixPath(name).name.lower() == 'vbaproject.bin' for name in bundle.names)
+            if family == 'word':
                 _docx(bundle, output)
-            elif extension == 'xlsx':
+            elif family == 'sheet':
                 _xlsx(bundle, output)
-            elif extension == 'pptx':
+            elif family == 'slides':
                 _pptx(bundle, output)
             elif extension == 'epub':
                 _epub(bundle, output)
@@ -729,11 +744,12 @@ def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDo
         output.check()
         if not output.segments:
             raise InvalidInput('document contains no extractable text')
-        parser = 'native-xml-word-tables-v1' if extension == 'docx' and any(
+        parser = 'native-xml-word-tables-v1' if family == 'word' and any(
             'table_status' in segment.metadata for segment in output.segments) else 'native-xml'
-        if extension == 'xlsx' and any('table_status' in segment.metadata for segment in output.segments):
+        if family == 'sheet' and any('table_status' in segment.metadata for segment in output.segments):
             parser = 'native-xml-xlsx-tables-v1'
-        parsed = ParsedDocument(format=extension, parser=parser, segments=tuple(output.segments))
+        parsed = ParsedDocument(format=extension, parser=parser, segments=tuple(output.segments),
+                                metadata={'macros': 'present, not read'} if macros else {})
         validate_document(parsed, limits)
         return parsed
     except (ValidationError, ValueError, OverflowError, RecursionError):
