@@ -106,9 +106,12 @@ def _visible_text(parts: list[tuple[str, bool]]) -> str:
 
 
 class HtmlTables:
-    def __init__(self, out: Collector, prefix: str) -> None:
+    def __init__(self, out: Collector, prefix: str, metadata: dict[str, str] | None = None) -> None:
         self.out = out
         self.prefix = prefix
+        #: Carried onto every row and caption: what the document as a whole
+        #: says of this text (which mail of a mailbox it came from).
+        self.metadata = dict(metadata or {})
         self.number = 0
         self.depth = 0
         self.table: _Table | None = None
@@ -344,7 +347,7 @@ class HtmlTables:
         for row in range(len(table.rows) + 1):
             for position, caption in table.captions:
                 if position == row:
-                    self.out.add(_visible_text(caption), f'{table.locator}/caption')
+                    self.out.add(_visible_text(caption), f'{table.locator}/caption', dict(self.metadata) or None)
             values = by_row.get(row, [])
             if not any(cell.text.strip() for cell in values):
                 continue
@@ -364,7 +367,7 @@ class HtmlTables:
                 evidence.append(DocumentTableCell(table_locator=table.locator, locator=cell.locator,
                     row=row, column=cell.column, row_span=cell.height, column_span=cell.width,
                     is_header=cell.header, text=cell.text, start=start, end=offset, headers=headers))
-            metadata = {'table_locator': table.locator, 'table_status': 'structured'}
+            metadata = {**self.metadata, 'table_locator': table.locator, 'table_status': 'structured'}
             if table.notes:
                 metadata['table_notes'] = ','.join(sorted(table.notes))
             self.out.add(''.join(parts), f'{table.locator}/row:{row + 1}', metadata)

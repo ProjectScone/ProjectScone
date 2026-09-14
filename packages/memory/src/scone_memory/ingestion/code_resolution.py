@@ -124,7 +124,7 @@ def resolve_across_files(
     return Resolution(edges=tuple(sorted(found)), ambiguous=ambiguous, unknown=unknown)
 
 
-def file_resolver(paths: Iterable[str]) -> "Resolve":
+def file_resolver(paths: Iterable[str]) -> "_FileResolver":
     """How a relative import is followed: only to a file the walk actually
     read, and never guessed at otherwise.
 
@@ -137,8 +137,28 @@ def file_resolver(paths: Iterable[str]) -> "Resolve":
     files remembered together, so the three cannot come to differ.
     """
     seen = {path.replace("\\", "/") for path in paths if isinstance(path, str)}
+    return _FileResolver(seen)
 
-    def resolve(path: str, level: int, module: str) -> Optional[str]:
+
+class _FileResolver:
+    """One set of files, followed two ways: an import by module and level,
+    a document's link by path or title (`doc_graph.link_target`)."""
+
+    def __init__(self, seen: set[str]) -> None:
+        self.seen = seen
+
+    def links(self, path: str, target: str) -> list[str]:
+        from .doc_graph import link_targets
+
+        return link_targets(self.seen, path, target)
+
+    def link(self, path: str, target: str) -> Optional[str]:
+        from .doc_graph import link_target
+
+        return link_target(self.seen, path, target)
+
+    def __call__(self, path: str, level: int, module: str) -> Optional[str]:
+        seen = self.seen
         here = posixpath.dirname(path)
         for _ in range(level - 1):
             here = posixpath.dirname(here)
@@ -155,8 +175,6 @@ def file_resolver(paths: Iterable[str]) -> "Resolve":
             if candidate in seen:
                 return candidate
         return None
-
-    return resolve
 
 
 if TYPE_CHECKING:

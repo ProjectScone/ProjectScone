@@ -44,7 +44,7 @@ def projection():
 
 def test_every_format_is_offered():
     assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid",
-                                   "svg", "canvas", "html"}
+                                   "svg", "canvas", "html", "explorer"}
 
 
 def test_node_link_json_carries_entities_relations_and_facts(projection):
@@ -799,3 +799,82 @@ def test_a_names_width_is_estimated_from_its_letters():
     from scone_memory.entities.export import _text_width
 
     assert _text_width("illi") < _text_width("oooo") < _text_width("OOOO") < _text_width("MMMM") < _text_width("漢字漢字")
+
+
+def test_explorer_is_one_page_with_the_whole_graph_and_nothing_fetched(projection):
+    exported = export_graph(projection, "explorer", about={"status": "current", "as_of": "2025-06-01T00:00:00.000Z"})
+    assert exported.media_type == "text/html" and exported.filename == "explorer.html"
+    page = _page(exported.body)
+    tags = [tag for tag, _ in page.tags]
+    assert tags.count("canvas") == 1 and "input" in tags and tags.count("script") == 2
+    assert not any(attrs.get("src") or (tag == "link" and not attrs.get("href", "").startswith("data:"))
+                   for tag, attrs in page.tags), "nothing fetched"
+    data = json.loads(page.data["graph-data"])
+    assert {node["id"] for node in data["nodes"]} == {entity.entity_id for entity in projection.entities}, "every entity"
+    assert {edge["id"] for edge in data["edges"]} == {relation.relation_id for relation in projection.relations}, "every relation"
+    works = next(edge for edge in data["edges"] if edge["predicate"] == "works_at")
+    assert works["facts"] == [1] and data["left_out"] == {"entities": 0, "relations": 0}
+    assert data["communities"] and all({"id", "label", "size"} <= set(c) for c in data["communities"])
+    assert set(data["predicates"]) == {relation.predicate for relation in projection.relations}
+    assert all(node["external"] is False for node in data["nodes"]), "a graph of people names nothing it does not read"
+    assert b"Content-Security-Policy" in exported.body and b"default-src 'none'" in exported.body
+    code = page.data["graph-code"]
+    assert "textContent" in code and "innerHTML" not in code and "eval(" not in code and "fetch(" not in code
+    assert export_graph(projection, "explorer").body == export_graph(projection, "explorer").body, "deterministic"
+
+
+def test_explorer_keeps_hostile_names_as_data():
+    hostile = '</script><script>alert(1)</script><img src=x onerror=alert(2)>'
+    projection = project_entities("alpha", [fact(1, hostile, "knows", "Alice Chen")], revision=1)
+    body = export_graph(projection, "explorer").body
+    assert body.count(b"<script") == 2, "only the page's own data and code"
+    assert b"<img" not in body
+    assert any(node["label"] == hostile for node in json.loads(_page(body).data["graph-data"])["nodes"])
+
+
+def test_explorer_draws_the_codebases_own_first_and_says_what_it_left_out(monkeypatch):
+    from scone_memory.entities import explorer
+
+    rows = []
+    for n in range(8):
+        rows.append(fact(len(rows) + 1, f"pkg/m{n}.py", "defines", f"pkg/m{n}.py:run"))
+        rows.append(fact(len(rows) + 1, f"pkg/m{n}.py", "imports", "typing"))
+        rows.append(fact(len(rows) + 1, f"pkg/m{n}.py", "imports", f"pkg/m{(n + 1) % 8}.py"))
+    projection = project_entities("alpha", rows, revision=1)
+    data = json.loads(_page(export_graph(projection, "explorer").body).data["graph-data"])
+    external = [node["label"] for node in data["nodes"] if node["external"]]
+    assert external == ["typing"], "imported by every file, defining nothing here"
+    monkeypatch.setattr(explorer, "MAX_NODES", 8)
+    exported = export_graph(projection, "explorer")
+    data = json.loads(_page(exported.body).data["graph-data"])
+    assert len(data["nodes"]) == 8 and not any(node["external"] for node in data["nodes"]), "the room goes to the code"
+    assert data["left_out"]["entities"] == len(projection.entities) - 8 and "left out of the page" in data["about"]
+    assert "named but never read were left out first" in data["about"]
+    monkeypatch.setattr(explorer, "MAX_NODES", 5_000)
+    monkeypatch.setattr(explorer, "MAX_EDGES", 2)
+    data = json.loads(_page(export_graph(projection, "explorer").body).data["graph-data"])
+    assert len(data["edges"]) == 2 and data["left_out"]["relations"] == len(projection.relations) - 2
+    assert "relations left out of the page" in data["about"]
+
+
+def test_explorer_pins_its_policy_to_the_bytes_it_emits_and_its_script_parses(projection):
+    import base64
+    import hashlib
+    import re
+    import shutil
+    import subprocess
+
+    text = export_graph(projection, "explorer").body.decode("utf-8")
+    policy = re.search(r'Content-Security-Policy" content="([^"]+)"', text).group(1)
+    code = re.search(r'<script id="graph-code">(.*?)</script>', text, re.S).group(1)
+    style = re.search(r"<style>(.*?)</style>", text, re.S).group(1)
+    for emitted in (code, style):
+        pinned = "'sha256-" + base64.b64encode(hashlib.sha256(emitted.encode("utf-8")).digest()).decode() + "'"
+        assert pinned in policy, "the hash covers exactly the bytes the page carries"
+    assert "'unsafe-inline'" not in policy and "projection " in json.loads(_page(text.encode()).data["graph-data"])["about"]
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed here; the script's syntax is checked where it is")
+    checked = subprocess.run([node, "-e", "new Function(process.argv[1])", code], capture_output=True, text=True, timeout=30)
+    assert checked.returncode == 0, checked.stderr
+    assert "Object.create(null)" in code and "pointerleave" in code and "settle()" in code

@@ -14,14 +14,20 @@ judge, and says which is which.
 - ``answer_relevancy``: whether the answer addresses the question.
 - ``context_relevancy``: the share of contexts that bear on the question.
 - ``correctness``: the answer against a reference, on a five-point scale.
+- ``pairwise``: which of two answers is better, asked in both orders so a
+  judge that prefers the first it reads is caught rather than believed.
+- ``semantic_similarity``: how close an answer's embedding is to a
+  reference's, which needs no judge and says nothing about truth.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from typing import Optional, Sequence
 
+from ..core.ports import Embedder
 from ..providers.llm import ChatModel
 
 #: Contexts one judgment may weigh; more is refused, not cut.
@@ -204,3 +210,78 @@ async def correctness(judge: ChatModel, *, question: str, answer: str, reference
         return _unverified(kind, "judge verdict has no integer score from 1 to 5", 1)
     reasons = (reason,) if isinstance(reason, str) and reason else ()
     return Judgment(kind, score / 5, score >= passing_score, reasons, True, 1)
+
+
+async def pairwise(judge: ChatModel, *, question: str, answer_a: str, answer_b: str,
+                   reference: Optional[str] = None) -> Judgment:
+    """Which of two answers to the question is better, in the judge's
+    opinion, asked twice with the answers in either order. A judge that
+    prefers whichever it read first gives two different verdicts, and
+    that disagreement is reported as a tie rather than resolved by a coin.
+    ``score`` is 1.0 when A wins, 0.0 when B wins, 0.5 for a tie;
+    ``passing`` is whether A won. A reference answer, when given, is shown
+    to the judge as what a right answer says."""
+    kind = "pairwise"
+    over = _over_bound(question, answer_a, answer_b, *(() if reference is None else (reference,)))
+    if over:
+        return _unverified(kind, over)
+    system = ("You judge which of two answers to a question is better: more correct, more complete, and "
+              "better grounded. Reply with exactly one JSON object: "
+              '{"winner": "first" | "second" | "tie", "reason": "..."}.')
+    shown = f"\n\nA right answer says:\n{reference}" if reference is not None else ""
+    verdicts: list[str] = []
+    reasons: list[str] = []
+    calls = 0
+    for first, second, label in ((answer_a, answer_b, ("first", "second")), (answer_b, answer_a, ("second", "first"))):
+        user = f"Question:\n{question}{shown}\n\nFirst answer:\n{first}\n\nSecond answer:\n{second}"
+        verdict, failure = await _ask(judge, kind, system, user)
+        calls += 1
+        if failure:
+            return _unverified(kind, failure.reasons[0], calls)
+        assert verdict is not None
+        winner, reason = verdict.get("winner"), verdict.get("reason")
+        if winner not in ("first", "second", "tie"):
+            return _unverified(kind, "judge verdict names no winner among first, second and tie", calls)
+        # Translate the judge's positional word into A or B for this order.
+        verdicts.append("tie" if winner == "tie" else ("a" if winner == label[0] else "b"))
+        if isinstance(reason, str) and reason:
+            reasons.append(reason)
+    if verdicts[0] != verdicts[1]:
+        reasons.append(f"the judge preferred {verdicts[0].upper() if verdicts[0] != 'tie' else 'neither'} in one order and "
+                       f"{verdicts[1].upper() if verdicts[1] != 'tie' else 'neither'} in the other: a tie, not a coin")
+        return Judgment(kind, 0.5, False, tuple(reasons), True, calls)
+    score = {"a": 1.0, "b": 0.0, "tie": 0.5}[verdicts[0]]
+    return Judgment(kind, score, verdicts[0] == "a", tuple(reasons), True, calls)
+
+
+async def semantic_similarity(embedder: Embedder, *, answer: str, reference: str,
+                              passing_similarity: float = 0.8) -> Judgment:
+    """The cosine between the answer's embedding and the reference's, as a
+    score in [0, 1] (a negative cosine is 0), passing at the caller's
+    threshold. No judge is called and nothing is checked for truth: two
+    fluent wrong answers can sit close together, and what this says
+    depends entirely on the embedder, whose id is on every reason."""
+    kind = "semantic_similarity"
+    if not isinstance(passing_similarity, (int, float)) or isinstance(passing_similarity, bool) or not 0 <= passing_similarity <= 1:
+        raise ValueError("passing_similarity must be a number from 0 to 1")
+    over = _over_bound(answer, reference)
+    if over:
+        return _unverified(kind, over)
+    if not answer.strip() or not reference.strip():
+        return _unverified(kind, "an empty answer or reference has no similarity to measure")
+    try:
+        first, second = await embedder.embed([answer, reference])
+    except Exception as error:  # an embedder that fails is not a verdict either way
+        return _unverified(kind, f"embedder failed: {type(error).__name__}")
+    if len(first) != len(second) or not first:
+        return _unverified(kind, "embedder returned vectors of different or zero width")
+    if not all(isinstance(value, (int, float)) and math.isfinite(value) for vector in (first, second) for value in vector):
+        # A NaN slips through a clamp as a perfect match: min(1.0, nan) is 1.0.
+        return _unverified(kind, "embedder returned a vector with a non-finite component")
+    dot = sum(a * b for a, b in zip(first, second))
+    norms = sum(a * a for a in first) ** 0.5 * sum(b * b for b in second) ** 0.5
+    if norms == 0:
+        return _unverified(kind, "embedder returned a zero vector")
+    cosine = max(0.0, min(1.0, dot / norms))
+    return Judgment(kind, cosine, cosine >= passing_similarity,
+                    (f"cosine {cosine:.3f} under embedder {embedder.id}; similarity is not correctness",), True, 0)

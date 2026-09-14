@@ -18,7 +18,7 @@ import json
 
 import re
 
-from typing import TYPE_CHECKING, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, cast
 from collections.abc import Callable
 
 from fastapi import Depends, FastAPI, Header, Query, Request
@@ -110,6 +110,8 @@ class EpisodeBody(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     source: Optional[str] = None
     created_at: Optional[str] = None
+    #: How this record is cut; unset keeps the server's rule.
+    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
@@ -205,6 +207,22 @@ class MergeBody(BaseModel):
     preview: bool = False
 
 
+class ForgetMatchingBody(BaseModel):
+    """Unknown fields are refused: a filter field that is silently dropped
+    would widen what gets forgotten."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_prefix: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    conditions: Optional[dict[str, object]] = None
+    kind: Optional[str] = None
+    limit: int = 100
+    apply: bool = False
+    selection: Optional[str] = None
+    with_claims: Literal["keep", "exclude"] = "keep"
+
+
 class BatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -258,6 +276,7 @@ class FeedbackBody(BaseModel):
 from ..ingestion.document_video import DocumentVideo
 from ..ingestion.document_media import DocumentMedia
 from ..ingestion.document_ocr import DocumentOcr
+from ..ingestion.web import WebLimits
 from ..ingestion.import_service import DocumentImportService
 from ..ingestion.directory_service import DirectorySyncService
 from ._lifecycle import finish_host_cleanup
@@ -283,6 +302,7 @@ def create_app(
     document_video: DocumentVideo | None = None,
     vision_factory: Callable[[], VisionModel | None] | None = None,
     synthesis_factory: Callable[[], ChatModel | None] | None = None,
+    url_import: WebLimits | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -457,7 +477,7 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.code_context": True,
+            "recall.window": True, "recall.code_context": True, "recall.highlights": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -536,7 +556,8 @@ def create_app(
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
     file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr,
-                                              assert_current_space=assert_current_space, document_media=document_media, document_video=document_video)
+                                              assert_current_space=assert_current_space, document_media=document_media, document_video=document_video,
+                                              url_import=url_import)
     if document_import_service is not None:
         from .document_jobs import mount_document_job_routes
         mount_document_job_routes(app, document_import_service, space_for, assert_current_space)
@@ -544,7 +565,7 @@ def create_app(
         from .directory_sync import mount_directory_sync_routes
         mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
-    mount_entity_routes(app, engine, space_for)
+    mount_entity_routes(app, engine, space_for, synthesis_factory=synthesis_factory)
     from .filesystem_routes import mount_filesystem_routes
     mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)
 
@@ -607,6 +628,7 @@ def create_app(
             attachment_ids=body.attachment_ids,
             dedup_key=body.dedup_key,
             replace=body.replace,
+            chunking=body.chunking,
         )
         return added.model_dump()
 
@@ -631,7 +653,8 @@ def create_app(
                                    for outcome in ("accepted", "duplicate", "updated")},
                         "job": job_json(replayed), "replayed": True}
         records = [
-            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key)
+            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
+                   chunking=r.chunking)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
@@ -727,6 +750,29 @@ def create_app(
     async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
         return episode_json(await engine.episode(space, episode_id))
 
+    @app.post("/v1/episodes/{episode_id}/summaries")
+    async def post_episode_summaries(episode_id: int, fan_in: int = Query(default=6, ge=2, le=24),
+                                     max_levels: int = Query(default=5, ge=1, le=5),
+                                     space: str = Depends(space_for)) -> JSONResponse:
+        """Write and store the episode's summary tree with the synthesis
+        model: notes the framework wrote, each saying what it summarizes,
+        every sentence resting on a quote from the level below."""
+        from ..retrieval.summary_tree import build_summary_tree
+
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            return JSONResponse({"error": "no synthesis model configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)"}, status_code=501)
+        tree = await build_summary_tree(engine, model, space, episode_id, fan_in=fan_in, max_levels=max_levels,
+                                        store=True, model_name=getattr(model, "model", type(model).__name__))
+        return JSONResponse(tree.record())
+
+    @app.get("/v1/episodes/{episode_id}/summaries")
+    async def get_episode_summaries(episode_id: int, space: str = Depends(space_for)) -> dict:
+        """The summaries stored for the episode, top level first, each saying whether the document has changed since."""
+        from ..retrieval.summary_tree import stored_summaries
+
+        return {"episode_id": episode_id, "summaries": [s.record() for s in await stored_summaries(engine, space, episode_id)]}
+
     @app.get("/v1/episodes/{episode_id}/impact")
     async def episode_impact(episode_id: int, space: str = Depends(space_for)) -> dict:
         """What forgetting would take and leave; removes nothing."""
@@ -736,6 +782,16 @@ def create_app(
     async def episode_forget_status(episode_id: int, space: str = Depends(space_for)) -> dict:
         """Read removal progress, including interrupted cleanup, without writes."""
         return (await engine.forget_status(space, episode_id)).model_dump()
+
+    @app.post("/v1/episodes/forget-matching")
+    async def forget_matching_route(body: ForgetMatchingBody, space: str = Depends(space_for)) -> dict:
+        """Forget what a filter selects. Without ``apply`` this is a preview and
+        removes nothing; with it, the preview's ``selection`` digest is required
+        and a selection that changed since is refused."""
+        report = await engine.forget_matching(space, source_prefix=body.source_prefix, tags=body.tags,
+                                              conditions=body.conditions, kind=body.kind, limit=body.limit,
+                                              apply=body.apply, selection=body.selection, with_claims=body.with_claims)
+        return report.model_dump()
 
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, with_claims: Literal["keep", "exclude"] = "keep",
@@ -886,6 +942,8 @@ def create_app(
         evidence_graph: bool = False,
         graph_analysis: bool = False,
         candidate_limit: Optional[int] = Query(default=None, ge=1, le=1000),
+        fusion: Literal["rank", "score"] = Query(default="rank", description="Fuse the lanes by rank (default) or by "
+                                                  "each lane's scores scaled to its own range."),
         withhold_kinds: Optional[str] = Query(
             default=None, alias="withhold",
             description="Withhold matches of these kinds from the answer, comma separated "
@@ -900,6 +958,11 @@ def create_app(
                                                "imports beside a code passage, with their line "
                                                "numbers. Never spliced into the passage."),
         structural_context: bool = False,
+        highlight: bool = Query(default=False,
+                                description="Give, beside the items and in the same order, the "
+                                            "code-point spans of every word in each returned "
+                                            "passage that the lexical lane would match to the "
+                                            "question. Computed last, on the text as returned."),
         multi_hop: bool = False,
         max_hops: int = Query(default=3, ge=1, le=6),
         expansion_max_bytes: int = Query(default=16000, ge=512, le=256000,
@@ -909,9 +972,26 @@ def create_app(
                                                       "the budget the caller already set."),
         graph_boost: bool = Query(default=False, description="Add the entity lane: passages naming the question's "
                                                               "entities or their neighbours in the knowledge graph."),
+        infer: bool = Query(default=False, description="Read the question's own words for a scope -- a date, a kind "
+                                                        "of memory, tags, a place -- and search with it where no filter "
+                                                        "was set by hand; the answer says what was read and applied."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
+        inferred: dict[str, object] | None = None
+        if infer:
+            from datetime import datetime, timezone
+
+            from ..retrieval.hints import apply_scope, infer_scope
+
+            asked_scope = infer_scope(q, now=datetime.now(timezone.utc))
+            # Only a question that names a tag pays for the space's tag list.
+            known_tags = await engine.tags(space) if asked_scope.tags else None
+            searched = apply_scope(asked_scope, since=since, until=until, kind=kind, tags=tag_list, source_prefix=source_prefix,
+                                   known_tags=known_tags)
+            since, until, kind, source_prefix = searched.since, searched.until, searched.kind, searched.source_prefix
+            tag_list = list(searched.tags)
+            inferred = searched.record(asked_scope)
         policy: tuple[str, ...] = ()
         if withhold_kinds:
             from ..retrieval.withhold import chosen_kinds
@@ -949,7 +1029,7 @@ def create_app(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
-            candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost,
+            candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
         )
         opened = None
         if window:
@@ -982,6 +1062,8 @@ def create_app(
             "top_similarity": result.top_similarity,
             "low_confidence": result.low_confidence,
             "degraded": result.degraded,
+            "fusion": result.fusion,
+            "narrowing": result.narrowing.model_dump() if result.narrowing is not None else None,
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),
@@ -1001,6 +1083,8 @@ def create_app(
             response["widened"] = staged(opened.record())
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
+        if inferred is not None:
+            response["inferred"] = inferred
         if graph_boost:
             response["entities"] = [entity.model_dump(mode="json") for entity in result.entities]
         if evidence_graph or graph_analysis or structural_context or multi_hop:
@@ -1090,6 +1174,15 @@ def create_app(
             response["items"] = [item_json(one) for one in inside.items]
             response["returned_bytes"] = sum(len(one.text.encode()) for one in inside.items)
             response["code_context"] = staged(inside.record())
+        if highlight:
+            from ..retrieval.highlights import Shown, highlights
+
+            # After everything, code context included, because every stage
+            # before this one may rewrite or drop a passage's text, and a
+            # span is only true of the text it was measured on.
+            returned = cast(list[dict[str, Any]], response["items"])
+            response["highlights"] = [marks.model_dump() for marks in highlights(
+                [Shown(one["chunk_id"], one["text"]) for one in returned], q)]
         return response
 
     @app.get("/v1/facts")

@@ -16,7 +16,7 @@ import base64
 import json
 from typing import Callable, Literal, Optional
 
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Path, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
@@ -249,6 +249,9 @@ class AnalysisCoverage(BaseModel):
     levels: int
     #: The modularity resolution the communities were found at.
     resolution: float = 1.0
+    #: Entities named but never read, kept out of the partition and the
+    #: central ranking and attached to the community that names each most.
+    external_entities: int = 0
 
 
 class Groupings(BaseModel):
@@ -304,7 +307,8 @@ def _groupings(analysis: GraphAnalysis, view: dict[str, object]) -> dict[str, ob
                          "members": [member for member in community.members if member in shown]}
                         for community in analysis.communities if any(member in shown for member in community.members)],
         "importance": [{"entity_id": item.entity_id, "community_id": item.community_id, "degree": item.degree,
-                        "pagerank": item.pagerank, "betweenness": item.betweenness, "participation": item.participation}
+                        "pagerank": item.pagerank, "betweenness": item.betweenness, "participation": item.participation,
+                        "external": item.external}
                        for item in analysis.importance if item.entity_id in shown],
         "coverage": analysis.coverage.record(),
     }
@@ -344,7 +348,8 @@ def _names(projection: EntityProjection) -> dict[str, dict[str, str]]:
             for entity in projection.entities}
 
 
-def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[..., object]) -> None:
+def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[..., object],
+                        synthesis_factory: Callable[[], object] | None = None) -> None:
     @app.exception_handler(ProjectionBuilding)
     async def _building(_: Request, error: ProjectionBuilding) -> LedgerJSONResponse:
         return LedgerJSONResponse({"error": str(error), "code": "projection_building"}, status_code=503,
@@ -443,9 +448,10 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         """The view's whole graph as a file another tool reads: node-link JSON,
         GraphML, dynamic GEXF, Cypher, CSV, JSON-LD, an Obsidian vault (with a
         canvas of its notes), a wiki an agent can crawl, a Mermaid chart, an
-        SVG drawing, an Obsidian canvas or one interactive page. The file says
-        which projection it holds and, when the read was capped, that it is
-        partial."""
+        SVG drawing, an Obsidian canvas, one interactive page of the busiest
+        entities (`html`) or the whole graph on one page (`explorer`). The
+        file says which projection it holds and, when the read was capped,
+        that it is partial."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
         reasons = coverage.get("reasons") or []
@@ -529,6 +535,43 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         found = await graph_overview(engine, space, question=q, limit=limit, facts_each=facts, status=status,
                                      as_of=when, resolution=resolution, max_bytes=max_bytes)
         return found.record(space, status=status, as_of=when, question=q)
+
+    @app.get("/v1/graph/communities/{community_id}/summary")
+    async def get_community_summary(
+        community_id: str = Path(min_length=1, max_length=128),
+        facts: int = Query(default=16, ge=1, le=64),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """What the space records about one community, in sentences that each
+        quote a recorded claim or a quote the code re-read in its episode,
+        written by the server's model; the record names the projection
+        digest and revision it was written under. Refused without a model."""
+        from ..entities.reports import community_report
+
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            raise InvalidInput("a community summary needs a model; none is configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
+        when = _moment(engine, as_of)
+        report = await community_report(engine, model, space, community_id, facts_each=facts, status=status, as_of=when)  # type: ignore[arg-type]
+        return report.record()
+
+    @app.get("/v1/graph/summary")
+    async def get_space_summary(
+        reports: int = Query(default=12, ge=1, le=50),
+        facts: int = Query(default=16, ge=1, le=64),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """The space in two levels: a summary per community, largest first, and
+        one over those, cited by community. Over ``reports`` communities is
+        refused rather than cut. Refused without a model."""
+        from ..entities.reports import space_report
+
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            raise InvalidInput("a space summary needs a model; none is configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
+        when = _moment(engine, as_of)
+        made = await space_report(engine, model, space, max_reports=reports, facts_each=facts, status=status, as_of=when)  # type: ignore[arg-type]
+        return made.record()
 
     @app.get("/v1/graph/changes")
     async def get_changes(
