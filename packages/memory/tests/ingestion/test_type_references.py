@@ -120,3 +120,40 @@ async def test_a_type_edge_becomes_a_relation_between_two_entities_in_the_graph(
     assert (f"{PATH}:put", "pkg.receipts.Receipt") in typed
     assert (f"{PATH}:later", "numpy.ndarray") in typed, "a lowercase type is a thing when a type names it"
     assert not any(attribute.predicate == USES_TYPE for attribute in projection.attributes), "never read as a value"
+
+
+SLOTS = '''
+from typing import Annotated, Callable, Literal
+
+import pkg.models as models
+from pkg.db import Session
+from pkg.deps import get_db, marker, Open, Closed
+from pkg.pages import Page
+from pkg.stamps import Stamp
+
+
+def route(db: Annotated[Session, Depends(get_db), marker], state: Literal["Open", Closed]) -> Page[int]:
+    pass
+
+
+def hook(check: Callable[[Session], models.Paper.Kind] | None) -> "Stamp | None":
+    pass
+'''
+
+
+def slot_edges() -> set[tuple[str, str]]:
+    return {(claim.subject, claim.object) for claim in code_claims(SLOTS, PATH, language="python")
+            if claim.predicate == USES_TYPE}
+
+
+def test_only_the_type_positions_of_an_annotation_are_read():
+    # Annotated's metadata is a value, not a type: `Depends(get_db)` names a function, and
+    # `marker` is whatever it was imported as.
+    # Literal's members are values too, quoted or not, whatever else shares their names.
+    assert slot_edges() == {
+        ("pkg/shelf.py:route", "pkg.db.Session"),
+        ("pkg/shelf.py:route", "pkg.pages.Page"),
+        ("pkg/shelf.py:hook", "pkg.db.Session"),
+        ("pkg/shelf.py:hook", "pkg.stamps.Stamp"),
+        ("pkg/shelf.py:hook", "pkg.models.Paper.Kind"),
+    }

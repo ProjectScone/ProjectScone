@@ -657,20 +657,33 @@ def _type_references(tree: ast.AST, path: str, named: dict[str, str],
         return None
 
     def names(annotation: Optional[ast.AST], inside: Optional[str] = None) -> list[str]:
+        """The types in an annotation's type positions only. A dotted name is one type, not
+        each of its heads; ``Literal``'s members and ``Annotated``'s metadata are values, and
+        so is anything a call is given."""
         found: list[str] = []
-        if annotation is None:
-            return found
-        for node in ast.walk(annotation):
+        stack = [annotation] if annotation is not None else []
+        while stack:
+            node = stack.pop()
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) <= _MAX_QUOTED:
                 try:
-                    quoted = ast.parse(node.value, mode="eval")
+                    stack.append(ast.parse(node.value, mode="eval").body)
                 except SyntaxError:
                     continue
-                found.extend(names(quoted.body, inside))
             elif isinstance(node, (ast.Name, ast.Attribute)):
                 target = resolve(node, inside)
                 if target is not None:
                     found.append(target)
+            elif isinstance(node, ast.Subscript):
+                stack.append(node.value)
+                last = (_spelling(node.value) or "").rpartition(".")[2]
+                if last == "Literal":
+                    continue
+                members = list(node.slice.elts) if isinstance(node.slice, ast.Tuple) else [node.slice]
+                stack.extend(members[:1] if last == "Annotated" else members)
+            elif isinstance(node, (ast.Tuple, ast.List)):
+                stack.extend(node.elts)
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+                stack.extend((node.left, node.right))
         return found
 
     def signature(function: ast.FunctionDef | ast.AsyncFunctionDef, inside: Optional[str]) -> list[tuple[str, int]]:
