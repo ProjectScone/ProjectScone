@@ -209,3 +209,19 @@ async def test_a_passage_whose_every_sentence_is_kept_is_returned_as_it_was_and_
     hit, passage = await _widened()
     made = await compress([passage], "harbour crane jib canteen parking", hits=[hit], keep=1.0)
     assert made.items == (passage,) and made.compressed == 0 and made.runs == {}
+
+
+async def test_the_words_that_ask_are_not_what_a_sentence_is_scored_by():
+    """On the project's own documentation, "how" kept sentences saying "how
+    many of how many" for questions about thresholds and reranking. How,
+    why and a "how many" or "how much" say what form the question takes,
+    not what it is about."""
+    nobody = "Nobody knew how many forms were due or why."
+    failed = "Two cranes failed the load test."
+    content = " ".join((nobody, S1, S4, failed, S7))
+    hit, passage = await _widened(content)
+    made = await compress([passage], "How many cranes failed, and why?", hits=[hit], keep=1.0)
+    assert made.items[0].text == f"{S4} {failed}"
+    # "many" still counts where it is not asking how many.
+    many = await compress([passage], "cranes many", hits=[hit], keep=1.0)
+    assert many.items[0].text.startswith(nobody)

@@ -1127,8 +1127,10 @@ span is never scored, only what widening added around it.
 - **Two scorers.** `terms`, the default, needs no model. A sentence
   scores the weight of the question's words it names, each word weighted
   by how few of the passage's sentences name it, so a word the whole
-  passage repeats counts for less than one it names once. A sentence
-  naming none is never kept. `embedding` scores a sentence by its cosine
+  passage repeats counts for less than one it names once. Words that only
+  ask, such as how, why, or the many of a "how many", do not count: on
+  this documentation they kept every sentence saying "how many". A
+  sentence naming none of the rest is never kept. `embedding` scores a sentence by its cosine
   to the question under the space's embedder, every sentence in one call,
   at most 400 per recall.
 - **`compress` is a ceiling.** 0.5 of five sentences keeps at most two,

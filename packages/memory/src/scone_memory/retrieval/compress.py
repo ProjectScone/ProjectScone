@@ -41,6 +41,12 @@ GAP = " … "
 #: Sentences one call may send to an embedder. Passages past it are left
 #: whole and counted in ``unscored``, never cut on a partial score.
 MAX_EMBEDDED_SENTENCES = 400
+#: Words that say what form a question takes rather than what it is about.
+#: The shared tokenizer keeps them, since a search for "how" is a search;
+#: as a reason to keep a sentence they kept every "how many" in a passage.
+_ASKING = frozenset({"how", "why", "whom", "whose"})
+#: Counted as asking only straight after "how".
+_AMOUNTS = frozenset({"many", "much"})
 
 
 @dataclass(frozen=True)
@@ -121,6 +127,12 @@ def _term_scores(plan: _Plan, question: set[str]) -> None:
             plan.scores[number] = sum(weight[term] for term in words)
 
 
+def _question_words(query: str) -> set[str]:
+    words = tokenize(query)
+    return {word for number, word in enumerate(words)
+            if word not in _ASKING and not (word in _AMOUNTS and number and words[number - 1] == "how")}
+
+
 def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     norm = math.sqrt(sum(x * x for x in left)) * math.sqrt(sum(y * y for y in right))
     return sum(x * y for x, y in zip(left, right)) / norm if norm else 0.0
@@ -169,7 +181,7 @@ async def compress(items: Sequence[RecallItem], query: str, *, hits: Sequence[Re
             plans.append(plan)
     if unpinned:
         reasons.append(f"{unpinned} passage(s) held no retrieved span to keep and were left whole")
-    question = set(tokenize(query))
+    question = _question_words(query)
     if scorer == "terms" and not question and plans:
         reasons.append("the question names no word the terms scorer can weigh, so nothing was compressed")
         plans = []
