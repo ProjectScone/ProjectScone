@@ -44,7 +44,7 @@ def projection():
 
 def test_every_format_is_offered():
     assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid",
-                                   "svg", "canvas", "html", "explorer", "communities"}
+                                   "svg", "canvas", "html", "explorer", "communities", "tree"}
 
 
 def test_node_link_json_carries_entities_relations_and_facts(projection):
