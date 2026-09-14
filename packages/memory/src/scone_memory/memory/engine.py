@@ -35,6 +35,7 @@ from ..entities.meanings import RelationMeanings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..ingestion.code_graph import Resolve
+    from ..ingestion.embedding_cache import EmbeddingCache
     # Type-only: the vocabulary store needs cryptography, and a base
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
@@ -196,10 +197,14 @@ class MemoryEngine:
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
         table_context_embeddings: bool = False,
+        embedding_cache: "EmbeddingCache | None" = None,
     ) -> None:
         if type(table_context_embeddings) is not bool:
             raise InvalidInput('table_context_embeddings must be a boolean')
         self._table_context_embeddings = table_context_embeddings
+        #: Vectors kept by the text they embed (ingestion/embedding_cache.py);
+        #: None embeds every chunk of every stored record.
+        self.embedding_cache = embedding_cache
         if similarity_floor is not None and not -1.0 <= similarity_floor <= 1.0:
             raise InvalidInput("similarity_floor must be a cosine similarity in [-1, 1]")
         if abstention is not None and not abstention.fits(embedder.id, embedder.dim):
@@ -497,7 +502,7 @@ class MemoryEngine:
                 added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
                 return Replaced(added=added, outcome="duplicate", replaced=None)
             pending = await ingestion_batch.chunk_record(runtime, new)
-            vectors = await ingestion_batch.embed_pending(runtime, space, [pending])
+            vectors, reused = await ingestion_batch.embed_pending_counted(runtime, space, [pending])
             # Embedding can yield for a long time. Never revoke a different source
             # or recreate one that the user forgot during preparation.
             await self._living(space)
@@ -522,7 +527,7 @@ class MemoryEngine:
             receipt = await self.forget(space, existing.episode_id)
         try:
             results: list[Added | _DupOf | None] = [None]
-            await ingestion_batch.write_batch(runtime, space, [pending], vectors, results)
+            await ingestion_batch.write_batch(runtime, space, [pending], vectors, results, reused=reused)
             await self.documents.bump_revision(space)
             added = cast(Added, results[0])
             retired = file_claims.Retired(closed=0)
@@ -639,7 +644,8 @@ class MemoryEngine:
             context_inputs = partial(embedding_inputs, blobs=self.blobs)
         return ingestion_batch.IngestionRuntime(
             self.documents, self.vectors, self.embedder, self.clock, self.chunk_target,
-            self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint, code_aware=self.code_aware,
+            self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint,
+            embedding_cache=self.embedding_cache, code_aware=self.code_aware,
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
