@@ -325,7 +325,7 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     # still not enough when the real reason is that no file here imports
     # any other: then the answer would have been empty for every file,
     # and that is a fact about the graph rather than about the target.
-    joined = any(one.predicate == "imports" and "/" in str(labels_of(projection, one.object_id))
+    joined = any(one.predicate in DEPENDS_ON and "/" in str(labels_of(projection, one.object_id))
                  for one in projection.relations)
     said = f"read as {mode} at {moment.isoformat()}"
     if limit_hit:
