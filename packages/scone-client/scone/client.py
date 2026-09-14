@@ -10,7 +10,10 @@ from __future__ import annotations
 import os
 import json as _json
 from types import TracebackType
-from typing import Iterator, Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Iterator, Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .conversations import ConversationClient
 
 import requests
 
