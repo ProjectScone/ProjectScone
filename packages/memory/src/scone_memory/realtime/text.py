@@ -44,6 +44,31 @@ def _bytes(messages):
     return len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
 
 
+#: How a conversation treats its history byte limit. ``refuse`` ends the
+#: conversation at the limit, as it always has. ``window`` lets whole
+#: oldest turns leave the model's context instead -- every turn is already
+#: its own episode, so nothing is lost -- and the turn receipt says which.
+HISTORY_POLICIES: tuple[str, ...] = ("refuse", "window")
+
+
+def _windowed(messages, turns, max_bytes):
+    """Drop whole oldest turns after the system prompt until the history
+    fits, keeping the newest turn whole; return what is left and the ids
+    of the turns that went. The window never starts on an assistant
+    message, because a turn is a user message and its reply together."""
+    kept, kept_turns = list(messages), list(turns)
+    evicted: list[str] = []
+    while _bytes(kept) > max_bytes and len(kept) > 2:
+        oldest = kept_turns[1]
+        if oldest is None or oldest == kept_turns[-1]:
+            break
+        while len(kept) > 1 and kept_turns[1] == oldest:
+            del kept[1]
+            del kept_turns[1]
+        evicted.append(oldest)
+    return kept, kept_turns, evicted
+
+
 class _AnswerReviewFailure(RuntimeError):
     def __init__(self, message: str, receipt: dict[str, object]) -> None:
         super().__init__(message)
@@ -86,6 +111,7 @@ class TextConversation:
     _tool_limits: ToolLoopLimits
     _tool_initial_search: bool
     _tool_compute: bool
+    _tool_tables: bool
     _evidence_answer_policy: Literal["when_available", "required"]
     _answer_reviewer: AnswerReviewer | None
     _answer_requirements: AnswerRequirements | None
@@ -94,6 +120,7 @@ class TextConversation:
     _closed: bool
     _history: list[dict[str, str]]
     _max_history: int
+    _history_policy: str
     _max_reply: int
     _cancel_reusable: bool
     _evidence_selector: EvidenceSelector | None
@@ -114,7 +141,7 @@ class TextConversation:
                  evidence_answer_policy: Literal["when_available", "required"] = "when_available",
                  tool_model_factory: Callable[[], ToolModel] | None = None,
                  tool_limits: ToolLoopLimits | None = None, tool_initial_search: bool = False,
-                 tool_compute: bool = False):
+                 tool_compute: bool = False, history_policy: str = "refuse"):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
@@ -138,7 +165,10 @@ class TextConversation:
             raise ValueError("neighbor_chunks is for ordinary search; tool mode uses read_memory")
         if type(tool_compute) is not bool or (tool_compute and tool_model_factory is None):
             raise ValueError("tool_compute requires a boolean and a tool model")
+        if type(tool_tables) is not bool or (tool_tables and tool_model_factory is None):
+            raise ValueError("tool_tables requires a boolean and a tool model")
         self._tool_compute = tool_compute
+        self._tool_tables = tool_tables
         self._tool_factory = tool_model_factory
         self._tool_initial_search = tool_initial_search
         self._tool_limits = ToolLoopLimits.model_validate((tool_limits or ToolLoopLimits()).model_dump())
@@ -176,7 +206,16 @@ class TextConversation:
                                if review_limits is not None else AnswerReviewLimits())
         if self._answer_requirements is not None:
             system_prompt += '\n\n' + self._answer_requirements.prompt()
+        if history_policy not in HISTORY_POLICIES:
+            raise ValueError(f"history_policy must be one of {', '.join(HISTORY_POLICIES)}, not {history_policy!r}")
+        self._history_policy = history_policy
         self._history = [{"role": "system", "content": system_prompt}]
+        #: The turn each history message belongs to, aligned with it; the
+        #: system prompt belongs to none.
+        self._turns: list[str | None] = [None]
+        #: Turns that have left the window; same-session recall may bring
+        #: them back, since the model no longer holds them.
+        self._evicted_turns: set[str] = set()
         if _bytes(self._history) > max_history_bytes:
             raise ValueError("system prompt exceeds history byte limit")
         self._memory, self._space, self._session_id = memory, space, session_id
@@ -206,10 +245,16 @@ class TextConversation:
         if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 32000:
             raise ValueError("message must contain 1..32000 UTF-8 bytes of nonempty text")
         messages = [*self._history, {"role": "user", "content": text}]
+        turns = [*self._turns, None]
+        evicted: list[str] = []
         if _bytes(messages) > self._max_history:
-            raise ValueError("conversation history byte limit reached; start a new conversation")
+            if self._history_policy != "window":
+                raise ValueError("conversation history byte limit reached; start a new conversation")
+            messages, turns, evicted = _windowed(messages, turns, self._max_history)
+            if _bytes(messages) > self._max_history:
+                raise ValueError("one message exceeds the conversation history byte limit on its own")
         self._cancel_reusable = False
-        active = self._active = asyncio.create_task(self._reply(messages, on_text))
+        active = self._active = asyncio.create_task(self._reply(messages, turns, evicted, on_text))
         try:
             return await asyncio.shield(active)
         except asyncio.CancelledError:
@@ -268,16 +313,26 @@ class TextConversation:
             raise asyncio.CancelledError()
         return added.episode_id
 
-    async def _reply(self, messages, on_text):
+    async def _reply(self, messages, turns, evicted, on_text):
         token = _OWNER.set(self)
         try:
             async with asyncio.timeout(self._timeout) as budget:
                 turn_id = uuid4().hex
+                turns = [*turns[:-1], turn_id]
+                self._evicted_turns.update(evicted)
                 user_id = await self._record(turn_id, "user", messages[-1]["content"])
                 text, receipt, answer_review, evidence_answer = await self._execute(messages, on_text, budget.when())
                 complete = [*messages, {"role": "assistant", "content": text}]
+                complete_turns = [*turns, turn_id]
                 if _bytes(complete) > self._max_history:
-                    raise RuntimeError("model reply exceeded the conversation history byte limit")
+                    if self._history_policy == "window":
+                        complete, complete_turns, more = _windowed(complete, complete_turns, self._max_history)
+                        evicted = [*evicted, *more]
+                        self._evicted_turns.update(more)
+                    # The tool path refuses an unfittable reply in `_emit_final`
+                    # before capture; the streaming path reaches only this check.
+                    if _bytes(complete) > self._max_history:
+                        raise RuntimeError("model reply exceeded the conversation history byte limit")
                 if self._closed or asyncio.current_task().cancelling():
                     raise asyncio.CancelledError()
                 if budget.when() is not None and asyncio.get_running_loop().time() >= budget.when():
@@ -287,9 +342,13 @@ class TextConversation:
                     evidence_abstention=evidence_answer is not None and evidence_answer.get("source_status") == "none",
                     tool_source_status=receipt.get('tool_retrieval', {}).get('source_status'))
                 self._history = complete
+                self._turns = complete_turns
                 result = dict(turn_id=turn_id, text=text, provider_completion="unverified",
                             user_episode_id=user_id, assistant_episode_id=assistant_id,
-                            memory_context=receipt)
+                            memory_context=receipt,
+                            history={"policy": self._history_policy, "max_bytes": self._max_history,
+                                     "bytes": _bytes(complete), "evicted_turn_count": len(evicted),
+                                     "evicted_turn_ids": list(evicted)})
                 if answer_review is not None:
                     result["answer_review"] = answer_review
                 if evidence_answer is not None:
@@ -301,7 +360,10 @@ class TextConversation:
     async def _execute(self, messages, on_text, deadline=None):
         if self._tool_factory is not None:
             return await self._execute_tools(messages, on_text, deadline)
-        request, receipt = await self._context.prepare(messages)
+        # Only a windowed conversation has turns to admit; every other one calls
+        # `prepare` exactly as before, so hosts that substitute it keep working.
+        admitted = {'admit_turn_ids': frozenset(self._evicted_turns)} if self._evicted_turns else {}
+        request, receipt = await self._context.prepare(messages, **admitted)
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
         if self._evidence_selector is not None and receipt["status"] == "prepared":
@@ -351,7 +413,8 @@ class TextConversation:
             except Exception:
                 raise RuntimeError('tool model unavailable') from None
             tools = ScopedMemoryTools(self._memory, self._space, scope=self._scope,
-                                      exclude_session_id=self._session_id, enable_computation=self._tool_compute)
+                                      exclude_session_id=self._session_id, enable_computation=self._tool_compute,
+                                      enable_tables=self._tool_tables)
             result = await EvidenceToolLoop(model, tools, limits=self._tool_limits,
                                            initial_search=self._tool_initial_search).run(messages)
         check_active()
@@ -389,12 +452,27 @@ class TextConversation:
             raise _AnswerReviewFailure('answer review evidence unavailable', failure) from error
         return self._accept_review(reviewed)
 
+    def _fits_history(self, messages, text) -> bool:
+        """Whether the reply can be kept: within the limit as it stands, or,
+        under the window policy, once whole oldest turns have left."""
+        complete = [*messages, {"role": "assistant", "content": text}]
+        if _bytes(complete) <= self._max_history:
+            return True
+        if self._history_policy != "window":
+            return False
+        # Turn ids are not to hand here; a turn after the system prompt is a
+        # user message and its reply, so the window drops pairs from the front.
+        kept = list(complete)
+        while _bytes(kept) > self._max_history and len(kept) > 3:
+            del kept[1:3]
+        return _bytes(kept) <= self._max_history
+
     async def _emit_final(self, messages, text, on_text):
         if self._answer_requirements is not None and not self._answer_requirements.accepts(text):
             raise RuntimeError('answer format violates configured requirements')
         if len(text.encode("utf-8")) > self._max_reply:
             raise RuntimeError("model reply exceeded the byte limit")
-        if _bytes([*messages, {"role": "assistant", "content": text}]) > self._max_history:
+        if not self._fits_history(messages, text):
             raise RuntimeError("model reply exceeded the conversation history byte limit")
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()

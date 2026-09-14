@@ -116,6 +116,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--code-context", action="store_true",
                    help="for a passage of code, also quote the signature it sits inside and the "
                         "imports of its file; the passage itself is not changed")
+    p.add_argument("--highlight", action="store_true",
+                   help="say which words of each passage the lexical lane matched; with --json, "
+                        "the code-point spans of each, beside the items")
     p.add_argument("--parts", action="store_true",
                    help="search each part of a multi-part question and give every part a turn "
                         "(measured to change nothing on LongMemEval; off by default)")
@@ -156,6 +159,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="show the impact and remove nothing")
     p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
                    help="exclude: take the claims only this source supported out of recall, reversibly (default keep)")
+
+    p = sub.add_parser("forget-matching", help="forget every source a filter selects: previews unless --apply")
+    p.add_argument("--source-prefix", help="sources whose name starts with this text")
+    p.add_argument("--tag", action="append", default=[], help="a tag every selected source carries, repeatable")
+    p.add_argument("--conditions", help='metadata filter as JSON, e.g. {"field": "sync", "is": "old"}')
+    p.add_argument("--kind", help="only episodes of this kind")
+    p.add_argument("--limit", type=int, default=100, help="episodes one pass forgets (1 to 1000, default 100)")
+    p.add_argument("--apply", action="store_true", help="forget; needs --selection from a preview")
+    p.add_argument("--selection", help="the selection digest a preview printed")
+    p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
+                   help="exclude: take the claims only these sources supported out of recall, reversibly")
 
     p = sub.add_parser("facts", help="list facts")
     p.add_argument("--all", action="store_true", help="include closed facts")
@@ -1485,6 +1499,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             result = result.model_copy(update={"items": list(inside.items)})
         if args.json:
             said = result.model_dump() | {"context_reduction": result.context_reduction}
+            if args.highlight:
+                from ..retrieval.highlights import highlights
+
+                said["highlights"] = [marks.model_dump() for marks in highlights(result.items, args.query)]
             emit(said | ({"merged": _staged(joined.record())} if joined else {})
                       | ({"widened": _staged(opened.record())} if opened else {})
                       | ({"withheld": _staged(kept.record())} if kept else {})
@@ -1514,11 +1532,24 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         for f in result.history:
             until = f.valid_until[:10] if f.valid_until else "?"
             print(f"was   {f.subject} {f.predicate} {f.object}  ({f.valid_from[:10]} to {until}; {f.closed_reason})", file=out)
-        for item in result.items:
+        marked = None
+        if args.highlight:
+            from ..retrieval.highlights import highlights
+
+            marked = highlights(result.items, args.query)
+        for position, item in enumerate(result.items):
             sim = f" sim={item.similarity:.2f}" if item.similarity is not None else ""
             print(f"{item.score:.2f}{sim}  {item.created_at[:10]}  #{item.episode_id}  {item.text.strip()[:200]}", file=out)
+            if marked is not None:
+                words = list(dict.fromkeys(item.text[span.start:span.end] for span in marked[position].spans))
+                more = " and more" if marked[position].truncated else ""
+                print(f"      matched: {', '.join(words) or 'no word of the question'}{more}", file=out)
         for d in result.degraded:
             print(f"degraded: {d}", file=sys.stderr)
+        if result.narrowing is not None and result.narrowing.window_exhausted:
+            n = result.narrowing
+            print(f"note: the narrowing removed {n.postfiltered_out} candidate(s) and a lane's window of "
+                  f"{max(n.vector_window, n.text_window)} was full when it did; memories that fit may lie deeper", file=out)
         if result.low_confidence:
             top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)
@@ -1600,6 +1631,27 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             return 2
         receipt = await engine.delete_space(space)
         emit({"deleted": space, **receipt.model_dump()}) if args.json else print(f"deleted space {space}: {space_line(receipt)}", file=out)
+        return 0
+
+    if args.command == "forget-matching":
+        conditions = json.loads(args.conditions) if args.conditions else None
+        bulk = await engine.forget_matching(space, source_prefix=args.source_prefix, tags=args.tag,
+                                              conditions=conditions, kind=args.kind, limit=args.limit, apply=args.apply,
+                                              selection=args.selection, with_claims=args.with_claims)
+        if args.json:
+            emit(bulk.model_dump())
+            return 0
+        verb = "forgot" if bulk.applied else "would forget"
+        count = len(bulk.forgotten) if bulk.applied else len(bulk.episode_ids)
+        print(f"{verb} {count} of {bulk.matched} matching source(s): {bulk.chunks} chunk(s), "
+              f"{bulk.attachments_released} attachment(s) released, {bulk.facts_citing} claim(s) and "
+              f"{bulk.links_citing} link(s) cite them", file=out)
+        if bulk.pass_limited:
+            print(f"the pass limit of {args.limit} bit; run again for the rest", file=out)
+        if not bulk.selection_complete:
+            print("the walk stopped before reading every source; more may match", file=out)
+        if not bulk.applied:
+            print(f"to forget exactly these, run again with --apply --selection {bulk.selection}", file=out)
         return 0
 
     if args.command == "forget":

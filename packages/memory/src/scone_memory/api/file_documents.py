@@ -93,6 +93,33 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
             'download_path': f'/v1/attachments/{result.original.attachment_id}'}))
 
 
+    @app.get('/v1/episodes/{episode_id}/tables')
+    async def tables(request: Request, episode_id: int = Path(ge=1, le=2**63 - 1),
+                     space: str = Depends(space_for)) -> JSONResponse:
+        """The tables an ingested document declares -- name, columns, row count, totals rows
+        set aside -- rebuilt from the retained manifest, so a query can name one."""
+        from ..retrieval.table_query import episode_tables
+
+        found = await episode_tables(engine, space, episode_id)
+        assert_current_space(request, space)
+        return JSONResponse(jsonable_encoder({'episode_id': episode_id, 'tables': [t.summary() for t in found]}))
+
+    @app.post('/v1/episodes/{episode_id}/tables/query')
+    async def table_query(request: Request, episode_id: int = Path(ge=1, le=2**63 - 1),
+                          space: str = Depends(space_for)) -> JSONResponse:
+        """An exact answer from one table's cells: filter rows, then count, sum, average, min,
+        max, or list them; every cell used is quoted with its byte span in the stored text,
+        and the record says what was matched, set aside and not verified. No model runs."""
+        from ..retrieval.table_query import TableQueryArgs, query_table
+
+        try:
+            args = TableQueryArgs.model_validate(await request.json(), strict=False)  # JSON lists are tuples here
+        except (ValidationError, ValueError) as error:
+            raise InvalidInput(f'table query is invalid: {error}') from None
+        answer = await query_table(engine, space, episode_id, args)
+        assert_current_space(request, space)
+        return JSONResponse(jsonable_encoder(answer.record()))
+
     @app.get('/v1/episodes/{episode_id}/document/ocr-tables')
     async def ocr_tables(request: Request, episode_id: int = Path(ge=1, le=2**63 - 1),
                          page: int = Query(ge=1, le=1000),

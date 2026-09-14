@@ -98,6 +98,9 @@ class ContextReceipt(TypedDict):
     status: str
     recall_event_id: int | None
     references: list[dict[str, int]]
+    #: Same-session turns admitted because they have left the model's
+    #: window; zero when every same-session turn was excluded as usual.
+    same_session_items: int
     context_sha256: str | None
     context_bytes: int
     omitted_count: int
@@ -194,7 +197,7 @@ class MemoryContext:
         self._adaptive_retriever = adaptive_retriever
         self._neighbor_chunks = neighbor_chunks
 
-    async def _overview(self) -> OverviewResult:
+    async def _overview(self, admit: frozenset[str] = frozenset()) -> OverviewResult:
         items: list[RecallItem] = []
         cursor: int | None = None
         considered, has_more = 0, True
@@ -208,7 +211,7 @@ class MemoryContext:
                 raise ValueError("overview continuation made no progress")
             usable: list[dict[str, object]] = []
             for item in overview_evidence(items, limit=len(items)):
-                if item.metadata.get("session_id") == self._session_id or item.source == self._session_id:
+                if self._excluded(item, admit):
                     continue
                 candidate = _source(item)
                 if len(_source_block([*usable, candidate], _overview_coverage(considered, has_more)).encode()) <= self._max_bytes:
@@ -217,11 +220,19 @@ class MemoryContext:
                     return OverviewResult(items, considered, has_more, cursor)
         return OverviewResult(items, considered, has_more, cursor)
 
-    async def prepare(self, messages: list[dict[str, object]]) -> tuple[list[dict[str, object]], ContextReceipt]:
+    def _excluded(self, item, admit: frozenset[str]) -> bool:
+        """A same-session item stays out of the context -- the model holds
+        the conversation already -- unless its turn has left the window."""
+        same = item.metadata.get("session_id") == self._session_id or item.source == self._session_id
+        return same and item.metadata.get("turn_id") not in admit
+
+    async def prepare(self, messages: list[dict[str, object]], *,
+                      admit_turn_ids: frozenset[str] = frozenset()) -> tuple[list[dict[str, object]], ContextReceipt]:
         started = time.perf_counter()
+        admit = frozenset(admit_turn_ids)
         request = copy.deepcopy(messages)
         receipt: ContextReceipt = dict(request_id=uuid4().hex, session_id=self._session_id,
-                       status="skipped", recall_event_id=None, references=[],
+                       status="skipped", recall_event_id=None, references=[], same_session_items=0,
                        context_sha256=None, context_bytes=0, omitted_count=0,
                        degraded=[], low_confidence=None, error_type=None)
         receipt["path_count"] = 0
@@ -272,7 +283,7 @@ class MemoryContext:
             search_timeout = None if plan.mode == "search" and self._adaptive_retriever is not None else self._timeout
             async with asyncio.timeout(search_timeout):
                 if plan.mode == "overview":
-                    overview = await self._overview()
+                    overview = await self._overview(admit)
                     items = overview_evidence(overview.items, limit=len(overview.items))
                     candidate_count = len(overview.items)
                     low_confidence, event_id, degraded = None, None, []
@@ -386,8 +397,7 @@ class MemoryContext:
                 provisional_items: list[RecallItem] = []
                 provisional_sources: list[dict[str, object]] = []
                 for item in items:
-                    if (item.metadata.get("session_id") == self._session_id or item.source == self._session_id
-                            or item.text.strip() == query.strip()):
+                    if self._excluded(item, admit) or item.text.strip() == query.strip():
                         continue
                     candidate = _source(item)
                     if len(_source_block([*provisional_sources, candidate], coverage).encode()) > self._max_bytes:
@@ -427,7 +437,8 @@ class MemoryContext:
                             raise RuntimeError("memory changed after passage window read")
                         verified_graph = await build_query_evidence_graph(self._memory.documents, self._space, query,
                             RecallResult(items=provisional_items, facts=recalled_facts, event_id=event_id),
-                            scope=TextFilter(**self._scope.kwargs()), exclude_session_id=self._session_id)
+                            scope=TextFilter(**self._scope.kwargs()), exclude_session_id=self._session_id,
+                            admit_turn_ids=admit)
                         if await self._memory.documents.revision(self._space) != graph_revision:
                             graph_stale = True
                             receipt["evidence_graph_stale"] = True
@@ -461,8 +472,7 @@ class MemoryContext:
                                    if graph else set() if adaptive_selected_ids is not None or graph_stale else None)
                 eligible = [item for item in provisional_items
                             if (retained_chunks is None or item.chunk_id in retained_chunks)
-                            and item.metadata.get("session_id") != self._session_id
-                            and item.source != self._session_id and item.text.strip() != query.strip()]
+                            and not self._excluded(item, admit) and item.text.strip() != query.strip()]
                 # Keep the best verbatim passage first when one fits. Structured
                 # evidence shares the existing byte budget, including JSON overhead.
                 for item in eligible:
@@ -540,6 +550,9 @@ class MemoryContext:
                                                   for key, ids in adaptive_provenance.items()})
                     block = _source_block(sources, coverage, claims, relations, paths)
                 references = [dict(episode_id=item.episode_id, chunk_id=item.chunk_id) for item in selected_items]
+                receipt["same_session_items"] = sum(
+                    1 for item in selected_items
+                    if item.metadata.get("session_id") == self._session_id or item.source == self._session_id)
                 if windows is not None:
                     retained_windows = {str(item.chunk_id): windows.anchors[item.chunk_id]
                         for item in selected_items if item.chunk_id in windows.anchors}
