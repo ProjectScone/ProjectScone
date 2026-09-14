@@ -91,7 +91,7 @@ def self_hosted_text_runtime(engine, store: ModelConnectionStore, *, think: bool
         if tools is not None:
             return TextConversation(engine, space, session_id,
                 tool_model_factory=tools.factory(connection, think=think), tool_limits=tools.limits,
-                tool_initial_search=tools.initial_search, tool_compute=tools.compute,
+                tool_initial_search=tools.initial_search, tool_compute=tools.compute, tool_tables=tools.tables,
                 turn_timeout=connection.timeout_s, **scope.kwargs(), **conversation_options)
         # The immutable connection stays with this session, even across edits.
         return TextConversation(engine, space, session_id, text_model_factory(connection, think=think),
@@ -111,6 +111,7 @@ class _SelfHostedBoundPersona(BoundPersona):
     tool_limits: ToolLoopLimits | None = None
     tool_initial_search: bool = False
     tool_compute: bool = False
+    tool_tables: bool = False
 
     def text(self, *args, **options):
         options.setdefault('turn_timeout', self.turn_timeout)
@@ -119,6 +120,7 @@ class _SelfHostedBoundPersona(BoundPersona):
             options.setdefault('tool_limits', self.tool_limits)
             options.setdefault('tool_initial_search', self.tool_initial_search)
             options.setdefault('tool_compute', self.tool_compute)
+            options.setdefault('tool_tables', self.tool_tables)
         return super().text(*args, **options)
 
     def voice(self, *args, **options):
@@ -171,7 +173,7 @@ class DynamicSelfHostedCatalog:
             bound.tts_factory, bound.activity_factory, chat.timeout_s,
             self.tools.factory(chat, think=self.think) if self.tools else None,
             self.tools.limits if self.tools else None, self.tools.initial_search if self.tools else False,
-            self.tools.compute if self.tools else False)
+            self.tools.compute if self.tools else False, self.tools.tables if self.tools else False)
         return PersonaCatalog((persona,), {persona.id: selected})
 
     @property

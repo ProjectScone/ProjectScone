@@ -291,6 +291,9 @@ def answer_from(tables: Sequence[Table], args: TableQueryArgs) -> TableAnswer:
         used = [row.cells[name] for row in matched for name in table.columns if name in row.cells]
         value = None
     elif args.operation == 'count':
+        # What was counted is evidence too: the first cell of each row, so a
+        # reader can see the rows behind the number.
+        used = [next(row.cells[name] for name in table.columns if name in row.cells) for row in matched if row.cells]
         value = str(len(matched))
     else:
         assert column is not None

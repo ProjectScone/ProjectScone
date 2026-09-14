@@ -34,6 +34,8 @@
     SCONE_RELATION_SYMMETRIC=married_to       which read the same both ways
     SCONE_RELATION_TRANSITIVE=part_of         which carry through
     SCONE_ABSTENTION_POLICY        a policy file from `scone calibrate`: the measured floor to abstain by
+    SCONE_CONVERSATIONS_TOOL_TABLES=1  offer list_tables and query_table in tool mode: exact answers from a
+                                   document's table cells, every cell quoted (off by default)
     SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
     SCONE_PROFILE_WITHOUT          predicates a profile never shows
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
@@ -212,6 +214,7 @@ class Settings:
     conversations_tool_mode: str = "off"
     conversations_tool_initial_search: bool = True
     conversations_tool_compute: bool = False
+    conversations_tool_tables: bool = False
     conversations_tool_max_calls: int = 4
     conversations_tool_max_rounds: int = 4
     conversations_tool_timeout: float = 120.0
@@ -445,6 +448,7 @@ class Settings:
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
             conversations_tool_compute=parse_flag("SCONE_CONVERSATIONS_TOOL_COMPUTE", env.get("SCONE_CONVERSATIONS_TOOL_COMPUTE", "0")),
+            conversations_tool_tables=parse_flag("SCONE_CONVERSATIONS_TOOL_TABLES", env.get("SCONE_CONVERSATIONS_TOOL_TABLES", "0")),
             conversations_tool_max_calls=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", "4")),
             conversations_tool_max_rounds=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", "4")),
             conversations_tool_timeout=parse_seconds("SCONE_CONVERSATIONS_TOOL_TIMEOUT", env.get("SCONE_CONVERSATIONS_TOOL_TIMEOUT"), 120.0),
