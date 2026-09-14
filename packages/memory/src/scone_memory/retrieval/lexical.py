@@ -180,6 +180,11 @@ class Bm25:
         families = [(fold_diacritics(prefix), [term for term in self._df if term.startswith(fold_diacritics(prefix))])
                     for prefix in prefixes]
         families = [(prefix, members) for prefix, members in families if members]
+        # A query word its own family covers is scored once, through the
+        # family: "billing" asked with the prefix "bill" is one signal, not
+        # the word and then the family it belongs to.
+        covered = {term for term in terms if any(term.startswith(prefix) for prefix, _ in families)}
+        terms = [term for term in terms if term not in covered]
         if (not terms and not families) or not self._docs:
             return []
         n = len(self._docs)

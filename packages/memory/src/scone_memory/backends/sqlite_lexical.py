@@ -69,9 +69,13 @@ def terms_of(text: str) -> str:
 
 
 def lexical_match(query: str, prefixes: Sequence[str] = ()) -> str | None:
-    """The FTS5 expression for the query's terms and any prefixes, OR-joined and quoted; None when empty."""
-    pieces = ['"' + term(token).replace('"', '""') + '"' for token in tokenize(query)]
-    pieces += ['"' + term(prefix).replace('"', '""') + '"*' for prefix in prefixes if prefix]
+    """The FTS5 expression for the query's terms and any prefixes, OR-joined
+    and quoted; None when empty. A term a prefix covers is left to the
+    prefix phrase, so bm25 counts it once, as the in-memory lane does."""
+    stems = [term(prefix) for prefix in prefixes if prefix]
+    tokens = [term(token) for token in tokenize(query)]
+    pieces = ['"' + token.replace('"', '""') + '"' for token in tokens if not any(token.startswith(stem) for stem in stems)]
+    pieces += ['"' + stem.replace('"', '""') + '"*' for stem in stems]
     return " OR ".join(pieces) if pieces else None
 
 
@@ -130,18 +134,27 @@ def initialize_lexical(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (_VERSION_KEY, _VERSION))
 
 
-def synchronize_lexical(conn: sqlite3.Connection, space: str) -> int:
-    """Bring ``space``'s lexical rows up to date; the number of chunks re-read."""
+#: Chunks one synchronisation pass re-reads at most. A query after a
+#: rebuild or a bulk write pays for this many and no more; what is still
+#: behind is counted and returned, so the lane can say it is behind.
+MAX_SYNC_ROWS = 2_048
+
+
+def synchronize_lexical(conn: sqlite3.Connection, space: str) -> tuple[int, int]:
+    """Bring ``space``'s lexical rows up to date, up to ``MAX_SYNC_ROWS`` of
+    them; the number of chunks re-read and the number still behind."""
     done = 0
     with _savepoint(conn):
-        while True:
+        while done < MAX_SYNC_ROWS:
             rows = conn.execute("""SELECT c.id, c.text FROM chunk_lexical_dirty AS d INDEXED BY chunk_lexical_dirty_space
                 JOIN chunks AS c ON c.id = d.chunk_id AND c.space = d.space
-                WHERE d.space = ? ORDER BY d.chunk_id LIMIT 256""", (space,)).fetchall()
+                WHERE d.space = ? ORDER BY d.chunk_id LIMIT ?""", (space, min(256, MAX_SYNC_ROWS - done))).fetchall()
             if not rows:
-                return done
+                break
             for row in rows:
                 conn.execute("INSERT OR REPLACE INTO chunk_lexical(chunk_id, space, terms) VALUES (?, ?, ?)",
                              (row["id"], space, terms_of(row["text"])))
                 conn.execute("DELETE FROM chunk_lexical_dirty WHERE chunk_id = ?", (row["id"],))
                 done += 1
+        behind = conn.execute("SELECT count(*) FROM chunk_lexical_dirty WHERE space = ?", (space,)).fetchone()[0]
+    return done, int(behind)

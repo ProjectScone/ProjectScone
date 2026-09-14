@@ -42,3 +42,43 @@ async def test_a_new_tokenizer_version_rebuilds_the_index_lazily(tmp_path, monke
 def test_the_match_expression_folds_and_quotes_like_the_index():
     assert module.lexical_match("Résumé, don't", ("bill",)) == '"resume" OR "don\u02bct" OR "bill"*'
     assert module.lexical_match("   ") is None
+
+
+async def test_a_query_word_its_own_family_covers_is_one_signal_in_both_stores(tmp_path):
+    """"billing" asked with the prefix "bill" is scored once, through the
+    family, in the in-memory lane and in the SQLite expression alike."""
+    from scone_memory.retrieval.lexical import Bm25
+
+    index = Bm25()
+    index.add(1, "The billing run went out late.")
+    index.add(2, "Two bills were paid on time.")
+    index.add(3, "Nothing about money here at all.")
+    exact = dict(index.search("billing", limit=5))
+    family = dict(index.search("billing", limit=5, prefixes=("bill",)))
+    assert 1 in exact and 2 not in exact, "without the family only the exact word matches"
+    assert 2 in family, "the family reaches bills"
+    assert family[1] <= exact[1] * 1.0001 + 1e-9, "the exact word is not counted again beside its family"
+    assert module.lexical_match("billing", ("bill",)) == '"bill"*', "the SQLite phrase for a covered word is the prefix alone"
+    assert module.lexical_match("billing run", ("bill",)) == '"run" OR "bill"*'
+
+
+async def test_the_synchronisation_is_bounded_per_query_and_the_backlog_is_said(tmp_path, monkeypatch):
+    from scone_memory import HashEmbedder, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.backends import sqlite_lexical
+
+    monkeypatch.setattr(sqlite_lexical, "MAX_SYNC_ROWS", 4)
+    store = SqliteDocumentStore(str(tmp_path / "b.db"))
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        for number in range(10):
+            await engine.remember("s", f"Invoice number {number} for the harbour lights, billing due in March.")
+        first = await engine.recall("s", "billing harbour", limit=3)
+        assert store.lexical_backlog("s") == 6, "four chunks synchronised, six still behind"
+        assert any("6 chunk(s) not yet in the lexical index" in note for note in first.degraded), first.degraded
+        second = await engine.recall("s", "billing harbour", limit=3)
+        assert store.lexical_backlog("s") == 2 and any("2 chunk(s)" in note for note in second.degraded)
+        third = await engine.recall("s", "billing harbour", limit=3)
+        assert store.lexical_backlog("s") == 0 and not any("lexical index" in note for note in third.degraded)
+        assert len(third.items) == 3
+    finally:
+        await engine.close()
