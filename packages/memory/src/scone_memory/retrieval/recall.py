@@ -79,6 +79,8 @@ class RecallRuntime:
     context_lane: bool = False
     #: Whether a query term's family is searched by stem prefix in the text lane.
     lexical_stems: bool = False
+    #: The vector lane's voice in rank fusion, against the text lane's 1.0.
+    vector_weight: float = 1.0
 
 
 def _ms(since: float) -> float:
@@ -185,6 +187,7 @@ async def recall(
                      else {"matched": len(expansion.matched), "added": len(expansion.added), "capped": expansion.capped}),
         "context_lane": runtime.context_lane,
         "prefixes": ({"added": len(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
+        "fusion_weights": {"vector": runtime.vector_weight, "text": 1.0},
         "similarity_floor": runtime.similarity_floor,
         "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
                    "conditions": dict(conditions) if conditions is not None else None,
@@ -299,7 +302,7 @@ async def recall(
         "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
     }
     lanes: list[list[tuple[int, float]]] = [vector_lane, text_lane]
-    weights = [1.0, 1.0]
+    weights = [runtime.vector_weight, 1.0]
     if graph_boost:
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
         lanes.append(entity_hits)
