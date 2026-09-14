@@ -702,8 +702,11 @@ After uploading the original, select OCR explicitly in the indexing request:
 }
 ```
 
-`missing_text` preserves readable embedded text and recognizes pages lacking it
-or whose text extraction fails. `all_pages` recognizes every page, including
+`missing_text` preserves readable embedded text and recognizes pages lacking it,
+whose text extraction fails, or whose text layer is unreadable (mostly private-use
+code points, `(cid:N)` runs, replacement characters or control bytes). Without OCR
+such a page keeps its text, its segment carries `unreadable: true` and the
+document metadata lists it in `unreadable_pages`. `all_pages` recognizes every page, including
 those with embedded text. Reading order is `provider`, `columns_ltr` or
 `columns_rtl`; the latter two infer columns geometrically, not semantically.
 The browser Documents import queue exposes these choices per PDF when available.
