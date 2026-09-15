@@ -320,15 +320,17 @@ async def embedding_inputs(runtime: IngestionRuntime, new: NewEpisode, spans: Se
         return []
     if runtime.context_inputs is not None:
         content = new.content.encode()
-        previous = 0
+        # In order, not disjoint: a token cut with an overlap stores
+        # neighbouring spans that share text (ingestion/token_chunks.py).
+        previous_start, previous_end = -1, 0
         if len(spans) != len(texts):
             raise InvalidInput('document embedding chunk does not match its source span')
         for (start, end), text in zip(spans, texts):
             if (type(start) is not int or type(end) is not int
-                    or not previous <= start < end <= len(content)
+                    or not previous_start < start < end <= len(content) or end <= previous_end
                     or content[start:end] != text.encode()):
                 raise InvalidInput('document embedding chunk does not match its source span')
-            previous = end
+            previous_start, previous_end = start, end
     contextual = await runtime.context_inputs(new, spans) if runtime.context_inputs is not None else texts
     if len(contextual) != len(texts):
         raise InvalidInput('embedding context must preserve the chunk count')

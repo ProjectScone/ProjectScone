@@ -61,11 +61,14 @@ def context_inputs(parsed: ParsedDocument, spans: Sequence[tuple[int, int]]) -> 
     ends = [end for _, end, _ in cells]
     result: list[str] = []
     total = previous_end = 0
+    previous_start = -1
     for start, end in spans:
+        # In order, not disjoint: neighbouring spans of a token cut with an
+        # overlap share text, and each is given the context it lacks.
         if (type(start) is not int or type(end) is not int
-                or not previous_end <= start < end <= len(content)):
+                or not previous_start < start < end <= len(content) or end <= previous_end):
             raise InvalidInput('document embedding chunk spans are invalid')
-        previous_end = end
+        previous_start, previous_end = start, end
         try:
             excerpt = content[start:end].decode('utf-8')
         except UnicodeError:

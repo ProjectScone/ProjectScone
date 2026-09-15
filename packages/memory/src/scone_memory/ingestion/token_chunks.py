@@ -13,9 +13,12 @@ count a chunk as the sum of its sentences.
 
 Tokens are counted by the function given: the embedder's own tokenizer
 when it has one, and otherwise the budget's estimate (``estimated_tokens``),
-which needs no model and errs high, so a chunk it keeps within 512 fits a
-512-token window. The count of an empty text is what the counter adds to
-every input (a model's start and end markers) and is paid once a chunk.
+which needs no model and is meant to err high but is not a bound: BGE-small
+counted 8 of 16,301 chunks it held to 512 over 512 (largest 534). Under the
+estimate ``over_target`` and ``largest`` are the estimate measuring the
+pieces it packed, so they cannot show a model's window. The count of an
+empty text is what the counter adds to every input (a model's start and
+end markers) and is paid once a chunk.
 The estimate reads the text once (``_Estimate``): every sentence, line,
 word and chunk is then a difference of running totals. Estimating each
 one's text again took 2.6 to 3.0 times as long over the bench's

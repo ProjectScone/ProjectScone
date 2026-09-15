@@ -303,13 +303,34 @@ async def test_the_engine_cuts_by_tokens_when_asked_and_by_characters_otherwise(
         await plain.close()
 
 
-async def test_the_engine_passes_the_overlap_through():
-    engine = await open_engine(chunk_tokens=64, chunk_overlap_tokens=24)
+@pytest.mark.parametrize("table_context", [False, True])
+async def test_the_engine_passes_the_overlap_through(table_context):
+    """Neighbouring stored spans overlap, and table context -- which checks
+    every record's spans, not only a table's -- embeds them as they stand."""
+    engine = await open_engine(chunk_tokens=64, chunk_overlap_tokens=24, table_context_embeddings=table_context)
     try:
         added = await engine.remember("default", LONG)
         assert added.structure["overlap"] == 24 and added.structure["overlapped"] > 0
+        stored = await engine.documents.chunks_of("default", added.episode_id)
+        assert sum(1 for before, after in zip(stored, stored[1:]) if after.start < before.end) == added.structure["overlapped"]
     finally:
         await engine.close()
+
+
+async def test_chunks_stored_with_an_overlap_can_be_rebuilt_and_recovered_with_table_context():
+    """Stored chunks are never recut: turning table context on later must
+    re-embed the overlapped chunks a space already holds."""
+    first = await open_engine(chunk_tokens=64, chunk_overlap_tokens=24)
+    added = await first.remember("default", LONG)
+    stored = await first.documents.chunks_of("default", added.episode_id)
+    assert added.structure["overlapped"] > 0
+    later = MemoryEngine(first.documents, first.vectors, HashEmbedder(), table_context_embeddings=True)
+    assert (await later.reembed_vectors()).chunks == len(stored)
+    episode = await later.episode("default", added.episode_id)
+    await later.documents.mark_inflight("default", episode.content_hash)
+    await later.vectors.delete([chunk.chunk_id for chunk in stored])
+    assert (await later.recover()).completed == 1
+    await first.close()
 
 
 class Counting(HashEmbedder):
