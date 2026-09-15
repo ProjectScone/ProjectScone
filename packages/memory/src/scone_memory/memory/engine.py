@@ -41,6 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
     from ..entities.vocabulary_store import VocabularyStore
+    from ..retrieval.lessons import Lessons
 from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
@@ -1057,8 +1058,12 @@ class MemoryEngine:
         require: Sequence[str] = (),
         exclude: Sequence[str] = (),
         diversity: Optional[float] = None,
+        lessons: bool = False,
     ) -> RecallResult:
-        """``history`` (research experiment 3) also returns, for every
+        """``lessons`` puts beside each returned passage what people said about it
+        (``engine.lessons``), leaving the order as it was.
+
+        ``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
         held before: what changed, when, and why. Off by default; the
         reader gets only what holds at ``as_of`` unless asked for the chain.
@@ -1133,12 +1138,23 @@ class MemoryEngine:
             lexical_stems=self.lexical_stems,
             vector_weight=self.vector_weight,
         )
-        return await recall(runtime, space, query, limit, as_of, tags, where, history,
+        if type(lessons) is not bool:
+            raise InvalidInput("lessons must be a boolean")
+        result = await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
                             entity_notes=notes, lanes=lanes,
                             require=require, exclude=exclude, diversity=diversity)
+        if lessons:
+            from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons, read_summary
+
+            found = await read_lessons(self, space, chunk_ids=[item.chunk_id for item in result.items],
+                                       max_events=MAX_FEEDBACK_EVENTS)
+            result.lessons_read = read_summary(found)
+            result.items = [item.model_copy(update={"lessons": found.lessons[item.chunk_id].record()})
+                            if item.chunk_id in found.lessons else item for item in result.items]
+        return result
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its
@@ -1239,6 +1255,19 @@ class MemoryEngine:
             raise InvalidInput('fact_limit must be an integer in 1..2000')
         return await build_activity_graph(self.documents, self.events, space,
             session_id=session_id, episode_id=episode_id, since=since, limit=limit, fact_limit=fact_limit)
+
+    async def lessons(self, space: str, *, window_days: int = 90, half_life_days: float = 30,
+                      min_corroboration: int = 2, max_events: Optional[int] = None) -> "Lessons":
+        """What people said about the passages of ``space`` over the last ``window_days``:
+        per passage, the latest judgement of each recall weighed by age, counted, and
+        stated as preferred, tentative, contested or dead end, with whether it can still be
+        read. The read is bounded by ``max_events`` and says when that bit."""
+        from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons
+
+        check_space(space)
+        return await read_lessons(self, space, window_days=window_days, half_life_days=half_life_days,
+                                  min_corroboration=min_corroboration,
+                                  max_events=MAX_FEEDBACK_EVENTS if max_events is None else max_events)
 
     async def feedback(
         self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None
