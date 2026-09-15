@@ -659,6 +659,11 @@ class InMemoryVectorIndex:
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         return scored[:limit]
 
+    async def vectors_of(self, space: str, chunk_ids: Sequence[int]) -> dict[int, list[float]]:
+        """The stored vectors of these chunks in the space; a chunk without one is absent."""
+        return {chunk_id: list(point.vector) for chunk_id in chunk_ids
+                if (point := self._points.get(chunk_id)) is not None and point.space == space}
+
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         for chunk_id in chunk_ids:
             self._points.pop(chunk_id, None)

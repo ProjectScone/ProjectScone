@@ -47,6 +47,65 @@ floor has no default because the right value depends on the embedder:
 no-evidence questions it would catch and how many answerable ones it
 would wrongly withhold, and that sweep is where a floor comes from.
 
+`lanes=text` or `lanes=vector` (CLI `--lanes`) runs one lane alone; both
+run by default. A lane not asked for is not run at all: a text-only
+recall makes no embedding call, which suits an exact code or identifier
+no embedding knows, and comparing the two lanes on one question. It is
+not reported as degraded, because nothing failed. The answer's `lanes`
+names the lanes that answered, so with both asked and one failed it
+names the other, and the recall event records the same list. A vector
+lane that did not run judges no confidence: `top_similarity` and
+`low_confidence` are `null`. `lanes` names only these two; the entity
+lane is asked for with `graph_boost` and the context lane with
+`SCONE_CONTEXT_LANE`, whatever `lanes` says, and whether either ran shows
+on the items (`lanes.entity`, `lanes.context`) and in `degraded`, not in
+`lanes`. A note in `degraded` about a lane that still answered, such as
+a text lane whose lexical index is behind, does not take it out of
+`lanes`. When the only lane asked for fails, recall
+fails rather than returning an empty answer that reads as nothing found.
+Advertised as `recall.lanes`.
+
+`require` and `exclude` (repeat each for more; CLI `--require`,
+`--exclude`) are phrases a returned passage must all hold, or must hold
+none of. A phrase matches as whole words in order, whatever the case and
+the punctuation between them: `slew ring` matches `SLEW-RING`, and `art`
+does not match `party`. In scripts written without spaces a phrase
+matches inside a run. The reference's keyword filter drops nodes after
+retrieval, so a filter that drops three of five returns two and says
+nothing. Here the phrases are checked across every fused candidate before
+the per-episode cap and the limit, so a passage ranked below the limit
+that holds the phrase takes the place of one that does not. `phrases` in
+the answer (and the recall event) says how many candidates were checked,
+how many each rule dropped, and `short: true` when fewer passages came
+back than the limit after the phrases dropped some while a lane filled
+its candidate window, because passages beyond that window were never
+checked. Each lane is judged against its own window: a narrowed recall
+that post-filters the vector lane gives it a deeper one than the text
+lane's. When no lane filled its window every passage was a candidate,
+and a short answer is only a small space. Facts are not filtered.
+A phrase both required and excluded, one with no word to match, more than
+20 phrases or one over 200 characters is refused. Advertised as
+`recall.phrases`.
+
+`diversity`, a weight from 0 to 1 (CLI `--diversity`), keeps near-copies
+of one passage from taking several places. Fusion ranks by relevance
+alone, so three restatements of a note can fill three of five places.
+With `diversity` the places are filled one at a time, each by the
+candidate whose relevance (its fused score over the best one's) times
+`1 - weight`, less `weight` times its greatest cosine to a passage
+already placed, is highest: maximal marginal relevance, over the fused
+candidates rather than one vector lane. `0` keeps the relevance order.
+The likeness is read from the index's stored vectors where the index can
+give them back (in memory and SQLite), and otherwise every candidate is
+embedded once so all likenesses are on one scale; `diversity.vectors`
+says which. `diversity.replaced` counts the first `limit` places, before
+the per-episode cap, that relevance alone would have filled differently.
+Only the first 200 candidates are compared and only twice the limit's
+places are filled this way; the rest keep relevance order and are
+counted. It runs after any phrases and is refused beside an active
+reranker, which would set the order again. Unmeasured. Advertised as
+`recall.diversity`.
+
 `history=true` (CLI `--history`) adds, for every matched fact, the closed
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.
