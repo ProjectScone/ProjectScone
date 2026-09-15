@@ -104,7 +104,8 @@ _ENTITY_PREDICATES = frozenset("""works_at worked_at works_for worked_for employ
 #: evidence about what it is. A package a manifest names is one too:
 #: `pytest`, `@scope/pkg`, `github.com/gorilla/mux` are things a graph
 #: walks to, not values a project has.
-CODE_PREDICATES = frozenset("defines imports calls inherits mixes_in depends_on develops_with references".split())
+CODE_PREDICATES = frozenset("defines imports imports_when_called imports_for_types calls inherits mixes_in uses_type "
+                            "depends_on develops_with references runs_with requires_env connects_to".split())
 
 _MONTHS = ("january|february|march|april|may|june|july|august|september|october|november|december"
            "|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec")
@@ -240,6 +241,20 @@ def _code_shaped(text: str) -> bool:
         head = text
     segment = head.rsplit("/", 1)[-1]
     return bool(_EXTENSION.search(segment)) and not segment.rstrip().endswith(" ")
+
+
+def is_code_name(text: str) -> bool:
+    """Whether a name is a code reader's: a path whose last segment carries
+    a file extension, or such a path, a colon and a declaration
+    (`pkg/store.py`, `pkg/store.py:Store.open`). A URL, a time, a ratio or
+    a sentence with a slash in it is not, whatever marks it holds."""
+    if not text:
+        return False
+    cut = text.rfind(":")
+    head = text[:cut] if cut > 0 and _declaration(text[cut + 1:]) else text
+    if not head or any(c.isspace() for c in head) or "://" in head or ":" in head:
+        return False
+    return bool(_EXTENSION.search(head.rsplit("/", 1)[-1]))
 
 
 def _uncased_name(text: str) -> bool:

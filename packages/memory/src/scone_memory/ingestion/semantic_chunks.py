@@ -210,7 +210,7 @@ def _sentences(text: str) -> list[Span]:
             if after >= size or text[after].isspace():
                 while after < size and text[after].isspace():
                     after += 1
-                if _ends_a_sentence(text, index, after):
+                if ends_a_sentence(text, index, after):
                     spans.append(Span(start, after))
                     start, index = None, after
                     continue
@@ -220,7 +220,7 @@ def _sentences(text: str) -> list[Span]:
     return spans
 
 
-def _ends_a_sentence(text: str, stop: int, after: int) -> bool:
+def ends_a_sentence(text: str, stop: int, after: int) -> bool:
     """Whether the stop at ``stop`` closes a sentence or sits inside one.
 
     Every cut this module makes lands on a sentence boundary, so a stop
