@@ -54,9 +54,13 @@ def validate_recency(weight: float, half_life_days: float) -> None:
         raise InvalidInput(f"recency_half_life_days must be finite and greater than zero, at most {MAX_RECENCY_HALF_LIFE_DAYS:g}")
 
 
-#: The ways recall can fuse its lanes: by rank alone, or by each lane's
-#: scores scaled to that lane's own range.
-FUSIONS: tuple[str, ...] = ("rank", "score")
+#: The ways recall can fuse its lanes: by rank alone; by each lane's
+#: scores scaled to that lane's own range; or by each lane's scores
+#: placed on the range its own mean and spread describe.
+FUSIONS: tuple[str, ...] = ("rank", "score", "distribution")
+#: How many standard deviations either side of a lane's mean count as
+#: its full range in distribution fusion.
+DISTRIBUTION_SPREAD = 3.0
 
 
 def relative_scores(lanes: Sequence[Sequence[tuple[int, float]]], weights: Sequence[float] | None = None) -> dict[int, float]:
@@ -79,6 +83,47 @@ def relative_scores(lanes: Sequence[Sequence[tuple[int, float]]], weights: Seque
         else:
             low, high = min(raw), max(raw)
             scaled = [1.0 if high == low else (score - low) / (high - low) for score in raw]
+        for (chunk_id, _), value in zip(lane, scaled):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + weight * value
+    return scores
+
+
+def distribution_scores(lanes: Sequence[Sequence[tuple[int, float]]], weights: Sequence[float] | None = None) -> dict[int, float]:
+    """Distribution-based fusion: each lane's scores placed on the range its
+    own mean and spread describe -- mean minus DISTRIBUTION_SPREAD standard
+    deviations is 0, mean plus that is 1, anything outside clipped -- then
+    added with the lanes' weights.
+
+    Relative-score fusion scales a lane by its two extremes, so one outlier
+    at the top pushes every other candidate toward zero; this scales by the
+    shape of the lane -- a score is placed by how many deviations it sits
+    from the lane's mean -- so an outlier counts as an outlier, not as the
+    yardstick, and the candidates near the mean keep their credit. (Both
+    scalings are blind to a lane's units: a cosine at 0.80 and a BM25 score
+    at 20 are placed by their lane's shape either way.) What follows from
+    it: a lane's top candidate no longer gets full credit by being top --
+    the top of a two-candidate lane sits at two thirds -- so a lane that
+    returns few candidates speaks more quietly than one that returns many,
+    and the lanes' weights apply on top of that. A lane whose scores do not
+    spread gives every candidate full credit; a lane that reports no score
+    contributes its order, first 1, last 0, as relative fusion does."""
+    weights = weights or [1.0] * len(lanes)
+    scores: dict[int, float] = {}
+    for lane, weight in zip(lanes, weights):
+        if not lane:
+            continue
+        raw = [score for _, score in lane]
+        if any(math.isnan(score) for score in raw):
+            count = len(lane)
+            scaled = [1.0 if count == 1 else 1.0 - rank / (count - 1) for rank in range(count)]
+        else:
+            mean = sum(raw) / len(raw)
+            deviation = math.sqrt(sum((score - mean) ** 2 for score in raw) / len(raw))
+            if deviation == 0.0:
+                scaled = [1.0] * len(raw)
+            else:
+                low, high = mean - DISTRIBUTION_SPREAD * deviation, mean + DISTRIBUTION_SPREAD * deviation
+                scaled = [min(1.0, max(0.0, (score - low) / (high - low))) for score in raw]
         for (chunk_id, _), value in zip(lane, scaled):
             scores[chunk_id] = scores.get(chunk_id, 0.0) + weight * value
     return scores

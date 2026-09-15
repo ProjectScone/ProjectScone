@@ -29,6 +29,7 @@
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_HEADING_CONTEXT=1        embed each chunk with the headings above it, or its file and declarations (off by default)
+    SCONE_EMBEDDING_BUDGET=1       shorten that context to fit the embedder's declared window, never the chunk (off by default)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
     SCONE_RELATION_INVERSE=works_at:employs   which predicates are the other side of which
@@ -179,6 +180,7 @@ class Settings:
     url_import_private: bool = False
     contextual_embeddings: bool = False
     heading_context: bool = False
+    embedding_budget: bool = False
     table_context_embeddings: bool = False
     #: SCONE_EMBEDDING_CACHE: unset embeds every chunk of every stored
     #: record; "memory" keeps vectors for the process; a path keeps them in
@@ -236,8 +238,12 @@ class Settings:
     document_video_config: Optional[str] = None
     document_ocr_executable: Optional[str] = None
     document_ocr_language: str = 'eng'
+    #: Languages a request may choose for its scan, besides document_ocr_language.
+    document_ocr_languages: tuple[str, ...] = ()
     document_ocr_psm: int = 3
     document_ocr_dpi: int = 150
+    #: Turn a page Tesseract's orientation detection is sure is turned before reading it.
+    document_ocr_orientation: bool = False
     conversations_journal: Optional[str] = None
     conversations_model_factory: Optional[str] = None
     # A persona catalog (JSON array of Persona documents) needs a registry
@@ -415,6 +421,7 @@ class Settings:
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             heading_context=env.get("SCONE_HEADING_CONTEXT") == "1",
+            embedding_budget=env.get("SCONE_EMBEDDING_BUDGET") == "1",
             table_context_embeddings=env.get("SCONE_TABLE_CONTEXT_EMBEDDINGS") == "1",
             embedding_cache=env.get("SCONE_EMBEDDING_CACHE") or None,
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
@@ -471,8 +478,11 @@ class Settings:
             document_video_config=env.get("SCONE_DOCUMENT_VIDEO_CONFIG") or None,
             document_ocr_executable=env.get('SCONE_DOCUMENT_OCR_EXECUTABLE') or None,
             document_ocr_language=env.get('SCONE_DOCUMENT_OCR_LANGUAGE', 'eng'),
+            document_ocr_languages=tuple(one.strip() for one in env.get('SCONE_DOCUMENT_OCR_LANGUAGES', '').split(',')
+                                         if one.strip()),
             document_ocr_psm=int(env.get('SCONE_DOCUMENT_OCR_PSM', '3')),
             document_ocr_dpi=int(env.get('SCONE_DOCUMENT_OCR_DPI', '150')),
+            document_ocr_orientation=env.get('SCONE_DOCUMENT_OCR_ORIENTATION') == '1',
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
@@ -739,7 +749,7 @@ def build_vectors(settings: Settings, documents=None):
 
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
-ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
+ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "lexical_stems",
                    "vector_weight", "recency_weight", "recency_half_life_days")
 #: Settings carried into an engine that are read from a file, not a value.
@@ -831,6 +841,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
         contextual_embeddings=settings.contextual_embeddings,
         heading_context=settings.heading_context,
+        embedding_budget=settings.embedding_budget,
         table_context_embeddings=settings.table_context_embeddings,
         similarity_floor=settings.similarity_floor,
         recency_weight=settings.recency_weight,
@@ -1030,6 +1041,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         record_queries=settings.events_queries == "text",
         contextual_embeddings=settings.contextual_embeddings,
         heading_context=settings.heading_context,
+        embedding_budget=settings.embedding_budget,
         table_context_embeddings=settings.table_context_embeddings,
         embedding_cache=embedding_cache,
         demote_restated=settings.demote_restated,
