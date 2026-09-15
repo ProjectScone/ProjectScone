@@ -357,6 +357,51 @@ unless the fourth route is asked for by name:
    needs a model (`SCONE_CHAT_URL` and `SCONE_CHAT_MODEL`); without one
    the route is refused. `scone answer --route synthesize --limit 30`.
 
+   That is the **evidence** mode, the default. `synthesis_mode` picks one
+   of two more, the reference framework's Refine and Accumulate, and both
+   keep the rule that a sentence is shown only with a quote the framework
+   found in a passage:
+
+   - **refine** threads one answer through the rounds. The first round
+     that leaves a note is the answer; each later round is one call that
+     sees the answer so far (every sentence with its passage id and quote,
+     not the passages again) and the new round's passages, and returns the
+     whole answer rewritten. A rewritten sentence survives only if its
+     quote is found in a passage read so far; one that quotes nothing, or
+     names a passage not yet read, is dropped and counted like any note. A
+     readable rewrite replaces the answer; a reply that cannot be read, or
+     whose every sentence fails the check, leaves the answer as it stood,
+     and `refine_kept_prior` counts those rounds with a reason each. A
+     rewrite may also leave out a sentence the answer had: the rewrite is
+     the answer, `refine_dropped_carried` counts the checked sentences it
+     left out (matched by passage and quote, so a reworded sentence is
+     carried), and a reason names the round. `notes.kept` counts every
+     sentence each round kept, so a carried sentence is counted once per
+     round. Rounds are packed by bytes, and a round after the first answer
+     carries that answer inside the bound: its passages get
+     `max_round_bytes` less the answer's bytes, and each round's record
+     gives both `bytes` and `answer_bytes`. That is the reference's
+     CompactAndRefine. Passages are never cut, so when the answer leaves no
+     room for the next passage the rounds stop there, the rest are unread
+     with a reason, and the answer is `partial` and `truncated`. Nothing is
+     folded.
+   - **accumulate** gives the model one passage per call and joins what
+     each call kept, in passage order, with no fold; a sentence must quote
+     the passage its own call held. It spends the most calls on the
+     passages it reads.
+
+   In every mode the calls are bounded by the rounds bound (six by
+   default; `evidence` may add its one fold), and passages past it are
+   left unread, counted, and the answer is `partial`. `detail` names the
+   `mode`, the `model_calls`, and under `passages` how many were read and
+   how many the shown sentences `cited`. A mode on any other route is
+   refused. `scone answer --route synthesize --synthesis-mode refine`,
+   `GET /v1/answer?route=synthesize&synthesis_mode=accumulate`,
+   `answer_question(..., route="synthesize", synthesis_mode="refine")`.
+   Measured on eight multi-session questions with a local 8B model, no
+   mode spoke more often than `evidence`, and `refine`'s second round
+   changed no answer ([results](../benchmarks/synthesis-modes-v1.results.md)).
+
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
 `chars_omitted`, and when anything was cut the text ends with one line
