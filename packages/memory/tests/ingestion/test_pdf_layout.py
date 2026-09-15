@@ -280,3 +280,16 @@ async def test_a_small_table_inside_a_column_stays_whole_while_the_columns_are_r
     assert rows[1:7] == list(prose_left) and rows[-6:] == list(prose_right)
     assert [row for row in rows if row.startswith("Revenue")] == [next(row for row in rows if "2,903" in row)], "a table row is one row"
     assert rows.index("Left column prose that fills the line") < rows.index(next(row for row in rows if row.startswith("Revenue"))) < rows.index("Right column prose that fills its line")
+
+
+def test_a_currency_sign_after_a_space_opens_a_run_of_its_own():
+    from scone_memory.ingestion.pdf_layout import _RUN
+    def runs(line):
+        return [match.group() for match in _RUN.finditer(line)]
+    # A filing sets the next column's sign three spaces from a loss, as
+    # close as words sit: the sign is not the loss's run, while its own
+    # number, within three spaces of it, is.
+    assert runs("(108)   $   (5,930)") == ["(108)", "$   (5,930)"]
+    assert runs("(108)   $          (5,930)") == ["(108)", "$", "(5,930)"]
+    assert runs("US $ 5 each") == ["US", "$ 5 each"] and runs("$62.0\xa0billion net") == ["$62.0\xa0billion net"]
+    assert runs("Total   costs    2,903") == ["Total   costs", "2,903"]

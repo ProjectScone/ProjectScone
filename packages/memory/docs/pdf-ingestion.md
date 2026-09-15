@@ -64,7 +64,9 @@ the grid's own geometry and without a layout model:
 - Every run of characters on a row (runs are separated by four or more of
   the grid's own ASCII spaces; any other space, the no-break space in a
   table's `$62.0 billion` or a thin space in `1 000`, is text and stays in
-  its run) becomes a region whose box is its grid position. The same whitespace
+  its run; a currency sign after a space opens a run of its own, as a
+  statement sets the next column's `$` as close to a loss as words sit)
+  becomes a region whose box is its grid position. The same whitespace
   partitioning that orders OCR words (`ocr.layout.order_columns`) finds the
   gutters, with a gutter a few characters wide, and the page is written out
   column by column: what spans the columns above them first, then each column

@@ -322,9 +322,13 @@ carries its runs as regions when a table is among them (see
 [pdf-ingestion.md](pdf-ingestion.md)) -- (see [pdf-ocr.md](pdf-ocr.md#inspect-possible-tables-without-repeating-ocr)),
 reach `segment.table_cells` with the same record: row, column,
 `column_span` where a cell reaches across the grid's columns, and the
-cell's exact byte span of the page's text. The first row filling every
-column is the header when none of its cells is a number (a bare year
-is a label) and a column below it is mostly numbers: its cells say
+cell's exact byte span of the page's text (a cell's text is the page's
+bytes, spaces and all: a statement's `$` stands apart from its number).
+The first row filling every column, or every column but the first (a
+statement's years over its blank label column), is the header when none
+of its cells is a value -- a number, a loss in parentheses, a percentage
+or a dash, while a bare year is a label -- and a column below it is
+mostly values: its cells say
 `is_header`, the cells below carry `column` header references, and the
 segment says `header_basis: pdf_first_row` and counts `tables_headed`,
 so the [table query](#table-query) names the columns; a table of words
