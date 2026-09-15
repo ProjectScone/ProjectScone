@@ -61,8 +61,10 @@ on every line, and a chunk cut anywhere in that text quotes two paragraphs at
 once. The parser therefore lays each page out before the text is stored, from
 the grid's own geometry and without a layout model:
 
-- Every run of characters on a row (runs are separated by four or more
-  spaces) becomes a region whose box is its grid position. The same whitespace
+- Every run of characters on a row (runs are separated by four or more of
+  the grid's own ASCII spaces; any other space, the no-break space in a
+  table's `$62.0 billion` or a thin space in `1 000`, is text and stays in
+  its run) becomes a region whose box is its grid position. The same whitespace
   partitioning that orders OCR words (`ocr.layout.order_columns`) finds the
   gutters, with a gutter a few characters wide, and the page is written out
   column by column: what spans the columns above them first, then each column
@@ -72,6 +74,13 @@ the grid's own geometry and without a layout model:
   typical row at least half the widest. A table page fails those, stays as it
   was extracted, and its receipt says `tabular_kept_whole`. A page with more
   than `MAX_REGIONS_PER_PAGE` runs also stays as extracted, with `region_limit`.
+- A page kept as extracted still has its runs read by the label rules
+  ([pdf-ocr.md](pdf-ocr.md#label-the-pages-regions)); when they find a
+  table among them, the page carries its runs as labelled regions, each
+  citing its own bytes of the page's text, so the grid reaches the document
+  as [table cells](file-ingestion.md#pdf-table-evidence). A page of prose
+  carries none: its regions would cost about twenty kilobytes a page and
+  say nothing the text does not.
 - A page number on a line of its own is left out of the page's text on every
   page. A line whose words recur at the top or bottom of three or more pages is
   a running header or footer: it stays where it first appears (that may be the
@@ -80,10 +89,11 @@ the grid's own geometry and without a layout model:
 
 Each laid-out page carries a `reading_order` receipt with
 `strategy: grid-columns-v1`, the number of columns found (0 when none), and
-notes; a page that was cut also carries its regions, with `region_geometry:
-normalized_text_grid` to say that their boxes are estimated from grid
-positions rather than measured on a raster, `provider_index` (the run's
-grid order) and `reading_column`. The manifest is schema version 3, as with
+notes; a page that was cut, or kept whole with a table in it, also carries
+its regions, with `region_geometry: normalized_text_grid` to say that their
+boxes are estimated from grid positions rather than measured on a raster,
+`provider_index` (the run's grid order) and `reading_column` (zero on a page
+kept whole). The manifest is schema version 3, as with
 OCR reading order, and `pdf_provenance` returns the same receipts and regions,
 so a caller can see which column a chunk came from. The parser string ends in
 `+grid-columns-v1`.
@@ -122,9 +132,18 @@ per-document counts of pages cut, pages kept whole, and lines left out.
   bounded to one metadata value by dropping its outermost titles (`… > `).
 - `pdf_coverage=text_layer` means every page yielded text. It does **not** certify
   that every visible word, figure or table was understood.
-- Encrypted PDFs, malformed files, absent parser dependencies and exceeded limits
-  raise `InvalidInput` before creating an episode. Password handling is not
-  implemented; provide a separately decrypted input when appropriate.
+- An encrypted PDF is opened with the empty password: an owner password alone
+  restricts what a reader may do (SEC filings from EDGAR are made this way)
+  and hides nothing. The parsed record's `encryption` says so (`opened_with:
+  empty_password`, which of the file's passwords `matched`) and names what the
+  owner `restricted` -- `print`, `modify`, `extract`, `annotate`, `fill_forms`,
+  `extract_for_accessibility`, `assemble`, `print_high_quality` -- so a caller
+  who must honour a restriction can check; a file import carries the same on
+  the document's metadata (`pdf_opened_with`, `pdf_password_matched`,
+  `pdf_restricted`). A file whose user password is not empty is refused, as
+  is one whose cipher needs the `cryptography` package when it is absent.
+- Malformed files, absent parser dependencies and exceeded limits raise
+  `InvalidInput` before creating an episode.
 - Parser failures do not indicate that the memory database is unavailable.
 
 The defaults are 25 MiB of PDF input, 100 pages, 2,000,000 extracted UTF-8 bytes

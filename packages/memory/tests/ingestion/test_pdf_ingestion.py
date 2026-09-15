@@ -9,7 +9,8 @@ pypdf = pytest.importorskip('pypdf')
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 
-def pdf_bytes(pages=("Café calibration uses Polaris.", "Juniper ships on Friday."), *, password=None, title="Fixture"):
+def pdf_bytes(pages=("Café calibration uses Polaris.", "Juniper ships on Friday."), *, password=None, title="Fixture",
+              owner_password=None, restrict=(), algorithm=None):
     writer = pypdf.PdfWriter()
     font = DictionaryObject({NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/Type1'),
         NameObject('/BaseFont'): NameObject('/Helvetica'), NameObject('/Encoding'): NameObject('/WinAnsiEncoding')})
@@ -22,6 +23,14 @@ def pdf_bytes(pages=("Café calibration uses Polaris.", "Juniper ships on Friday
     writer.add_metadata({'/Title': title})
     if password:
         writer.encrypt(password)
+    elif owner_password:
+        # An owner password alone: the empty user password opens the file,
+        # and the owner's permission bits say what a reader may not do.
+        from pypdf.constants import UserAccessPermissions
+        allowed = UserAccessPermissions.all()
+        for name in restrict:
+            allowed &= ~UserAccessPermissions[name]
+        writer.encrypt('', owner_password, permissions_flag=allowed, algorithm=algorithm)
     target = BytesIO()
     writer.write(target)
     return target.getvalue()
@@ -293,3 +302,66 @@ async def test_recalled_chunk_id_resolves_its_own_pages_and_rejects_other_episod
     other = await ingest_pdf(memory, 'alpha', pdf_bytes(title='other'))
     with pytest.raises(InvalidInput, match='chunk'):
         await pdf_provenance(memory, 'alpha', other.added.episode_id, chunk_id=item.chunk_id)
+
+
+async def test_an_owner_password_only_pdf_opens_with_the_empty_password_and_names_what_is_restricted(memory):
+    from scone_memory.ingestion import ingest_pdf
+    from scone_memory.ingestion.formats.registry import BuiltinDocumentParser
+    from scone_memory.ingestion.formats.types import DocumentLimits
+    from scone_memory.ingestion.pdf import PdfEncryption, PdfLimits, PypdfParser
+    raw = pdf_bytes(owner_password='owner', restrict=('PRINT', 'EXTRACT'))
+    parsed = await PypdfParser().parse(raw, PdfLimits())
+    assert parsed.encryption == PdfEncryption(matched='user', restricted=('print', 'extract'))
+    assert 'Polaris' in parsed.text and b'"encryption"' in parsed.model_dump_json().encode()
+    assert b'"encryption"' not in (await PypdfParser().parse(pdf_bytes(), PdfLimits())).model_dump_json().encode(), \
+        "a file that was not encrypted says nothing, as before"
+    document = await BuiltinDocumentParser().parse(raw, 'filing.pdf', DocumentLimits())
+    assert {k: v for k, v in document.metadata.items() if k.startswith('pdf_')} == {
+        'pdf_opened_with': 'empty_password', 'pdf_password_matched': 'user', 'pdf_restricted': 'print,extract'}
+    result = await ingest_pdf(memory, 'alpha', raw)
+    _, manifest = await memory.attachment('alpha', result.manifest.attachment_id)
+    assert b'"restricted":["print","extract"]' in manifest, "the receipt is kept with the document"
+    from scone_memory.ingestion import pdf_provenance
+    assert (await pdf_provenance(memory, 'alpha', result.added.episode_id)).encryption == parsed.encryption
+    unrestricted = await PypdfParser().parse(pdf_bytes(owner_password='owner'), PdfLimits())
+    assert unrestricted.encryption == PdfEncryption(matched='user', restricted=())
+    with pytest.raises(InvalidInput, match='user password'):
+        await PypdfParser().parse(pdf_bytes(password='secret'), PdfLimits())
+
+
+def test_a_missing_cipher_package_is_named_not_reported_as_a_broken_file(monkeypatch):
+    """Without the cryptography package pypdf cannot read an AES file: reading an
+    AES-256 file tries the empty password at once, and an AES-128 file opens but
+    needs the cipher for its pages. Neither is a corrupt file, and a text error
+    the caller allows is not what this is."""
+    import pypdf
+    import pypdf._encryption as encryption
+    from scone_memory.ingestion import _pdf_worker
+    from scone_memory.ingestion.pdf import PdfLimits
+
+    # Written while the cipher is still there: writing an AES file needs it too.
+    aes256, aes128, rc4 = (pdf_bytes(owner_password='owner', algorithm=a) for a in ('AES-256', 'AES-128', 'RC4-128'))
+
+    def missing(*args, **kwargs):
+        raise pypdf.errors.DependencyError('cryptography is required for AES algorithm')
+
+    class MissingAes:
+        def __init__(self, *args, **kwargs):
+            missing()
+    monkeypatch.setattr(encryption, 'aes_cbc_encrypt', missing)
+    monkeypatch.setattr(encryption, 'aes_cbc_decrypt', missing)
+    monkeypatch.setattr(encryption, 'CryptAES', MissingAes)
+    with pytest.raises(InvalidInput, match='cryptography'):
+        _pdf_worker.extract(aes256, PdfLimits())
+    with pytest.raises(InvalidInput, match='cryptography'):
+        _pdf_worker.extract(aes128, PdfLimits(), allow_text_errors=True)
+    assert 'Polaris' in _pdf_worker.extract(rc4, PdfLimits()).text, "an RC4 file needs no package"
+
+
+def test_the_ocr_assembly_keeps_the_encryption_receipt():
+    from scone_memory.ingestion.pdf import ParsedPdf, PdfEncryption, PdfLimits, PdfPage
+    from scone_memory.ingestion.pdf_ocr import assemble_ocr_pdf
+    receipt = PdfEncryption(matched='owner', restricted=('modify',))
+    parsed = ParsedPdf(text='Polaris', parser='fixture', encryption=receipt,
+                       pages=(PdfPage(number=1, start=0, end=7, width_points=600., height_points=800., rotation=0, empty=False),))
+    assert assemble_ocr_pdf(parsed, {}, PdfLimits()).encryption == receipt

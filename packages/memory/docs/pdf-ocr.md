@@ -164,7 +164,8 @@ then deterministically rebuild the ordered text on resume.
 ## Label the page's regions
 
 Every recognized page's regions, and every text-layer page laid out in
-reading order, carry a `label` saying what the region is, from one
+reading order or kept whole with a table in it, carry a `label` saying
+what the region is, from one
 vocabulary: `title`, `heading`, `paragraph`, `list`, `table`, `figure`,
 `caption`, `header`, `footer`, `page_number`, `footnote`, `formula`,
 `code`, `sidebar`, `reference`. The page's `labels` receipt (and the
@@ -211,16 +212,24 @@ across the table, a "Total" beside two numbers -- is read as cells that
 span the grid's columns, each over the contiguous columns its own width
 covers (`column_span`), judged against the full rows' column extents;
 nothing narrower is widened, and a row that fits no column stays
-unassigned. A sentence above the grid is not its title; a row of one
-cell at its foot, or one opening with a footnote's mark, is its note or
-the prose below it, not its last row; all stay unassigned. It returns `geometry_inferred` results; it does not identify
+unassigned. Prose is kept out by its shape: a sentence above the grid
+(a citation like `[28]` closing it counts) is not its title, nor is a
+wrapped word over a later column; at the grid's foot a row opening with
+a footnote's mark or holding a line of prose (a sentence, six words or
+forty characters) is its note or the prose below it, not its last row,
+while a total, a subtotal across its numbers or a wrapped word is; three rows of
+fewer cells in a row are prose beside the grid, which ends before them;
+and two columns of lines about as wide as each other are prose side by
+side, not a table of two columns (a notation list's first column is
+narrow and ragged). All stay unassigned. It returns `geometry_inferred` results; it does not identify
 semantic headers, multi-line cells or missing values. Aligned prose can
 resemble a table, and irregular tables can remain unassigned. A layout
 stored under `aligned-rows-v1` is one read before spans were.
 
 A page's candidates also reach the document: the segment of a
-recognized page, or of a text-layer page laid out in reading order,
-carries them as `table_cells` the way the DOCX and HTML readers give
+recognized page, or of a text-layer page whose runs the rules read as
+a table (laid out in columns or kept whole), carries them as
+`table_cells` the way the DOCX and HTML readers give
 theirs (`DocumentTableCell` with row, column, `column_span`, and a byte
 span of the segment's text holding exactly the cell's words), located
 `page:N/table:T/cell:R,C`, and validated the same way. Only the regions
@@ -230,8 +239,15 @@ come in the order the page's text reads them, each keeping its row and
 column, so a table a recognizer read column by column cites its columns
 in turn; a table whose cells do not sit together in the page's text is
 left out rather than cited wrongly, and the segment's `tables` and
-`tables_unreadable` metadata count both. No header, row span or empty
-cell is invented.
+`tables_unreadable` metadata count both. A table's header is read from
+its shape: the first row filling every column is the header when none
+of its cells is a number (a bare year is a label) and a column below it
+is mostly numbers; its cells say `is_header`, every cell below carries a
+`column` reference to the header over it, and the segment says
+`header_basis: pdf_first_row` and counts `tables_headed`, so the table
+query names the columns. A table of words alone gets no header, as
+nothing tells one from a first row. No row span or empty cell is
+invented.
 
 ```python
 from scone_memory.ocr import infer_tables
