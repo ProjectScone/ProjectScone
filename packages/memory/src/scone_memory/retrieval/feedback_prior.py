@@ -63,11 +63,13 @@ FEEDBACK_PRIOR_VERSION = "feedback-prior-v1"
 #: The largest weight a setting may give: a judgement's full weight times it is the term before its cut.
 MAX_FEEDBACK_WEIGHT = 1.0
 #: The most the term moves one candidate's fused score either way: what first place is worth
-#: over second under rank fusion when both lanes agree. It bounds each term, not who a passage
-#: can pass: a leader sunk and a follower lifted close twice it, and deeper ranks sit closer
-#: than first and second. Nor is it what keeps unrelated questions whole -- the weight and the
-#: score's hold are: on the replay a term of 0.0004, under this bound, already cost them
-#: (benchmarks/feedback-replay-v1.results.md).
+#: over second under rank fusion when both lanes agree at full voice. A lane at a lighter voice
+#: makes a place worth less: at a hashed embedder's default vector voice (a hundredth) one place
+#: where both lanes agree is worth 1.01 * (1/61 - 1/62), so this bound is about two places. It
+#: bounds each term, not who a passage can pass: a leader sunk and a follower lifted close twice
+#: it, and deeper ranks sit closer than first and second. Nor is it what keeps unrelated questions
+#: whole -- the weight and the score's hold are: on the replay a term of 0.00027, half this bound,
+#: already cost them (benchmarks/feedback-replay-v1.results.md).
 MAX_FEEDBACK_BOOST = 2 * (1 / (RRF_K + 1) - 1 / (RRF_K + 2))
 FEEDBACK_WINDOW_DAYS = 90
 FEEDBACK_HALF_LIFE_DAYS = 30.0

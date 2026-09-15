@@ -45,11 +45,14 @@ SPACE = "feedback-replay"
 SHOWN = 5
 #: How deep the evaluated rank looks: MRR@10.
 DEPTH = 10
-#: The weights measured. 0.0001 was chosen on the replay judging half a (the largest whose
-#: unrelated MRR stayed within 0.01 of off); half b is its held-out check. Both with every passage
-#: stored at one instant: stored apart, it costs unrelated questions more (the results say how much).
-WEIGHTS = (0.00005, 0.0001, 0.0002, 0.0005)
-CHOSEN = 0.0001
+#: The weights measured. 0.00013 was chosen on the replay judging half a (the largest of the grid
+#: whose unrelated MRR stayed within 0.01 of off, at the engine's defaults: for HashEmbedder a
+#: vector voice of 0.01); half b is its held-out check. Both with every passage stored at one
+#: instant: stored apart, it costs unrelated questions more (the results say how much). 0.00014 is
+#: the next weight of the grid, and costs them a tenth; 0.0001 was the weight chosen at the
+#: previous vector voice of 0.25, and lifts nothing under the kind judge now.
+WEIGHTS = (0.00005, 0.0001, 0.00013, 0.00014, 0.0002, 0.0005)
+CHOSEN = 0.00013
 #: The most judging days a replay takes: two ways of asking, each asked three times.
 MAX_JUDGEMENTS = 6
 JUDGES = ("kind", "strict")
