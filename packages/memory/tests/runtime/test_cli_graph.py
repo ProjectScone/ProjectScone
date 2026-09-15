@@ -83,6 +83,14 @@ async def test_export_writes_any_format_to_a_file(engine, tmp_path):
     assert ElementTree.fromstring(target.read_bytes()).tag.endswith("graphml")
 
 
+async def test_export_writes_the_community_map(engine, tmp_path):
+    target = tmp_path / "graph-communities.svg"
+    code, text = await graph(engine, "export", "--format", "communities", "--out", str(target))
+    root = ElementTree.fromstring(target.read_bytes())
+    assert code == 0 and root.tag == "{http://www.w3.org/2000/svg}svg"
+    assert root.find("{http://www.w3.org/2000/svg}title").text.startswith("Communities of ")
+
+
 @pytest.mark.parametrize("arguments, code", [(("path", "alice chen", "lisbon"), 0),
                                              (("context", "alice chen"), 0),
                                              (("entity", "alice chen"), 0),
@@ -278,6 +286,20 @@ async def test_report_can_say_what_recall_uses():
     code, text = await graph(memory, "report", "--markdown", "--usage")
     await memory.close()
     assert code == 0 and "## What recall uses" in text and "Alice Chen (1)" in text.replace("alice chen (1)", "Alice Chen (1)")
+
+
+async def test_export_can_draw_what_recall_returned():
+    from scone_memory.observability.events import InMemoryEventLog
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await memory.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    await memory.recall("default", "alice chen")
+    code, text = await graph(memory, "export", "--format", "svg", "--usage")
+    plain_code, plain = await graph(memory, "export", "--format", "svg")
+    await memory.close()
+    assert code == 0 and "returned by 1 of the 1 recall read" in text
+    assert plain_code == 0 and "returned by" not in plain
 
 
 async def test_match_answers_a_structured_question_and_exits_zero_on_a_row(engine):
