@@ -82,11 +82,12 @@ def test_an_outline_level_that_is_not_a_decimal_number_is_not_a_level():
 
 
 def test_a_style_chain_past_the_bound_says_its_level_was_not_resolved():
-    from scone_memory.ingestion.formats import office
+    from scone_memory.ingestion.formats import word_structure
 
+    depth = word_structure.MAX_STYLE_DEPTH
     chain = "".join(f'<w:style w:type="paragraph" w:styleId="S{n}"><w:basedOn w:val="S{n + 1}"/></w:style>'
-                    for n in range(office._STYLE_DEPTH))
-    styles = (f'<w:styles xmlns:w="{W}">{chain}<w:style w:type="paragraph" w:styleId="S{office._STYLE_DEPTH}">'
+                    for n in range(depth))
+    styles = (f'<w:styles xmlns:w="{W}">{chain}<w:style w:type="paragraph" w:styleId="S{depth}">'
               '<w:name w:val="heading 2"/></w:style></w:styles>')
     body = (paragraph("Near", f'<w:pStyle w:val="S1"/>') + paragraph("Far", '<w:pStyle w:val="S0"/>')
             + paragraph("Circular", '<w:pStyle w:val="Loop"/>') + paragraph("Plain", '<w:pStyle w:val="Quote"/>'))
@@ -103,10 +104,14 @@ def test_a_style_chain_past_the_bound_says_its_level_was_not_resolved():
 
 
 def test_a_word_document_without_styles_still_reads():
-    styled = paragraph("Refunds", '<w:pStyle w:val="Heading1"/>')
+    # With no styles part to name it, a style id is read by its spelling, and the
+    # segment says so (heading_basis: style_id; see test_declared_structure).
+    styled = paragraph("Refunds", '<w:pStyle w:val="Heading1"/>') + paragraph("Terms", '<w:pStyle w:val="Titre1"/>')
     document = f'<w:document xmlns:w="{W}"><w:body>{styled}</w:body></w:document>'
     data = ooxml_archive({"word/document.xml": document}, main_part="word/document.xml")
-    assert levels(parse_office(data, "terms.docx", DocumentLimits())) == [("Refunds", None)]
+    parsed = parse_office(data, "terms.docx", DocumentLimits())
+    assert levels(parsed) == [("Refunds", "1"), ("Terms", None)]
+    assert parsed.segments[0].metadata["heading_basis"] == "style_id"
 
 
 def test_an_open_document_heading_says_its_outline_level():

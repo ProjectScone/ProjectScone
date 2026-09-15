@@ -14,6 +14,8 @@ type -- one for books, one for laws, one for papers, one for resumes --
 so someone must declare what kind of document this is before it is read.
 Ours reads the structure the document already carries, which needs no
 model, no new dependency and no such declaration.
+When whoever stores a document can declare its genre, ``chunking_profiles``
+reads that genre's boundaries through the same line scan instead.
 
 ``structure.parse_structure`` already finds headings, fenced code and
 pipe tables in byte offsets, and is used by retrieval and by source
@@ -48,6 +50,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 import re
+from typing import Protocol
 
 from .chunker import DEFAULT_TARGET, Span, chunk_spans
 from .structure import Heading, parse_structure
@@ -95,6 +98,24 @@ _CLAUSE = re.compile(
     r")(?=[ \t]*\S|[ \t]*$)")
 #: A question or an answer opening a pair.
 _PAIR = re.compile(r"^ {0,3}(?:Q|A|Question|Answer)[ \t]*[:.][ \t]*\S")
+#: The depth of a table, and of the prose left between a table and the
+#: next unit: below everything, so each belongs to the unit above it.
+LEAF = 1_000
+
+
+class UnitReader(Protocol):
+    """Names the units of one document in place of the built-in rules.
+
+    Called once per line, in order, so it may keep state (which clause
+    style came first, whether a references list is open). ``heading``
+    answers for a Markdown or setext heading, which is always a unit;
+    ``line`` for any other non-blank line outside a fence or table, and
+    None means the line is not a boundary. The depth says what a unit
+    sits under: a unit owns every later one deeper than itself."""
+
+    def heading(self, title: str, level: int) -> tuple[str, int]: ...
+
+    def line(self, text: str, opens_paragraph: bool) -> tuple[str, int] | None: ...
 
 
 @dataclass(frozen=True)
@@ -109,6 +130,8 @@ class Unit:
     #: not something the document labelled: it is the interval between a
     #: table's last row and whatever follows, which belongs to neither.
     label: str
+    #: What this unit sits under, as a reader ranked it; 0 without one.
+    depth: int = 0
     #: Whether the heading came from the document's own marks rather than its text.
     marked: bool = False
 
@@ -184,11 +207,14 @@ def _after_front_matter(lines: list[str]) -> int:
     return 0
 
 
-def units(content: str, limit: int = MAX_SECTIONS, headings: Sequence[Heading] = ()) -> tuple[Unit, ...]:
+def units(content: str, limit: int = MAX_SECTIONS, headings: Sequence[Heading] = (), *,
+          reader: UnitReader | None = None) -> tuple[Unit, ...]:
     """The structural units this document carries, in order.
 
     Reads at most ``limit``; a caller needing to know whether it read all
-    of them asks for one more than it wants.
+    of them asks for one more than it wants. A ``reader`` replaces the
+    clause and pair rules with its own and ranks every unit; headings,
+    tables, fences and front matter are read the same either way.
     """
     if limit <= 0:
         raise ValueError("limit must be positive")
@@ -198,58 +224,72 @@ def units(content: str, limit: int = MAX_SECTIONS, headings: Sequence[Heading] =
     # Headings and tables come from the shared parser; code fences come
     # from it too, and are where a clause pattern must not fire.
     heads = {section.start: section.title for section in structure.sections if section.level > 0}
+    levels = {section.start: section.level for section in structure.sections if section.level > 0}
     # A heading the document marked starts a line of its own in the stored text, and is a
     # heading whatever the line says; the text's own reading does not see it.
-    marked = {heading.start for heading in headings}
+    marked = {heading.start: heading for heading in headings}
     tables = {block.start: block.end for block in structure.blocks if block.kind == "table"}
     quiet = [(block.start, block.end) for block in structure.blocks
              if block.kind in ("fenced_code", "table")]
 
-    found: list[tuple[int, str, str]] = []
+    found: list[tuple[int, str, str, int]] = []
     lines = content.splitlines(keepends=True)
     begin = _after_front_matter(lines)
     byte = sum(len(line.encode()) for line in lines[:begin])
+    opens = True
     for index in range(begin, len(lines)):
         line = lines[index]
         stripped = line.rstrip("\r\n")
         inside = any(start <= byte < end for start, end in quiet)
         if byte in heads or byte in marked:
-            found.append((byte, "heading", stripped.strip()))
+            kind, depth = "heading", 0
+            if reader is not None and byte in heads:
+                kind, depth = reader.heading(heads[byte], levels[byte])
+            elif reader is not None:
+                kind, depth = reader.heading(marked[byte].title, marked[byte].level)
+            found.append((byte, kind, stripped.strip(), depth))
         elif byte in tables:
-            found.append((byte, "table", stripped.strip()))
+            found.append((byte, "table", stripped.strip(), LEAF))
         elif not inside and stripped.strip():
-            kind = ""
+            kind, depth = "", 0
             if (index + 1 < len(lines)
                     and _UNDERLINE.match(lines[index + 1].rstrip("\r\n"))
                     and not _UNDERLINE.match(stripped)):
                 kind = "heading"
+                if reader is not None:
+                    underline = lines[index + 1].strip()
+                    kind, depth = reader.heading(stripped.strip(), 1 if underline.startswith("=") else 2)
+            elif reader is not None:
+                kind, depth = reader.line(stripped.strip(), opens) or ("", 0)
             elif _CLAUSE.match(stripped):
                 kind = "clause"
             elif _PAIR.match(stripped):
                 kind = "pair"
             if kind:
-                found.append((byte, kind, stripped.strip()))
+                found.append((byte, kind, stripped.strip(), depth))
         if len(found) >= limit:
             break
+        # A blank line, a heading and a rule or setext underline each end a paragraph.
+        opens = not stripped.strip() or byte in heads or byte in marked or bool(_UNDERLINE.match(stripped))
         byte += len(line.encode())
 
-    ends = {start: tables[start] for start, _, _ in found if start in tables}
-    wanted = ({start for start, _, _ in found} | set(ends.values())
+    ends = {start: tables[start] for start, _, _, _ in found if start in tables}
+    wanted = ({start for start, _, _, _ in found} | set(ends.values())
               | {len(content.encode())})
     at = _points(content, wanted)
-    starts = [start for start, _, _ in found]
+    starts = [start for start, _, _, _ in found]
     out: list[Unit] = []
-    for position, (start, kind, label) in enumerate(found):
+    for position, (start, kind, label, depth) in enumerate(found):
         after = starts[position + 1] if position + 1 < len(starts) else len(content.encode())
         end = min(ends[start], after) if start in ends else after
-        out.append(Unit(at[start], _point(at, end, content), kind, label, marked=start in marked))
+        out.append(Unit(at[start], _point(at, end, content), kind, label, depth, marked=start in marked))
         if end < after:
             # A table ends where its rows end, not where the next unit
             # begins, so the prose between the two belongs to neither.
             # Until this it belonged to no chunk at all and was silently
             # unretrievable -- the only unit boundary that does not
             # abut the next one.
-            between = Unit(_point(at, end, content), _point(at, after, content), "text", "")
+            between = Unit(_point(at, end, content), _point(at, after, content), "text", "", LEAF)
             if content[between.start:between.end].strip():
                 out.append(between)
     return tuple(out)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -50,6 +51,81 @@ async def acme_id(engine: MemoryEngine) -> str:
     projection, _ = await load_projection(engine, "alpha", mode="current")
     analysis = cached_analysis(projection)
     return next(c.community_id for c in analysis.communities if "acme" in c.label.lower())
+
+
+class NamingChat:
+    """Names a group after its first central member's employer or town; scripted
+    answers otherwise: an exception is raised, a number is seconds slept."""
+
+    def __init__(self, answers=None) -> None:
+        self.answers, self.asked = list(answers or []), []
+
+    async def complete(self, system: str, user: str) -> str:
+        self.asked.append((system, user))
+        if self.answers:
+            answer = self.answers.pop(0)
+            if isinstance(answer, BaseException):
+                raise answer
+            if isinstance(answer, float):
+                await asyncio.sleep(answer)
+                return "Slow name"
+            return answer
+        return "Acme Robotics staff" if "Acme" in user else "People in Porto"
+
+
+async def test_a_model_names_the_largest_communities_beside_their_computed_labels():
+    from scone_memory.entities.reports import MAX_NAMES, as_community_name, name_communities
+
+    engine = await seeded()
+    chat = NamingChat()
+    named = await name_communities(engine, chat, "alpha")
+    projection, _ = await load_projection(engine, "alpha", mode="current")
+    assert named.projection_digest == projection.digest and named.communities_total == len(cached_analysis(projection).communities)
+    by_label = {name.label: name for name in named.names}
+    acme = next(name for name in named.names if "acme" in name.label.lower())
+    assert acme.name == "Acme Robotics staff" and acme.why == "named" and "Acme Robotics" in acme.shown
+    assert all(name.label for name in named.names), "the computed label is always there beside the model's name"
+    assert all("name alone" in system for system, _ in chat.asked) and all("Relations inside it" in user for _, user in chat.asked)
+    record = named.record()
+    assert record["communities_named"] == len(named.names) and record["verified_accuracy"] is False and "not facts" in record["note"]
+    scripted = NamingChat(["", "Two lines\nof answer", "This is a long explanation of what the group is about, in prose",
+                           "\"Quoted name.\"", "Fine"])
+    second = await name_communities(engine, scripted, "alpha", max_names=2)
+    assert [n.name for n in second.names] == [None, None] and "nothing" in second.names[0].why and "one line" in second.names[1].why
+    assert as_community_name("This is a long explanation of what the group is about, in prose") == (None, "the model answered 13 words, longer than a name")
+    long_words = "Antidisestablishmentarianism Counterrevolutionary Extraterritoriality"
+    assert as_community_name(long_words) == (None, f"the model answered {len(long_words)} characters, longer than a name"), \
+        "three words over the character bound blame the characters, not the words"
+    assert as_community_name("Acme staff\rPeople in Porto") == (None, "the model answered more than one line"), \
+        "any line break is more than one line, not only a newline"
+    assert as_community_name("\"Quoted name.\"") == ("Quoted name", "named") and as_community_name(" Fine ") == ("Fine", "named")
+    assert len(second.names) == 2, "the bound holds"
+    assert record["communities_asked"] == len(named.names) and record["communities_timed_out"] == 0 == record["communities_failed"]
+    with pytest.raises(InvalidInput, match=f"1 to {MAX_NAMES}"):
+        await name_communities(engine, chat, "alpha", max_names=MAX_NAMES + 1)
+    with pytest.raises(InvalidInput, match="timeout_s"):
+        await name_communities(engine, chat, "alpha", timeout_s=0)
+    await engine.close()
+
+
+async def test_a_model_failure_or_the_deadline_leaves_that_community_unnamed_and_the_rest_named():
+    from scone_memory.entities.reports import name_communities
+
+    engine = await seeded()
+    broken = NamingChat(["Acme staff", RuntimeError("boom")])
+    named = await name_communities(engine, broken, "alpha", max_names=2)
+    assert [n.name for n in named.names] == ["Acme staff", None] and named.names[1].why == "the model failed: RuntimeError"
+    record = named.record()
+    assert record["communities_asked"] == 2 and record["communities_named"] == 1 and record["communities_failed"] == 1
+    slow = NamingChat([0.5, "Fine"])
+    named = await name_communities(engine, slow, "alpha", max_names=2, timeout_s=0.1)
+    assert [n.name for n in named.names] == [None, None]
+    assert named.names[0].why == "timeout: the 0.1s deadline passed while the model was asked"
+    assert named.names[1].why == "timeout: the 0.1s deadline passed before the model was asked"
+    assert len(slow.asked) == 1, "a pass past its deadline asks the model nothing more"
+    record = named.record()
+    assert record["communities_asked"] == 1 and record["communities_timed_out"] == 2 and record["timeout_s"] == 0.1
+    await engine.close()
 
 
 async def test_a_report_cites_the_community_s_claims_and_the_quotes_the_code_re_read():
