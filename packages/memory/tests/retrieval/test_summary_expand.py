@@ -1,0 +1,435 @@
+"""A summary hit, expanded to the chunks it cites: only those, never a forgotten one, and always said where it came from."""
+from __future__ import annotations
+
+import io
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+from scone_memory.api.app import create_app
+from scone_memory.core.errors import InvalidInput
+from scone_memory.providers.llm import FakeChat
+from scone_memory.retrieval import summary_expand as module
+from scone_memory.retrieval.summary_expand import expand_summaries
+from scone_memory.retrieval.summary_tree import build_summary_tree
+from scone_memory.runtime.cli import build_parser, run
+
+PARTS = [
+    "The harbour at Vellmar closes to sailing boats every November when the winter swell begins.",
+    "Its lighthouse was rebuilt in 1904 after a storm took the first one down to the foundations.",
+    "Pilots board arriving ships two miles out, at the red buoy, in every season of the year.",
+    "The orchard on the ridge above the town grows only Bramley apples, planted in rows of forty.",
+    "Picking starts in the last week of September and ends before the first frost of the year.",
+    "The press in the barn makes two thousand litres of juice a season for the town's market.",
+    "A narrow-gauge railway once carried the apples down to the harbour; its bed is a footpath now.",
+    "The town council meets on the first Tuesday of the month in the old customs house by the quay.",
+]
+
+
+async def document():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=100).open()
+    added = await engine.remember("s", "\n\n".join(PARTS), kind="file", source="town.md")
+    return engine, added.episode_id, await engine.documents.chunks_of("s", added.episode_id)
+
+
+def reply(*rows):
+    return json.dumps({"notes": [{"sentence": s, "passage": p, "quote": q} for s, p, q in rows]})
+
+
+def opening(text, count=3):
+    return " ".join(text.split()[:count])
+
+
+def sentence_about(level, group, member, text):
+    return f"Zorvath {level}.{group}.{member} recounts {opening(text)}."
+
+
+def replies_for(chunks, fan_in=3, cite=2, max_levels=5):
+    """One reply per group the builder forms, level by level (the builder's
+    own arithmetic, mirrored): at level one a sentence for each of the first
+    ``cite`` members quoting its opening words; above, a sentence quoting
+    the whole first sentence of the first ``cite`` members, so a citation
+    rests on one sentence of the node below and not on all of it."""
+    below = [(f"chunk:{c.chunk_id}", c.text, opening(c.text)) for c in chunks]
+    replies = []
+    level = 0
+    while len(below) > 1 and level < max_levels:
+        level += 1
+        written = []
+        position = 0
+        for start in range(0, len(below), fan_in):
+            group = below[start:start + fan_in]
+            if len(group) == 1 and start > 0:
+                written.append(group[0])
+                continue
+            rows = [(sentence_about(level, position, m, text), ident, quote)
+                    for m, (ident, text, quote) in enumerate(group[:cite])]
+            replies.append(reply(*rows))
+            node_text = " ".join(row[0] for row in rows)
+            written.append((f"node:{level}:{position}", node_text, rows[0][0]))
+            position += 1
+        below = written
+    return replies
+
+
+async def summary_items(engine, level, index):
+    """The recall items of one stored summary, found by its source."""
+    found = await engine.recall("s", f"Zorvath {level}.{index}", limit=50, kind="note",
+                                source_prefix=f"town.md#summary/{level}/{index}")
+    assert found.items, f"summary {level}/{index} was not recalled"
+    return found.items
+
+
+async def test_a_level_one_summary_is_followed_by_the_chunks_it_cites_and_only_those():
+    engine, episode_id, chunks = await document()
+    try:
+        await build_summary_tree(engine, FakeChat(replies_for(chunks, max_levels=1)), "s", episode_id,
+                                 fan_in=3, max_levels=1, store=True)
+        hit = await summary_items(engine, 1, 0)
+        summary_episode = hit[0].episode_id
+        followed = await expand_summaries(engine, "s", hit, mode="follow")
+        ids = [item.chunk_id for item in followed.items]
+        assert ids == [hit[0].chunk_id, chunks[0].chunk_id, chunks[1].chunk_id], "the two cited chunks, in document order"
+        assert chunks[2].chunk_id not in ids, "a chunk the summary covers but does not cite is not served"
+        added = followed.items[1:]
+        assert all(item.episode_id == episode_id and item.source == "town.md" for item in added)
+        assert [item.text for item in added] == [chunks[0].text, chunks[1].text]
+        assert [(item.start, item.end) for item in added] == [(chunks[0].start, chunks[0].end), (chunks[1].start, chunks[1].end)]
+        assert all(item.score == hit[0].score and item.lanes == {} for item in added)
+        via = added[0].via_summary
+        assert via is not None and via["episode_id"] == summary_episode and via["chunk_id"] == hit[0].chunk_id
+        assert (via["level"], via["index"], via["summary_of"], via["mode"]) == (1, 0, episode_id, "follow")
+        quoted = opening(chunks[0].text)
+        assert via["cited"] == [[0, len(quoted)]] and chunks[0].text[0:len(quoted)] == quoted, \
+            "where in the chunk's own text the quote the summary rests on sits"
+        assert quoted not in json.dumps(via), "offsets, never a second copy of the passage's text"
+        assert followed.items[0].via_summary is None, "the summary itself did not come through a summary"
+        assert (followed.summaries, followed.expanded, followed.chunks_added, followed.capped) == (1, 1, 2, 0)
+        assert followed.refused == () and "expanded 1 of 1 summary hit(s) to 2 cited chunk(s)" in followed.why
+        record = followed.record()
+        assert record["mode"] == "follow" and record["chunks_added"] == 2 and record["by_summary"] == {
+            str(summary_episode): [chunks[0].chunk_id, chunks[1].chunk_id]}
+
+        replaced = await expand_summaries(engine, "s", hit, mode="replace")
+        assert [item.chunk_id for item in replaced.items] == [chunks[0].chunk_id, chunks[1].chunk_id]
+        assert all(item.via_summary["mode"] == "replace" for item in replaced.items)
+    finally:
+        await engine.close()
+
+
+async def test_a_higher_summary_resolves_down_to_the_sentences_its_quotes_rest_on():
+    engine, episode_id, chunks = await document()
+    try:
+        assert len(chunks) == 7, [c.text for c in chunks]
+        # Seven chunks at fan_in 3: level one writes [1,2,3] and [4,5,6] and
+        # carries the seventh; the root is written from node:1:0, node:1:1
+        # and chunk 7, and cites the first two of them.
+        tree = await build_summary_tree(engine, FakeChat(replies_for(chunks)), "s", episode_id, fan_in=3, store=True)
+        assert tree.levels == 2 and tree.root is not None
+        root = await summary_items(engine, 2, 0)
+        opened = await expand_summaries(engine, "s", root, mode="replace")
+        # node:1:0's first sentence cites chunk 1 only; node:1:1's first
+        # sentence cites chunk 4 only. The second sentences' chunks (2, 5)
+        # sit under the root and are not what it rests on.
+        assert [item.chunk_id for item in opened.items] == [chunks[0].chunk_id, chunks[3].chunk_id]
+        assert opened.reads == 3, "the root's account and the two level-one accounts it cites"
+        assert opened.items[0].via_summary["level"] == 2 and opened.items[0].via_summary["episode_id"] == root[0].episode_id
+
+        # The root and a level-one summary of the same document in one answer:
+        # the document, its stored nodes and each account are read once, and a
+        # chunk both cite is served once.
+        reads = {"episode": 0, "stored": 0}
+        real_episode, real_stored = engine.episode, module.stored_summaries
+
+        async def episode(space, wanted):
+            reads["episode"] += 1
+            return await real_episode(space, wanted)
+
+        async def stored(*args, **kwargs):
+            reads["stored"] += 1
+            return await real_stored(*args, **kwargs)
+
+        engine.episode = episode
+        module.stored_summaries = stored
+        try:
+            first = await summary_items(engine, 1, 0)
+            reads["episode"] = 0
+            both = await expand_summaries(engine, "s", [*root, *first], mode="follow")
+        finally:
+            engine.episode, module.stored_summaries = real_episode, real_stored
+        assert [item.chunk_id for item in both.items] == [root[0].chunk_id, chunks[0].chunk_id, chunks[3].chunk_id,
+                                                          first[0].chunk_id, chunks[1].chunk_id]
+        assert both.already_present == 1 and both.reads == 3 and reads == {"episode": 2, "stored": 1}
+    finally:
+        await engine.close()
+
+
+async def test_a_carried_chunk_cited_from_above_is_served_directly():
+    engine, episode_id, chunks = await document()
+    try:
+        replies = replies_for(chunks, cite=2)
+        # The root's reply: cite node:1:0's first sentence and the carried seventh chunk.
+        node_text = sentence_about(1, 0, 0, chunks[0].text)
+        replies[-1] = reply(("The root about the first node.", "node:1:0", node_text),
+                            ("The root about the carried chunk.", f"chunk:{chunks[6].chunk_id}", opening(chunks[6].text)))
+        await build_summary_tree(engine, FakeChat(replies), "s", episode_id, fan_in=3, store=True)
+        opened = await expand_summaries(engine, "s", await summary_items(engine, 2, 0), mode="replace")
+        assert [item.chunk_id for item in opened.items] == [chunks[0].chunk_id, chunks[6].chunk_id]
+    finally:
+        await engine.close()
+
+
+FORGERIES: list[dict] = []
+
+
+async def forged_summary(engine, episode_id, chunks, **overrides):
+    """A note that says it summarizes ``episode_id``, as a migrated store or
+    a hand-written note could: the metadata and account are ours to spoil."""
+    from scone_memory.retrieval.summary_tree import _hash
+
+    source = await engine.episode("s", episode_id)
+    account = overrides.pop("account", {"sentences": [
+        {"text": "Forged.", "citations": [{"passage": f"chunk:{chunks[0].chunk_id}", "quote": opening(chunks[0].text),
+                                           "start": 0, "end": len(opening(chunks[0].text))}]}]})
+    raw = overrides.pop("raw", None) or json.dumps(account).encode()
+    detail = await engine.attach("s", raw, media_type="application/json", filename="summary-node.json")
+    metadata = {"summary_of": str(episode_id), "summary_level": "1", "summary_index": "0", "summary_fan_in": "3",
+                "summary_chunks": "3", "summary_first_chunk": str(chunks[0].chunk_id),
+                "summary_last_chunk": str(chunks[2].chunk_id), "summary_content_hash": _hash(source.content),
+                "summary_model": "hand", "summary_detail": detail.attachment_id} | overrides
+    # Each forgery its own text, or remembering it again would be a duplicate of the first
+    # (the attachment is named by its bytes, so it cannot tell two forgeries apart).
+    FORGERIES.append(overrides)
+    added = await engine.remember("s", f"Xylocarp forged summary of the harbour, number {len(FORGERIES)}.", kind="note",
+                                  source="forged#summary/1/0", metadata=metadata, attachment_ids=(detail.attachment_id,))
+    found = await engine.recall("s", "Xylocarp forged summary", limit=20, kind="note", source_prefix="forged#")
+    return [item for item in found.items if item.episode_id == added.episode_id]
+
+
+async def test_a_summary_whose_document_changed_or_went_is_refused_and_stands_as_it_was():
+    engine, episode_id, chunks = await document()
+    try:
+        honest = await forged_summary(engine, episode_id, chunks)
+        assert [item.chunk_id for item in (await expand_summaries(engine, "s", honest)).items][1:] == [chunks[0].chunk_id]
+
+        stale = await forged_summary(engine, episode_id, chunks, summary_content_hash="0" * 64)
+        refused = await expand_summaries(engine, "s", stale, mode="replace")
+        assert refused.items == tuple(stale), "a refused summary stands; nothing is served in its place"
+        assert refused.expanded == 0 and [r["reason"] for r in refused.refused] == ["content_changed"]
+        assert refused.refused[0]["episode_id"] == stale[0].episode_id and "no longer matches" in refused.why
+
+        unreadable = await forged_summary(engine, episode_id, chunks, summary_detail="nope")
+        assert [r["reason"] for r in (await expand_summaries(engine, "s", unreadable)).refused] == ["detail_unreadable"]
+        malformed = await forged_summary(engine, episode_id, chunks, summary_of="the harbour")
+        assert [r["reason"] for r in (await expand_summaries(engine, "s", malformed)).refused] == ["malformed"]
+
+        from scone_memory.core.errors import SconeError
+
+        real_episode = engine.episode
+
+        async def failing(space, wanted):
+            if wanted == episode_id:
+                raise SconeError("the store did not answer")
+            return await real_episode(space, wanted)
+
+        engine.episode = failing
+        unread = await expand_summaries(engine, "s", honest, mode="replace")
+        engine.episode = real_episode
+        assert unread.items == tuple(honest) and [r["reason"] for r in unread.refused] == ["unread"]
+        assert "could not be read" in unread.why and "forgotten" not in unread.why
+
+        await engine.forget("s", episode_id)
+        gone = await expand_summaries(engine, "s", honest, mode="replace")
+        assert gone.items == tuple(honest) and gone.chunks_added == 0, "a forgotten document's chunks are never served"
+        assert [r["reason"] for r in gone.refused] == ["source_gone"] and "forgotten" in gone.why
+        twice = await expand_summaries(engine, "s", [*honest, *stale], mode="replace")
+        assert [r["reason"] for r in twice.refused] == ["source_gone", "source_gone"] and twice.chunks_added == 0
+    finally:
+        await engine.close()
+
+
+async def test_a_cited_chunk_that_is_not_the_documents_or_does_not_hold_the_quote_is_not_served():
+    engine, episode_id, chunks = await document()
+    try:
+        other = await engine.remember("s", "An unrelated note about nothing in the town at all.", kind="note")
+        other_chunk = (await engine.documents.chunks_of("s", other.episode_id))[0]
+
+        def cite(chunk_id, quote):
+            return {"passage": f"chunk:{chunk_id}", "quote": quote, "start": 0, "end": len(quote)}
+
+        account = {"sentences": [{"text": "Mixed.", "citations": [
+            cite(chunks[1].chunk_id, opening(chunks[1].text)),
+            cite(other_chunk.chunk_id, opening(other_chunk.text)),
+            cite(999_999, "anything"),
+            cite(chunks[2].chunk_id, "words this chunk never held"),
+            {"passage": "node:1:9", "quote": "no such node", "start": 0, "end": 12},
+            {"passage": "elsewhere", "quote": "x", "start": 0, "end": 1},
+            {"passage": f"chunk:{chunks[3].chunk_id}"},
+            {"passage": "chunk:three", "quote": "x", "start": 0, "end": 1},
+            cite(chunks[0].chunk_id, opening(chunks[0].text)),
+            {"passage": f"chunk:{chunks[1].chunk_id}", "quote": chunks[1].text[10:30], "start": 10, "end": 30}]}]}
+        hit = await forged_summary(engine, episode_id, chunks, account=account)
+        opened = await expand_summaries(engine, "s", hit, mode="follow")
+        assert [item.chunk_id for item in opened.items][1:] == [chunks[0].chunk_id, chunks[1].chunk_id], \
+            "served in the document's order, not the order they were cited in"
+        assert opened.items[2].via_summary["cited"] == [[0, len(opening(chunks[1].text))], [10, 30]]
+        assert (opened.missing, opened.unquoted, opened.unresolved) == (2, 1, 4)
+        assert "not among the document's chunks" in opened.why and "does not hold the quote" in opened.why
+
+        nothing = await forged_summary(engine, episode_id, chunks, account={"sentences": [{"text": "None.", "citations": [
+            cite(999_999, "anything")]}]})
+        empty = await expand_summaries(engine, "s", nothing, mode="replace")
+        assert empty.items == tuple(nothing) and [r["reason"] for r in empty.refused] == ["nothing_cited"]
+        for raw in (b"not json at all", json.dumps({"sentences": ["a sentence with no citations"]}).encode()):
+            spoiled = await forged_summary(engine, episode_id, chunks, raw=raw)
+            assert [r["reason"] for r in (await expand_summaries(engine, "s", spoiled)).refused] == ["detail_unreadable"]
+    finally:
+        await engine.close()
+
+
+async def test_a_node_cited_from_above_is_checked_like_a_chunk_and_never_followed_sideways():
+    engine, episode_id, chunks = await document()
+    try:
+        def cite(chunk):
+            return {"passage": f"chunk:{chunk.chunk_id}", "quote": opening(chunk.text), "start": 0, "end": len(opening(chunk.text))}
+
+        def node(level, index, quote="Xylocarp"):
+            return {"passage": f"node:{level}:{index}", "quote": quote, "start": 0, "end": len(quote)}
+
+        def one(*citations):
+            return {"sentences": [{"text": "Forged.", "citations": list(citations)}]}
+
+        await forged_summary(engine, episode_id, chunks, summary_index="0", summary_content_hash="0" * 64, account=one(cite(chunks[0])))
+        await forged_summary(engine, episode_id, chunks, summary_index="1", account=one(cite(chunks[1])))
+        await forged_summary(engine, episode_id, chunks, summary_index="2", summary_detail="nope")
+        top = await forged_summary(engine, episode_id, chunks, summary_level="2", summary_index="0",
+                                   account=one(node(1, 0), node(1, 1, "Wrongful"), node(1, 1), node(1, 2),
+                                               {"passage": "page:1:1", "quote": "Xylocarp", "start": 0, "end": 8}))
+        opened = await expand_summaries(engine, "s", top, mode="replace")
+        # node:1:0 was written from other content; the first node:1:1 quote is
+        # not its text; node:1:2's account cannot be read; a page is not a node.
+        # Only node:1:1 is followed.
+        assert [item.chunk_id for item in opened.items] == [chunks[1].chunk_id] and opened.unresolved == 4
+    finally:
+        await engine.close()
+
+    engine, episode_id, chunks = await document()
+    try:
+        # A summary citing a node at its own level -- here, itself -- is not followed round in a circle.
+        itself = await forged_summary(engine, episode_id, chunks, account={"sentences": [{"text": "Forged.", "citations": [
+            {"passage": "node:1:0", "quote": "Xylocarp", "start": 0, "end": 8}]}]})
+        circle = await expand_summaries(engine, "s", itself, mode="replace")
+        assert circle.items == tuple(itself) and circle.unresolved == 1 and [r["reason"] for r in circle.refused] == ["nothing_cited"]
+    finally:
+        await engine.close()
+
+
+async def test_the_cap_cuts_and_says_so_and_a_cut_summary_is_not_replaced():
+    engine, episode_id, chunks = await document()
+    try:
+        await build_summary_tree(engine, FakeChat(replies_for(chunks, cite=3, max_levels=1)), "s", episode_id,
+                                 fan_in=3, max_levels=1, store=True)
+        first, second = await summary_items(engine, 1, 0), await summary_items(engine, 1, 1)
+        both = [*first, *second]
+        cut = await expand_summaries(engine, "s", both, mode="replace", max_chunks=4)
+        ids = [item.chunk_id for item in cut.items]
+        assert ids == [chunks[0].chunk_id, chunks[1].chunk_id, chunks[2].chunk_id,
+                       second[0].chunk_id, chunks[3].chunk_id], "the cut summary stands, followed by what fit"
+        assert (cut.chunks_added, cut.capped, cut.cut) == (4, 2, (second[0].episode_id,))
+        assert "the cap of 4 chunk(s) left 2 cited chunk(s) out" in cut.why
+        whole = await expand_summaries(engine, "s", both, mode="replace", max_chunks=6)
+        assert whole.capped == 0 and whole.cut == () and "cap" not in whole.why
+        for bad in (0, module.MAX_CHUNKS + 1, True, 2.5):
+            with pytest.raises(InvalidInput):
+                await expand_summaries(engine, "s", both, max_chunks=bad)
+        with pytest.raises(InvalidInput):
+            await expand_summaries(engine, "s", both, mode="whole")
+    finally:
+        await engine.close()
+
+
+async def test_the_read_budget_leaves_later_summaries_as_they_were_and_counts_them(monkeypatch):
+    engine, episode_id, chunks = await document()
+    try:
+        await build_summary_tree(engine, FakeChat(replies_for(chunks)), "s", episode_id, fan_in=3, store=True)
+        root = await summary_items(engine, 2, 0)
+        monkeypatch.setattr(module, "MAX_READS", 2)
+        short = await expand_summaries(engine, "s", root, mode="replace")
+        assert short.items == tuple(root) and short.not_read == 1 and short.reads == 2
+        assert "budget of 2 read(s)" in short.why
+        monkeypatch.setattr(module, "MAX_READS", 3)
+        assert (await expand_summaries(engine, "s", root, mode="replace")).not_read == 0
+    finally:
+        await engine.close()
+
+
+async def test_a_cited_chunk_already_in_the_answer_is_not_repeated_and_a_summary_expands_once():
+    engine, episode_id, chunks = await document()
+    try:
+        await build_summary_tree(engine, FakeChat(replies_for(chunks, max_levels=1)), "s", episode_id,
+                                 fan_in=3, max_levels=1, store=True)
+        hit = await summary_items(engine, 1, 0)
+        direct = await engine.recall("s", PARTS[1], limit=1, kind="file")
+        assert direct.items[0].chunk_id == chunks[1].chunk_id
+        opened = await expand_summaries(engine, "s", [*direct.items, *hit, *hit], mode="follow")
+        assert [item.chunk_id for item in opened.items] == [chunks[1].chunk_id, hit[0].chunk_id, chunks[0].chunk_id, hit[0].chunk_id]
+        assert opened.already_present == 1 and opened.items[0].via_summary is None and opened.summaries == 1
+        replaced = await expand_summaries(engine, "s", [*hit, *hit], mode="replace")
+        assert [item.chunk_id for item in replaced.items] == [chunks[0].chunk_id, chunks[1].chunk_id], \
+            "a replaced summary's other occurrences go with it"
+    finally:
+        await engine.close()
+
+
+async def test_recall_expands_on_request_and_answers_as_before_without_it():
+    engine, episode_id, chunks = await document()
+    try:
+        await build_summary_tree(engine, FakeChat(replies_for(chunks, max_levels=1)), "s", episode_id,
+                                 fan_in=3, max_levels=1, store=True)
+        plain = await engine.recall("s", "Zorvath 1.0 recounts", limit=3)
+        assert plain.expanded is None and all(item.via_summary is None for item in plain.items)
+        dumped = json.dumps(plain.model_dump(mode="json"))
+        assert "via_summary" not in dumped and '"expanded"' not in dumped
+        opened = await engine.recall("s", "Zorvath 1.0 recounts", limit=3, expand_summaries="follow", expand_max_chunks=1)
+        assert opened.expanded is not None and opened.expanded["mode"] == "follow" and opened.expanded["max_chunks"] == 1
+        assert any(item.via_summary for item in opened.items) and opened.expanded["capped"] >= 1
+        assert opened.returned_bytes == sum(len(item.text.encode()) for item in opened.items)
+        import scone_memory.memory.engine as engine_module
+
+        def no_search(*args, **kwargs):
+            raise AssertionError("a mistaken request is refused before anything is searched")
+
+        real_recall, engine_module.recall = engine_module.recall, no_search
+        try:
+            with pytest.raises(InvalidInput):
+                await engine.recall("s", "Zorvath", expand_summaries="whole")
+            with pytest.raises(InvalidInput):
+                await engine.recall("s", "Zorvath", expand_summaries="follow", expand_max_chunks=0)
+        finally:
+            engine_module.recall = real_recall
+        with pytest.raises(InvalidInput, match="expand_max_chunks"):
+            await engine.recall("s", "Zorvath", expand_max_chunks=3)
+
+        with TestClient(create_app(engine, {"key-a": "s"})) as client:
+            auth = {"Authorization": "Bearer key-a"}
+            body = client.get("/v1/recall", params={"q": "Zorvath 1.0 recounts", "limit": 3, "expand_summaries": "replace"},
+                              headers=auth).json()
+            assert body["expanded"]["mode"] == "replace" and any("via_summary" in item for item in body["items"])
+            bare = client.get("/v1/recall", params={"q": "Zorvath 1.0 recounts", "limit": 3}, headers=auth).json()
+            assert "expanded" not in bare and all("via_summary" not in item for item in bare["items"])
+            assert '"recall.expand_summaries": true' in json.dumps(client.get("/v1/capabilities", headers=auth).json())
+            assert client.get("/v1/recall", params={"q": "x", "expand_summaries": "whole"}, headers=auth).status_code in (400, 422)
+
+        out = io.StringIO()
+        code = await run(build_parser().parse_args(["--space", "s", "recall", "Zorvath 1.0 recounts", "--limit", "3",
+                                                    "--expand-summaries", "follow", "--json"]), engine, io.StringIO(""), out)
+        said = json.loads(out.getvalue())
+        assert code == 0 and said["expanded"]["mode"] == "follow" and any(item.get("via_summary") for item in said["items"])
+        out = io.StringIO()
+        await run(build_parser().parse_args(["--space", "s", "recall", "Zorvath 1.0 recounts", "--limit", "3", "--expand-summaries", "replace",
+                                             "--expand-max-chunks", "1"]), engine, io.StringIO(""), out)
+        assert "summary hit(s) to" in out.getvalue() and "via summary #" in out.getvalue()
+    finally:
+        await engine.close()

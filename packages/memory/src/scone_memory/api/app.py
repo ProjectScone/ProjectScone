@@ -37,6 +37,7 @@ from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..retrieval.receipts import staged
+from ..retrieval.summary_expand import MAX_CHUNKS as SUMMARY_EXPANSION_MAX_CHUNKS
 from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
 from . import chat_imports, file_documents, pdf_documents
@@ -505,7 +506,7 @@ def create_app(
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
-            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "recall.graph_boost": True, "recall.lessons": True, "graph.knowledge_paging": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "recall.graph_boost": True, "recall.lessons": True, "recall.expand_summaries": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
         if agent_catalog is not None and agent_plan_store is not None:
@@ -1032,6 +1033,14 @@ def create_app(
                                                         "was set by hand; the answer says what was read and applied."),
         lessons: bool = Query(default=False, description="Put beside each passage what people said about it in "
                                                           "feedback. The order is not changed."),
+        expand_summaries: Optional[Literal["replace", "follow"]] = Query(
+            default=None,
+            description="Follow each stored summary among the passages with the chunks its citations rest on, or "
+                        "replace it with them: only those, never a forgotten document's, each saying which summary "
+                        "it came through. The answer can hold more than limit; expanded says what was added, "
+                        "refused and cut."),
+        expand_max_chunks: Optional[int] = Query(default=None, ge=1, le=SUMMARY_EXPANSION_MAX_CHUNKS,
+                                                 description="The most chunks expand_summaries adds (20 unless set)."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
@@ -1108,7 +1117,7 @@ def create_app(
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
-            lessons=lessons,
+            lessons=lessons, expand_summaries=expand_summaries, expand_max_chunks=expand_max_chunks,
             **({"lanes": [lane.strip() for lane in lanes.split(",") if lane.strip()]} if lanes is not None else {}),
             require=require, exclude=exclude, diversity=diversity,
         )
@@ -1191,6 +1200,8 @@ def create_app(
             response["widened"] = staged(opened.record())
         if result.lessons_read is not None:
             response["lessons_read"] = result.lessons_read
+        if result.expanded is not None:
+            response["expanded"] = result.expanded
         if joined is not None:
             response["merged"] = staged(joined.record())
         if cut is not None:
@@ -1644,6 +1655,8 @@ def item_json(item: RecallItem) -> dict:
         result["rerank_score"] = item.rerank_score
     if item.lessons is not None:
         result["lessons"] = item.lessons
+    if item.via_summary is not None:
+        result["via_summary"] = item.via_summary
     return result
 
 

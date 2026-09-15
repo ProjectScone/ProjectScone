@@ -443,6 +443,91 @@ Forgetting a document does not yet forget its summaries; they carry
 coverage on broad questions with and without stored summaries waits for a
 run with the local model.
 
+### Expanding a summary hit to the chunks it cites
+
+```bash
+scone recall "what does the mill survey say about the river" --limit 10 --expand-summaries follow
+scone recall "what does the mill survey say about the river" --expand-summaries replace --expand-max-chunks 8 --json
+```
+
+A stored summary answers a broad question as the model's word, and a reader
+who has to quote the document wants the document's own text. The leading
+framework's document summary index retrieves over summaries and returns the
+nodes under the chosen one — every node of the document. `expand_summaries`
+returns the chunks the summary *cites*, and only those: `follow` puts them
+after the summary, `replace` puts them in its place (engine
+`recall(..., expand_summaries="follow")`, HTTP `GET
+/v1/recall?expand_summaries=follow`, CLI `--expand-summaries`). No model is
+called and nothing is re-embedded.
+
+Resolution runs downward through the account each summary keeps as its
+attachment. A level-one summary cites chunks. A summary above cites a node
+of the level below (or a chunk carried up as a lone remainder) with a quote
+at an offset of that node's text; the quote lands in some of that node's
+sentences, and only their citations are followed. So the root of a long
+document expands to the chunks its own sentences rest on, not to the
+document, and a chunk a summary's span covers but no citation names is not
+served. Chunks come back in the document's order, each scored as the summary
+was, with no lanes of its own, and each carries `via_summary`: the summary's
+episode and chunk, its level and index, the episode it summarizes, the mode,
+and `cited`, the character spans of the chunk's stored text where the quotes
+it rests on sit. Spans rather than the quotes themselves, so an answer holds
+no second copy of a passage's text for withholding to miss; after a window
+widens the passage they still count from the chunk's own start. A cited
+chunk already in the answer is not repeated.
+
+What it refuses, and says so in `expanded`:
+
+- A citation is followed only when the text it names holds its quote at
+  its offsets. A chunk that is not one of the summarized document's chunks
+  is counted in `missing`; one that does not hold the quote in `unquoted`;
+  a node that is not stored below the citing level, was written from other
+  content, or whose account cannot be read, in `unresolved`. None is served.
+- A summary whose document is forgotten is refused as `source_gone` and
+  nothing of the document is served: forgetting a document leaves its
+  summaries, and what they cite is deleted text. A document whose content
+  hash no longer matches `summary_content_hash` is refused as
+  `content_changed` (a stored document is never rewritten, so this is a
+  note written by hand or carried from another store). A document that
+  could not be read is `unread`, which is not a finding that it is gone;
+  metadata that does not say what a note summarizes is `malformed`; an
+  account that cannot be read is `detail_unreadable`; citations that reach
+  no chunk are `nothing_cited`. A refused summary stands as it was.
+- `expand_max_chunks` (20 unless set, at most 200) bounds the chunks added
+  across the answer. When it cuts, `capped` counts the cited chunks left
+  out and `cut` names the summaries, and a cut summary is kept followed by
+  what fit, even under `replace`, since part of what it cites does not stand
+  for all of it. Citation accounts read per call are bounded too
+  (`MAX_READS`, 200; a failed read counts), and a summary past that budget
+  stands as it was and is counted in `not_read`.
+
+The answer can hold more than `limit` items, and `returned_bytes` counts
+what is returned. Expansion runs inside recall before `lessons`, so the
+chunks a summary brings are read for lessons, and before the route's window,
+merge and withholding stages, so what it adds is widened, merged and scanned
+like any passage. The narrowing a caller set (kind, tags, source prefix,
+dates) chose what was searched; it is not applied again to what a returned
+summary cites. The recall event records what the lanes returned, so feedback
+on a chunk a summary brought is refused as not returned by that recall.
+
+Measured on a scripted fixture, not a quality claim
+(`benchmarks/summary_expansion.py`, 14 September 2026): four documents of
+three sections of three paragraphs, one chunk each, with summary trees built
+by `FakeChat` replies the script writes and `HashEmbedder`; twelve questions
+asking what a document says about one section's theme, the section's three
+chunks gold, `limit=10`, scored on the first ten items. With level-one
+summaries citing two of three paragraphs, recall_at(10) is 0.278 off, 0.667
+with `follow` and with `replace`; every chunk under each summary's span in its
+place (the document-summary-index shape, computed by the script) gives 1.000.
+With every paragraph cited: 0.278 off, 0.722 `follow` (whole list 1.000),
+1.000 `replace`, 1.000 under the span. With expansion off 4.58 of the ten
+places held summaries. The citation ratio is the script's, and so is the
+ceiling of cited-only expansion; this fixture does not show a summary whose
+span is much wider than what it cites, beyond the root. Median latency over
+five interleaved repeats was 3.3–4.0 ms per recall in every arm, inside the
+spread on a machine at load average about 60, so no latency claim is made.
+Not measured: summaries a real model wrote, and real documents.
+
 ### Checking the rule instead of asserting it
 
 A routing rule written down is only better than one a model invents if
