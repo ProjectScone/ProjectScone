@@ -741,6 +741,38 @@ in an unchanged one. This is the reference graph
 tool's watch mode without a file-system event library: polling, bounded,
 and honest about each pass.
 
+A repository has a better signal than the clock. `scone-memory hooks
+install` (from anywhere inside the repository, or `--root DIR`) writes a
+runner script into the repository's hooks directory, wherever
+`core.hooksPath` puts it, and a guarded block into `post-commit`,
+`post-checkout` and `post-merge` that calls it; each call maps the tree
+with `--graph` (`--no-graph` to store the files alone) in the background,
+so a commit is not made to wait, and appends the JSON receipt to
+`scone-map.log` in the repository's git directory (`.git/scone-map.log`;
+a linked worktree's own git directory, so two worktrees do not share a
+log). A checkout of files (the branch flag 0) maps nothing. `hooks
+status` says which hooks carry the block (`installed`, `absent`, or
+`other` for a hook of the person's own), the interpreter the runner
+names and whether it still exists, the settings it carries, and how the
+log ends: the last receipt when the last run finished, or the log's last
+line when it did not, so a failed run is never hidden behind the success
+before it. `hooks uninstall` takes the blocks out and leaves whatever
+else the hook files held, removing a file only when nothing but its
+shebang is left. A hook file that exists is appended to, never replaced;
+a second install replaces its own block where it stands, so what the
+person put after it stays after it; a block with a start and no end is
+refused rather than guessed at, and a marker is a whole line, so a
+comment that mentions one is not a block. The interpreter's path is
+written in full, so a commit from an editor with no shell environment
+still finds it, and `PYTHONPATH` goes with it when the install ran with
+one; only the settings that name a store kind or a local path
+(`SCONE_DOCUMENTS`, `SCONE_VECTORS`, `SCONE_EVENTS`, `SCONE_SQLITE_PATH`)
+are written into the runner, and a connection URL or a key never is: the
+runner reads those from the environment it runs in, or from a file the
+person names with `--env-file`, which the runner sources. `SCONE_HOOK_WAIT=1` makes the runner wait for the map. A
+file-system event watch is not built: the hooks cover the moments a
+repository's tree moves, and `--watch` covers an editor's saves.
+
 `map` walks a directory, remembers every source file under the path it
 was read from, and with `--graph` records what each says. A map is of the
 tree as it is now: a file is held under the identity `sync` uses for it,
