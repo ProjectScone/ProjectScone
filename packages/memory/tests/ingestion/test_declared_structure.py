@@ -192,7 +192,7 @@ def html_roles(raw: str) -> list[tuple[str, str, dict[str, str]]]:
 
 def test_html_elements_declare_headings_lists_captions_and_code() -> None:
     page = ('<title>Guide</title>\n<h1>Install</h1>\n<p>Run the <code>setup</code> step.</p>\n'
-            '<ul><li>Linux<ul><li>Debian</li></ul></li><li>macOS</ul>\n'
+            '<ul><li>Linux<ul><li>Debian</li></ul>kernels</li><li>macOS</ul>\n'
             '<ol><li>Download<li>Verify</ol>\n'
             '<figure><img src="a.png"><figcaption>Figure 1: Layout</figcaption></figure>\n'
             '<pre>x = 1\n  y = 2</pre>\n<li>Stray item</li>\n<h4>Deep <em>heading</em></h4>\n'
@@ -202,14 +202,15 @@ def test_html_elements_declare_headings_lists_captions_and_code() -> None:
         ('Guide', {}),
         ('Install', {'block_role': 'heading', 'heading_level': '1'}),
         ('Run the setup step.', {}),
-        ('Linux', {'block_role': 'list_item', 'list_id': '1', 'list_level': '0', 'list_kind': 'bullet'}),
-        ('Debian', {'block_role': 'list_item', 'list_id': '1', 'list_level': '1', 'list_kind': 'bullet'}),
-        ('macOS', {'block_role': 'list_item', 'list_id': '1', 'list_level': '0', 'list_kind': 'bullet'}),
-        ('Download', {'block_role': 'list_item', 'list_id': '2', 'list_level': '0', 'list_kind': 'ordered'}),
-        ('Verify', {'block_role': 'list_item', 'list_id': '2', 'list_level': '0', 'list_kind': 'ordered'}),
+        ('Linux', {'block_role': 'list_item', 'list_id': '1', 'list_level': '0', 'list_kind': 'bullet', 'list_item_id': '1'}),
+        ('Debian', {'block_role': 'list_item', 'list_id': '1', 'list_level': '1', 'list_kind': 'bullet', 'list_item_id': '2'}),
+        ('kernels', {'block_role': 'list_item', 'list_id': '1', 'list_level': '0', 'list_kind': 'bullet', 'list_item_id': '1'}),
+        ('macOS', {'block_role': 'list_item', 'list_id': '1', 'list_level': '0', 'list_kind': 'bullet', 'list_item_id': '3'}),
+        ('Download', {'block_role': 'list_item', 'list_id': '2', 'list_level': '0', 'list_kind': 'ordered', 'list_item_id': '4'}),
+        ('Verify', {'block_role': 'list_item', 'list_id': '2', 'list_level': '0', 'list_kind': 'ordered', 'list_item_id': '5'}),
         ('Figure 1: Layout', {'block_role': 'caption'}),
         ('x = 1\n  y = 2', {'block_role': 'code'}),
-        ('Stray item', {'block_role': 'list_item', 'list_level': '0'}),
+        ('Stray item', {'block_role': 'list_item', 'list_level': '0', 'list_item_id': '6'}),
         ('Deep heading', {'block_role': 'heading', 'heading_level': '4'}),
         ('Ports', {'block_role': 'caption', 'caption_target': 'table:1'}),
         ('Name Port', {'table_locator': 'table:1', 'table_status': 'structured'}),

@@ -269,6 +269,10 @@ class _HTML(HTMLParser):
         self.role: dict[str, str] = {}
         #: Outermost lists opened so far; an item names the one it is in.
         self.lists = 0
+        #: The ordinal of the list item last opened at each stack position, so
+        #: a paragraph after a nested list names the item it still belongs to.
+        self.items: dict[int, str] = {}
+        self.item_count = 0
 
     def flush(self) -> None:
         text = ''.join(self.parts)
@@ -292,7 +296,8 @@ class _HTML(HTMLParser):
                 return {'block_role': 'caption'}
             if tag == 'li':
                 lists = [name for name, _ in self.stack[:index] if name in _LISTS]
-                role = {'block_role': 'list_item', 'list_level': str(max(0, len(lists) - 1))}
+                role = {'block_role': 'list_item', 'list_level': str(max(0, len(lists) - 1)),
+                        'list_item_id': self.items[index]}
                 if lists:
                     role.update(list_id=str(self.lists), list_kind='ordered' if lists[-1] == 'ol' else 'bullet')
                 return role
@@ -320,6 +325,9 @@ class _HTML(HTMLParser):
             self.tables.data('\n')
         if tag in {'td', 'th'} and self.parts and not hidden:
             self.parts.append(' ')
+        if tag == 'li':
+            self.item_count += 1
+            self.items[len(self.stack)] = str(self.item_count)
         if tag not in _VOID:
             self.stack.append((tag, hidden))
 
