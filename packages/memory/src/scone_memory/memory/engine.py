@@ -12,6 +12,7 @@ import math
 import hashlib
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from functools import partial
 from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Literal, Mapping, Optional,
                     Sequence, TypedDict, cast)
@@ -47,6 +48,7 @@ from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
+from ..retrieval.image_lane import ImageLane
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
 from ..retrieval.synonyms import Synonyms
@@ -106,6 +108,7 @@ from ..core.ports import (
     DuplicateEvent,
     Embedder,
     EmbeddingCheckpoint,
+    ImageEmbedder,
     Event,
     EventLog,
     NewEpisode,
@@ -231,7 +234,26 @@ class MemoryEngine:
         context_lane: bool = False,
         lexical_stems: bool = True,
         vector_weight: Optional[float] = None,
+        #: The image lane: an embedder putting images and text queries into
+        #: one space, and a vector index of its own for its vectors. Both or
+        #: neither; without them a recall asking for the lane is told so.
+        image_embedder: "ImageEmbedder | None" = None,
+        image_vectors: VectorIndex | None = None,
     ) -> None:
+        if image_embedder is not None and image_vectors is None:
+            raise InvalidInput("the image lane keeps its vectors in an index of its own; image_vectors is missing")
+        if image_vectors is not None and image_embedder is None:
+            raise InvalidInput("the image lane embeds images and queries with one model; image_embedder is missing")
+        if image_embedder is not None and not isinstance(image_embedder, ImageEmbedder):
+            raise InvalidInput("image_embedder must have an id, a dim, embed_images and embed_texts")
+        if _same_index(vectors, image_vectors):
+            raise InvalidInput("image_vectors must be an index of its own, not the text vectors' index: "
+                               "one index holds one embedder's vectors at one width")
+        #: The image lane's embedder, or None when the engine has no image lane.
+        self.image_embedder = image_embedder
+        #: Its vectors, one per stored image, checked against its writer like the text vectors.
+        self.image_vectors = (None if image_vectors is None else vector_identity.guard(
+            image_vectors, lambda: cast(ImageEmbedder, image_embedder).id))
         if vector_weight is None:
             # A hashed-token embedder ranks by word overlap, badly: a weak
             # echo of the text lane. Measured on LongMemEval-S, giving it a
@@ -410,6 +432,8 @@ class MemoryEngine:
         if pending:
             raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
         await self.vectors.ensure(self.embedder.dim)
+        if self.image_vectors is not None:
+            await self.image_vectors.ensure(cast(ImageEmbedder, self.image_embedder).dim)
         if self.vocabulary is not None:
             # Read on this thread, which owns the store's connection, and
             # held for the life of the engine. A vocabulary saved later
@@ -481,7 +505,7 @@ class MemoryEngine:
         self._closed = True
         await self.entities.aclose()
         first: Optional[BaseException] = None
-        for store in (self.documents, self.vectors, self.events, self.blobs, self.embedding_cache):
+        for store in (self.documents, self.vectors, self.image_vectors, self.events, self.blobs, self.embedding_cache):
             closer = getattr(store, "close", None)
             if store is None or not callable(closer):
                 continue
@@ -821,7 +845,7 @@ class MemoryEngine:
         return retention.RetentionRuntime(
             self.documents, self.vectors, self.blobs, self.events, self.clock, self._emit,
             self._episode_or_gone, self.impact, self.forget, self._living,
-            self.space_deleted, self._space_receipt, self.exclude,
+            self.space_deleted, self._space_receipt, self.exclude, image_vectors=self.image_vectors,
         )
 
     async def _episode_or_gone(self, space: str, episode_id: int) -> Episode:
@@ -1060,8 +1084,14 @@ class MemoryEngine:
         exclude: Sequence[str] = (),
         diversity: Optional[float] = None,
         lessons: bool = False,
+        image_lane: bool = False,
     ) -> RecallResult:
-        """``lessons`` puts beside each returned passage what people said about it
+        """``image_lane`` adds the image lane: stored images nearest the query
+        in the image embedder's space, fused by rank (``retrieval.image_lane``).
+        Off unless asked for; an engine without an image embedder answers from
+        the other lanes and ``degraded`` says so.
+
+        ``lessons`` puts beside each returned passage what people said about it
         (``engine.lessons``), leaving the order as it was.
 
         ``history`` (research experiment 3) also returns, for every
@@ -1138,6 +1168,8 @@ class MemoryEngine:
             context_lane=self.context_lane,
             lexical_stems=self.lexical_stems,
             vector_weight=self.vector_weight,
+            image=None if self.image_vectors is None else ImageLane(cast(ImageEmbedder, self.image_embedder),
+                                                                   self.image_vectors),
         )
         if type(lessons) is not bool:
             raise InvalidInput("lessons must be a boolean")
@@ -1146,7 +1178,7 @@ class MemoryEngine:
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
                             entity_notes=notes, lanes=lanes,
-                            require=require, exclude=exclude, diversity=diversity)
+                            require=require, exclude=exclude, diversity=diversity, image_lane=image_lane)
         if lessons:
             from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons, read_summary
 
@@ -1658,6 +1690,16 @@ class MemoryEngine:
 
 
 # -- validation helpers -----------------------------------------------------
+
+
+def _same_index(vectors: object, image_vectors: object) -> bool:
+    """Whether two indexes are one: the same object, or two handles on one database file."""
+    if vectors is image_vectors:
+        return True
+    left, right = getattr(vectors, "path", None), getattr(image_vectors, "path", None)
+    if not isinstance(left, (str, Path)) or not isinstance(right, (str, Path)) or ":memory:" in (str(left), str(right)):
+        return False
+    return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
 
 
 def _ms(since: float) -> float:

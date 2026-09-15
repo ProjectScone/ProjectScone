@@ -4,15 +4,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..core.errors import Gone, InvalidInput, NotFound
 from ..core.models import Added, Attachment, RecallResult
+from ..core.ports import ImageEmbedder
 from ..core.validation import check_space
 from ..providers.vision import SUPPORTED_IMAGE_TYPES
 from ..ocr.process import python_worker, run_bounded
+from ..retrieval.image_lane import index_image
 from .image_context import ImageAttribute, ImageContext, ImageEntity, context_text
 
 __all__ = ['ImageAttribute', 'ImageContext', 'ImageEntity', 'ImageIngested', 'ImageProvenance',
@@ -39,6 +41,9 @@ class ImageIngested:
     added: Added
     image: Attachment
     manifest: Attachment
+    #: Whether the image lane holds a vector for this image: ``indexed``, or
+    #: ``not_configured`` when the engine has no image embedder and index.
+    image_lane: Literal['indexed', 'not_configured'] = 'not_configured'
 
 
 @dataclass(frozen=True)
@@ -117,7 +122,12 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
         dedup_key=f'image-v1:{image.attachment_id}:{retained.attachment_id}',
         metadata={'document_format': 'image', 'evidence_origin': 'image_context',
             'image_original': image.attachment_id, 'image_manifest': retained.attachment_id})
-    return ImageIngested(added, image, retained)
+    if memory.image_vectors is None:
+        return ImageIngested(added, image, retained)
+    episode = await memory.episode(space, added.episode_id)
+    await index_image(memory.documents, cast(ImageEmbedder, memory.image_embedder), memory.image_vectors,
+                      space, episode, data)
+    return ImageIngested(added, image, retained, 'indexed')
 
 
 async def image_provenance(memory: MemoryEngine, space: str, episode_id: int) -> ImageProvenance:
@@ -145,13 +155,15 @@ async def image_provenance(memory: MemoryEngine, space: str, episode_id: int) ->
 
 
 async def recall_images(memory: MemoryEngine, space: str, query: str, *, limit: int = 5,
-                        entity_id: str | None = None) -> ImageRecall:
-    """Use the configured hybrid index; return authorized references, not base64 blobs."""
+                        entity_id: str | None = None, image_lane: bool = False) -> ImageRecall:
+    """Use the configured hybrid index; return authorized references, not base64 blobs.
+
+    ``image_lane`` also searches the images' own vectors (``retrieval.image_lane``)."""
     if type(limit) is not int or not 1 <= limit <= 25:
         raise InvalidInput('image result limit must be between 1 and 25')
     tags = () if entity_id is None else (_entity_tag(entity_id),)
     recalled = await memory.recall(space, query, limit=limit * 4,
-        where={'document_format': 'image'}, tags=tags)
+        where={'document_format': 'image'}, tags=tags, image_lane=image_lane)
     matches: list[ImageMatch] = []
     unresolved: list[int] = []
     seen: set[int] = set()

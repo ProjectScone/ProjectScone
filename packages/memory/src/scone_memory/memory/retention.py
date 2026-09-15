@@ -38,6 +38,8 @@ class RetentionRuntime:
     space_receipt: Callable[[str], Awaitable[SpaceReceipt]]
     #: Exclude one ledger claim from recall with a reason and an actor.
     exclude: Callable[[str, int, str, Optional[str]], Awaitable[object]]
+    #: The image lane's own index, keyed by chunk ids like the text vectors; None without the lane.
+    image_vectors: Optional[VectorIndex] = None
 
 
 ClaimPolicy = Literal["keep", "exclude"]
@@ -343,6 +345,9 @@ async def _finish_forget(runtime: RetentionRuntime, store: RetirementStore, pend
             or await runtime.documents.chunks_of(space, episode_id)):
         raise InvalidInput("source row cleanup is incomplete; its retirement remains pending")
     await runtime.vectors.delete(pending.chunk_ids)
+    if runtime.image_vectors is not None:
+        # An image's vector is keyed by its episode's first chunk, so the same ids remove it.
+        await runtime.image_vectors.delete(pending.chunk_ids)
     await runtime.blobs.unlink(space, episode_id)
     stone = await runtime.documents.record_tombstone(NewTombstone(
         space=space, episode_id=episode_id, content_hash=pending.content_hash, forgotten_at=pending.requested_at,

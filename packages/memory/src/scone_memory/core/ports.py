@@ -454,3 +454,22 @@ class Embedder(Protocol):
     dim: int
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
+
+
+@runtime_checkable
+class ImageEmbedder(Protocol):
+    """Images and text queries into one space, for the image lane.
+
+    ``embed_images`` takes an image's stored bytes (PNG, JPEG or WebP);
+    ``embed_texts`` takes queries. A cosine between an image's vector and
+    a query's means something only because one model made both, so the
+    image lane keeps these vectors in an index of their own, never beside
+    the text embedder's. Optional: an engine without one has no image lane
+    and says so when a recall asks for it."""
+
+    #: Names the model; vectors from different ids are never compared.
+    id: str
+    dim: int
+
+    async def embed_images(self, images: Sequence[bytes]) -> list[list[float]]: ...
+    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]: ...
