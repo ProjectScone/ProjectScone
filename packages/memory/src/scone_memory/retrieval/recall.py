@@ -387,8 +387,8 @@ async def recall(
             failed.add("text")
 
     # The context lane: what each passage is under, searched with the same
-    # query the text lane got, fused at a lower weight so a passage that
-    # says the words comes before one that is only under them.
+    # query the text lane got, fused at CONTEXT_WEIGHT -- twice the text
+    # lane's, so a passage only under the words can come before one that says them.
     # The question lane is kept in the same index (ingestion.chunk_questions),
     # so either flag searches it, and a store without it is named by the lane asked for.
     context_hits: list[tuple[int, float]] = []

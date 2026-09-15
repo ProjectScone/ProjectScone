@@ -1757,13 +1757,13 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         model = build_chat(settings) if settings is not None else None
         if model is None:
             raise InvalidInput("chunk-questions needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
-        lane = await engine.build_chunk_questions(space, model, model_name=settings.chat_model or "",
-                                                  max_chunks=args.max_chunks, per_chunk=args.per_chunk,
-                                                  after_chunk=args.after_chunk, episode_ids=args.episodes)
+        written = await engine.build_chunk_questions(space, model, model_name=settings.chat_model or "",
+                                                     max_chunks=args.max_chunks, per_chunk=args.per_chunk,
+                                                     after_chunk=args.after_chunk, episode_ids=args.episodes)
         if args.json:
-            emit(lane.record())
+            emit(written.record())
         else:
-            print(lane.text(), file=out)
+            print(written.text(), file=out)
         return 0
 
     if args.command == "sync-directory":
