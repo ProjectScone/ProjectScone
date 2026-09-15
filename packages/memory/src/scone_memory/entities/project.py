@@ -28,7 +28,7 @@ from .classify import (CLASSIFIER_VERSION, ClassificationContext, ObjectClassifi
                        reference_flag)
 from .ids import attribute_id, implied_id, key_id, relation_id
 from .meanings import MAX_IMPLIED, MAX_STEPS, MAX_WALKED, RelationMeanings
-from .kinds import KIND_HINTS_VERSION, EntityKind, KindStatus, hint, infer_kind
+from .kinds import KIND_HINTS_VERSION, EntityKind, KindStatus, code_kind, hint, infer_kind
 from .merges import EntityMerges, MergeOutcome, entity_merges, is_decision
 
 PROJECTION_VERSION = "scone.entities/1"
@@ -355,7 +355,7 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
         subject_id = key_id(space, subject_key)
         forms[subject_key][quoted_form(entity_key(fact.subject), fact.quote) or fact.subject.strip()] += 1
         roles_count[subject_key]["subject"] += 1
-        if (kind := hint(fact.predicate, "subject")) is not None:
+        if (kind := code_kind(fact.subject, fact.predicate, "subject") or hint(fact.predicate, "subject")) is not None:
             hints[subject_key].append((kind, fact.fact_id))
         classification = classify_object(fact.object, fact.predicate, context)
         object_id = None
@@ -364,7 +364,7 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
             object_id = key_id(space, object_key)
             forms[object_key][fact.object.strip()] += 1
             roles_count[object_key]["object"] += 1
-            if (kind := hint(fact.predicate, "object")) is not None:
+            if (kind := code_kind(fact.object, fact.predicate, "object") or hint(fact.predicate, "object")) is not None:
                 hints[object_key].append((kind, fact.fact_id))
             relation_facts[(subject_id, fact.predicate, object_id)].append(fact)
         else:
