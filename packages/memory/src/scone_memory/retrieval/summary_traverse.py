@@ -17,7 +17,11 @@ The walk:
   content. The trees are found by one walk over the space's episodes, as
   listing a document's summaries is, and episodes the listing left out (a
   store's cap on what it lists, or episodes stored meanwhile) are counted in
-  ``unlisted``; more than ``MAX_DOCUMENTS`` in scope
+  ``unlisted``. With no ``episode_ids``, a tree whose document the listing
+  did not return (a document forgotten, or replaced, leaves its summaries
+  behind) cannot be fitted to the scope and is not read: it is counted in
+  ``unlisted_trees``, so trees left behind cost a call nothing but the count;
+  more than ``MAX_DOCUMENTS`` in scope
   is refused rather than cut to some of them, and so is a step with more
   than ``MAX_CANDIDATES`` candidates (a wide unjoined top, or a forged account).
 - **How it descends.** Every candidate at a step is scored against the
@@ -27,13 +31,17 @@ The walk:
   ``branching`` best across all documents are kept, as the reference's
   retriever pools the children of every node it kept before choosing. A
   kept node's children are what its account says it was written from: the
-  nodes below it and the chunks. A chunk is a leaf. The leaves reached come
-  back branch first -- the chunks of the summary kept first at its step,
-  then the next -- and within a branch in their own ranking, the same
-  scoring as a step's; the first ``limit`` are returned, each with the path
-  of summaries that led there. Branch first, because a chunk's own words
-  are the signal a broad question defeats: ranked by those alone, chunks of
-  a lower branch displace the section the descent chose. ``score`` is the
+  nodes below it and the chunks. The chunks a first-level summary names are
+  leaves; a chunk a higher summary names was carried up beside its nodes
+  unsummarized, so it is a candidate at the next step with them, and a leaf
+  only if that step keeps it. The leaves reached come back branch first --
+  in the order of the ranks down their path, so every chunk under the
+  summary kept first at a step comes before any under the next, whatever
+  depth each tree reaches -- and within a branch in their own ranking, the
+  same scoring as a step's; the first ``limit`` are returned, each with the
+  path of summaries that led there. Branch first, because a chunk's own
+  words are the signal a broad question defeats: ranked by those alone,
+  chunks of a lower branch displace the section the descent chose. ``score`` is the
   item's place in that order (``1 / (1 + place)``), ``similarity`` its own
   cosine. ``max_depth`` bounds the steps.
 - **What it never returns.** A summary written from other content than its
@@ -41,15 +49,18 @@ The walk:
   counted in ``stale``. A chunk named below a summary that is not one of
   the document's is ``missing``; a node named that is not stored from this
   content, or whose account cannot be read, is ``unresolved``. A document
-  forgotten is refused (``source_gone``), and so is one that could not be
-  read (``unread``) or was never stored (``source_unknown``), and one the
-  listing left out is refused as ``unlisted``. The walk
-  awaits reads, and a document can be forgotten during any of them, so the
-  chunks about to be returned are read again after the last one, with
-  nothing awaited between that read and the answer; a document whose chunks
-  moved is read again for its reason and serves none of them.
+  named and forgotten is refused (``source_gone``), and so is one that could
+  not be read (``unread``) or was never stored (``source_unknown``), and one
+  the listing left out is refused as ``unlisted``. The walk awaits reads, and
+  a document or a summary can be forgotten during any of them, so the chunks
+  about to be returned, and the chunks of every summary on their paths, are
+  read again in one read after the last one, with nothing awaited between
+  that read and the answer; a document whose chunks moved is read again for
+  its reason and serves none of them, and one with a summary on a path gone
+  or changed is refused as ``tree_changed``. A document refused there is not
+  counted among those descended, nor its chunks among the leaves.
 - **The bounds say when they cut.** ``limit`` leaves out leaves reached
-  (``cut_by_limit``), ``max_depth`` leaves nodes reached but not scored
+  (``cut_by_limit``), ``max_depth`` leaves candidates reached but not scored
   (``cut_by_depth``), and chunks under no summary a descent starts from
   (a group the model wrote nothing about, a remainder left at an unjoined
   top) are counted in ``uncovered``, since no descent reaches them.
@@ -101,6 +112,7 @@ _REASONS = {
     "content_changed": "every summary they hold was written from other content than their document's",
     "changed_while_read": "their document's chunks changed while the tree was read",
     "unlisted": "their document was not in the space's listing, so their tree was not seen whole",
+    "tree_changed": "a summary on the path to their chunks was forgotten or changed while the tree was read",
 }
 
 
@@ -114,7 +126,7 @@ class Traversal:
     branching: int = DEFAULT_BRANCHING
     max_depth: int = MAX_DEPTH
     text: bool = False
-    #: Documents whose trees were descended.
+    #: Documents whose trees were descended, less any refused when the chunks were read again.
     documents: tuple[int, ...] = ()
     #: Documents named that have no summary tree.
     untreed: tuple[int, ...] = ()
@@ -122,12 +134,12 @@ class Traversal:
     out_of_scope: int = 0
     #: Documents refused, each with its episode and a reason.
     refused: tuple[dict[str, object], ...] = ()
-    #: Each step: how many candidates, and the summaries kept.
+    #: Each step: how many candidates, the summaries kept, and the chunks kept (those carried up beside summaries).
     steps: tuple[dict[str, object], ...] = ()
-    #: Distinct chunks reached, and those the limit left out.
+    #: Distinct chunks reached of the documents not refused, and those the limit left out.
     leaves: int = 0
     cut_by_limit: int = 0
-    #: Summary nodes reached but not scored because the depth ran out.
+    #: Candidates (summary nodes, or chunks carried up beside them) reached but not scored because the depth ran out.
     cut_by_depth: int = 0
     #: Summaries of the documents in scope written from other content.
     stale: int = 0
@@ -144,6 +156,8 @@ class Traversal:
     #: Episodes walked to find the trees, and episodes the space holds that the listing did not return.
     walked: int = 0
     unlisted: int = 0
+    #: With no episodes named, trees whose document the listing did not return; not read, fitted or descended.
+    unlisted_trees: int = 0
     why: str = ""
 
     def record(self) -> dict[str, object]:
@@ -154,18 +168,22 @@ class Traversal:
                 "leaves": self.leaves, "cut_by_limit": self.cut_by_limit, "cut_by_depth": self.cut_by_depth,
                 "stale": self.stale, "missing": self.missing, "unresolved": self.unresolved, "uncovered": self.uncovered,
                 "vectors": dict(self.vectors), "embed_calls": self.embed_calls, "embedded_texts": self.embedded_texts,
-                "walked": self.walked, "unlisted": self.unlisted, "why": self.why}
+                "walked": self.walked, "unlisted": self.unlisted, "unlisted_trees": self.unlisted_trees, "why": self.why}
 
 
 @dataclass(frozen=True)
 class _Candidate:
-    """One thing a step scores: a summary node, or a chunk, with the path of summaries above it."""
+    """One thing a step scores: a summary node, or a chunk, with the path of summaries above it and their ranks."""
 
     document: int
     text: str
     path: tuple[dict[str, object], ...]
     node: Optional[StoredSummary] = None
     chunk: Optional[Chunk] = None
+    #: The ranks down the path, and for a chunk kept at a step, its own rank there: the order leaves come back in.
+    ranks: tuple[int, ...] = ()
+    #: The episodes of the summaries on the path, which the last read confirms.
+    through: tuple[int, ...] = ()
 
 
 @dataclass
@@ -211,6 +229,13 @@ class _Scorer:
         self.embed_calls = self.embedded_texts = 0
         self.vectors = {"index": 0, "embedded": 0}
         self.question: list[float] = []
+        #: Each summary note's chunks as first read, so the last read can confirm the summaries on a path.
+        self.held: dict[int, list[Chunk]] = {}
+
+    async def chunks_of(self, episode_id: int) -> list[Chunk]:
+        if episode_id not in self.held:
+            self.held[episode_id] = await self.engine.documents.chunks_of(self.space, episode_id)
+        return self.held[episode_id]
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         self.embed_calls += 1
@@ -225,7 +250,7 @@ class _Scorer:
         owned: list[list[int]] = []
         for candidate in candidates:
             if candidate.node is not None:
-                owned.append([chunk.chunk_id for chunk in await self.engine.documents.chunks_of(self.space, candidate.node.episode_id)])
+                owned.append([chunk.chunk_id for chunk in await self.chunks_of(candidate.node.episode_id)])
             else:
                 assert candidate.chunk is not None, "a candidate is a node or a chunk"
                 owned.append([candidate.chunk.chunk_id])
@@ -282,11 +307,10 @@ async def _account(engine: "MemoryEngine", space: str, detail: str) -> Optional[
     return listed
 
 
-def _branch(scored: _Scored) -> int:
-    """The place, among those kept at its step, of the summary a chunk was reached through."""
-    rank = scored.candidate.path[-1]["rank"]
-    assert isinstance(rank, int), "every path ends at the summary that named the chunk"
-    return rank
+def _branch(scored: _Scored) -> tuple[int, ...]:
+    """The ranks down a chunk's path, top first: compared in order, every chunk under the summary kept first at
+    a step comes before any under the next, whether its tree ends at that step or goes further down."""
+    return scored.candidate.ranks
 
 
 def _leaf(scored: _Scored) -> Chunk:
@@ -331,10 +355,14 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
     untreed: list[int] = []
     in_scope: list[Episode] = []
     absent: list[int] = []
-    out_of_scope = 0
+    out_of_scope = unlisted_trees = 0
     for document in (list(dict.fromkeys(episode_ids)) if episode_ids is not None else sorted(trees)):
         found = living.get(document)
-        if found is None:
+        if found is None and episode_ids is None:
+            # A tree whose document the listing did not return: a document forgotten or replaced leaves its
+            # summaries behind, and nothing it holds can be fitted to the scope. Counted, not read.
+            unlisted_trees += 1
+        elif found is None:
             absent.append(document)
         elif not wanted_tags.issubset(found.tags) or not episode_fits(found, kind, source_prefix, since_at, until_at):
             out_of_scope += 1
@@ -385,27 +413,40 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
         if len(steps) == max_depth:
             cut_by_depth = len(pool)
             break
-        kept: list[tuple[_Scored, StoredSummary]] = []
-        for scored in (await scorer.rank(pool))[:branching]:
-            assert scored.candidate.node is not None, "only summaries are in a pool"
-            kept.append((scored, scored.candidate.node))
-        steps.append({"pool": len(pool), "chosen": [node.episode_id for _, node in kept]})
+        chosen = (await scorer.rank(pool))[:branching]
+        steps.append({"pool": len(pool),
+                      "chosen": [one.candidate.node.episode_id for one in chosen if one.candidate.node is not None],
+                      "chunks": [one.candidate.chunk.chunk_id for one in chosen if one.candidate.chunk is not None]})
         below: list[_Candidate] = []
-        for rank, (scored, node) in enumerate(kept, start=1):
+        for rank, scored in enumerate(chosen, start=1):
             document = scored.candidate.document
+            node = scored.candidate.node
+            if node is None:
+                carried = _leaf(scored)
+                leaves.setdefault(carried.chunk_id, _Candidate(document, carried.text, scored.candidate.path,
+                                                               chunk=carried, ranks=(*scored.candidate.ranks, rank),
+                                                               through=scored.candidate.through))
+                continue
             written_from = await _account(engine, space, node.detail)
             if written_from is None:
                 unresolved += 1
                 continue
+            # Read now (once, if its step read it to score it), so the last read can confirm every summary on a path.
+            await scorer.chunks_of(node.episode_id)
             path = (*scored.candidate.path, _step(node, scored, rank, text))
+            ranks, through = (*scored.candidate.ranks, rank), (*scored.candidate.through, node.episode_id)
             for named in written_from:
                 kind_of, _, rest = named.partition(":")
                 if kind_of == "chunk" and rest.isdigit():
                     chunk = sources[document].chunks.get(int(rest))
                     if chunk is None:
                         missing += 1
+                    elif node.level > 1:
+                        # Carried up beside the nodes below unsummarized: it competes with them at the next step.
+                        below.append(_Candidate(document, chunk.text, path, chunk=chunk, ranks=ranks, through=through))
                     else:
-                        leaves.setdefault(chunk.chunk_id, _Candidate(document, chunk.text, path, chunk=chunk))
+                        leaves.setdefault(chunk.chunk_id, _Candidate(document, chunk.text, path, chunk=chunk, ranks=ranks,
+                                                                     through=through))
                     continue
                 parts = rest.split(":")
                 child = (places[document].get((node.fan_in, int(parts[0]), int(parts[1])))
@@ -414,7 +455,7 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
                 if child is None or child.level >= node.level:
                     unresolved += 1
                     continue
-                below.append(_Candidate(document, child.text, path, node=child))
+                below.append(_Candidate(document, child.text, path, node=child, ranks=ranks, through=through))
         pool = below
 
     # The branch first, then the chunk: a broad question is answered by the section the descent chose, and a
@@ -422,22 +463,33 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
     # sort is stable, so a branch's chunks keep their own ranking.
     ranked_leaves = sorted(((scored, _leaf(scored)) for scored in await scorer.rank(list(leaves.values()))),
                            key=lambda pair: _branch(pair[0]))
-    # Every read is done but the last: the chunks about to be returned, read again. A document
-    # forgotten or changed during the walk serves none of its chunks.
+    # Every read is done but the last: the chunks about to be returned, and the chunks of every summary on their
+    # paths, read again in one read. A document forgotten or changed during the walk serves none of its chunks,
+    # and nor does one whose path runs through a summary that went.
     while ranked_leaves:
-        chosen = ranked_leaves[:limit]
+        taken = ranked_leaves[:limit]
+        summaries = {summary for scored, _ in taken for summary in scored.candidate.through}
+        wanted = {chunk.chunk_id for _, chunk in taken} | {
+            chunk.chunk_id for summary in summaries for chunk in scorer.held[summary]}
         try:
-            fresh_chunks = {chunk.chunk_id: chunk for chunk in await engine.documents.get_chunks(
-                space, [chunk.chunk_id for _, chunk in chosen])}
+            fresh_chunks = {chunk.chunk_id: chunk for chunk in await engine.documents.get_chunks(space, sorted(wanted))}
         except SconeError:
-            for document in dict.fromkeys(chunk.episode_id for _, chunk in chosen):
+            # The read that confirms the answer failed, so no document's chunks were confirmed, returned or cut.
+            for document in dict.fromkeys(chunk.episode_id for _, chunk in ranked_leaves):
                 refused.append({"episode_id": document, "reason": "unread"})
             ranked_leaves = []
             break
-        moved = next((chunk.episode_id for _, chunk in chosen if fresh_chunks.get(chunk.chunk_id) != chunk), None)
-        if moved is None:
-            break
-        refused.append({"episode_id": moved, "reason": await walk.recheck(moved)})
+        moved = next((chunk.episode_id for _, chunk in taken if fresh_chunks.get(chunk.chunk_id) != chunk), None)
+        if moved is not None:
+            refused.append({"episode_id": moved, "reason": await walk.recheck(moved)})
+        else:
+            # A summary with no chunks when first read was already gone, so it confirms nothing.
+            moved = next((chunk.episode_id for scored, chunk in taken for summary in scored.candidate.through
+                          if not scorer.held[summary]
+                          or any(fresh_chunks.get(held.chunk_id) != held for held in scorer.held[summary])), None)
+            if moved is None:
+                break
+            refused.append({"episode_id": moved, "reason": "tree_changed"})
         ranked_leaves = [(scored, chunk) for scored, chunk in ranked_leaves if chunk.episode_id != moved]
 
     # Nothing is awaited from here on, so what was confirmed is what is returned.
@@ -451,9 +503,12 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
             tags=held_in.tags, metadata=dict(held_in.metadata), start=chunk.start, end=chunk.end,
             first_line=first_line, last_line=last_line, declaration=declaration,
             via_tree={"summary_of": held_in.episode_id, "path": [dict(step) for step in scored.candidate.path],
+                      **({"rank": scored.candidate.ranks[-1]} if len(scored.candidate.ranks) > len(scored.candidate.path) else {}),
                       **({"text_rank": scored.text_rank} if text else {})}))
-    reached, cut_by_limit = len(leaves), max(0, len(ranked_leaves) - limit)
-    descended = tuple(sorted(sources))
+    reached, cut_by_limit = len(ranked_leaves), max(0, len(ranked_leaves) - limit)
+    # A document is refused before the descent or instead of it, or when its chunks were read again: only the last
+    # were descended, and they are not counted among the documents that were.
+    descended = tuple(sorted(set(sources) - {one["episode_id"] for one in refused}))
     why = f"descended {len(steps)} level(s) of {len(descended)} document tree(s) to {reached} chunk(s)"
     if not in_scope and not absent:
         why = "no document with a summary tree is in scope"
@@ -474,6 +529,10 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
     if unlisted:
         why += (f"; the store listed {len(listed)} episode(s) and holds {len(listed) + unlisted}, so a tree among the "
                 f"{unlisted} it left out was not found")
+    if unlisted_trees:
+        why += (f"; {unlisted_trees} summary tree(s) name a document the space's listing did not return (a document "
+                f"forgotten or replaced leaves its tree behind{', and the listing left episodes out' if unlisted else ''}), "
+                f"and were not read or descended")
     if untreed:
         why += f"; {len(untreed)} document(s) named have no summary tree"
     if out_of_scope:
@@ -487,4 +546,5 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
                      steps=tuple(steps), leaves=reached, cut_by_limit=cut_by_limit, cut_by_depth=cut_by_depth,
                      stale=stale, missing=missing, unresolved=unresolved, uncovered=uncovered,
                      vectors=dict(scorer.vectors), embed_calls=scorer.embed_calls,
-                     embedded_texts=scorer.embedded_texts, walked=len(listed), unlisted=unlisted, why=why)
+                     embedded_texts=scorer.embedded_texts, walked=len(listed), unlisted=unlisted,
+                     unlisted_trees=unlisted_trees, why=why)
