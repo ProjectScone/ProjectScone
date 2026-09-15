@@ -504,7 +504,7 @@ async def write_batch(
             offset += len(chunks)
             await runtime.documents.clear_inflight(space, pending.new.content_hash)
             results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks),
-                                          embeddings_reused=reused[index] if reused is not None else 0)
+                                          embeddings_reused=reused[index] if reused is not None else 0,
                                           chunking=pending.chunking, structure=pending.structure,
                                           embedding_context=pending.embedding_context)
     except Exception:

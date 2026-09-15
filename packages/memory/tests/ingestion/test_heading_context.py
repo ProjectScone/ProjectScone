@@ -146,13 +146,13 @@ async def test_replace_refuses_when_the_setting_changes_while_preparing(monkeypa
     memory, _ = await engine_with(heading_context=True)
     try:
         await memory.replace("default", Record(DOC, source="guide.md", dedup_key="guide"))
-        original = batch.embed_pending
+        original = batch.embed_pending_counted
 
         async def flip(*args, **kwargs):
             memory.heading_context = False
             return await original(*args, **kwargs)
 
-        monkeypatch.setattr(batch, "embed_pending", flip)
+        monkeypatch.setattr(batch, "embed_pending_counted", flip)
         with pytest.raises(InvalidInput, match="configuration changed"):
             await memory.replace("default", Record(DOC + "\nMore.", source="guide.md", dedup_key="guide"))
     finally:

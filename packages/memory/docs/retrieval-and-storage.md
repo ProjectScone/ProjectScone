@@ -11,7 +11,12 @@ Examples below run from `packages/memory/` unless a section names another workin
 Items carry `score` (rank within this query; the top item is always 1.0)
 and `similarity` (cosine from the vector lane, when that lane saw the
 chunk). Two lanes, vector and lexical, are fused by reciprocal rank with a
-small recency term, capped at two chunks per episode. A lane that fails is
+small recency term, capped at two chunks per episode. The recency term is
+`SCONE_RECENCY_WEIGHT` at age zero (default 0.005, small against a fused rank
+score, so it breaks near-ties toward newer memory and nothing else), halved
+every `SCONE_RECENCY_HALF_LIFE_DAYS` (default 30); a memory of a support queue
+can weight it up, and zero turns it off. The same knobs are
+`MemoryEngine(recency_weight=…, recency_half_life_days=…)`. A lane that fails is
 named in `degraded` and the other lane still answers. `context_reduction`
 is the share of the space's bytes that were left behind.
 
@@ -296,6 +301,7 @@ lanes search, since a word that names a scope can still name what the
 passage says. A kind is read only after a word that places the question in
 it ("in my notes"), a tag begins with a letter (`#12` is an issue, not a
 tag), and nothing is read without `--infer`.
+
 ### Summary trees for long documents
 
 ```bash
@@ -1232,6 +1238,7 @@ already use, so `scone graph affected db/schema.sql:customers` lists the
 tables and views that rest on `customers`, nearest first, beside the code
 that imports a module. Nothing binds code to a table: a query is a string,
 and a string that names a table is a guess this graph does not make.
+
 ### What a diff reaches
 
 ```bash
@@ -1401,6 +1408,7 @@ scale) are the four the reference framework also asks. Two more:
 
 A judgment is the judge's opinion, not proof; the bench reports it beside the
 metrics that need no judge, and says which is which.
+
 ### Questions your own corpus answers
 
 ```bash
@@ -1643,7 +1651,10 @@ scone sync ~/work/notes --apply --remove         # also forgets what is gone
 An unchanged file is **not a write**: the space's revision does not move,
 so a sync on a timer does not churn the store. A changed file is an
 update through the engine's keyed `replace`, so a source that changed
-leaves **one** memory and not two. A sync that reads code reads the
+leaves **one** memory and not two — and with `SCONE_EMBEDDING_CACHE` set,
+only the chunks whose text changed reach the embedder; the receipt's
+`embeddings_reused` counts the rest (see [file ingestion](file-ingestion.md#reusing-embeddings-across-updates)). A sync
+that reads code reads the
 project's manifests too (`pyproject.toml`, `package.json`, `Cargo.toml`,
 `go.mod`, `requirements*.txt` and `requirements/*.txt`, and the rest
 `map` knows), whatever their suffix, judged by their path below the
@@ -1653,9 +1664,6 @@ sync keeps what the project depends on as current as what it defines; a
 sync of notes alone (`--suffix .md`) leaves them, and a manifest that
 falls out of a narrowed sync's scope is out of scope, not missing. The
 receipt's `files_found` counts them with the files the suffixes chose.
-leaves **one** memory and not two — and with `SCONE_EMBEDDING_CACHE` set,
-only the chunks whose text changed reach the embedder; the receipt's
-`embeddings_reused` counts the rest (see [file ingestion](file-ingestion.md#reusing-embeddings-across-updates)).
 
 **What the tree says not to read is left unread.** A repository walked
 whole is a repository with its `node_modules`, `build`, `dist`, `target`

@@ -169,7 +169,7 @@ SLACK_DAY = [
     {"type": "message", "subtype": "channel_join", "user": "U1", "text": "<@U1> has joined the channel", "ts": "1710237600.000100"},
     {"type": "message", "user": "U1", "user_profile": {"display_name": "ada", "real_name": "Ada L"},
      "text": "Deploy at <https://example.test/run/9|run 9> &amp; ping <@U2>, see <#C9|ops>", "ts": "1710237660.000200"},
-    {"type": "message", "user": "U2", "text": "on it", "ts": "1710237720.000300", "thread_ts": "1710237660.000200"},
+    {"type": "message", "user": "U2", "text": "on it, rolling the deploy now", "ts": "1710237720.000300", "thread_ts": "1710237660.000200"},
     {"type": "message", "user": "U2", "text": "", "ts": "1710237780.000400", "files": [{"name": "log.txt"}]},
 ]
 

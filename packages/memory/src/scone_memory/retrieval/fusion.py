@@ -13,11 +13,18 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from ..core.errors import InvalidInput
 from ..core.timeutil import parse_rfc3339
 
 RRF_K = 60
+#: The recency term's size at age zero, and the age at which it has
+#: halved. Small against a fused rank score so it breaks near-ties only;
+#: an engine can be built with its own (a memory of a life is not a
+#: memory of a build log), and zero turns it off.
 W_RECENCY = 0.005
 RECENCY_HALF_LIFE_DAYS = 30.0
+MAX_RECENCY_WEIGHT = 1.0
+MAX_RECENCY_HALF_LIFE_DAYS = 36_500.0
 PER_EPISODE_CAP = 2
 
 
@@ -35,6 +42,16 @@ def rrf(lanes: Sequence[Sequence[tuple[int, float]]], weights: Sequence[float] |
         for rank, (chunk_id, _) in enumerate(lane):
             scores[chunk_id] = scores.get(chunk_id, 0.0) + weight / (RRF_K + rank + 1)
     return scores
+
+
+def validate_recency(weight: float, half_life_days: float) -> None:
+    """A weight is zero or more, at most MAX_RECENCY_WEIGHT; a half-life is
+    a positive number of days, at most a century. Both finite."""
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or not 0 <= weight <= MAX_RECENCY_WEIGHT:
+        raise InvalidInput(f"recency_weight must be a finite number from 0 to {MAX_RECENCY_WEIGHT}")
+    if (isinstance(half_life_days, bool) or not isinstance(half_life_days, (int, float)) or not math.isfinite(half_life_days)
+            or not 0 < half_life_days <= MAX_RECENCY_HALF_LIFE_DAYS):
+        raise InvalidInput(f"recency_half_life_days must be finite and greater than zero, at most {MAX_RECENCY_HALF_LIFE_DAYS:g}")
 
 
 #: The ways recall can fuse its lanes: by rank alone, or by each lane's
@@ -67,9 +84,17 @@ def relative_scores(lanes: Sequence[Sequence[tuple[int, float]]], weights: Seque
     return scores
 
 
-def recency_boost(created_at: str, now: str) -> float:
+def recency_boost(created_at: str, now: str, *, weight: float = W_RECENCY,
+                  half_life_days: float = RECENCY_HALF_LIFE_DAYS) -> float:
+    """How much newer memory is favoured: ``weight`` at age zero, halved
+    every ``half_life_days``. Zero weight favours nothing."""
+    if weight == 0:
+        return 0.0
     age_days = max(0.0, (parse_rfc3339(now) - parse_rfc3339(created_at)).total_seconds() / 86400)
-    return W_RECENCY * math.exp(-age_days / RECENCY_HALF_LIFE_DAYS)
+    # A half-life halves: at age half_life_days the term is weight / 2.
+    # (The constant this replaced was a 1/e time constant under the same
+    # name, which halved at 0.69 of the days it named.)
+    return weight * 2.0 ** (-age_days / half_life_days)
 
 
 def order(items: list[Fused]) -> list[Fused]:

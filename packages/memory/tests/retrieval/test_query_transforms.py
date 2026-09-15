@@ -80,11 +80,14 @@ async def test_a_rewritten_recall_finds_what_the_question_could_not_and_carries_
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     await engine.remember("s", "The billing run went out late and the invoices were wrong.")
     await engine.remember("s", "The garden shed needs a new roof before winter.")
-    plain = await engine.recall("s", QUESTION, limit=2)
+    # The text lane matches a word's family by stem ("bills" finds
+    # "billing"), so the question shares no family with the passage.
+    question = "Any trouble with the accounts?"
+    plain = await engine.recall("s", question, limit=2)
     assert all("text" not in item.lanes for item in plain.items), "the question's words are not the passage's"
-    found, asked = await rewritten_recall(engine, FakeChat([reply("bills billing run invoices")]), "s", QUESTION, limit=2)
+    found, asked = await rewritten_recall(engine, FakeChat([reply("accounts billing run invoices")]), "s", question, limit=2)
     assert asked.applied and found.items[0].text.startswith("The billing run") and found.items[0].lanes.get("text") == 1
-    kept, untouched = await rewritten_recall(engine, FakeChat(["nonsense"]), "s", QUESTION, limit=2)
+    kept, untouched = await rewritten_recall(engine, FakeChat(["nonsense"]), "s", question, limit=2)
     assert untouched.applied is False and [i.text for i in kept.items] == [i.text for i in plain.items]
 
 

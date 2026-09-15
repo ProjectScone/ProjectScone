@@ -321,6 +321,25 @@ def test_an_html_table_in_a_mail_carries_the_mails_metadata_and_a_bare_file_is_n
     doc = parse_text(bare.as_bytes(), "one.mbox", DocumentLimits())
     assert any(s.text == ">From my notes, the harbour closes in November." for s in doc.segments), \
         "a file no mbox writer made was never quoted, so nothing is unquoted"
+
+
+async def test_a_mailbox_file_is_ingested_end_to_end_and_its_original_kept_under_its_own_type() -> None:
+    """The reader is not enough: ingesting a file keeps its original bytes as
+    an attachment under the file's media type, and the engine refuses a type
+    it does not attach."""
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.ingestion.files import ingest_document
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        ingested = await ingest_document(memory, "mail", _mailbox_bytes(), filename="inbox.mbox")
+        assert ingested.format == "mbox" and ingested.original.media_type == "application/mbox"
+        episode = await memory.episode("mail", ingested.added.episode_id)
+        assert "The harbour closes to sailing boats every November." in episode.content
+    finally:
+        await memory.close()
+
+
 def test_csv_rows_carry_their_cells_with_spans_and_the_column_names() -> None:
     import json
 

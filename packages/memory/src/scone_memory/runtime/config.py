@@ -95,6 +95,7 @@ if TYPE_CHECKING:
 
 from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
+from ..retrieval.fusion import RECENCY_HALF_LIFE_DAYS, W_RECENCY, validate_recency
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 
 
@@ -197,6 +198,11 @@ class Settings:
     profile_predicates: tuple[str, ...] = ()
     profile_without: tuple[str, ...] = ()
     similarity_floor: Optional[float] = None
+    #: How much newer memory is favoured in fusion (SCONE_RECENCY_WEIGHT,
+    #: SCONE_RECENCY_HALF_LIFE_DAYS): the term's size at age zero and the
+    #: age at which it halves. Zero weight turns it off.
+    recency_weight: float = W_RECENCY
+    recency_half_life_days: float = RECENCY_HALF_LIFE_DAYS
     candidate_limit: int | None = None
     reranker_factory: str | None = None
     reranker_cross_encoder_dir: str | None = None
@@ -302,6 +308,11 @@ class Settings:
                 ("rerank_timeout", "SCONE_RERANK_TIMEOUT")):
                 message = message.replace(field_name, env_name)
             raise InvalidInput(message) from None
+        try:
+            validate_recency(self.recency_weight, self.recency_half_life_days)
+        except InvalidInput as error:
+            raise InvalidInput(str(error).replace("recency_weight", "SCONE_RECENCY_WEIGHT")
+                               .replace("recency_half_life_days", "SCONE_RECENCY_HALF_LIFE_DAYS")) from None
         if self.reranker_factory is not None:
             _reranker_spec(self.reranker_factory)
         for name, value in (("DIR", self.reranker_cross_encoder_dir), ("MODEL", self.reranker_cross_encoder_model)):
@@ -426,6 +437,9 @@ class Settings:
             profile_without=tuple(item.strip() for item in env.get("SCONE_PROFILE_WITHOUT", "").split(",")
                                   if item.strip()),
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
+            recency_weight=_environment_float("SCONE_RECENCY_WEIGHT", env.get("SCONE_RECENCY_WEIGHT") or str(W_RECENCY)),
+            recency_half_life_days=_environment_float("SCONE_RECENCY_HALF_LIFE_DAYS",
+                                                      env.get("SCONE_RECENCY_HALF_LIFE_DAYS") or str(RECENCY_HALF_LIFE_DAYS)),
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),
             reranker_factory=env.get("SCONE_RERANKER_FACTORY") or None,
@@ -725,13 +739,23 @@ def build_vectors(settings: Settings, documents=None):
 
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
-ENGINE_SETTINGS = ("contextual_embeddings", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
+ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "lexical_stems",
-                   "vector_weight")
+                   "vector_weight", "recency_weight", "recency_half_life_days")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy", "synonyms")
 #: Settings carried into an engine through a policy they build.
 POLICY_SETTINGS = ("profile_predicates", "profile_without")
+
+
+def _environment_float(name: str, value: str) -> float:
+    try:
+        number = float(value.strip())
+    except (ValueError, AttributeError):
+        raise InvalidInput(f"{name} must be a number, got {value!r}") from None
+    if not math.isfinite(number):
+        raise InvalidInput(f"{name} must be a finite number, got {value!r}")
+    return number
 
 
 def _environment_integer(name: str, value: str) -> int:
@@ -809,6 +833,8 @@ async def build_in_process_engine(settings: Settings, embedder):
         heading_context=settings.heading_context,
         table_context_embeddings=settings.table_context_embeddings,
         similarity_floor=settings.similarity_floor,
+        recency_weight=settings.recency_weight,
+        recency_half_life_days=settings.recency_half_life_days,
         demote_restated=settings.demote_restated,
         candidate_limit=settings.candidate_limit,
         reranker=reranker,
@@ -1008,6 +1034,8 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         embedding_cache=embedding_cache,
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
+        recency_weight=settings.recency_weight,
+        recency_half_life_days=settings.recency_half_life_days,
         candidate_limit=settings.candidate_limit,
         reranker=reranker,
         rerank_limit=settings.rerank_limit,

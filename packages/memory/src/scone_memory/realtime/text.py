@@ -137,6 +137,7 @@ class TextConversation:
                  max_reply_bytes=64000, max_history_bytes=128000,
                  adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0,
                  neighbor_chunks: int = 0,
+                 reading_order: str = "ranked",
                  answer_reviewer: AnswerReviewer | None = None, review_limits: AnswerReviewLimits | None = None,
                  review_policy: Literal["report", "require_supported"] = "report",
                  answer_requirements: AnswerRequirements | None = None,
@@ -144,7 +145,7 @@ class TextConversation:
                  evidence_answer_policy: Literal["when_available", "required"] = "when_available",
                  tool_model_factory: Callable[[], ToolModel] | None = None,
                  tool_limits: ToolLoopLimits | None = None, tool_initial_search: bool = False,
-                 tool_compute: bool = False, history_policy: str = "refuse",
+                 tool_compute: bool = False, tool_tables: bool = False, history_policy: str = "refuse",
                  standing_profile: "ProfilePolicy | None" = None, profile_limit: int = 10,
                  max_profile_bytes: int = 1000):
         check_space(space)
@@ -229,7 +230,8 @@ class TextConversation:
         self._scope = scope
         self._context = MemoryContext(memory, space, session_id, **scope.kwargs(),
                                       adaptive_retriever=adaptive_retriever, recall_timeout=recall_timeout,
-                                      neighbor_chunks=neighbor_chunks, standing_profile=standing_profile,
+                                      neighbor_chunks=neighbor_chunks, reading_order=reading_order,
+                                      standing_profile=standing_profile,
                                       profile_limit=profile_limit, max_profile_bytes=max_profile_bytes)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task[dict] | None = None
