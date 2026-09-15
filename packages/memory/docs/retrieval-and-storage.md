@@ -1268,6 +1268,142 @@ invariant test that should have caught the first asserted exactly the
 right property and passed, because its fixture never contained the
 junction.
 
+## A chunk measured in tokens
+
+The length cut's target is 700 characters. A model reads tokens, and the
+reference framework's splitter measures its nodes in them -- 512 by
+default -- filling each with whole sentences, so one of its nodes carries
+more of a conversation than one of our chunks. `chunk_tokens` measures
+the length cut in tokens instead:
+
+```python
+MemoryEngine(store, index, embedder, chunk_tokens=512)                           # or SCONE_CHUNK_TOKENS=512
+MemoryEngine(store, index, embedder, chunk_tokens=512, chunk_overlap_tokens=64)  # SCONE_CHUNK_OVERLAP_TOKENS=64
+```
+
+- **Whole sentences are packed.** Sentences are found as the semantic cut
+  finds them (a stop followed by space, not after an initial, a title or
+  before a lower-case word) and added to a chunk while its count stays
+  within the target. A chunk ends where a sentence ends.
+- **A sentence is cut inside only when it alone is over the target**, and
+  then at a line break before a space, and at a space before a hard cut
+  inside a word. The receipt counts both: `sentences_over_target` and
+  `hard_cuts`.
+- **Counted by the embedder's tokenizer when it has one** (`tokenizer-v1`;
+  the local BGE models do), **by the budget's estimate otherwise**
+  (`estimate-v1`, no model: see "Keeping that context inside the embedder's
+  window" below). The count of an empty text -- the start and end markers
+  a model adds -- is paid once a chunk, so a 512-token chunk fits a
+  512-token window as that count sees it. The estimate is meant to err
+  high, and it is not a bound on any model's count: cutting every tenth
+  LongMemEval-S item's 2,443 sessions at 512 by the estimate, BGE-small's
+  own tokenizer counted 8 of the 16,301 chunks over 512, the largest 534
+  (Portuguese prose); on the first 200 LongMemEval oracle items at 256,
+  1 of 9,590, at 261. Nor is it a count of the reference's tokens
+  (tiktoken's `cl100k_base`): on the conversations below a chunk it held
+  to 512 had 330 of those at the median and 640 at most. An embedder
+  with a window and no tokenizer should be given a target below it.
+- **The bound says when it did not hold -- as its count sees it.** The
+  chunk is measured again whole, and `over_target` counts the chunks the
+  count measured over the target (a tokenizer need not count a chunk as
+  the sum of its sentences); `largest` gives the largest count. Under
+  `estimate-v1` both are the estimate measuring what it packed, the sum
+  of pieces it already held to the target, so `over_target` can be above
+  0 there only beside a hard cut, and says nothing about a model's window.
+- **An overlap repeats whole trailing sentences** of the chunk before, as
+  many as fit in `chunk_overlap_tokens`, and gives way from its front when
+  it and the next sentence do not fit. With it on, stored spans of
+  neighbouring chunks overlap; `overlapped` counts the chunks that start
+  with repeated text. Off (0) by default, and refused without
+  `chunk_tokens` or at or above it. It works with table context
+  (`table_context_embeddings`), which embeds each overlapping chunk with
+  the headers it lacks: the spans it checks must be in order -- each
+  starting after the one before starts and ending after it ends -- not
+  disjoint, so a space stored with an overlap can be rebuilt or recovered
+  with table context turned on later.
+- **Only the length cut.** Code, structure, semantic and unit cuts keep the
+  character target, and a record's receipt still says `chunking: length`,
+  with the token counts under `structure` (`measure: tokens`).
+- **Stored chunks are never recut.** The setting decides how records
+  stored from then on are cut; a record already stored keeps its chunks,
+  and the same content stored again is a duplicate that changes nothing.
+  Both values are part of the configuration a keyed replacement is
+  prepared under, so a replacement cut before the setting changed is
+  refused rather than stored as if cut under the new one.
+- **Scripts written without spaces are one sentence to it.** The sentence
+  finder knows `.`, `!` and `?`; Chinese or Japanese prose is packed by
+  hard cuts inside that one sentence and the receipt says so. Leave
+  `chunk_tokens` unset for such text until it learns the full-width stops.
+  A hard cut's end is found by widening from the part's start, doubling
+  until a part does not fit, so the count never reads far past the part
+  it finds: a 100,000-letter word is counted 16 times over, where halving
+  from the word's end counted it 341 times over and grew with the square
+  of the word. 300,000 characters of Chinese prose took 3.4 s at 256
+  tokens and 2.3 s at 512, against 135 s and 61 s (three interleaved
+  rounds, medians; the same cuts).
+- **Off by default.** Cut positions decide what chunks exist, and the
+  numbers below are one sample on a hashed-token embedder.
+
+### What it measured
+
+LongMemEval-S, the 50 items stratified by question type (seed 42), the
+hashed-token embedder on both sides, no model, no reranker, engine
+defaults otherwise (stem prefixes on, vector weight 0.25), engines built
+through `Settings.from_env` with `SCONE_CHUNK_TOKENS`. The reference is
+LlamaIndex 0.14.24 at its best retrieval configuration:
+`QueryFusionRetriever(VectorIndexRetriever + BM25Retriever)` over
+`SentenceSplitter(chunk_size=512, chunk_overlap=0)`, every node ranked and
+folded to sessions. Both sides are deterministic: ours returned the same
+rankings in each of three rounds, and the reference the same scores in
+each of its four runs.
+
+| our chunks | R@5 | all-sessions@5 | R@15 | MRR | k=5 against the reference: won / lost |
+| --- | --- | --- | --- | --- | --- |
+| 700 characters (default) | 0.88 | 0.72 | 0.98 | 0.807 | 1 / 1 |
+| 256 tokens | 0.88 | 0.74 | 0.98 | 0.831 | 1 / 1 |
+| **512 tokens** | **0.92** | **0.78** | 0.96 | 0.840 | 2 / 0 |
+| 1,024 tokens | 0.90 | 0.74 | **1.00** | **0.856** | 2 / 1 |
+| *reference: `SentenceSplitter(512)`, BM25 + vector fusion* | 0.88 | 0.74 | 0.98 | 0.831 | |
+
+Chunk sizes over the same 2,355 sessions:
+
+| | chunks | a session | median characters | median `cl100k_base` tokens | largest | sentences over the target |
+| --- | --- | --- | --- | --- | --- | --- |
+| 700 characters | 46,640 | 19.8 | 576 | 117 | 643 | -- |
+| 256 tokens | 33,717 | 14.3 | 762 | 159 | 400 | 532 of 253,069 |
+| 512 tokens | 16,689 | 7.1 | 1,581 | 330 | 640 | 104 |
+| 1,024 tokens | 8,745 | 3.7 | 3,201 | 666 | 1,325 | 18 |
+| reference, 512 | 11,946 | 5.1 | 2,233 | 482 | | |
+
+No word was hard-cut, and the estimate counted no chunk over its target
+(which, as above, it could only beside a hard cut: this is not a check
+against a model's window).
+
+What it says: at 512 estimated tokens our engine is ahead of the
+reference at its best at k=5 (R@5 0.92 vs 0.88, all-sessions@5 0.78 vs
+0.74, MRR 0.840 vs 0.831; two items won, none lost) and still one item
+behind at k=15; the best MRR was at 1,024. What it does not say: 50
+items is one or two items a column, so these are not differences a
+second sample is sure to repeat; with hashed-token vectors both lanes are
+lexical; and the two sides' chunks are not the same size -- the
+reference's 512 tiktoken nodes sit between our 512 and 1,024 estimated
+tokens. Nothing about answer quality.
+
+It costs time. Cutting those sessions (24.8 million characters) alone,
+the four ways interleaved, five rounds, medians: 0.60 s at 700
+characters, 9.0 s at 256 tokens, 8.7 s at 512 and 9.0 s at 1,024. The
+estimate reads each session once and every sentence, line, word and
+chunk is a difference of running totals. The first version estimated
+every sentence's text and then every chunk's again; against it, in one
+process, interleaved, five rounds, the medians were 75.0 s against 20.0 s
+at 256 tokens, 65.8 s against 24.5 s at 512 and 23.3 s against 8.5 s at
+1,024 -- 3.0, 2.7 and 2.6 times as fast by the median of each round's
+ratio, on a machine whose load went from 15 to 68 during the run (the
+quietest rounds: 13.2 against 5.8 s, 15.1 against 7.3 s, 16.2 against
+8.0 s). Both versions cut every session into the same spans with the
+same receipt at 256, 512, 1,024, and 512 with a 64-token overlap. The
+retrieval numbers above were taken with the first version.
+
 ## Cutting a document at its genre's boundaries
 
 Structure chunking reads what any document carries and packs it up to the

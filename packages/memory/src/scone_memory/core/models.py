@@ -641,8 +641,12 @@ class Added(BaseModel):
     #: ``code`` for a code source unless the record said otherwise -- and,
     #: when it was cut at its structure, the chunker's own counts: what
     #: landed on a boundary, what was split by size, whether a unit ran
-    #: over the target and whether the unit bound bit. None on a receipt
-    #: that stored nothing.
+    #: over the target and whether the unit bound bit. A length cut measured
+    #: in tokens (``chunk_tokens``) carries its own counts here too, with
+    #: ``measure: "tokens"``: sentences cut inside because one alone was
+    #: over the target, cuts inside a word, chunks that overlap the one
+    #: before and chunks the count measured over. None on a receipt that
+    #: stored nothing.
     chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     structure: Optional[dict[str, object]] = None
     #: With heading context on: how many chunks were embedded with a line
