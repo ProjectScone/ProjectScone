@@ -321,6 +321,8 @@ def test_an_html_table_in_a_mail_carries_the_mails_metadata_and_a_bare_file_is_n
     doc = parse_text(bare.as_bytes(), "one.mbox", DocumentLimits())
     assert any(s.text == ">From my notes, the harbour closes in November." for s in doc.segments), \
         "a file no mbox writer made was never quoted, so nothing is unquoted"
+
+
 def test_csv_rows_carry_their_cells_with_spans_and_the_column_names() -> None:
     import json
 

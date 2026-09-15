@@ -40,6 +40,7 @@ def tree(tmp_path):
     (tmp_path / "app" / "planner.py").write_text(PLANNER, encoding="utf-8")
     (tmp_path / "app" / "store.py").write_text(STORE, encoding="utf-8")
     (tmp_path / "app" / "broken.py").write_text("def half(:\n", encoding="utf-8")
+    # A document is read too (see ingestion/doc_graph.py); one with no links has nothing to say.
     (tmp_path / "README.md").write_text("# not code\n", encoding="utf-8")
     return tmp_path
 
@@ -60,15 +61,15 @@ async def test_mapping_a_directory_remembers_every_source_file(tree):
     engine = await memory()
     said = await mapped(engine, str(tree))
     counts = await engine.documents.counts("default")
-    assert counts.episodes == 3, "three .py files; the readme is not code"
-    assert "3 file(s)" in said
+    assert counts.episodes == 4, "three .py files and the readme, a document"
+    assert "4 file(s)" in said
 
 
 async def test_a_file_is_stored_under_the_path_it_was_read_from(tree):
     engine = await memory()
     await mapped(engine, str(tree))
     sources = {episode.source for episode in await engine.documents.recent_episodes("default", 10)}
-    assert sources == {"app/planner.py", "app/store.py", "app/broken.py"}
+    assert sources == {"app/planner.py", "app/store.py", "app/broken.py", "README.md"}
 
 
 async def test_mapping_can_record_what_each_file_says_about_itself(tree):
@@ -94,7 +95,7 @@ async def test_a_file_that_cannot_be_read_is_counted_apart_from_one_with_nothing
     engine = await memory()
     said = await mapped(engine, str(tree), "--graph")
     assert "1 could not be read" in said, said
-    assert "1 had nothing to say" in said, said
+    assert "2 had nothing to say" in said, said  # empty.py and the readme, which links nothing
 
 
 async def test_a_directory_that_is_not_one_is_refused(tmp_path):
@@ -114,7 +115,7 @@ async def test_mapping_the_same_directory_again_changes_nothing(tree):
     said = await mapped(engine, str(tree), "--graph")
     assert (await engine.documents.counts("default")).episodes == episodes
     assert len(await engine.documents.list_facts("default", include_closed=True)) == facts
-    assert "3 already here" in said, said
+    assert "4 already here" in said, said
 
 
 async def test_mapping_resolves_the_imports_between_the_files_it_saw(tmp_path):
@@ -249,7 +250,7 @@ async def test_the_json_receipt_carries_what_was_withheld_and_why(tree):
         {"path": "app/config.py", "reason": "content:secret"},
         {"path": "app/deploy.py", "reason": "content:private_key"},
     ]
-    assert report["read"] == 3
+    assert report["read"] == 4
 
 
 async def test_mapping_reads_the_manifests_beside_the_code(tree):

@@ -367,18 +367,17 @@ async def run(
                 ))
             await engine.remember_many(space, records)
             t0 = time.perf_counter()
-            # Only when asked for: engines built before the option, and test
-            # stand-ins, take recall without it.
-            if fusion == "rank":
-                pack = await engine.recall(space, item.question, limit=k_max, history=history)
-            else:
-                pack = await engine.recall(space, item.question, limit=k_max, history=history, fusion=fusion)
             question = item.question
             if transform is not None:
                 asked = await transform(item.question)
                 question = asked.query
                 result.query, result.transformed = asked.query, asked.applied
-            pack = await engine.recall(space, question, limit=k_max, history=history)
+            # Only when asked for: engines built before the option, and test
+            # stand-ins, take recall without it.
+            if fusion == "rank":
+                pack = await engine.recall(space, question, limit=k_max, history=history)
+            else:
+                pack = await engine.recall(space, question, limit=k_max, history=history, fusion=fusion)
             if window:
                 from ..retrieval.window import widen
 

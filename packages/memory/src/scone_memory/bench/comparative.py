@@ -373,8 +373,6 @@ async def compare(items: Iterable[BenchItem], make_engine: Callable[[], Any], em
         "embedder": embedder.id, "llm": None, "reranker": None, "ks": list(ks),
         "scone": {"recall_limit": recall_limit, "retrieval": "engine defaults: vector + lexical lanes, reciprocal rank fusion",
                   "sessions_folded_from_passages": True},
-        "llamaindex": {"version": llama_index.core.__version__, "index": "VectorStoreIndex", "retriever": "VectorIndexRetriever",
-        "scone": {"recall_limit": k_max, "retrieval": "engine defaults: vector + lexical lanes, reciprocal rank fusion"},
         "llamaindex": {"version": llama_index.core.__version__, "index": "VectorStoreIndex",
                        "retriever": ("QueryFusionRetriever(VectorIndexRetriever + BM25Retriever)" if hybrid
                                      else "VectorIndexRetriever"),

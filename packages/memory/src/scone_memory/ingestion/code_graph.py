@@ -692,23 +692,20 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     from .schema_claims import is_schema, schema_claims
 
     said = 0
-    # A manifest says what the project depends on; a source file says what
-    # it defines, imports and calls; a document says what it references
-    # and cites. All are read the same way from here.
+    # A manifest says what the project depends on; a schema says what
+    # tables there are and what rests on what; a source file says what it
+    # defines, imports and calls; a document says what it references and
+    # cites. All are read the same way from here.
     if is_manifest(path):
         claims = manifest_claims(content, path)
+    elif is_schema(path):
+        claims = schema_claims(content, path)
     elif is_document(path):
         # The import resolver also follows a document's links when it can
         # (`file_resolver`); a resolver that cannot leaves them unresolved.
         claims = doc_claims(content, path, resolve=resolve if hasattr(resolve, "links") else None)
     else:
         claims = code_claims(content, path, language=code_language(path), resolve=resolve)
-    # A manifest says what the project depends on; a schema says what
-    # tables there are and what rests on what; a source file says what it
-    # defines, imports and calls. All are read the same way from here.
-    claims = (manifest_claims(content, path) if is_manifest(path)
-              else schema_claims(content, path) if is_schema(path)
-              else code_claims(content, path, language=code_language(path), resolve=resolve))
     for claim in claims:
         if _recorded is not None:
             _recorded.append(claim)
