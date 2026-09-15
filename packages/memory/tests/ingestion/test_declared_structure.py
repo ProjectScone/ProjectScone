@@ -109,7 +109,7 @@ def test_word_headings_lists_and_captions_come_from_outline_levels_styles_and_nu
         ('Aside', MEMBER),
         ('Scope', heading(3, 'outline_level')),
         ('Quoted', MEMBER),
-        ('Circular', MEMBER),
+        ('Circular', {**MEMBER, 'heading_level_unresolved': 'style_chain'}),
         ('Figure 1: Layout', {**MEMBER, 'block_role': 'caption'}),
         ('Apples', item('1', '0', 'bullet')),
         ('Green', item('1', '1', 'bullet')),
@@ -171,7 +171,7 @@ def test_a_style_chain_longer_than_its_bound_is_cut_and_noted(monkeypatch) -> No
     assert circular.metadata == {}, 'a style based on itself ends its chain; nothing was cut'
     monkeypatch.setattr(word_structure, 'MAX_STYLE_DEPTH', 1)
     parsed = parse_office(word(body, styles=STYLES), 'report.docx', DocumentLimits())
-    assert parsed.segments[0].metadata == MEMBER
+    assert parsed.segments[0].metadata == {**MEMBER, 'heading_level_unresolved': 'style_chain'}
     assert parsed.metadata == {'structure_notes': 'style_chain_cut'}
 
 

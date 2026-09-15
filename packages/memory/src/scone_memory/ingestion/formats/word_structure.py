@@ -26,6 +26,8 @@ from xml.etree.ElementTree import Element
 #: Styles followed through ``basedOn`` for one paragraph. A chain longer
 #: than this is read no further, and the document's ``structure_notes`` say
 #: ``style_chain_cut``: a heading declared further up would have been missed.
+#: A paragraph whose chain was cut, or runs round in a circle, before any
+#: style in it named a heading says ``heading_level_unresolved: style_chain``.
 MAX_STYLE_DEPTH = 32
 
 _HEADING_NAME = re.compile(r'heading ([1-9])', re.IGNORECASE)
@@ -115,31 +117,40 @@ class WordStructure:
                 if fmt is not None and fmt != 'none':
                     self.kinds[(identifier, level_id)] = 'bullet' if fmt == 'bullet' else 'ordered'
 
-    def _chain(self, identifier: str | None) -> list[_Style]:
-        """The style and those it is based on, nearest first; a cycle ends it."""
+    def _chain(self, identifier: str | None) -> tuple[list[_Style], bool]:
+        """The style and those it is based on, nearest first, and whether the chain was
+        followed to its end: a cycle or the depth bound ends it short."""
         chain: list[_Style] = []
         seen: set[str] = set()
-        while identifier in self.styles and identifier not in seen:
+        while identifier in self.styles:
+            if identifier in seen:
+                return chain, False
             if len(chain) == MAX_STYLE_DEPTH:
                 self.notes.add('style_chain_cut')
-                break
+                return chain, False
             seen.add(identifier)
             chain.append(self.styles[identifier])
             identifier = chain[-1].based_on
-        return chain
+        return chain, True
 
     def role(self, paragraph: Element, check: Callable[[], None]) -> dict[str, str]:
         check()
         properties = _child(paragraph, 'pPr')
         style_id = _value(_property(properties, 'pStyle')) if properties is not None else None
-        chain = self._chain(style_id)
+        chain, whole = self._chain(style_id)
         heading = self._heading(properties, style_id, chain)
         if heading is not None:
             return heading
+        # Unresolved only where the chain ended short before anything said whether this is a
+        # heading: an outline level, the paragraph's own or a style's, says body text too.
+        decided = _outline(properties) is not None or any(
+            style.outline is not None or _HEADING_NAME.fullmatch(style.name) or style.name.lower() == 'title'
+            for style in chain)
+        unresolved = {} if whole or decided else {'heading_level_unresolved': 'style_chain'}
         if any(style.name.lower() == 'caption' for style in chain) or (
                 style_id and style_id not in self.styles and style_id.lower() == 'caption'):
-            return {'block_role': 'caption'}
-        return self._list_item(properties, chain)
+            return {'block_role': 'caption', **unresolved}
+        return {**self._list_item(properties, chain), **unresolved}
 
     def _heading(self, properties: Element | None, style_id: str | None,
                  chain: list[_Style]) -> dict[str, str] | None:

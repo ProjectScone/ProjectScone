@@ -173,7 +173,7 @@ async def teams():
 def test_the_report_names_communities_central_entities_and_surprises(teams):
     client, bridge = teams
     report = client.get("/v1/graph/report", headers=auth()).json()
-    assert report["analysis"]["version"] == "scone.analysis/1" and report["analysis"]["modularity"] > 0.3
+    assert report["analysis"]["version"] == "scone.analysis/2" and report["analysis"]["modularity"] > 0.3
     assert len(report["communities"]) == 2 and all(c["label"] for c in report["communities"])
     assert report["surprising_connections"][0]["fact_ids"] == [bridge.fact_id]
     assert {e["key"] for e in report["central_entities"][:2]} <= {"dev", "eli", "ana", "ben", "cho", "fay", "gus", "hal"}
@@ -196,7 +196,7 @@ def test_groupings_are_computed_and_kept_apart_from_recorded_relations(teams):
     assert "groupings" not in plain
     view = client.get("/v1/graph/knowledge", params={"groupings": "true", "limit": 6}, headers=auth()).json()
     groupings = view["groupings"]
-    assert groupings["basis"] == "computed" and groupings["method"] == "scone.analysis/1"
+    assert groupings["basis"] == "computed" and groupings["method"] == "scone.analysis/2"
     shown = {entity["id"] for entity in view["entities"]}
     assert set(groupings["membership"]) == shown
     assert {item["entity_id"] for item in groupings["importance"]} == shown
@@ -204,7 +204,10 @@ def test_groupings_are_computed_and_kept_apart_from_recorded_relations(teams):
     assert groupings["coverage"] == {"entities_total": 8, "entities_analysed": 8, "isolated_entities": 0,
                                      "truncated": False, "reasons": [], "betweenness": "exact",
                                      "betweenness_estimated": False, "levels": groupings["coverage"]["levels"],
-                                     "resolution": 1.0, "external_entities": 0}
+                                     "resolution": 1.0, "external_entities": 0, "exclude_hubs": None,
+                                     "hubs_held_apart": 0, "split_oversized": 0,
+                                     "split_nested": 0, "unsplittable": 0, "detach_hubs": None,
+                                     "hubs_detached": 0, "modularity_before_guards": None}
 
 
 async def test_estimated_betweenness_is_disclosed_wherever_it_is_shown():
@@ -544,16 +547,18 @@ async def test_the_report_can_leave_hubs_out_of_its_central_entities():
     assert plain["central_entities"][0]["key"] == "acme corp"
     assert "acme corp" not in {item["key"] for item in trimmed["central_entities"]}
     assert [hub["key"] for hub in trimmed["hubs_excluded"]] == ["acme corp"]
+    assert trimmed["hubs_excluded"][0]["community"] and trimmed["analysis"]["coverage"]["hubs_held_apart"] == 1
+    assert plain["analysis"]["coverage"]["hubs_held_apart"] == 0
     assert trimmed["analysis"]["resolution"] == 1.5 and refused.status_code == 422
     with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
         markdown = client.get("/v1/graph/report", params={"exclude_hubs": 95, "resolution": 1.5, "format": "markdown"},
                               headers=auth()).text
         default = client.get("/v1/graph/report", params={"format": "markdown"}, headers=auth()).text
     assert "resolution 1.5" in markdown and "above the 95th percentile" in markdown
-    hubs = markdown.split("## Hubs left out of the ranking")[1].split("##")[0]
+    hubs = markdown.split("## Hubs held apart")[1].split("##")[0]
     central = markdown.split("## Central entities")[1].split("##")[0]
     assert "Acme Corp" in hubs and not any(row.startswith("| Acme Corp |") for row in central.splitlines())
-    assert "## Hubs left out" not in default and "resolution 1" in default
+    assert "## Hubs held apart" not in default and "resolution 1" in default
 
 
 
@@ -910,6 +915,24 @@ def test_health_counts_what_wants_attention(seeded):
     assert all(len(concern["examples"]) <= 2 for concern in found["concerns"])
     assert client.get("/v1/graph/health", params={"limit": 0}, headers=auth()).status_code == 422
     assert client.get("/v1/graph/health", headers=auth("key-b")).json()["totals"]["entities"] == 2
+
+
+async def test_cycles_reports_the_loops_a_space_holds(seeded):
+    client, _ = seeded
+    engine = client.app.state.engine
+    for subject, predicate, obj in (("app/a.py", "imports", "app/b.py"), ("app/b.py", "imports", "app/a.py"),
+                                    ("lib/x.py", "imports", "lib/y.py"), ("lib/y.py", "imports_for_types", "lib/x.py")):
+        await engine.assert_fact("alpha", subject, predicate, obj, valid_from="2024-01-01T00:00:00Z", origin="extracted")
+    found = client.get("/v1/graph/cycles", params={"limit": 1}, headers=auth()).json()
+    assert found["status"] == "cycles" and found["space"] == "alpha"
+    assert (found["totals"]["cycles"], found["totals"]["held_apart"]) == (1, 1)
+    [cycle] = found["cycles"]
+    assert sorted(cycle["members"]) == ["app/a.py", "app/b.py"] and len(cycle["hops"]) == 2
+    assert found["held_apart"][0]["deferred"], "the facts that hold a loop apart are named"
+    assert client.get("/v1/graph/cycles", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/cycles", params={"max_bytes": 100}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/cycles", headers=auth("key-b")).json()["status"] == "none"
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.cycles"] is True
 
 
 @pytest.fixture

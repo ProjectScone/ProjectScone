@@ -86,6 +86,20 @@ async def test_pairs_that_may_be_one_thing_are_carried_in():
     assert {pair["examples"][0]["a"], pair["examples"][0]["b"]} == {"alice chen", "dr. alice chen"}
 
 
+async def test_two_values_of_a_many_valued_predicate_at_one_instant_are_no_collision():
+    engine = await engine_with(("app/a.py", "imports", "json"), ("app/a.py", "imports", "csv"),
+                               ("app/a.py", "calls", "app/b.py:run"), ("app/a.py", "calls", "app/c.py:run"),
+                               ("alice", "works_at", "Acme"), ("alice", "works_at", "Globex"),
+                               ("alice", "owns", "a bike"), ("alice", "owns", "a car"), many_valued=("owns",))
+    try:
+        found = await graph_health(engine, "alpha", status="all")
+        [contested] = [c for c in found.concerns if c["kind"] == "contested_instant"]
+        assert contested["count"] == 1 and contested["examples"][0]["predicate"] == "works_at", \
+            "imports, calls and a configured many-valued predicate hold their values side by side; works_at does not"
+    finally:
+        await engine.close()
+
+
 async def test_a_graph_with_nothing_to_fix_says_so():
     """Quoted claims, kinds the claims imply, everything linked, and no
     predicate used once: nothing to report, and it says that."""

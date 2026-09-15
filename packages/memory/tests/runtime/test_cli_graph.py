@@ -60,6 +60,17 @@ async def test_report_prints_markdown_or_json(engine):
     assert code == 0 and json.loads(text)["summary"]["entities"] >= 4
 
 
+async def test_report_can_hold_hubs_apart(engine):
+    for number in range(8):
+        await engine.assert_fact("default", f"person {number}", "works_at", "Acme Robotics", valid_from=DAY)
+    code, text = await graph(engine, "report", "--exclude-hubs", "80", "--json")
+    report = json.loads(text)
+    assert code == 0 and [hub["key"] for hub in report["hubs_excluded"]] == ["acme robotics"]
+    assert report["hubs_excluded"][0]["community"] and report["analysis"]["coverage"]["hubs_held_apart"] == 1
+    with pytest.raises(InvalidInput, match="50 to 100"):
+        await graph(engine, "report", "--exclude-hubs", "10")
+
+
 async def test_timeline_prints_an_entitys_items(engine):
     code, text = await graph(engine, "timeline", "alice chen", "--json")
     assert code == 0 and [item["predicate"] for item in json.loads(text)["items"]] == ["works_at"]
@@ -136,6 +147,20 @@ async def test_a_report_is_read_and_labelled_at_one_instant(moved):
     keys = {entity["key"] for entity in report["central_entities"]}
     assert code == 0 and report["filters"]["as_of"] == "2024-12-31T23:59:59.000Z"
     assert "acme" in keys and "beta" not in keys
+
+
+async def test_export_writes_obsidian_notes_into_a_vault(engine, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Own.md").write_text("mine\n", encoding="utf-8")
+    code, text = await graph(engine, "export", "--format", "obsidian", "--into", str(vault))
+    receipt = json.loads(text)
+    assert code == 0 and receipt["written"] >= 3 and receipt["kept_theirs"] == [] and receipt["folder"] == "scone"
+    assert (vault / "scone" / "index.md").exists() and (vault / "Own.md").read_text(encoding="utf-8") == "mine\n"
+    with pytest.raises(InvalidInput, match="obsidian format only"):
+        await graph(engine, "export", "--format", "json", "--into", str(vault))
+    with pytest.raises(InvalidInput, match="two destinations"):
+        await graph(engine, "export", "--format", "obsidian", "--into", str(vault), "--out", str(tmp_path / "z.zip"))
 
 
 async def test_an_export_says_the_instant_it_was_read_at(moved):
@@ -328,6 +353,17 @@ async def test_health_prints_what_wants_attention(engine):
     assert "see scone facts," in text
     code, shown = await graph(engine, "health", "--json")
     assert code == 0 and json.loads(shown)["status"] == "concerns"
+
+
+async def test_cycles_prints_the_loops_and_what_holds_one_apart(engine):
+    for subject, predicate, obj in (("app/a.py", "imports", "app/b.py"), ("app/b.py", "imports", "app/a.py"),
+                                    ("lib/x.py", "imports", "lib/y.py"), ("lib/y.py", "imports_when_called", "lib/x.py")):
+        await engine.assert_fact("default", subject, predicate, obj, valid_from=DAY, origin="extracted")
+    code, text = await graph(engine, "cycles", "--limit", "1")
+    assert code == 0 and "cycles: space default" in text and "app/a.py" in text and "lib/x.py" in text
+    code, shown = await graph(engine, "cycles", "--json")
+    report = json.loads(shown)
+    assert code == 0 and report["status"] == "cycles" and (report["totals"]["cycles"], report["totals"]["held_apart"]) == (1, 1)
 
 
 async def temporal(engine, *arguments: str) -> tuple[int, str]:
@@ -599,6 +635,24 @@ async def test_recall_can_join_neighbouring_chunks_and_say_what_it_joined():
     assert code == 0 and "joined" not in plain.getvalue(), "merging stays opt-in"
 
 
+async def test_recall_can_widen_a_hit_by_whole_sentences():
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                chunk_target=70).open()
+    await memory.remember("default", (
+        "The survey of the harbour crane was booked for the third of May. "
+        "It found rust on the jib and a slew ring that needed grease. "
+        "The yard did both in the same week."))
+    out = io.StringIO()
+    asked = ["recall", "rust jib slew grease", "--window", "1", "--window-unit", "sentences", "--limit", "1", "--json"]
+    code = await run(build_parser().parse_args(asked), memory, io.StringIO(""), out)
+    await memory.close()
+    printed = json.loads(out.getvalue())
+    widened = printed["widened"]
+    assert code == 0 and widened["unit"] == "sentences", widened
+    [item] = printed["items"]
+    assert item["text"].startswith("The survey") and item["text"].endswith("same week."), item["text"]
+
+
 async def test_recall_can_widen_a_single_hit():
     """The case --merge cannot serve: one chunk matched, and the answer is
     in the sentence after it."""
@@ -684,3 +738,24 @@ async def test_map_watch_lets_a_changed_caller_find_an_unchanged_declaration(tmp
     assert second["unconfirmed_call_candidates"] == first["unconfirmed_call_candidates"], \
         "the unchanged file's declaration still binds the changed caller's call"
     await memory.close()
+
+
+async def test_merge_records_a_decision_the_graph_honours_and_close_parts_the_names():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    await engine.assert_fact("default", "dr. alice chen", "leads", "Robotics Lab", valid_from=DAY)
+    code, text = await graph(engine, "merge", "Dr. Alice Chen", "alice chen", "--reason", "one badge")
+    assert code == 0 and "merged: dr. alice chen into alice chen" in text
+    code, text = await graph(engine, "duplicates")
+    assert code == 0 and "pair: alice chen" not in text
+    [event] = await engine.events.query("default", kind="entity_merge", limit=3)
+    assert event.payload["actor"].startswith("cli:") and event.payload["reason"] == "one badge"
+    code, text = await graph(engine, "merges", "--json")
+    assert code == 0 and [item["alias_key"] for item in json.loads(text)["merges"]] == ["dr. alice chen"]
+    code, text = await graph(engine, "unmerge", "dr. alice chen", "--reason", "two people")
+    assert code == 0 and "unmerged: dr. alice chen" in text
+    code, text = await graph(engine, "merges")
+    assert code == 0 and "no merges in force" in text
+    with pytest.raises(InvalidInput, match="reason"):
+        await graph(engine, "merge", "dr. alice chen", "alice chen", "--reason", " ")
