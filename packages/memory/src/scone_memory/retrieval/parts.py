@@ -35,6 +35,7 @@ from ..core.errors import InvalidInput
 from ..core.models import RecallItem
 from ..memory.engine import check_space
 from .decompose import MAX_PARTS, Decomposition, Part, decompose
+from .listwise import one_listwise_budget
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..memory.engine import MemoryEngine
@@ -134,8 +135,10 @@ async def recall_parts(
     narrowing = {"as_of": as_of, "tags": tags, "where": where, "kind": kind,
                  "source_prefix": source_prefix, "since": since, "until": until,
                  "conditions": conditions, "rerank": rerank, "graph_boost": graph_boost}
-    results = [await engine.recall(space, part.text, limit=limit, **narrowing)  # type: ignore[arg-type]
-               for part in read.parts]
+    # A listwise model reranker's passes share one timeout across the parts.
+    with one_listwise_budget():
+        results = [await engine.recall(space, part.text, limit=limit, **narrowing)  # type: ignore[arg-type]
+                   for part in read.parts]
 
     by_chunk: dict[int, tuple[int, ...]] = {}
     for index, result in enumerate(results):

@@ -233,3 +233,76 @@ async def test_offline_load_failure_is_sanitized_before_backend_open(monkeypatch
     with pytest.raises(InvalidInput, match="SCONE_RERANKER_CROSS_ENCODER") as error:
         await config.build_engine(config.Settings(reranker_cross_encoder_dir="/private/model/path", reranker_cross_encoder_model="model"))
     assert "private" not in str(error.value) and error.value.__suppress_context__
+
+
+LISTWISE_CHAT = {"SCONE_CHAT_URL": "http://127.0.0.1:11434/v1", "SCONE_CHAT_MODEL": "llama3.2-ctx8k"}
+
+
+def test_listwise_reranker_is_off_unless_asked_and_reads_its_bounds():
+    assert config.Settings.from_env(LISTWISE_CHAT).reranker_listwise is False
+    assert config.build_reranker(config.Settings.from_env(LISTWISE_CHAT)) is None
+    settings = config.Settings.from_env({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1",
+        "SCONE_RERANKER_LISTWISE_WINDOW": "12", "SCONE_RERANKER_LISTWISE_STEP": "4",
+        "SCONE_RERANKER_LISTWISE_PASSAGE_BYTES": "700", "SCONE_RERANKER_LISTWISE_TIMEOUT": "45"})
+    assert settings.reranker_listwise is True
+    assert (settings.reranker_listwise_window, settings.reranker_listwise_step,
+            settings.reranker_listwise_passage_bytes, settings.reranker_listwise_timeout) == (12, 4, 700, 45.0)
+
+
+@pytest.mark.parametrize("options,named", [
+    ({"SCONE_RERANKER_LISTWISE": "1"}, "SCONE_CHAT"),
+    ({"SCONE_RERANKER_LISTWISE": "1", "SCONE_CHAT_URL": "http://127.0.0.1:11434/v1"}, "SCONE_CHAT"),
+    ({"SCONE_RERANKER_LISTWISE": "1", "SCONE_CHAT_MODEL": "llama3.2-ctx8k"}, "SCONE_CHAT"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "maybe"}, "SCONE_RERANKER_LISTWISE"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1", "SCONE_RERANKER_FACTORY": "trusted:factory"}, "SCONE_RERANKER_LISTWISE"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1", "SCONE_RERANKER_CROSS_ENCODER_DIR": "/models",
+      "SCONE_RERANKER_CROSS_ENCODER_MODEL": "model"}, "SCONE_RERANKER_LISTWISE"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE_WINDOW": "10"}, "SCONE_RERANKER_LISTWISE_WINDOW"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE_TIMEOUT": "10"}, "SCONE_RERANKER_LISTWISE_TIMEOUT"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1", "SCONE_RERANKER_LISTWISE_WINDOW": "21"}, "SCONE_RERANKER_LISTWISE_WINDOW must"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1", "SCONE_RERANKER_LISTWISE_STEP": "20"}, "SCONE_RERANKER_LISTWISE_STEP must"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1", "SCONE_RERANKER_LISTWISE_PASSAGE_BYTES": "63"}, "SCONE_RERANKER_LISTWISE_PASSAGE_BYTES must"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1", "SCONE_RERANKER_LISTWISE_TIMEOUT": "601"}, "SCONE_RERANKER_LISTWISE_TIMEOUT must"),
+    ({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1", "SCONE_RERANKER_LISTWISE_WINDOW": "ten"}, "SCONE_RERANKER_LISTWISE_WINDOW"),
+])
+def test_listwise_settings_that_cannot_be_honoured_are_refused(options, named):
+    with pytest.raises(InvalidInput, match=named):
+        config.Settings.from_env(options)
+
+
+@pytest.mark.parametrize("in_process", [False, True])
+async def test_every_engine_builder_constructs_the_listwise_reranker_on_the_chat_model(in_process):
+    from scone_memory.providers.llm import OpenAICompatibleChat
+    from scone_memory.retrieval.listwise import ListwiseReranker
+
+    settings = config.Settings.from_env({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1",
+        "SCONE_RERANKER_LISTWISE_WINDOW": "12", "SCONE_RERANKER_LISTWISE_STEP": "4",
+        "SCONE_RERANKER_LISTWISE_PASSAGE_BYTES": "700", "SCONE_RERANKER_LISTWISE_TIMEOUT": "45"})
+    engine = (await config.build_in_process_engine(settings, HashEmbedder()) if in_process
+              else await config.build_engine(settings))
+    try:
+        ranker = engine.reranker
+        assert isinstance(ranker, ListwiseReranker) and isinstance(ranker.chat, OpenAICompatibleChat)
+        assert ranker.chat.model == "llama3.2-ctx8k"
+        assert (ranker.window, ranker.step, ranker.passage_bytes, ranker.timeout) == (12, 4, 700, 45.0)
+    finally:
+        await engine.close()
+
+
+def test_listwise_switch_must_be_a_boolean_when_set_directly():
+    with pytest.raises(InvalidInput, match="SCONE_RERANKER_LISTWISE must be 1 or 0"):
+        config.Settings(chat_url="http://127.0.0.1:11434/v1", chat_model="llama3.2-ctx8k", reranker_listwise=1)
+
+
+def test_listwise_step_defaults_to_half_a_configured_window():
+    ranker = config.build_reranker(config.Settings.from_env({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1",
+                                                             "SCONE_RERANKER_LISTWISE_WINDOW": "12"}))
+    assert (ranker.window, ranker.step) == (12, 6)
+
+
+def test_listwise_defaults_apply_when_only_switched_on():
+    from scone_memory.retrieval.listwise import DEFAULT_PASSAGE_BYTES, DEFAULT_STEP, DEFAULT_TIMEOUT, DEFAULT_WINDOW
+
+    ranker = config.build_reranker(config.Settings.from_env({**LISTWISE_CHAT, "SCONE_RERANKER_LISTWISE": "1"}))
+    assert (ranker.window, ranker.step, ranker.passage_bytes, ranker.timeout) == (
+        DEFAULT_WINDOW, DEFAULT_STEP, DEFAULT_PASSAGE_BYTES, DEFAULT_TIMEOUT)
