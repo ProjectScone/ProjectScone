@@ -667,7 +667,7 @@ async def recall(
         lanes=answered,
         diversity=diversity_trace,
         phrases=_finished(phrase_trace, len(result_items), limit,
-                          window_full=any(len(lane) >= depth for lane in (vector_lane, text_lane))),
+                          window_full=len(vector_lane) >= vector_depth or len(text_lane) >= depth),
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,

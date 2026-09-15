@@ -99,7 +99,10 @@ async def test_the_only_lane_asked_for_failing_is_an_error_not_an_empty_answer()
     async def explode(*args, **kwargs):
         raise RuntimeError("the index is unwell")
 
+    # Both ways the text lane reads the store: a query with a stemmable
+    # word goes by stem prefix, one without by plain search.
     engine.documents.search_text = explode
+    engine.documents.search_terms = explode
     try:
         with pytest.raises(RuntimeError, match="text"):
             await engine.recall("default", "INV-20931", lanes=("text",))
@@ -109,6 +112,22 @@ async def test_the_only_lane_asked_for_failing_is_an_error_not_an_empty_answer()
     assert both.lanes == ["vector"] and any(note.startswith("text:") for note in both.degraded), \
         "with both asked, a failed lane is degraded and the result names the lane that ran"
 
+
+
+async def test_a_note_on_a_lane_that_still_answered_does_not_count_it_failed():
+    engine, _ = await stored()
+    # A store whose lexical index is behind says so in degraded, and the
+    # text lane still answers from what is indexed.
+    engine.documents.lexical_backlog = lambda space: 2
+    try:
+        alone = await engine.recall("default", "INV-20931", lanes=("text",))
+        both = await engine.recall("default", "crane jib")
+    finally:
+        await engine.close()
+    assert any("not yet in the lexical index" in note for note in alone.degraded), \
+        "the fixture must put a note on the text lane to reach the case"
+    assert alone.lanes == ["text"] and alone.items, "a text lane that is behind still answered"
+    assert both.lanes == ["vector", "text"]
 
 @pytest.mark.parametrize("lanes", [(), ("entity",), ("vectors",), "text"])
 async def test_lanes_that_do_not_exist_are_refused(lanes):
