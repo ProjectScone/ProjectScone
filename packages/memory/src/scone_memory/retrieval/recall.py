@@ -12,7 +12,9 @@ import math
 import time
 from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING, cast
 
+from ..core import forget_after
 from ..core.errors import InvalidInput
+from ..core.timeutil import parse_rfc3339
 from ..ingestion.code import code_language, declaration_at, line_span
 from ..core.models import Chunk, DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search, question_index
@@ -590,6 +592,32 @@ async def recall(
             if episode is not None and candidate_is_retained(chunk, episode, space, scope):
                 retained.append(item)
         items = retained
+    # A memory past its forget_after is not returned, whether or not a sweep
+    # has forgotten it yet (memory.scheduled_forget). Checked before the
+    # limit, so a withheld passage gives its place to the next one. Without a
+    # reranker ``items`` is already capped per episode and only the candidates
+    # needed to fill the answer are read, which are the episodes the answer
+    # reads anyway; a reranker's candidates are all judged.
+    moment = parse_rfc3339(now)
+    withheld: dict[int, int] = {}
+    unwithheld: list[fusion.Fused] = []
+    placed = 0
+    fill_only = active_reranker is None
+    for item in items:
+        if fill_only and placed >= limit:
+            break
+        eid = chunks[item.chunk_id].episode_id
+        if eid not in episodes:
+            found = await runtime.documents.get_episode(space, eid)
+            if found is not None:
+                episodes[eid] = found
+        held = episodes.get(eid)
+        if held is not None and forget_after.is_due(held.metadata, moment):
+            withheld[eid] = withheld.get(eid, 0) + 1
+            continue
+        unwithheld.append(item)
+        placed += 1
+    items = unwithheld
     candidate_items = items
     items = [item for item in items if item.chunk_id in baseline_allowed][:limit]
     if runtime.demote_restated:
@@ -739,7 +767,11 @@ async def recall(
         expansion=expansion.record() if expansion is not None else None,
         expanded=expanded.record() if expanded is not None else None,
         prefixes=({"added": list(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
+        past_forget_after=({"withheld": sum(withheld.values()), "episode_ids": sorted(withheld), "at": now}
+                           if withheld else None),
     )
+    if result.past_forget_after is not None:
+        evidence["past_forget_after"] = result.past_forget_after
     latency["total"] = _ms(started)
     if candidate_limit is not None:
         evidence["candidate_limit"] = candidate_limit

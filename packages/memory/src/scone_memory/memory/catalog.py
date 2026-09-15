@@ -10,7 +10,9 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, TypedDict, cast
 
+from ..core import forget_after
 from ..core.affirmations import affirmation_store
+from ..core.timeutil import parse_rfc3339
 from ..core.errors import InvalidInput
 from ..core.models import Episode, Fact, Status
 from ..core.ports import DocumentStore, SourcePage
@@ -282,19 +284,23 @@ async def source_page(documents: DocumentStore, space: str, *, before: Optional[
     return SourcePage(kept, not ended, None if ended else cursor)
 
 
-async def episodes(documents: DocumentStore, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
+async def episodes(documents: DocumentStore, space: str, where: Mapping[str, str], limit: Optional[int] = None,
+                   *, now: Optional[str] = None) -> list[Episode]:
     """The episodes whose metadata matches every ``where`` pair, oldest
     first by (created_at, episode_id); with ``limit``, the newest N of
     them in that same order. This is a walk over the space's episodes,
-    fine for a session's turns, not a query language."""
+    fine for a session's turns, not a query language. With ``now``, an
+    episode past its ``forget_after`` is left out before the limit."""
     check_space(space)
     clean = normalise_metadata(where)
     if not clean:
         raise InvalidInput("episodes() needs at least one where pair")
     counts = await documents.counts(space)
+    moment = parse_rfc3339(now) if now is not None else None
     found = [
         e for e in await documents.recent_episodes(space, max(counts.episodes, 1))
         if all(e.metadata.get(k) == v for k, v in clean.items())
+        and (moment is None or not forget_after.is_due(e.metadata, moment))
     ]
     found.sort(key=lambda e: (e.created_at, e.episode_id))
     return found[-limit:] if limit else found

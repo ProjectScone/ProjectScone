@@ -13,6 +13,8 @@ from typing import Optional
 
 from ..backends.blobs import BlobStore
 from . import attachment_archive, archive_supersession, archive_inventory
+from ..core import forget_after
+from ..core.timeutil import parse_rfc3339
 from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput
 from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact, FactLink
@@ -62,6 +64,9 @@ class MergeReceipt:
     tombstoned: int = 0
     attachments_skipped: int = 0
     forgotten_source_references: int = 0
+    #: Episodes left behind because their own ``forget_after`` had come; they
+    #: go when the source space is deleted, as a sweep would have taken them.
+    past_forget_after: int = 0
 
     def record(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -81,6 +86,9 @@ class ImportSummary:
     links_skipped: int = 0
     #: Episodes skipped because this space forgot that content on purpose.
     tombstoned: int = 0
+    #: Episodes skipped because their own ``forget_after`` had already come:
+    #: restoring them would bring back what was scheduled to be gone.
+    past_forget_after: int = 0
     #: Facts already present in the target (same subject, predicate,
     #: object, interval and status).
     facts_skipped: int = 0
@@ -99,6 +107,8 @@ class ImportSummary:
         result: dict[str, object] = dataclasses.asdict(self)
         if not self.supersessions:
             result.pop('supersessions')
+        if not self.past_forget_after:
+            result.pop('past_forget_after')
         if self.profile == ARCHIVE_PROFILE:
             result.pop('attachments')
             result.pop('attachment_links')
@@ -196,6 +206,9 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             digest = episode.content_hash or content_hash(space, episode.content, episode.dedup_key)
             if not resurrect and await runtime.documents.tombstone_by_hash(space, digest) is not None:
                 summary.tombstoned += 1
+                continue
+            if overdue(episode, runtime.clock()):
+                summary.past_forget_after += 1
                 continue
             episodes.append(episode)
             source_ids.append(record.get("episode_id"))
@@ -350,6 +363,12 @@ def _rederived(record: Record, source_space: Optional[str], space: str) -> Recor
     if record.content_hash == content_hash(str(source_space), record.content):
         return dataclasses.replace(record, content_hash=None)
     return record
+
+
+def overdue(record: Record, now: str) -> bool:
+    """Whether an archived episode's own schedule has already come. A value
+    that cannot be read is not judged here; ingestion refuses it by name."""
+    return forget_after.is_due(record.metadata or {}, parse_rfc3339(now))
 
 
 def _check_fields(kind: str, record: Mapping) -> None:

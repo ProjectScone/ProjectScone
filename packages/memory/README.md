@@ -104,6 +104,7 @@ storage ports, source validation and resource ownership.
 | Import WhatsApp, Telegram, Discord and Slack exports as conversations | [Chat exports](docs/chat-exports.md) |
 | Reconcile local files, changed revisions and managed deletions | [Incremental directory ingestion](docs/directory-sync.md) |
 | Resume interrupted source deletion across stores | [Source cleanup and recovery](docs/retirement-catalog.md) |
+| Schedule a memory to be forgotten at a time, withheld from recall from then | [Scheduled forgetting](docs/scheduled-forgetting.md) |
 | Ingest PDFs, scans and page provenance | [PDF ingestion](docs/pdf-ingestion.md), [PDF OCR](docs/pdf-ocr.md) |
 | Preserve images and search attributed context | [Attachments](docs/attachments.md), [image context and entities](docs/image-context.md) |
 | Review duplicate documents without discarding originals | [Document duplicate review](docs/document-deduplication.md) |

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Iterator, Optional, Sequence
 
 from ..memory.engine import MemoryEngine, check_space, normalise_term
+from ..core import forget_after
 from ..core.errors import InvalidInput, SconeError
 from ..providers.llm import ChatModel, StructuredChatModel
 from ..core.models import Episode, Fact
@@ -454,8 +455,11 @@ class Distiller:
         counts = await documents.counts(space)
         episodes = await documents.recent_episodes(space, max(counts.episodes, 1))
         referenced = {f.source_episode_id for f in await documents.list_facts(space, include_closed=True)}
+        # A memory past its forget_after is as good as forgotten: no model reads it.
+        moment = parse_rfc3339(self.engine.clock())
         fresh = [
             e for e in episodes if e.content.strip() and e.episode_id not in referenced and (space, e.episode_id) not in self._done
+            and not forget_after.is_due(e.metadata, moment)
         ]
         return sorted(fresh, key=lambda e: (parse_rfc3339(e.created_at), e.episode_id))
 
