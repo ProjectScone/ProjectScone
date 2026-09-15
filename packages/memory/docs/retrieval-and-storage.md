@@ -1025,15 +1025,18 @@ question, and re-indexing to change it.
 ```bash
 scone recall "crane survey rust jib slew" --merge --limit 5
 # 1 passage(s) joined from 3 chunk(s)
-# joined 3 chunk(s) into #12: 11, 12, 13
+# joined 3 chunk(s) into #12: 11, 12, 13 (84% of it retrieved)
 ```
+
+Over HTTP, `GET /v1/recall?q=...&merge=true`, with the record in
+`merged`. Advertised as `recall.merge`.
 
 **No hierarchy and no re-index**, because every chunk already carries the
 byte span it came from: neighbours from one episode are merged by reading
 the span that contains them. The shape of a merge is therefore decided by
 what was actually retrieved, not by a decision taken at ingestion.
 
-Three rules it keeps:
+The rules it keeps:
 
 - **A merged passage says what went into it.** `from_chunks` names every
   chunk absorbed, because a citation nobody can check is worse than three
@@ -1041,10 +1044,35 @@ Three rules it keeps:
 - **It keeps the best score of its parts, never their sum.** A sum would
   make a merged passage outrank everything by arithmetic rather than by
   relevance.
-- **It is a passage, not a document.** Fragments further apart than
-  `max_merged` bytes are left alone and the report says so — silently
-  returning most of a document to answer a question about a sentence
-  would be worse than not merging.
+- **It is a passage, not a document.** An episode's fragments are joined
+  in clusters, taken in the order they sit, each spanning at most
+  `max_merged` bytes (4,000). A fragment too far from the rest is left
+  alone and the report says so; silently returning most of a document to
+  answer a question about a sentence would be worse than not merging. One
+  far fragment does not stop the fragments beside each other from
+  joining, and every cluster in an episode is merged from one read of it.
+- **It says how much of itself was retrieved.** A merge reads the text
+  between fragments too, so two short hits far apart would make a passage
+  mostly nobody retrieved. `shares` gives, for every merged passage, the
+  part of its bytes that retrieved chunks cover, overlaps counted once,
+  counting the spans the chunks were retrieved at rather than any window
+  around them.
+  `merge_min_share` (`--merge-min-share`) leaves a sparser merge as
+  fragments, counted in `too_sparse`. The reference merges children into
+  a parent only when enough of them were retrieved; this is that rule in
+  the bytes a reader gets. It defaults to 0, no floor, and is unmeasured.
+- **A budget that bit says so.** At most 50 episodes are read per call;
+  the rest stand unjoined, counted in `not_read`. A passage whose span
+  reads back blank from an episode that was read (its text changed under
+  the chunks) is left as fragments and counted in `blank`, apart from an
+  episode that could not be read.
+- **Withholding scans what a merge reads.** Merging runs after any window
+  and before withholding, so an address in the text between two
+  fragments is withheld like one inside them. The command line refused
+  `--withhold` beside `--merge` while it merged after withholding; it now
+  merges first and allows both. Merging does not combine with
+  `compress`: a merged passage is reported under one chunk, so
+  compression would not keep the others it holds.
 - **The caller's ranking survives.** Neighbours are found per episode and
   emitted in the order they arrived, a merged passage taking the place of
   its best fragment. Walking a ranked list by episode and appending group
@@ -1060,6 +1088,153 @@ Three rules it keeps:
 Opt-in, because it is not yet measured. It changes the shape of an answer
 for certain; whether it changes what is *found* is a question for the
 bench, and until that number exists this does not become the default.
+
+## The passage around a precise hit
+
+Merging needs two hits in one episode. The commoner case is one: a
+sentence matches exactly, and the answer is in the sentence after it. A
+window returns each hit with the episode's own text around it, read at
+retrieval from the byte span every chunk carries.
+
+```bash
+scone recall "rust jib slew grease" --window 200                         # 200 bytes either side
+scone recall "rust jib slew grease" --window 1 --window-unit sentences   # one whole sentence either side
+```
+
+Over HTTP, `GET /v1/recall?window=1&window_unit=sentences`; the response's
+`widened` receipt says what was done.
+
+The leading framework builds its sentence window at ingestion: one
+sentence per node, the neighbours stored beside it, and a re-index to
+change the size. Here the unit and the count are the caller's, per
+request, and nothing is re-embedded.
+
+- **A window is quoted, never assembled.** Its text is the episode's
+  bytes between two offsets, both on character boundaries.
+- **Counted in bytes**, both edges land wherever the count does.
+- **Counted in sentences**, the hit first grows to the whole sentences it
+  touches, then by `window` whole sentences either side (at most 20), so
+  both edges sit on sentence boundaries. With `window=0` it only
+  completes the sentences it touches. A hit that is only the space
+  between sentences takes the sentence after it. The window always holds
+  the whole hit.
+  - A sentence ends at `.`, `!` or `?`, with any closing quote or
+    bracket, followed by space or the end. It does not end at an initial
+    (`J. Anderson`), a title (`Dr. Okafor`) or a stop followed by a
+    lower-case word (`i.e. before`), the rules the semantic chunker cuts
+    by. It also ends at a CJK full stop (`。！？`), which needs no space
+    after it, and at a blank line, so a heading or list item with no stop
+    is a sentence of its own.
+- **A window cut short says so.** `clipped` counts windows that met the
+  start or end of the episode. `capped` counts sentence windows stopped at
+  the 100,000-byte reach inside an over-long sentence. `aligned` counts
+  byte windows moved off a partial character. The `why` line says each in
+  words.
+- **A source confirmed gone is dropped, not served**, and one that could
+  not be read stands as it was and is counted.
+
+Advertised as `recall.window` and `recall.sentence_window`.
+
+## Cutting a window back to what bears on the question
+
+A window of sentences either side of a hit holds the answer more often
+than the hit alone, and it holds a good deal besides. `compress` keeps
+the sentences the passage was retrieved for, always, and at most a share
+of the sentences the window added around them:
+
+```
+GET /v1/recall?q=what+was+wrong+with+the+crane+jib&window=3&window_unit=sentences&compress=0.5
+scone recall "what was wrong with the crane jib" --window 3 --window-unit sentences --compress 0.5
+```
+
+The reference's sentence optimizer embeds every sentence of a node and
+drops the ones least like the question, so a node found by a sentence
+that happens to score low can lose that sentence. Here the retrieved
+span is never scored, only what widening added around it.
+
+- **Two scorers.** `terms`, the default, needs no model. A sentence
+  scores the weight of the question's words it names, each word weighted
+  by how few of the passage's sentences name it, so a word the whole
+  passage repeats counts for less than one it names once. Words that only
+  ask, such as how, why, or the many of a "how many", do not count: on
+  this documentation they kept every sentence saying "how many". A
+  sentence naming none of the rest is never kept. `embedding` scores a sentence by its cosine
+  to the question under the space's embedder, every sentence in one call,
+  at most 400 per recall.
+- **`compress` is a ceiling.** 0.5 of five sentences keeps at most two,
+  never rounded up; 0 keeps only what was retrieved. Between sentences of
+  equal score, the one nearer the hit is kept.
+- **Kept text is quoted in runs, never spliced.** Adjacent kept sentences
+  are one run of the episode's own bytes, listed in `compressed.runs` as
+  byte offsets per chunk. Runs that are not adjacent are joined by ` … `,
+  so the text never reads as one quote. The item's `start` and `end`
+  bound the first and last run.
+- **What was not cut says so.** A passage with no retrieved span inside
+  it is left whole and counted in `unpinned`; a passage past the
+  embedding budget is left whole and counted in `unscored`; a question
+  naming no word the terms scorer can weigh cuts nothing, and `why` says
+  each in words. `bytes_before` and `bytes_after` count what was saved.
+- **Refused without a window of sentences**, where there is nothing it
+  may cut, and beside a merge, whose passage is reported under one chunk
+  so the other retrieved chunks inside it would not be kept; on the
+  command line also beside `--parts`, which answers without it.
+  It runs after widening and before withholding, so what withholding
+  scans is what is returned.
+
+Neither scorer is measured. Which share keeps the answer while saving the
+most is an answer-bench question, and until that number exists `compress`
+stays opt-in and its record says `measured: false`. Advertised as
+`recall.compress`.
+
+## Where each sentence of an answer came from
+
+An answer composed from recalled passages reads as sourced whether it is
+or not. The leading framework asks the model to cite numbered sources as
+it writes, and nothing checks the numbers afterwards. Attribution takes an
+answer already written, by a model or a person, and the stored chunks it
+was composed from, and aligns each sentence to them without a model.
+
+```bash
+scone attribute --answer "Priya moved the launch to March because the audit ran late. The board was not told." \
+  --chunk 12 --chunk 14
+# quoted chunk:12: Priya moved the launch to March because the audit ran late.
+# unattributed: The board was not told.
+```
+
+Over HTTP, `POST /v1/answers/attribute` with `{"answer": ..., "chunk_ids": [...]}`.
+The chunks are read from the space, never taken from the caller, so an
+answer cannot be attributed to text the space does not hold. An id the
+space does not hold is named in `chunks_missing`, and one it holds whose
+text is blank, with nothing to attribute to, in `chunks_empty`.
+
+Each sentence gets one status:
+
+- **quoted**: it shares a run of at least 5 consecutive words with a
+  passage, compared case-folded, with the punctuation between words
+  ignored. The record gives the run's span in the passage and its text.
+- **overlapping**: no such run, but at least 60% of its content words
+  (the lexical lane's tokens, stopwords left out) are in one passage.
+- **unattributed**: neither, for every passage given.
+- **too_short**: fewer than two content words.
+
+A quote beats an overlap and a longer run beats a shorter one; then more
+of the sentence's words wins, then the passage given first. Numbers in a
+sentence that its passage does not hold, such as `14th` against a passage
+saying `twelfth`, are named on the sentence.
+
+What it is not:
+
+- **Word overlap is not support.** A sentence can quote a passage and
+  still misstate it, and a faithful paraphrase can come out unattributed.
+  The record says `verified_accuracy: false`.
+- **Both rules are unmeasured**, and the record says so (`rules.measured:
+  false`).
+- **A run is counted between words separated by space or punctuation**,
+  so text in scripts written without spaces can overlap but is rarely
+  quoted.
+
+An answer over 20,000 characters or more than 50 passages is refused, not
+cut. Advertised as `answers.attribution`.
 
 ## What a codebase says about itself beyond who calls whom
 

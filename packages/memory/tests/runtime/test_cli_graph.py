@@ -621,6 +621,24 @@ async def test_recall_can_join_neighbouring_chunks_and_say_what_it_joined():
     assert code == 0 and "joined" not in plain.getvalue(), "merging stays opt-in"
 
 
+async def test_recall_can_widen_a_hit_by_whole_sentences():
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                chunk_target=70).open()
+    await memory.remember("default", (
+        "The survey of the harbour crane was booked for the third of May. "
+        "It found rust on the jib and a slew ring that needed grease. "
+        "The yard did both in the same week."))
+    out = io.StringIO()
+    asked = ["recall", "rust jib slew grease", "--window", "1", "--window-unit", "sentences", "--limit", "1", "--json"]
+    code = await run(build_parser().parse_args(asked), memory, io.StringIO(""), out)
+    await memory.close()
+    printed = json.loads(out.getvalue())
+    widened = printed["widened"]
+    assert code == 0 and widened["unit"] == "sentences", widened
+    [item] = printed["items"]
+    assert item["text"].startswith("The survey") and item["text"].endswith("same week."), item["text"]
+
+
 async def test_recall_can_widen_a_single_hit():
     """The case --merge cannot serve: one chunk matched, and the answer is
     in the sentence after it."""
