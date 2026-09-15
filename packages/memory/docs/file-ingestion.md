@@ -147,9 +147,9 @@ many landed. Only `.md`, `.markdown` and `.mdx` are read this way.
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
-| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties, and heading levels through styles; no rendered layout or macros |
+| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows, referenced notes and charts' cached series | Direct source properties, and heading levels through styles; no rendered layout or macros |
 | XLSX, and XLSM, XLTX, XLTM | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
-| PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text and notes | No rendered Office layout or macro execution |
+| PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text, notes and charts' cached series | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
 | HWPX | Sections and paragraphs in order; a table's cells, and the paragraphs of a header, footer, note, caption or text box, after the paragraph that holds them (`content_role`, `parent_locator`) | Hangul's XML package (KS X 6101) only; the binary HWP 5 container is not read; pictures, charts and fields are not read; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
@@ -216,7 +216,8 @@ They are queued after body text instead of being concatenated into the anchor.
 Nested boxes receive nested locators; extraction order is not page layout order.
 For DOCX main/note/comment XML parts, alternate content selects the first choice
 whose required namespace URIs are supported for text extraction (Word main,
-Word 2010 wordprocessingShape, and VML), otherwise its fallback. Prefix aliases
+Word 2010 wordprocessingShape, VML, and the Office 2016 chart namespace, so a
+newer chart is read rather than its picture fallback), otherwise its fallback. Prefix aliases
 and local namespace shadowing are honored. Missing/invalid requirements, malformed
 branch ordering, or an unsupported choice without fallback are explicit errors.
 Unused alternatives still count against XML construction limits. This is text
@@ -232,6 +233,26 @@ unreferenced annotations and separator notes do not become searchable content.
 Current-text filtering also applies inside notes. Dangling, ambiguous and invalid
 part references are rejected. All extracted parts share the document's text and
 segment budgets, and nested reference locators are bounded.
+
+A chart in a Word or PowerPoint file (DOCX or PPTX, or another member of their
+families) becomes a segment of its own after the text it sits in (`paragraph:3/chart:1`, `slide:2/chart:1`; `content_role` `chart`,
+`parent_locator` its paragraph or slide). Its text is the chart's title and
+kind, then one line per series of category and value pairs, for example
+`Revenue (bar chart)` then `2025: Q1 10; Q2 12.5`. The chart kinds Office 2016
+added (waterfall, histogram, treemap, sunburst, box and whisker, funnel) keep
+their data apart from their series; each series is read from the data it names,
+its kind is its layout (`waterfall`, `treemap`), and of nested category levels
+the first is read and `chart_category_levels_cut` counts the rest. Only the values cached in the
+chart part are read: nothing is recalculated from the embedded workbook and
+nothing is rendered. A series without categories is read by point number. At
+most 64 series per chart and 1,000 points per series are read; past those,
+`chart_series_cut` and `chart_points_cut` say how many were left out. The
+segment also carries `chart_type`, `chart_series` and `chart_points`. A chart
+whose relationship or part cannot be read is not a reason to refuse the file:
+it is left out and counted in the document's `charts_unreadable`. A file with a
+chart read says `charts` and its parser id ends `+charts-v1`; a file without
+charts is read exactly as before. A package that also carries macros keeps its
+`macros` note beside the chart counts.
 
 DOCX, XLSX and PPTX locate their main document through `_rels/.rels` and resolve
 child relationships relative to that selected part. Nonstandard main-part paths
@@ -749,8 +770,11 @@ After uploading the original, select OCR explicitly in the indexing request:
 }
 ```
 
-`missing_text` preserves readable embedded text and recognizes pages lacking it
-or whose text extraction fails. `all_pages` recognizes every page, including
+`missing_text` preserves readable embedded text and recognizes pages lacking it,
+whose text extraction fails, or whose text layer is unreadable (mostly private-use
+code points, `(cid:N)` runs, replacement characters or control bytes). Without OCR
+such a page keeps its text, its segment carries `unreadable: true` and the
+document metadata lists it in `unreadable_pages`. `all_pages` recognizes every page, including
 those with embedded text. Reading order is `provider`, `columns_ltr` or
 `columns_rtl`; the latter two infer columns geometrically, not semantically.
 The browser Documents import queue exposes these choices per PDF when available.
