@@ -629,7 +629,11 @@ keeps the children most like the question, and descends to the leaves.
   written from its present content. The trees are found by one walk over the
   space's episodes, the same walk `GET /v1/episodes/{id}/summaries` makes, and
   its size is reported in `walked`; a keyed pointer to each tree's top, which
-  would remove that walk, is not written by the builder yet. More than
+  would remove that walk, is not written by the builder yet. The space is
+  counted again after the listing, and episodes it did not return — a store
+  that caps what it lists (Elasticsearch lists at most 10,000), or episodes
+  stored meanwhile — are counted in `unlisted`, since a tree among them was
+  not found. More than
   `MAX_DOCUMENTS` (100) documents with trees in scope is refused, not cut to
   some of them, and so is a step with more than `MAX_CANDIDATES` (1,000)
   candidates to score — a stored tree keeps a step to `branching` times its
@@ -670,8 +674,8 @@ keeps the children most like the question, and descends to the leaves.
   at all, and an account that cannot be read or does not list names, are
   `unresolved`; none is followed. A document forgotten is refused as
   `source_gone` (its summaries outlive it), one never stored as
-  `source_unknown`, one unreadable as `unread`, and one stored after the walk
-  as `changed_while_read`. The walk awaits reads and a document can be
+  `source_unknown`, one unreadable as `unread`, and one the listing left out
+  as `unlisted`. The walk awaits reads and a document can be
   forgotten during any of them, so the chunks about to be returned are read
   again after the last one, with nothing awaited between that read and the
   answer: a document whose chunks moved is read again for its reason and

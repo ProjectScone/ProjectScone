@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api.app import create_app
+from scone_memory.backends import SqliteDocumentStore, SqliteVectorIndex
 from scone_memory.core.errors import InvalidInput, SconeError
 from scone_memory.core.validation import MAX_SOURCE
 from scone_memory.providers.llm import FakeChat
@@ -88,9 +89,9 @@ class Constant(HashEmbedder):
         return [[1.0] + [0.0] * (self.dim - 1) for _ in texts]
 
 
-async def library(embedder=None, empty=(), index=None):
-    engine = await MemoryEngine(InMemoryDocumentStore(), index or InMemoryVectorIndex(), embedder or HashEmbedder(),
-                                chunk_target=170).open()
+async def library(embedder=None, empty=(), index=None, documents_store=None):
+    engine = await MemoryEngine(documents_store or InMemoryDocumentStore(), index or InMemoryVectorIndex(),
+                                embedder or HashEmbedder(), chunk_target=170).open()
     documents = {}
     for source, (place, sections) in LIBRARY.items():
         parts = [part for _, texts in sections for part in texts]
@@ -365,8 +366,9 @@ async def test_a_document_forgotten_or_changed_while_the_tree_is_read_serves_not
             late = await traverse_summaries(engine, "s", "river of Brannock", episode_ids=[brannock])
         finally:
             engine.documents.recent_episodes = real_walk
-        assert late.items == () and late.refused == ({"episode_id": brannock, "reason": "changed_while_read"},), \
-            "a document stored after the walk had no tree seen whole"
+        assert late.items == () and late.refused == ({"episode_id": brannock, "reason": "unlisted"},), \
+            "a document the listing left out had no tree seen whole"
+        assert "their document was not in the space's listing" in late.why
 
         async def then_forgotten(space, limit):
             listed = await real_walk(space, limit)
@@ -378,6 +380,7 @@ async def test_a_document_forgotten_or_changed_while_the_tree_is_read_serves_not
             went = await traverse_summaries(engine, "s", "river of Brannock", episode_ids=[brannock])
         finally:
             engine.documents.recent_episodes = real_walk
+        assert went.unlisted == 0, "an episode forgotten after the listing leaves nothing unlisted, not fewer than nothing"
         assert went.items == () and went.refused == ({"episode_id": brannock, "reason": "source_gone"},), \
             "a document the walk listed and that went before it was read"
     finally:
@@ -520,6 +523,49 @@ async def test_chunks_no_summary_covers_are_counted_since_no_descent_reaches_the
         vellmar, _ = documents["Vellmar"]
         found = await traverse_summaries(engine, "s", "harbour of Vellmar", episode_ids=[vellmar])
         assert found.uncovered == 3 and "3 chunk(s) are under no summary the descent starts from" in found.why
+    finally:
+        await engine.close()
+
+
+async def test_an_empty_space_and_a_sqlite_store_answer_as_the_memory_one_does(tmp_path):
+    for documents, vectors in ((InMemoryDocumentStore(), InMemoryVectorIndex()),
+                               (SqliteDocumentStore(str(tmp_path / "empty.db")), SqliteVectorIndex(str(tmp_path / "empty.db")))):
+        engine = await MemoryEngine(documents, vectors, HashEmbedder()).open()
+        try:
+            found = await traverse_summaries(engine, "s", "harbour")
+            assert (found.items, found.walked, found.unlisted, found.embed_calls) == ((), 0, 0, 0)
+            assert found.why.startswith("no document with a summary tree is in scope")
+        finally:
+            await engine.close()
+    path = str(tmp_path / "library.db")
+    engine, documents = await library(documents_store=SqliteDocumentStore(path), index=SqliteVectorIndex(path))
+    try:
+        _, chunks = documents["Vellmar"]
+        found = await traverse_summaries(engine, "s", "harbour of Vellmar", branching=1)
+        assert sorted(item.chunk_id for item in found.items) == [chunk.chunk_id for chunk in chunks[:3]]
+        assert found.vectors == {"index": 3, "embedded": 0} and found.embed_calls == 1, "SQLite hands its vectors back"
+    finally:
+        await engine.close()
+
+
+async def test_episodes_the_listing_leaves_out_are_counted_since_a_tree_among_them_is_not_found():
+    engine, documents = await library()
+    try:
+        vellmar, _ = documents["Vellmar"]
+        real_walk = engine.documents.recent_episodes
+
+        async def capped(space, limit):
+            return (await real_walk(space, limit))[:-2]  # a store that lists fewer than it holds, newest first
+
+        engine.documents.recent_episodes = capped
+        try:
+            short = await traverse_summaries(engine, "s", "harbour of Vellmar")
+        finally:
+            engine.documents.recent_episodes = real_walk
+        assert short.unlisted == 2 and vellmar not in short.documents
+        assert short.refused == ({"episode_id": vellmar, "reason": "unlisted"},)
+        assert f"the store listed {short.walked} episode(s) and holds {short.walked + 2}" in short.why
+        assert (await traverse_summaries(engine, "s", "harbour of Vellmar")).unlisted == 0
     finally:
         await engine.close()
 
