@@ -21,6 +21,7 @@ from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import GRAPH_REASONS, AdaptiveRetriever
 from ..retrieval.conversation_plan import ConversationPlan, overview_evidence, plan_conversation_retrieval
 from ..retrieval.followup import MODES as FOLLOWUP_MODES, REWRITE_TIMEOUT_S, Followup, fused, plan_followup
+from ..retrieval.listwise import ListwiseReranker
 from ..providers.llm import ChatModel
 from ..retrieval.overview import OverviewResult
 from ..core.models import Fact, RecallItem, RecallResult
@@ -247,6 +248,12 @@ class MemoryContext:
                 raise ValueError("adaptive_retriever must use the same memory engine")
             if recall_timeout < adaptive_retriever.limits.timeout_s:
                 raise ValueError("recall_timeout must be at least adaptive_retriever.limits.timeout_s")
+        # A listwise pass keeps its own deadline, beyond the engine's scorer
+        # rerank_timeout; under a shorter recall budget every turn's recall
+        # would be cancelled whole rather than fall back to fused order.
+        reranker = getattr(memory, "reranker", None)
+        if isinstance(reranker, ListwiseReranker) and recall_timeout < reranker.timeout:
+            raise ValueError("recall_timeout must be at least the listwise reranker's timeout")
         self._memory, self._space, self._session_id = memory, space, session_id
         self._scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
         self._limit, self._max_bytes, self._timeout = limit, max_context_bytes, recall_timeout
