@@ -330,6 +330,17 @@ async def test_health_prints_what_wants_attention(engine):
     assert code == 0 and json.loads(shown)["status"] == "concerns"
 
 
+async def test_cycles_prints_the_loops_and_what_holds_one_apart(engine):
+    for subject, predicate, obj in (("app/a.py", "imports", "app/b.py"), ("app/b.py", "imports", "app/a.py"),
+                                    ("lib/x.py", "imports", "lib/y.py"), ("lib/y.py", "imports_when_called", "lib/x.py")):
+        await engine.assert_fact("default", subject, predicate, obj, valid_from=DAY, origin="extracted")
+    code, text = await graph(engine, "cycles", "--limit", "1")
+    assert code == 0 and "cycles: space default" in text and "app/a.py" in text and "lib/x.py" in text
+    code, shown = await graph(engine, "cycles", "--json")
+    report = json.loads(shown)
+    assert code == 0 and report["status"] == "cycles" and (report["totals"]["cycles"], report["totals"]["held_apart"]) == (1, 1)
+
+
 async def temporal(engine, *arguments: str) -> tuple[int, str]:
     out = io.StringIO()
     code = await run(build_parser().parse_args(["when", *arguments]), engine, io.StringIO(""), out)
