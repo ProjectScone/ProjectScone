@@ -260,6 +260,30 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
         }, []),
     ),
     ToolSpec(
+        name="graph_stats",
+        summary=("The knowledge graph counted: entities, relations, attributes, communities and modularity, isolated "
+                 "and external entities, kinds, predicates, and the facts by origin, grounding and standing. "
+                 "Counts over recorded data; it changes nothing."),
+        parameters=_schema({
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text. Defaults to 8000."},
+        }, []),
+    ),
+    ToolSpec(
+        name="graph_hubs",
+        summary=("The entities with the most neighbours, the graph's core abstractions or its utility hubs, each "
+                 "with its degree, fact weight, PageRank and community; optionally only those above a degree "
+                 "percentile, as the report holds them apart. It changes nothing."),
+        parameters=_schema({
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100,
+                      "description": "Hubs shown, most linked first, 1 to 100. Defaults to 10."},
+            "above": {"type": "number", "minimum": 50, "maximum": 100,
+                      "description": "Only the hubs above this degree percentile, 50 to 100. Defaults to none."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text. Defaults to 8000."},
+        }, []),
+    ),
+    ToolSpec(
         name="graph_health",
         summary=("What in the knowledge graph wants attention: claims resting on nothing, kinds that disagree or "
                  "are missing, entities nothing links to, predicates used once, and names that may be one thing. "
@@ -354,7 +378,8 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
 )
 
 _GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
-                          "graph_overview", "graph_changes", "find_duplicates", "graph_health", "graph_cycles", "graph_affected",
+                          "graph_overview", "graph_changes", "find_duplicates", "graph_health", "graph_cycles", "graph_stats",
+                          "graph_hubs", "graph_affected",
                           "temporal_answer"})
 #: The tree. ``write_note`` is offered only when a policy allows writing:
 #: an absent tool is a clearer refusal than an error a model may argue
@@ -607,6 +632,16 @@ class ToolBox:
                                         limit=arguments.get("limit", CYCLES_LIMIT),
                                         max_bytes=arguments.get("max_bytes", CYCLES_BYTES))
             return cycles.record(self.space, status="current", as_of=when)
+        if name in ("graph_stats", "graph_hubs"):
+            from ..entities.stats import DEFAULT_HUBS, MAX_BYTES as STATS_BYTES, graph_hubs, graph_stats
+
+            max_bytes = arguments.get("max_bytes", STATS_BYTES)
+            if name == "graph_stats":
+                stats = await graph_stats(self.engine, self.space, as_of=when, max_bytes=max_bytes)
+                return stats.record(self.space, status="current", as_of=when)
+            hubs = await graph_hubs(self.engine, self.space, as_of=when, max_bytes=max_bytes,
+                                    limit=arguments.get("limit", DEFAULT_HUBS), above=arguments.get("above"))
+            return hubs.record(self.space, status="current", as_of=when)
         if name == "graph_health":
             from ..entities.health import DEFAULT_EXAMPLES, MAX_BYTES as HEALTH_BYTES, graph_health
 
