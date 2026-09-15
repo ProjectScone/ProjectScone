@@ -483,11 +483,20 @@ def _community_tag(rank: int, label: str) -> str:
     return f"community/c{rank}" + (f"-{slug}" if slug else "")
 
 
-def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Export:
-    """A note per entity, a hub note per community the analysis found, and
-    an index. A community's tag is on its hub and on each member's note, and
-    the vault's graph view colours the community by that same tag, in the
-    drawings' colours."""
+def obsidian_files(projection: EntityProjection, about: Mapping[str, object], *, root: str = "") -> dict[str, str]:
+    """The notes of the Obsidian export, path -> text: one note per entity
+    under ``entities/``, a hub note per community the analysis found under
+    ``communities/``, ``index.md`` and ``graph.canvas``. A community's tag
+    is on its hub and on each member's note. Every note opens with
+    ``scone_note: 1`` in its frontmatter, so a later write into a vault can
+    tell these notes from a person's own; the index carries the projection
+    digest as well.
+    ``root`` is the vault-relative folder the files will sit in, which
+    the canvas needs to name its cards' notes. Without one the files are
+    the vault's top, and ``.obsidian/graph.json`` colours each community by
+    its tag in the drawings' colours; under a folder that file would be read
+    by nothing, and the vault's own ``.obsidian/`` is not this export's to
+    write, so it is left out."""
     from .analysis import cached_analysis
 
     names = _note_names(projection.entities)
@@ -516,11 +525,15 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
         values[attribute.entity_id].append(
             f"- {literal(attribute.predicate)}: {literal(attribute.value)} ({cited(attribute.fact_ids)})")
     files: dict[str, str] = {}
+    # A note carries a signature that says whose it is and nothing that
+    # changes when the rest of the graph does; the projection digest is
+    # the index's.
+    signature = "scone_note: 1"
     for entity in projection.entities:
         home = community_of.get(entity.entity_id)
         body = ["---", f"id: {entity.entity_id}", f"key: {json.dumps(entity.key, ensure_ascii=False)}",
                 f"kind: {entity.kind or 'unknown'}",
-                *([f"tags: {json.dumps([tag_of[home]])}"] if home else []), "---", "",
+                *([f"tags: {json.dumps([tag_of[home]])}"] if home else []), signature, "---", "",
                 f"# {literal(entity.label)}", "",
                 *([f"Community: [[communities/{hub_names[home]}]]", ""] if home else [])]
         for title, lines in (("Relations", outgoing[entity.entity_id]), ("Referenced by", incoming[entity.entity_id]),
@@ -539,7 +552,7 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
                             key=lambda item: (-item[1], hub_names[item[0]]))
         cohesion = f"; cohesion {community.cohesion}" if community.cohesion is not None else ""
         hub = ["---", f"id: {community.community_id}", f"tags: {json.dumps([tag_of[community.community_id]])}",
-               f"members: {len(community.members)}", "---", "", f"# {literal(community.label)}", "",
+               f"members: {len(community.members)}", signature, "---", "", f"# {literal(community.label)}", "",
                f"{_many(len(community.members), 'entity', 'entities')}; {_many(community.internal_links, 'link')} "
                f"inside and {community.boundary_links} to other communities{cohesion}. A link is a pair of entities "
                "one or more relations join.", "", "## Members", "", *(f"- [[{names[member]}]]" for member in members), ""]
@@ -552,22 +565,27 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
             hub += ["## Linked communities", "",
                     *(f"- [[communities/{hub_names[other]}]] ({_many(count, 'link')})" for other, count in neighbours), ""]
         files[f"communities/{hub_names[community.community_id]}.md"] = "\n".join(hub)
-    files["index.md"] = "\n".join([f"# Knowledge graph: {literal(projection.space)}", "",
+    files["index.md"] = "\n".join(["---", signature, f"scone_projection: {projection.digest}", "---", "",
+                                   f"# Knowledge graph: {literal(projection.space)}", "",
                                    f"Projection `{projection.digest[:12]}`, {len(projection.entities)} entities.",
                                    *_about_lines(about), "", "## Communities", "",
                                    *([f"- [[communities/{hub_names[community.community_id]}]]" for community in ranked]
                                      or ["No entity has a relation to another, so there is no community."]), "",
                                    "## Entities", "",
                                    *sorted(f"- [[{name}]]" for name in names.values())]) + "\n"
-    if ranked:
+    if ranked and not root:
         # Obsidian's graph view: one colour group per community, querying the tag its notes carry.
         files[".obsidian/graph.json"] = json.dumps({"colorGroups": [
             {"query": f"tag:#{tag_of[community.community_id]}",
              "color": {"a": 1, "rgb": int(_PALETTE[index % (len(_PALETTE) - 1)].lstrip("#"), 16)}}
             for index, community in enumerate(ranked)]}, indent=1) + "\n"
     # The same graph drawn as a canvas of the vault's own notes.
-    files["graph.canvas"] = _canvas_text(projection, about, lambda entity_id: f"entities/{names[entity_id]}.md")
-    return Export(_zip(files), "application/zip", "graph-obsidian.zip")
+    files["graph.canvas"] = _canvas_text(projection, about, lambda entity_id: f"{root}entities/{names[entity_id]}.md")
+    return files
+
+
+def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    return Export(_zip(obsidian_files(projection, about)), "application/zip", "graph-obsidian.zip")
 
 
 #: Lines listed per section of a wiki article; the rest are counted.

@@ -106,6 +106,13 @@ def main(settings: Settings, *, journal: str, model_factory: str | None = None) 
         except Exception:
             print("cannot load model factory: check trusted module:callable and zero-argument signature", file=sys.stderr)
             return 2
+    from ..runtime.conversation_followup import build_followup
+
+    followup = build_followup(settings)
+    if followup and factory is None:
+        # History-only serving searches nothing, so the setting would do nothing.
+        print("SCONE_FOLLOWUP_QUERIES needs --model-factory: history-only serving searches no memory", file=sys.stderr)
+        return 2
 
     async def run():
         # Build database clients on the same loop as the ASGI server.
@@ -113,11 +120,11 @@ def main(settings: Settings, *, journal: str, model_factory: str | None = None) 
         try:
             scoped = None
             if factory is not None:
-                def scoped(space, sid, scope):
-                    return runtime_type(engine, space, sid, factory, **scope.kwargs())
+                def scoped(space, sid, scope, **options):
+                    return runtime_type(engine, space, sid, factory, **scope.kwargs(), **options)
             app = create_conversation_app(engine, settings.keys, path, None,
                                           scoped_runtime_factory=scoped,
-                                          public_text_streaming=scoped is not None)
+                                          public_text_streaming=scoped is not None, followup=followup)
             server = create_server(app, host=settings.host, port=settings.port)
             await server.serve()
             if not server.started:

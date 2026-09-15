@@ -101,12 +101,15 @@ def resolve(projection: EntityProjection, name: str, *, limit: int = 20) -> Reso
     the id itself; the same key (case and spacing folded); the same
     variant (titles, possessives and punctuation aside); a key the name
     begins at a word boundary; a key holding every word of the name."""
+    # A name or id a merge took away still means the entity it went into.
+    merged = {old: new for item in projection.merges if item.outcome == "applied"
+              for old, new in ((item.alias_id, item.into_id), (item.alias_key, item.into_key))}
     wanted = entity_key(name)
     entities = sorted(projection.entities, key=lambda entity: entity.key)
     variant = variant_fold(name)
     tiers: list[tuple[ResolveTier, list[Entity]]] = [
-        ("id", [entity for entity in entities if entity.entity_id == name.strip()]),
-        ("key", [entity for entity in entities if entity.key == wanted]),
+        ("id", [entity for entity in entities if entity.entity_id == merged.get(name.strip(), name.strip())]),
+        ("key", [entity for entity in entities if entity.key == merged.get(wanted, wanted)]),
         ("variant", sorted(_variants(projection).get(variant, ()), key=lambda entity: entity.key) if variant else []),
         ("prefix", [entity for entity in entities if wanted and entity.key.startswith(wanted + " ")]),
         ("tokens", [entity for entity in entities
