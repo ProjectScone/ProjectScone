@@ -1912,6 +1912,10 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(f"remembered {fresh} episode(s)" + (f", {updated} replaced" if updated else "")
                   + (f", {dup} already known" if dup else ""), file=out)
             for a in added:
+                if a.forgot_overdue is not None:
+                    print(f"  episode {a.forgot_overdue.episode_id} was past its forget_after "
+                          f"{a.forgot_overdue.forget_after} and was forgotten; episode {a.episode_id} holds the words now",
+                          file=out)
                 if a.forget_after is not None:
                     print(f"  episode {a.episode_id} is to be forgotten after {a.forget_after}", file=out)
             if attachment:

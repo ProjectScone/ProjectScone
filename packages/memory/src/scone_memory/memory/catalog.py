@@ -227,7 +227,8 @@ async def cited_episode_ids(documents: DocumentStore, space: str) -> set[int]:
 async def source_page(documents: DocumentStore, space: str, *, before: Optional[int] = None,
                       limit: int = 25, kind: Optional[str] = None,
                       conditions: Mapping[str, object] | None = None,
-                      walk_page: int = SOURCE_WALK_PAGE, walk_reads: int = SOURCE_WALK_READS) -> SourcePage:
+                      walk_page: int = SOURCE_WALK_PAGE, walk_reads: int = SOURCE_WALK_READS,
+                      now: Optional[str] = None) -> SourcePage:
     """Browse retained sources by descending ID, not relevance or source date.
 
     Newer inserts are found by restarting the walk. Deleting the boundary
@@ -240,6 +241,9 @@ async def source_page(documents: DocumentStore, space: str, *, before: Optional[
     matches nothing would otherwise read a whole space to prove it, and
     reaching that bound is reported as more to come rather than as the
     end.
+
+    With ``now``, a source past its ``forget_after`` at that time is passed
+    over like one the conditions reject, and counted in ``past_forget_after``.
     """
     check_space(space)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
@@ -251,27 +255,39 @@ async def source_page(documents: DocumentStore, space: str, *, before: Optional[
     page = getattr(documents, "page_episodes", None)
     if not callable(page):
         raise InvalidInput("this document store does not implement source inventory")
+    judged_at = parse_rfc3339(now) if now is not None else None
+
+    def overdue(episode: Episode) -> bool:
+        return judged_at is not None and forget_after.is_due(episode.metadata, judged_at)
+
+    narrow = None
     if conditions is None:
         rows = await page(space, before, limit + 1, kind)
-        more = len(rows) > limit
-        return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
+        if not any(overdue(row) for row in rows):
+            more = len(rows) > limit
+            return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
+        # An overdue row would leave the page short: walk and fill it instead.
+    else:
+        from ..retrieval.filters import parse_filter
 
-    from ..retrieval.filters import parse_filter
-
-    narrow = parse_filter(conditions)
+        narrow = parse_filter(conditions)
     kept: list[Episode] = []
-    cursor, reads, ended = before, 0, False
+    cursor, reads, ended, passed_over = before, 0, False, 0
     while len(kept) < limit and reads < walk_reads:
         batch = await page(space, cursor, walk_page, kind)
         reads += 1
         filled = False
         for episode in batch:
             cursor = episode.episode_id
-            if narrow.matches(episode.metadata):
-                kept.append(episode)
-                if len(kept) == limit:
-                    filled = True
-                    break
+            if narrow is not None and not narrow.matches(episode.metadata):
+                continue
+            if overdue(episode):
+                passed_over += 1
+                continue
+            kept.append(episode)
+            if len(kept) == limit:
+                filled = True
+                break
         if filled:
             # Stopped on a full page, not on the end of the store: the
             # rest of this batch has not been looked at yet.
@@ -281,7 +297,7 @@ async def source_page(documents: DocumentStore, space: str, *, before: Optional[
             # the space rather than the end of what was read.
             ended = True
             break
-    return SourcePage(kept, not ended, None if ended else cursor)
+    return SourcePage(kept, not ended, None if ended else cursor, passed_over)
 
 
 async def episodes(documents: DocumentStore, space: str, where: Mapping[str, str], limit: Optional[int] = None,

@@ -639,7 +639,9 @@ class MemoryEngine:
             # stored afresh, the overdue one forgotten below as any replaced one.
             if (existing is not None and existing.content == new.content
                     and not forget_after.is_due(existing.metadata, parse_rfc3339(self.clock()))):
-                added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
+                # The schedule the stored episode holds, which this write did not change.
+                added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate",
+                              forget_after=existing.metadata.get(forget_after.KEY))
                 return Replaced(added=added, outcome="duplicate", replaced=None)
             pending = await ingestion_batch.chunk_record(runtime, new)
             vectors, reused = await ingestion_batch.embed_pending_counted(runtime, space, [pending])
@@ -1674,13 +1676,14 @@ class MemoryEngine:
         source_prefix: str | None = None, since: str | None = None, until: str | None = None,
         exclude_session_id: str | None = None, max_records: int = 200,
     ) -> OverviewResult:
-        """Return bounded recent source evidence; coverage and continuation are explicit."""
+        """Return bounded recent source evidence; coverage and continuation are
+        explicit. A source past its ``forget_after`` is left out and counted."""
         from ..retrieval.overview import overview
 
         return await overview(
             self.documents, space, limit=limit, before=before, where=where, kind=kind,
             source_prefix=source_prefix, since=since, until=until,
-            exclude_session_id=exclude_session_id, max_records=max_records,
+            exclude_session_id=exclude_session_id, max_records=max_records, now=self.clock(),
         )
 
     async def source_page(self, space: str, *, before: Optional[int] = None,
@@ -1698,9 +1701,19 @@ class MemoryEngine:
         matches nothing would otherwise read a whole space to prove it, and
         reaching that bound is reported as more to come rather than as the
         end.
+
+        A source past its ``forget_after`` is left out, swept or not, and
+        counted in ``past_forget_after``; the page is still filled around it.
         """
+        moment = self.clock()
+        return await self._source_page(space, before=before, limit=limit, kind=kind, conditions=conditions, now=moment)
+
+    async def _source_page(self, space: str, *, before: Optional[int], limit: int, kind: Optional[str],
+                           conditions: Mapping[str, object] | None, now: Optional[str]) -> SourcePage:
+        """``source_page``, and with ``now`` None the overdue sources too: what
+        forgetting by filter selects from, since ``forget`` still reaches them."""
         return await catalog.source_page(self.documents, space, before=before, limit=limit, kind=kind,
-            conditions=conditions, walk_page=SOURCE_WALK_PAGE, walk_reads=SOURCE_WALK_READS)
+            conditions=conditions, walk_page=SOURCE_WALK_PAGE, walk_reads=SOURCE_WALK_READS, now=now)
 
     async def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         """The episodes whose metadata matches every ``where`` pair, oldest

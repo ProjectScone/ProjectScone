@@ -152,6 +152,33 @@ async def test_replacing_a_keyed_record_over_an_overdue_one_stores_it_afresh(mem
     assert (await memory.episode_by_key("s", "k")).episode_id == again.episode_id
 
 
+async def test_replacing_with_the_same_words_reports_the_schedule_the_episode_holds(memory):
+    first = await memory.remember("s", "keyed schedule words", dedup_key="k", forget_after="3d")
+    again = await memory.remember("s", "keyed schedule words", dedup_key="k", replace=True)
+    assert again.outcome == "duplicate" and again.episode_id == first.episode_id
+    assert again.forget_after == first.forget_after == "2026-09-18T12:00:00.000Z", \
+        "a duplicate's receipt says the schedule the stored episode holds, as a plain write's does"
+
+
+async def test_a_write_over_an_overdue_memory_names_the_memory_it_forgot(memory):
+    first = await memory.remember("s", "secret words", forget_after="1h")
+    plain = await memory.remember("s", "plain words")
+    at(memory, "2026-09-15T14:00:00.000Z")
+    again = await memory.remember("s", "secret words")
+    assert again.forgot_overdue is not None and again.forgot_overdue.episode_id == first.episode_id
+    assert again.forgot_overdue.forget_after == "2026-09-15T13:00:00.000Z" and again.forgot_overdue.outcome == "forgotten"
+    assert again.forgot_overdue.receipt is not None and again.forgot_overdue.receipt.episode_id == first.episode_id
+    assert "had passed" in again.forgot_overdue.reason
+    [batch_twin, fresh] = await memory.remember_many("s", [Record("plain words"), Record("new words")])
+    assert batch_twin.forgot_overdue is None and fresh.forgot_overdue is None, "only a write that forgot something says so"
+    assert batch_twin.episode_id == plain.episode_id
+    later = await memory.remember("s", "words due later", forget_after="1h")
+    at(memory, "2026-09-15T16:00:00.000Z")
+    [first_in_batch, over_later] = await memory.remember_many("s", [Record("a fresh first record"), Record("words due later")])
+    assert first_in_batch.forgot_overdue is None, "the receipt that names the forgotten memory is the write that replaced it"
+    assert over_later.forgot_overdue is not None and over_later.forgot_overdue.episode_id == later.episode_id
+
+
 async def test_a_partial_batch_answers_a_bad_schedule_where_it_was_asked(memory):
     added = await memory.remember_many("s", [Record("fine", forget_after="1d"), Record("late", forget_after="2020-01-01")],
                                        partial=True)
@@ -289,6 +316,44 @@ async def test_a_listing_by_metadata_leaves_an_overdue_turn_out(memory):
     at(memory, "2026-09-15T13:00:00.000Z")
     assert [e.episode_id for e in await memory.episodes("s", {"session_id": "a"})] == [kept.episode_id]
     assert gone.episode_id not in [e.episode_id for e in await memory.episodes("s", {"session_id": "a"}, limit=5)]
+
+
+async def test_the_overview_leaves_an_overdue_memory_out_and_counts_it(memory):
+    kept = await memory.remember("s", "the router lives in the hall")
+    await memory.remember("s", "the wifi password is hunter2", forget_after="1h")
+    at(memory, "2026-09-15T13:00:00.000Z")
+    shown = await memory.overview("s")
+    assert [item.episode_id for item in shown.items] == [kept.episode_id], "an overdue memory must not reach a model by overview"
+    assert shown.past_forget_after == 1
+    filtered = await memory.overview("s", kind="note", limit=1)
+    assert [item.episode_id for item in filtered.items] == [kept.episode_id] and filtered.past_forget_after == 1
+    assert (await memory.overview("s", kind="file")).past_forget_after == 0, "only a memory the filters would show is counted"
+
+
+async def test_the_source_listing_leaves_an_overdue_memory_out_and_still_fills_its_page(memory):
+    work = await memory.remember("s", "a note about work", metadata={"topic": "work"})
+    older = await memory.remember("s", "an older kept note", metadata={"topic": "home"})
+    kept = await memory.remember("s", "the router lives in the hall", metadata={"topic": "home"})
+    await memory.remember("s", "the wifi password is hunter2", metadata={"topic": "home"}, forget_after="1h")
+    at(memory, "2026-09-15T13:00:00.000Z")
+    page = await memory.source_page("s", limit=1)
+    assert [e.episode_id for e in page.episodes] == [kept.episode_id] and page.past_forget_after == 1
+    assert page.has_more and page.next_before == kept.episode_id
+    rest = await memory.source_page("s", limit=1, before=page.next_before)
+    assert [e.episode_id for e in rest.episodes] == [older.episode_id] and rest.past_forget_after == 0
+    narrowed = await memory.source_page("s", conditions={"field": "topic", "is": "home"})
+    assert [e.episode_id for e in narrowed.episodes] == [kept.episode_id, older.episode_id]
+    assert narrowed.past_forget_after == 1
+    plain = await memory.source_page("s", limit=5)
+    assert [e.episode_id for e in plain.episodes] == [kept.episode_id, older.episode_id, work.episode_id]
+    assert not plain.has_more
+
+
+async def test_forgetting_by_filter_still_selects_an_overdue_memory(memory):
+    due = await memory.remember("s", "a synced note past its time", source="sync/a.md", forget_after="1h")
+    at(memory, "2026-09-15T13:00:00.000Z")
+    preview = await memory.forget_matching("s", source_prefix="sync/")
+    assert preview.episode_ids == [due.episode_id], "forget reaches an overdue memory, and so does forgetting by filter"
 
 
 # -- the sweep ---------------------------------------------------------------
@@ -550,6 +615,88 @@ async def test_a_sweep_that_fails_is_the_pass_error(memory):
     memory.forget_due = broken
     report = await ConsolidationWorker(memory, None, ["s"], retention={"conversation": 30}).run_once("s")
     assert report.error == "InvalidInput: the store cannot walk its sources"
+
+
+async def test_the_worker_walks_on_to_older_episodes_across_passes(memory, monkeypatch, caplog):
+    import logging
+
+    from scone_memory.ingestion.worker import ConsolidationWorker
+
+    monkeypatch.setattr(scheduled_forget, "MAX_SCANNED", 4)
+    monkeypatch.setattr(scheduled_forget, "PAGE", 2)
+    caplog.set_level(logging.INFO, logger="scone_memory.ingestion.worker")
+    oldest = await memory.remember("s", "the oldest note, due", forget_after="1h")
+    for n in range(6):
+        await memory.remember("s", f"a newer unscheduled note {n}")
+    at(memory, "2026-09-15T13:00:00.000Z")
+    worker = ConsolidationWorker(memory, None, ["s"], retention={"conversation": 30})
+    first = await worker.run_once("s")
+    assert first.forgotten_due == 0 and first.forget_due_scan_cut is True and first.forget_due_limited is False
+    [finished] = [r for r in caplog.records if getattr(r, "event", None) == "consolidation.finished"]
+    assert finished.forget_due_scan_cut is True and finished.forget_due_limited is False
+    second = await worker.run_once("s")
+    assert second.forgotten_due == 1 and second.forget_due_scan_cut is False, "the next pass walks on from where the last stopped"
+    assert await memory.documents.get_episode("s", oldest.episode_id) is None
+    newest = await memory.remember("s", "a new note, due soon", forget_after="1s")
+    at(memory, "2026-09-15T13:00:01.000Z")
+    third = await worker.run_once("s")
+    assert third.forgotten_due == 1 and await memory.documents.get_episode("s", newest.episode_id) is None, \
+        "a walk that reached the oldest starts again from the newest"
+
+
+async def test_the_worker_drains_a_window_before_walking_on(memory, monkeypatch):
+    from scone_memory.ingestion.worker import ConsolidationWorker
+
+    monkeypatch.setattr(scheduled_forget, "MAX_SCANNED", 4)
+    monkeypatch.setattr(scheduled_forget, "PAGE", 2)
+    for n in range(3):
+        await memory.remember("s", f"an old unscheduled note {n}")
+    due = [await memory.remember("s", f"a due note {n}", forget_after="1h") for n in range(3)]
+    at(memory, "2026-09-15T13:00:00.000Z")
+    worker = ConsolidationWorker(memory, None, ["s"], retention={"conversation": 30}, batch=1)
+    reports = [await worker.run_once("s") for _ in range(3)]
+    assert [r.forgotten_due for r in reports] == [1, 1, 1] and reports[0].forget_due_limited is True
+    assert [await memory.documents.get_episode("s", d.episode_id) for d in due] == [None, None, None], \
+        "a limited pass leaves the rest of its window for the next pass, not for the next lap"
+
+
+async def test_a_store_without_source_inventory_still_expires_and_says_it_did_not_sweep(memory):
+    from scone_memory.ingestion.worker import ConsolidationWorker
+
+    await memory.remember("s", "an old note", kind="note", created_at="2026-01-01T00:00:00.000Z")
+
+    class NoInventory(type(memory.documents)):
+        page_episodes = None
+
+    memory.documents.__class__ = NoInventory
+    report = await ConsolidationWorker(memory, None, ["s"], retention={"note": 30}).run_once("s")
+    assert report.error is None and report.expired == 1, "a sweep the store cannot run must not stop retention"
+    assert report.forget_due_skipped is not None and "source inventory" in report.forget_due_skipped
+
+
+async def test_a_sweep_that_hits_a_transport_error_is_recorded_and_the_pass_goes_on(memory):
+    from scone_memory.ingestion.worker import ConsolidationWorker
+
+    await memory.remember("s", "an old note", kind="note", created_at="2026-01-01T00:00:00.000Z")
+
+    async def hiccup(*args, **kwargs):
+        raise ConnectionError("store hiccup with private detail")
+
+    memory.documents.page_episodes = hiccup
+    report = await ConsolidationWorker(memory, None, ["s"], retention={"note": 30}).run_once("s")
+    assert report.error == "ConnectionError", "a worker must not die on a transport hiccup, and no error text is kept"
+    assert report.expired == 1, "a failed sweep does not stop retention"
+
+
+async def test_a_sweep_that_takes_nothing_records_no_event(memory):
+    await memory.remember("s", "not due for a day", forget_after="1d")
+    empty = await memory.forget_due("s")
+    assert empty.items == []
+    assert [e for e in await memory.events.query(space="s", limit=50) if e.kind == "forget_due"] == [], \
+        "a timer that sweeps every pass must not fill the log with empty passes"
+    at(memory, "2026-09-16T12:00:00.000Z")
+    await memory.forget_due("s")
+    assert len([e for e in await memory.events.query(space="s", limit=50) if e.kind == "forget_due"]) == 1
 
 
 def test_the_sync_engine_sweeps_too():

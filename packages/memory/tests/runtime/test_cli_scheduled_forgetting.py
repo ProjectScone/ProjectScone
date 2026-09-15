@@ -34,6 +34,13 @@ async def test_remember_takes_a_schedule_and_says_when(memory):
     assert code == 0 and json.loads(text)["forget_after"] == "2026-10-01T00:00:00.000Z"
 
 
+async def test_remember_over_an_overdue_memory_says_what_it_forgot(memory):
+    await cli(memory, "remember", "--forget-after", "1h", stdin="secret words")
+    memory.test_clock.now = "2026-09-15T14:00:00.000Z"
+    code, text = await cli(memory, "remember", stdin="secret words")
+    assert code == 0 and "episode 1 was past its forget_after 2026-09-15T13:00:00.000Z and was forgotten" in text, text
+
+
 async def test_remember_refuses_a_past_schedule(memory):
     with pytest.raises(InvalidInput, match="forget_after"):
         await cli(memory, "remember", "--forget-after", "2026-01-01", stdin="too late")

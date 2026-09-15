@@ -705,6 +705,11 @@ class Added(BaseModel):
     #: duplicate this is the schedule of the episode already there, which
     #: the write did not change.
     forget_after: Optional[str] = None
+    #: The memory past its ``forget_after`` that held this record's identity
+    #: and was forgotten, through the ordinary forget, so this write could be
+    #: stored afresh: which episode, when it was due, why, and the forget's
+    #: receipt. None when the write forgot nothing.
+    forgot_overdue: Optional[ScheduledForget] = None
 
 
 class Status(BaseModel):

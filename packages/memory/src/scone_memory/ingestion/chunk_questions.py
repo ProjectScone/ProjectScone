@@ -34,8 +34,10 @@ import time
 from typing import TYPE_CHECKING, Optional, Sequence
 
 from ..bench.questions import MAX_PER_CHUNK, MAX_QUESTION_CHARS, MIN_QUOTE_WORDS, anchored, loose_pairs, parse_pairs
+from ..core import forget_after
 from ..core.errors import InvalidInput
 from ..core.ports import question_index
+from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space
 from ..providers.llm import ChatError, ChatModel
 
@@ -110,6 +112,8 @@ class QuestionLaneReport:
     chunks_kept_none: int = 0
     #: Chunks forgotten while the model was answering: nothing is written for them.
     chunks_gone: int = 0
+    #: Episodes past their ``forget_after``, whose chunks were not shown to the model.
+    episodes_past_forget_after: int = 0
     kept: tuple[ChunkQuestions, ...] = ()
     #: Whether the document store keeps the question index the lane is searched through.
     kept_lane: bool = True
@@ -130,7 +134,7 @@ class QuestionLaneReport:
                 "dropped_unasked": self.dropped_unasked, "dropped_extra": self.dropped_extra,
                 "dropped_repeated": self.dropped_repeated, "chunks_indexed": self.chunks_indexed,
                 "chunks_kept_none": self.chunks_kept_none, "chunks_gone": self.chunks_gone,
-                "questions": self.questions, "kept": [kept.record() for kept in self.kept], "kept_lane": self.kept_lane,
+                "episodes_past_forget_after": self.episodes_past_forget_after, "questions": self.questions, "kept": [kept.record() for kept in self.kept], "kept_lane": self.kept_lane,
                 "seconds": round(self.seconds, 3), "reasons": list(self.reasons), "version": self.version}
 
     def text(self) -> str:
@@ -145,14 +149,27 @@ class QuestionLaneReport:
                 f"hold none now; {self.chunks_gone} chunk(s) forgotten while the model answered")
         if self.chunks_cut:
             said += f"; {self.chunks_cut} chunk(s) past max_chunks, resume after chunk {self.resume_after}"
+        if self.episodes_past_forget_after:
+            said += f"; {self.episodes_past_forget_after} episode(s) past their forget_after not read"
         return "; ".join((said, *self.reasons))
 
 
-async def _episodes(engine: "MemoryEngine", space: str, episode_ids: Optional[Sequence[int]]) -> list["Episode"]:
+async def _episodes(engine: "MemoryEngine", space: str,
+                    episode_ids: Optional[Sequence[int]]) -> tuple[list["Episode"], int]:
+    """The episodes a pass reads, and how many were left out because their
+    ``forget_after`` had come. Named episodes go through ``engine.episode``,
+    which refuses an overdue one as Gone."""
     if episode_ids is not None:
-        return [await engine.episode(space, episode_id) for episode_id in dict.fromkeys(episode_ids)]
+        return [await engine.episode(space, episode_id) for episode_id in dict.fromkeys(episode_ids)], 0
     counts = await engine.documents.counts(space)
-    return list(await engine.documents.recent_episodes(space, counts.episodes))
+    moment = parse_rfc3339(engine.clock())
+    read, overdue = [], 0
+    for episode in await engine.documents.recent_episodes(space, counts.episodes):
+        if forget_after.is_due(episode.metadata, moment):
+            overdue += 1
+            continue
+        read.append(episode)
+    return read, overdue
 
 
 async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatModel, *,
@@ -176,7 +193,8 @@ async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatM
             "questions and no model call was made",))
     started = time.perf_counter()
     rows: list[tuple["Chunk", "Episode"]] = []
-    for episode in await _episodes(engine, space, episode_ids):
+    episodes, overdue = await _episodes(engine, space, episode_ids)
+    for episode in episodes:
         rows.extend((chunk, episode) for chunk in await engine.documents.chunks_of(space, episode.episode_id)
                     if after_chunk is None or chunk.chunk_id > after_chunk)
     rows.sort(key=lambda row: row[0].chunk_id)
@@ -241,5 +259,5 @@ async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatM
         model_calls=counts["asked"], calls_failed=counts["failed"], dropped_unparsed=counts["unparsed"],
         read_loosely=counts["loosely"], dropped_unread=counts["unread"], dropped_unquoted=counts["unquoted"],
         dropped_unasked=counts["unasked"], dropped_extra=counts["extra"], dropped_repeated=counts["repeated"],
-        chunks_indexed=counts["indexed"], chunks_kept_none=counts["kept_none"], chunks_gone=counts["gone"], kept=tuple(kept),
+        chunks_indexed=counts["indexed"], chunks_kept_none=counts["kept_none"], chunks_gone=counts["gone"], episodes_past_forget_after=overdue, kept=tuple(kept),
         seconds=time.perf_counter() - started)
