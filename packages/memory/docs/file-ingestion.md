@@ -314,6 +314,18 @@ content preserves source indentation, tabs and newlines. Normal HTML flow
 collapses ASCII whitespace and preserves nonbreaking spaces; external CSS is not
 interpreted.
 
+### PDF table evidence
+
+A PDF page's tables, inferred from the geometry of the recognized or
+laid-out regions labelled `table` (see [pdf-ocr.md](pdf-ocr.md#inspect-possible-tables-without-repeating-ocr)),
+reach `segment.table_cells` with the same record: row, column,
+`column_span` where a cell reaches across the grid's columns, and the
+cell's exact byte span of the page's text. No header or row span is
+inferred, so `is_header` is false and `headers` empty; the segment's
+`tables` and `tables_unreadable` metadata count the grids proposed and
+those left out because their cells did not read together. The cells
+come in the page's text order, each with its row and column.
+
 ### HTML table evidence
 
 HTML and HTML MIME bodies retain typed `DocumentTableCell` evidence in
