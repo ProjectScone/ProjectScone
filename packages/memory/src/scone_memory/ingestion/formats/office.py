@@ -37,7 +37,7 @@ OFFICE_FAMILIES: dict[str, frozenset[str]] = {
     'slides': frozenset({'pptx', 'pptm', 'potx', 'potm', 'ppsx', 'ppsm'}),
 }
 _FAMILY_OF = {member: family for family, members in OFFICE_FAMILIES.items() for member in members}
-OFFICE_EXTENSIONS = frozenset(_FAMILY_OF) | frozenset({'odt', 'ods', 'odp', 'epub'})
+OFFICE_EXTENSIONS = frozenset(_FAMILY_OF) | frozenset({'odt', 'ods', 'odp', 'epub', 'hwpx'})
 _ODF_REVISION_METADATA = frozenset({
     '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}tracked-changes',
     '{urn:oasis:names:tc:opendocument:xmlns:office:1.0}change-info',
@@ -721,6 +721,160 @@ def _epub(bundle: SafeArchive, output: _Output) -> None:
         output.add(_visible_text(body, output), f'chapter:{chapter}/{path}', {'member': path})
 
 
+_HWPX_SECTION = re.compile(r'^Contents/section(\d+)\.xml$')
+#: Elements inside a text run that stand for one character.
+_HWPX_CHARACTERS = {'tab': '\t', 'lineBreak': '\n', 'nbSpace': '\u00a0', 'fwSpace': '\u3000', 'hyphen': '-'}
+#: What a control holding paragraphs of its own is called in a segment.
+_HWPX_CONTROLS = {'header': 'header', 'footer': 'footer', 'footNote': 'footnote', 'endNote': 'endnote',
+                  'hiddenComment': 'comment', 'caption': 'caption', 'drawText': 'textbox'}
+
+
+def _hwpx_sections(bundle: SafeArchive) -> list[str]:
+    """The section members in reading order: the order the package's
+    spine gives (`Contents/content.hpf`, an OPF manifest), else by number.
+    A spine entry whose item is missing from the package is refused, as
+    an EPUB's is."""
+    if 'Contents/content.hpf' in bundle.names:
+        package = bundle.xml('Contents/content.hpf')
+        manifest: dict[str, str] = {}
+        for item in _elements(package, 'item'):
+            identifier, href = item.get('id', ''), item.get('href', '')
+            if identifier and identifier not in manifest:
+                manifest[identifier] = href
+        ordered: list[str] = []
+        for itemref in _elements(package, 'itemref'):
+            listed = manifest.get(itemref.get('idref', ''))
+            if listed is None:
+                raise InvalidInput('HWPX spine refers to a missing manifest item')
+            # An href is written from the package root or from Contents/;
+            # a spine entry that is not a section (the header, settings)
+            # is passed over, and a section the package lacks is refused.
+            path = next((candidate for candidate in (listed, f'Contents/{listed}') if _HWPX_SECTION.match(candidate)), None)
+            if path is None:
+                continue
+            if path not in bundle.names:
+                raise InvalidInput('HWPX spine refers to a section the package does not hold')
+            if path not in ordered:
+                ordered.append(path)
+        if ordered:
+            return ordered
+    found = [(int(match.group(1)), name) for name in bundle.names for match in [_HWPX_SECTION.match(name)] if match]
+    return [name for _number, name in sorted(found)]
+
+
+def _hwpx_text(paragraph: Element, output: _Output, tables: list[Element],
+               sublists: list[tuple[str, Element]]) -> str:
+    """A paragraph's own text: its runs' `t` elements with the characters
+    that stand inside them, stopping at a table and at a control's own
+    paragraphs (`subList`: a header, footer, note, caption or text box),
+    which are collected to be read after the paragraph as segments of
+    their own. Text is taken only from inside a `t`; the whitespace an
+    editor puts between elements is not the document's."""
+    def parts() -> Iterator[str]:
+        stack: list[tuple[Element, bool, str] | str] = [(paragraph, False, 'p')]
+        while stack:
+            output.check()
+            current = stack.pop()
+            if isinstance(current, str):
+                yield current
+                continue
+            element, inside_text, parent = current
+            name = _local(element.tag)
+            if inside_text and element.tail:
+                stack.append(element.tail)
+            if name == 'tbl':
+                tables.append(element)
+                continue
+            if name == 'subList':
+                sublists.append((_HWPX_CONTROLS.get(parent, parent.lower()), element))
+                continue
+            if inside_text and name in _HWPX_CHARACTERS:
+                yield _HWPX_CHARACTERS[name]
+                continue
+            if name in {'tab', 'lineBreak'}:
+                yield _HWPX_CHARACTERS[name]
+                continue
+            within = inside_text or name == 't'
+            stack.extend((child, within, name) for child in reversed(element))
+            if within and element.text:
+                stack.append(element.text)
+    return output.join(parts())
+
+
+def _hwpx_paragraphs(root: Element) -> Iterator[Element]:
+    """Paragraphs in document order, reached without passing through
+    another paragraph: what a control or a cell holds is read by the
+    walk that reaches that control or cell."""
+    stack = [iter(root)]
+    while stack:
+        child = next(stack[-1], None)
+        if child is None:
+            stack.pop()
+            continue
+        if _local(child.tag) == 'p':
+            yield child
+            continue
+        stack.append(iter(child))
+
+
+def _hwpx_block(root: Element, output: _Output, locator: str, metadata: dict[str, str]) -> None:
+    """Every paragraph under `root` as segments, the tables and controls
+    each paragraph holds following it under its own locator."""
+    for number, paragraph in enumerate(_hwpx_paragraphs(root), 1):
+        output.check()
+        tables: list[Element] = []
+        sublists: list[tuple[str, Element]] = []
+        text = _hwpx_text(paragraph, output, tables, sublists)
+        here = f'{locator}/paragraph:{number}'
+        if text.strip():
+            output.add(text, here, dict(metadata))
+        for count, table in enumerate(tables, 1):
+            _hwpx_cells(table, output, here, count)
+        counts: dict[str, int] = {}
+        for kind, sublist in sublists:
+            counts[kind] = counts.get(kind, 0) + 1
+            _hwpx_block(sublist, output, f'{here}/{kind}:{counts[kind]}',
+                        {**metadata, 'content_role': kind, 'parent_locator': here})
+
+
+def _hwpx_cells(table: Element, output: _Output, locator: str, count: int) -> None:
+    """A table's cells as segments: direct rows, direct cells, each cell's
+    paragraphs joined, a nested table read under its cell."""
+    number = 0
+    for row in (child for child in table if _local(child.tag) == 'tr'):
+        for cell in (child for child in row if _local(child.tag) == 'tc'):
+            output.check()
+            number += 1
+            address = _child(cell, 'cellAddr')
+            nested: list[Element] = []
+            inner: list[tuple[str, Element]] = []
+            text = output.join((_hwpx_text(paragraph, output, nested, inner) for paragraph in _hwpx_paragraphs(cell)), '\n')
+            here = f'{locator}/table:{count}/cell:{number}'
+            metadata = {'content_role': 'table_cell', 'parent_locator': locator}
+            if address is not None:
+                metadata.update(row=_attr(address, 'rowAddr', '?'), column=_attr(address, 'colAddr', '?'))
+            if text.strip():
+                output.add(text, here, metadata)
+            for inner_count, table_inside in enumerate(nested, 1):
+                _hwpx_cells(table_inside, output, here, inner_count)
+            counts: dict[str, int] = {}
+            for kind, sublist in inner:
+                counts[kind] = counts.get(kind, 0) + 1
+                _hwpx_block(sublist, output, f'{here}/{kind}:{counts[kind]}', {'content_role': kind, 'parent_locator': here})
+
+
+def _hwpx(bundle: SafeArchive, output: _Output) -> None:
+    """Hangul's XML package (HWPX, KS X 6101): each section's paragraphs in
+    order; a table's cells, and the paragraphs a header, footer, note,
+    caption or text box holds, right after the paragraph that holds them.
+    The binary HWP 5 format is a different container and is not read."""
+    sections = _hwpx_sections(bundle)
+    if not sections:
+        raise InvalidInput('HWPX package has no sections (Contents/section0.xml)')
+    for section_number, path in enumerate(sections, 1):
+        _hwpx_block(bundle.xml(path), output, f'section:{section_number}', {'member': path})
+
+
 def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocument:
     """Extract ordered native text without filesystem extraction or execution."""
     extension = PurePosixPath(filename).suffix.lower().lstrip('.')
@@ -739,6 +893,8 @@ def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDo
                 _pptx(bundle, output)
             elif extension == 'epub':
                 _epub(bundle, output)
+            elif extension == 'hwpx':
+                _hwpx(bundle, output)
             else:
                 _odf(bundle, output, extension)
         output.check()
