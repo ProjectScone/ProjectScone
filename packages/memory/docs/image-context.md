@@ -104,7 +104,11 @@ not an OS sandbox or a native-library memory quota.
 1. `POST /v1/attachments` uploads image bytes using the existing authenticated API.
 2. `POST /v1/images` accepts `{"attachment_id": "...", "context": {...}}` and indexes
    that space's retained image. It requires write permission and shares ingestion
-   admission control. Context bodies are capped at 132 KB.
+   admission control. Context bodies are capped at 132 KB. `"forget_after"` (as for
+   `ingest_image(..., forget_after=)`) schedules the episode to be forgotten; a past or
+   unreadable one is refused before the context manifest is stored, and the sweep takes
+   the image vector and attachments nothing else carries
+   ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
 3. `GET /v1/images/search?query=Who%20is%20Pikachu%3F&entity_id=pokemon%3A25` returns
    matches with attributes, entities, original attachment descriptors and an
    authenticated `download_path`. The optional limit is 1–25.
