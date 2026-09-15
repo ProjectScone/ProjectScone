@@ -1404,6 +1404,112 @@ quietest rounds: 13.2 against 5.8 s, 15.1 against 7.3 s, 16.2 against
 same receipt at 256, 512, 1,024, and 512 with a 64-token overlap. The
 retrieval numbers above were taken with the first version.
 
+## Joining a semantic cut's chunks again
+
+A semantic cut (`chunking="semantic"`, or `semantic_aware=True` as the
+engine's rule) packs sentences up to the target and cuts where similarity
+dips below both sides and stands out from the rest of that text. That
+test is relative, so a passage about one subject all the way through can
+still be cut at its deepest dip. The reference's double-merging splitter
+answers with a second pass: neighbouring groups at least a threshold
+alike are joined again, within a maximum size. `semantic_merge_threshold`
+is that pass:
+
+```python
+MemoryEngine(store, index, embedder, semantic_merge_threshold=0.2)   # or SCONE_SEMANTIC_MERGE_THRESHOLD=0.2
+```
+
+- **Every semantic cut, and only those.** The engine's rule and a record's
+  own `chunking="semantic"` (`remember(..., chunking="semantic")`, `scone
+  remember --chunking semantic`, `"chunking": "semantic"` on
+  `POST /v1/episodes` and in each batch record) both get the pass; length,
+  code, structure and unit cuts never read it. `semantic_aware` has no
+  environment variable, so on a served process
+  `SCONE_SEMANTIC_MERGE_THRESHOLD` reaches exactly the records that ask
+  for a semantic cut.
+- **The rule.** The chunks are walked in order. A chunk is joined to the
+  one before it when the cosine between the two sides' mean sentence
+  vectors is at least the threshold **and** the joined span fits the
+  chunk target -- the same measure the first pass packs sentences by. A
+  joined chunk is compared by the mean of all its sentences, not by the
+  chunk it started as or the one it last took in, and keeps whether its
+  own end is a change of subject.
+- **It only undoes cuts.** The first pass packs sentences up to the
+  target, so a chunk it ended by size can never fit with the whole of the
+  next one; the only joins possible are across a valley. A merge never
+  makes a chunk the first pass could not have made for its length.
+- **No second embedding call, and the same answer every time.** The
+  sentence vectors the first pass already has are compared. The
+  reference embeds every joined text again.
+- **The receipt says what the pass did.** `structure` carries
+  `merge_threshold`, `groups` (the chunks the first pass made), `merges`,
+  and every join that did not happen, counted once:
+  `stopped_by_similarity` when the two were less alike than the threshold,
+  `stopped_by_size` when they were alike enough and too long together --
+  the size bound biting. Two chunks that fail both count as unalike. Most
+  size stops are the first pass's own size cuts: pieces of one subject
+  that were never going to fit together. A semantic cut without a
+  threshold has no such receipt (`structure` is null), as before.
+- **A similarity above 0 and at most 1.** At or below 0 any two chunks
+  that fit and are not opposed would be joined, which is size chunking
+  under a semantic name; above 1 nothing would, while the receipt says the pass ran. A
+  bool, NaN or anything that is not a number is refused, and the
+  environment variable is refused by name.
+- **The scale is the embedder's.** The first pass's own threshold is
+  derived from each text's depths and assumes no scale; this one does,
+  which is why it is off by default. Hashed-token cosines are word
+  overlap. Over the sample below (51,186 first-pass chunks in 2,355
+  sessions), the 7,060 neighbouring pairs that would fit together had a
+  median cosine of 0.04, a 90th percentile of 0.31 and a 95th of 0.39
+  under `hash-256`; a neural model's cosines sit far higher, and a
+  threshold chosen for one embedder means nothing for another.
+- **Stored chunks are never recut, and a replacement is prepared under
+  it.** The threshold is part of the configuration a keyed replacement is
+  prepared under, so one cut before the setting changed is refused rather
+  than stored. Recovery after a crash re-cuts the stored content under the
+  engine's threshold, which lands on exactly the chunks the uninterrupted
+  write stores under the same setting. The threshold is not written on
+  the episode: an engine restarted with another value recovers an
+  interrupted record under the new one, as it does with `chunk_target`
+  and `chunk_tokens`.
+- **Not the reference's first pass, and no merging across a chunk.** The
+  reference groups sentences by absolute thresholds against the chunk so
+  far and can reach one or two chunks past a dissimilar neighbour to join
+  across it (`merging_range`). Here the first pass is the valley cut
+  above, and a join across a chunk would pull in a chunk that failed the
+  very test.
+
+### What it measured
+
+`benchmarks/semantic_double_merge.py`: LongMemEval-S, the 50 items
+stratified by question type (seed 42), the hashed-token embedder on both
+sides, no model, no reranker, engine defaults otherwise (vector weight
+0.01). Every row is `bench.comparative.compare()` itself with
+`hybrid=True`: a fresh engine per item against LlamaIndex 0.14.24's
+BM25 + vector fusion over `SentenceSplitter(512)`, both folded to
+sessions. Both sides are deterministic, so one run is the number.
+
+| our cut | R@5 | all-sessions@5 | R@10 | R@15 | MRR | NDCG@5 | chunks | merges | stopped: similarity / size |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| length, 700 characters (default) | 0.90 | 0.76 | 0.92 | 1.00 | 0.838 | 0.807 | 46,637 | | |
+| semantic | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.824 | 51,248 | | |
+| semantic, merge at 0.4 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.824 | 50,942 | 306 | 38,974 / 9,614 |
+| semantic, merge at 0.2 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.825 | 49,865 | 1,383 | 20,734 / 26,777 |
+| *reference: BM25 + vector fusion* | 0.88 | 0.74 | 0.90 | 0.98 | 0.831 | 0.784 | | | |
+
+What it says: on this sample the second pass changes almost nothing a
+metric can see. At 0.2 it removes 1,383 chunks (2.7%) and changes the
+top-15 session ranking of 34 items and the top 5 of 8, and no score moves
+but NDCG@5 by 0.001; at 0.4 it removes 306 (0.6%), changing 7 and 2. The
+semantic cut itself scores as the length cut does at k=5 and 10, higher
+on MRR (0.857 vs 0.838), lower at k=15 (0.96 vs 1.00). What it does not
+say: 50 items is one or two items a column; hashed-token vectors carry
+0.01 of the fused ranking, so a cut changes the ranking mostly through
+the text lane; nothing about a neural embedder, whose scale needs its own
+thresholds, and nothing about answer quality. The record, with the
+per-item session rankings, is in
+`benchmarks/semantic-double-merge-v1.results.md`.
+
 ## Cutting a document at its genre's boundaries
 
 Structure chunking reads what any document carries and packs it up to the
