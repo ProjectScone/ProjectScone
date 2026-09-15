@@ -81,7 +81,7 @@ async def test_a_quoted_triple_is_stored_as_a_proposal_with_its_quote_and_holds_
                                           model_name="fake-3b")
 
     assert (report.chunks_total, report.chunks_asked, report.model_calls, report.model) == (1, 1, 1, "fake-3b")
-    assert [p.fact_id for p in report.proposed] and report.rejected_reasons == {}
+    assert [p.fact_id for p in report.proposed] and report.rejected_reasons == {} and report.quotes_settled == 0
     fact = await engine.documents.get_fact(SPACE, report.proposed[0].fact_id)
     assert (fact.subject, fact.predicate, fact.object) == ("worker", "uses", "Ollama")
     assert (fact.status, fact.origin, fact.quote, fact.source_episode_id) == ("proposed", "extracted", USES,
@@ -108,6 +108,27 @@ async def test_a_triple_without_a_verbatim_quote_is_rejected_and_counted():
     assert (report.triples_read, report.unquoted, len(report.proposed)) == (4, 2, 1)
     assert report.quoted_share == pytest.approx(1 / 3), "of the three whole triples, one quoted the chunk"
     assert len(await engine.documents.list_facts(SPACE, include_closed=True)) == 1
+
+
+async def test_a_quote_that_changes_only_whitespace_is_stored_as_the_chunk_writes_it(documents):
+    # A model copying a hard-wrapped line joins it with a space. The words are
+    # the chunk's, so the chunk's own span is the quote; a change of case is not.
+    wrapped = "Scone stores its ledger\nin SQLite. The worker uses Ollama for extraction."
+    engine = await opened(documents)
+    await engine.remember(SPACE, wrapped)
+    chat = FakeChat([reply(
+        {**GOOD_STORES, "quote": "Scone stores its ledger in SQLite."},
+        {**GOOD_USES, "quote": "  The worker  uses Ollama for extraction. "},
+        {**GOOD_STORES, "object": "SQLite", "quote": "scone stores its ledger in sqlite."},
+    )])
+
+    report = await extract_dynamic_schema(engine, SPACE, chat)
+
+    assert (report.quotes_settled, report.rejected_reasons, report.unquoted) == (2, {"quote_not_in_source": 1}, 1)
+    assert [p.quote for p in report.proposed] == ["Scone stores its ledger\nin SQLite.", USES]
+    stored = await engine.documents.list_facts(SPACE, include_closed=True)
+    assert sorted(f.quote for f in stored) == sorted(["Scone stores its ledger\nin SQLite.", USES])
+    assert report.record()["quotes_settled"] == 2 and "2 quote(s) settled to the chunk's whitespace" in report.text()
 
 
 async def test_a_quote_too_long_to_store_is_counted_as_unquoted(monkeypatch):

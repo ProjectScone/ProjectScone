@@ -17,6 +17,9 @@ triple with a span quoted from the chunk. A triple is kept only when:
 - it is among the first ``max_triples_per_chunk`` entries of the reply;
 - it passes the source-grounding gate model extraction already uses
   (``distill._grounding_reason``): the quote stands verbatim in the chunk
+  (a quote that differs from the chunk only in runs of whitespace, as a
+  model joining a hard-wrapped line writes it, is replaced by the chunk's
+  own span first, and counted)
   and is short enough to store, the model called it an observation, both
   ends are named in it, its clause is not negated or hypothetical, and the
   predicate's words are the quote's;
@@ -48,7 +51,7 @@ distiller, which only reads episodes no claim cites.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import re
 import time
@@ -208,6 +211,9 @@ class DynamicSchemaReport:
     triples_read: int = 0
     #: Entries past ``max_triples_per_chunk`` in one reply, not read.
     dropped_extra: int = 0
+    #: Quotes not in the chunk as written whose words are, with other runs
+    #: of whitespace between them: the chunk's own span replaced each.
+    quotes_settled: int = 0
     #: Entries not stored, by reason: ``malformed``, the grounding gate's
     #: reasons, ``new_type_not_allowed`` and ``new_type_cut``.
     rejected_reasons: dict[str, int] = field(default_factory=dict)
@@ -252,7 +258,7 @@ class DynamicSchemaReport:
                 "chunks_asked": self.chunks_asked, "chunks_cut": self.chunks_cut, "resume_after": self.resume_after,
                 "skipped_long": self.skipped_long, "model_calls": self.model_calls, "calls_failed": self.calls_failed,
                 "replies_unparsed": self.replies_unparsed, "triples_read": self.triples_read,
-                "dropped_extra": self.dropped_extra, "rejected_reasons": dict(sorted(self.rejected_reasons.items())),
+                "dropped_extra": self.dropped_extra, "quotes_settled": self.quotes_settled, "rejected_reasons": dict(sorted(self.rejected_reasons.items())),
                 "unquoted": self.unquoted, "quoted_share": None if share is None else round(share, 4),
                 "restated": self.restated, "proposed": [p.record() for p in self.proposed],
                 "proposed_outside_schema": self.proposed_outside_schema,
@@ -269,7 +275,8 @@ class DynamicSchemaReport:
         reasons = ", ".join(f"{count} {reason}" for reason, count in sorted(self.rejected_reasons.items()))
         said = (f"{len(self.proposed)} proposal(s) from {self.chunks_asked} of {self.chunks_total} chunk(s) asked, "
                 f"written by {self.model} in {self.model_calls} call(s) and {self.seconds:.1f}s; "
-                f"{self.triples_read} triple(s) read, {share}; rejected: {reasons or 'none'}; "
+                f"{self.triples_read} triple(s) read, {share}, {self.quotes_settled} quote(s) settled to the "
+                f"chunk's whitespace; rejected: {reasons or 'none'}; "
                 f"{self.restated} restated; {self.proposed_outside_schema} outside the suggested vocabulary; "
                 f"new predicates: {', '.join(t.term for t in self.new_predicates) or 'none'}; "
                 f"new kinds: {', '.join(t.term for t in self.new_kinds) or 'none'}; "
@@ -313,6 +320,26 @@ def _read(entry: object) -> Optional[_Read]:
     triple = Extracted(subject, predicate, obj, DEFAULT_CONFIDENCE, quote=_literal(entry.get("quote")),
                        statement_type=_clean(entry.get("statement_type")) or None)
     return _Read(triple, subject_kind, object_kind)
+
+
+def settle_quote(quote: str, text: str) -> Optional[str]:
+    """The span of ``text`` that ``quote`` copies with only its runs of
+    whitespace changed, as the text writes it; None when there is none.
+    Case, punctuation and every other character must match."""
+    found = re.search(r"\s+".join(re.escape(word) for word in quote.split()), text)
+    return None if found is None else found.group(0)
+
+
+def _settled(read: _Read, text: str) -> tuple[_Read, bool]:
+    """The reading with its quote as the chunk writes it, and whether that
+    changed it."""
+    quote = read.triple.quote
+    if quote is None or quote in text:
+        return read, False
+    span = settle_quote(quote, text)
+    if span is None:
+        return read, False
+    return replace(read, triple=replace(read.triple, quote=span)), True
 
 
 def _entries(reply: str) -> Optional[list[object]]:
@@ -404,8 +431,8 @@ async def extract_dynamic_schema(
         rows.extend((chunk, episode) for chunk in await engine.documents.chunks_of(space, episode.episode_id)
                     if after_chunk is None or chunk.chunk_id > after_chunk)
     rows.sort(key=lambda row: row[0].chunk_id)
-    counts = dict.fromkeys(("asked", "skipped_long", "failed", "unparsed", "read", "extra", "restated", "outside",
-                            "gone"), 0)
+    counts = dict.fromkeys(("asked", "skipped_long", "failed", "unparsed", "read", "extra", "settled", "restated",
+                            "outside", "gone"), 0)
     rejected: dict[str, int] = {}
     proposed: list[ProposedTriple] = []
     new_predicates: dict[str, _Term] = {}
@@ -438,6 +465,9 @@ async def extract_dynamic_schema(
         for entry in entries[:max_triples_per_chunk]:
             counts["read"] += 1
             read = _read(entry)
+            if read is not None:
+                read, settled = _settled(read, chunk.text)
+                counts["settled"] += settled
             reason = "malformed" if read is None else _grounding_reason(read.triple, chunk.text)
             if read is None or reason is not None:
                 rejected[str(reason)] = rejected.get(str(reason), 0) + 1
@@ -481,6 +511,7 @@ async def extract_dynamic_schema(
         chunks_asked=counts["asked"], chunks_cut=len(rows) - examined, resume_after=resume_after,
         skipped_long=counts["skipped_long"], model_calls=counts["asked"], calls_failed=counts["failed"],
         replies_unparsed=counts["unparsed"], triples_read=counts["read"], dropped_extra=counts["extra"],
+        quotes_settled=counts["settled"],
         rejected_reasons=rejected, restated=counts["restated"], proposed=tuple(proposed),
         proposed_outside_schema=counts["outside"],
         new_predicates=tuple(record.frozen(term) for term, record in new_predicates.items()),
@@ -499,4 +530,5 @@ __all__ = [
     "TermExample",
     "extract_dynamic_schema",
     "schema_term",
+    "settle_quote",
 ]
