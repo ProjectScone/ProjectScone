@@ -76,6 +76,7 @@ def assert_traced(parsed: ParsedDocument, result) -> None:
         size = len(segment.text.encode())
         starts.setdefault(segment.locator, []).append((offset, offset + size))
         offset += size + 2
+    assert '\r' not in result.markdown, 'a Markdown reader would count a carriage return as a line end'
     lines = result.markdown.split('\n')
     covered = [0] * len(lines)
     previous_end = 0
@@ -106,7 +107,7 @@ def test_word_document_rebuilds_with_heading_levels_nested_lists_a_caption_and_a
     [table] = record['tables']
     assert table == {'locator': 'table:1', 'rendering': 'pipe', 'rows': 3, 'rows_written': 3, 'columns': 2,
                      'header_basis': 'declared', 'extra_header_rows': 0, 'spanning_cells': 0, 'line_breaks': 0,
-                     'notes': '', 'caption': None}
+                     'notes': '', 'caption': None, 'interleaved_segments': 0}
     assert record['bound'] == {'max_bytes': MAX_MARKDOWN_BYTES, 'cut': False, 'cut_at': None, 'segments_omitted': 0}
     heading = result.spans[0]
     assert (heading.kind, heading.first_line, heading.sources[0].locator) == ('heading', 1, 'paragraph:1')
@@ -213,6 +214,8 @@ def test_delimited_rows_take_their_header_from_the_columns_the_reader_named() ->
     assert result.markdown == '| name | team |\n| --- | --- |\n| Ada | core |'
     assert result.record()['tables'][0]['header_basis'] == 'table_columns'
     assert_traced(parsed, result)
+    broken = parse_text(b'"first\nname",team\nAda,core\n', 'people.csv', DocumentLimits())
+    assert assemble_markdown(broken).markdown.startswith('| first<br>name | team |\n| --- | --- |\n')
 
 
 def test_a_table_read_as_text_says_why_and_keeps_its_rows_as_paragraphs() -> None:
@@ -237,7 +240,7 @@ def test_a_list_that_skips_a_level_is_nested_one_step_and_counted() -> None:
     parsed = parse_office(word(paragraph('Top', number=2, level='1') + paragraph('Child', number=2, level='3')
                                + paragraph('Unknown kind', number=9)), 'skip.docx', DocumentLimits())
     result = assemble_markdown(parsed)
-    assert result.markdown == '- Top\n  - Child\n\n- Unknown kind'
+    assert result.markdown == '- Top\n  - Child\n\n* Unknown kind'
     record = result.record()
     assert (record['list_levels_clamped'], record['list_kinds_unsaid']) == (2, 3)
 
@@ -336,7 +339,7 @@ def test_a_numbered_list_the_document_interrupts_carries_on_counting() -> None:
     body = (paragraph('One', number=2) + paragraph('Two', number=2) + paragraph('Aside.')
             + paragraph('Three', number=2) + paragraph('Other list', number=4))
     parsed = parse_office(word(body, numbering=NUMBERING), 'resume.docx', DocumentLimits())
-    assert assemble_markdown(parsed).markdown == '1. One\n2. Two\n\nAside.\n\n3. Three\n\n1. Other list'
+    assert assemble_markdown(parsed).markdown == '1. One\n2. Two\n\nAside.\n\n3. Three\n\n1) Other list'
 
 
 def test_a_table_note_header_and_delimiter_are_written_together_or_not_at_all() -> None:
@@ -397,3 +400,191 @@ def test_a_paragraph_that_continues_an_html_list_item_stays_inside_that_item() -
 def test_a_nested_list_after_a_continued_item_counts_from_one_again() -> None:
     result = assemble_markdown(html('<ol><li>a<ol><li>x</li></ol>more<ol><li>y</li></ol></li></ol>'))
     assert result.markdown == '1. a\n   1. x\n\n   more\n   1. y'
+
+
+def test_a_table_the_document_interleaves_with_other_segments_is_written_whole_and_says_so() -> None:
+    from .test_xlsx_tables import DEFINITION, workbook
+    from .test_xlsx_tables import cell as sheet_cell, parse as parse_sheet, row as sheet_row
+
+    rows = (sheet_row(4, sheet_cell('B4', 'Region') + sheet_cell('C4', 'Revenue') + sheet_cell('E4', 'note: audited'))
+            + sheet_row(5, sheet_cell('B5', 'West') + sheet_cell('C5', '20') + sheet_cell('E5', 'q1'))
+            + sheet_row(6, sheet_cell('B6', 'Total') + sheet_cell('C6', '20')))
+    parsed = parse_sheet(workbook(rows, DEFINITION))
+    result = assemble_markdown(parsed)
+    assert result.markdown == ('> sheet:Sales/table:1: 2 segments the document puts between its rows are written after it.'
+                               '\n\n| Region | Revenue |\n| --- | --- |\n| West | 20 |\n| Total | 20 |\n\nnote: audited\n\nq1')
+    [table] = result.record()['tables']
+    assert (table['rows'], table['rows_written'], table['header_basis'], table['interleaved_segments']) == (3, 3, 'declared', 2)
+    assert_traced(parsed, result)
+    west = result.markdown.index('| West | 20 |') + len('| West | 20 |')
+    cut = assemble_markdown(parsed, max_bytes=west)
+    assert cut.markdown == result.markdown[:west]
+    bound = cut.record()['bound']
+    assert bound['segments_omitted'] == 4, 'the side cells were never written, though they come before the cut row'
+    assert extracted(parsed)[bound['cut_at']:].startswith(b'note: audited')
+    one = html('<table><tr><th>A</th></tr><tr><td>1</td></tr></table><p>x</p><p>y</p>')
+    assert assemble_markdown(one).record()['tables'][0]['interleaved_segments'] == 0
+
+
+def test_a_caption_between_a_tables_rows_is_written_before_the_table() -> None:
+    parsed = html('<table><tr><th>A</th></tr><caption>C</caption><tr><td>1</td></tr></table>')
+    result = assemble_markdown(parsed)
+    assert result.markdown == '*C*\n\n| A |\n| --- |\n| 1 |'
+    [table] = result.record()['tables']
+    assert (table['rows'], table['caption'], table['interleaved_segments']) == (2, 'table:1/caption', 0)
+    assert_traced(parsed, result)
+
+
+def test_a_bound_that_cuts_inside_a_paragraph_run_names_the_first_byte_not_written() -> None:
+    parsed = ParsedDocument(format='txt', parser='test', segments=(
+        DocumentSegment(text='First\n\nSecond', locator='a'), DocumentSegment(text='Third', locator='b')))
+    bound = len('First\n\nSec')
+    result = assemble_markdown(parsed, max_bytes=bound)
+    assert result.markdown == 'First'
+    assert result.record()['bound'] == {'max_bytes': bound, 'cut': True, 'cut_at': len(b'First\n\n'), 'segments_omitted': 2}
+
+
+def test_code_a_heading_a_table_and_a_caption_inside_a_list_item_stay_inside_it() -> None:
+    parsed = html('<ol>\n<li>\n<p>Install the package:</p>\n<pre><code>pip install x\n</code></pre>\n'
+                  '<p>then check the version.</p>\n</li>\n<li>\n<p>Run it.</p>\n</li>\n</ol>\n')
+    result = assemble_markdown(parsed)
+    assert result.markdown == ('1. Install the package:\n\n   ```\n   pip install x\n   ```\n\n'
+                               '   then check the version.\n2. Run it.')
+    assert [span.kind for span in result.spans] == ['list_item', 'code', 'list_continuation', 'list_item']
+    assert result.record()['blocks']['list_item'] == 2
+    assert_traced(parsed, result)
+    opened = html('<ul><li><pre>x\n\ny</pre></li><li><h2>T</h2></li>'
+                  '<li><table><tr><th colspan="2">A</th></tr><tr><td>1</td><td>2</td></tr></table></li>'
+                  '<li><figure><figcaption>F</figcaption></figure></li></ul><p>After</p>')
+    result = assemble_markdown(opened)
+    assert result.markdown == ('- ```\n  x\n\n  y\n  ```\n- ## T\n'
+                               '- > table:1: 1 cell spans more than one row or column, which a pipe table cannot show; '
+                               'each is written in its first slot and the slots it covers are left empty.\n\n'
+                               '  | A |  |\n  | --- | --- |\n  | 1 | 2 |\n- *F*\n\nAfter')
+    assert result.record()['blocks'] == {'code': 1, 'heading': 1, 'table': 1, 'caption': 1, 'list_item': 4,
+                                         'paragraph': 1}
+    assert_traced(opened, result)
+
+
+def test_a_table_that_opens_a_list_item_is_written_with_its_marker_or_not_at_all() -> None:
+    parsed = html('<ul><li>x</li><li><table><tr><th>A</th></tr><tr><td>1</td></tr></table></li></ul>')
+    whole = assemble_markdown(parsed).markdown
+    assert whole == '- x\n- | A |\n  | --- |\n  | 1 |'
+    delimiter_end = whole.index('| --- |') + len('| --- |')
+    assert assemble_markdown(parsed, max_bytes=delimiter_end).markdown == whole[:delimiter_end]
+    cut = assemble_markdown(parsed, max_bytes=delimiter_end - 1)
+    assert cut.markdown == '- x' and cut.record()['blocks'] == {'list_item': 1}
+
+
+def test_side_content_in_a_list_item_role_is_quoted_not_listed() -> None:
+    parsed = ParsedDocument(format='custom', parser='plugin', segments=(DocumentSegment(
+        text='Boxed', locator='a', metadata={'block_role': 'list_item', 'content_role': 'textbox'}),))
+    assert assemble_markdown(parsed).markdown == '> textbox: Boxed'
+
+
+def test_a_segment_holding_cells_of_two_rows_is_written_only_when_its_last_row_is() -> None:
+    from scone_memory.ingestion.formats.table_types import DocumentTableCell
+
+    cells = (DocumentTableCell(table_locator='t', locator='t/b', row=1, column=0, text='b', start=0, end=1),
+             DocumentTableCell(table_locator='t', locator='t/a', row=0, column=0, text='a', start=2, end=3,
+                               is_header=True))
+    parsed = ParsedDocument(format='custom', parser='plugin', segments=(
+        DocumentSegment(text='b a', locator='rows', table_cells=cells, metadata={'table_locator': 't'}),
+        DocumentSegment(text='End', locator='end')))
+    whole = assemble_markdown(parsed).markdown
+    assert whole == '| a |\n| --- |\n| b |\n\nEnd'
+    cut = assemble_markdown(parsed, max_bytes=len('| a |\n| --- |'))
+    assert cut.record()['bound'] == {'max_bytes': 13, 'cut': True, 'cut_at': 0, 'segments_omitted': 2}
+
+
+def test_lists_in_separate_mail_parts_are_separate_lists() -> None:
+    def message(subject: str, body: str) -> str:
+        return (f'From sender@example.com Mon Sep 14 10:00:00 2026\nFrom: a@example.com\nSubject: {subject}\n'
+                f'MIME-Version: 1.0\nContent-Type: text/html; charset=utf-8\n\n{body}\n\n')
+
+    box = (message('One', '<ol><li>Collect</li><li>Reconcile</li></ol>')
+           + message('Two', '<ol><li>Pack</li><li>Ship</li></ol>')).encode()
+    markdown = assemble_markdown(parse_text(box, 'box.mbox', DocumentLimits())).markdown
+    assert '1. Collect\n2. Reconcile' in markdown and '1. Pack\n2. Ship' in markdown
+    mail = (b'From: a@example.com\nSubject: x\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=B\n\n'
+            b'--B\nContent-Type: text/html\n\n<ul><li>first</li></ul>\n'
+            b'--B\nContent-Type: text/html\n\n<ul><li>second<p>more</p></li></ul>\n--B--\n')
+    parsed = parse_text(mail, 'm.eml', DocumentLimits())
+    result = assemble_markdown(parsed)
+    assert result.markdown.endswith('- first\n\n* second\n\n  more')
+    assert [span.kind for span in result.spans][-3:] == ['list_item', 'list_item', 'list_continuation']
+
+
+def test_a_code_block_keeps_its_content_and_counts_lines_as_a_markdown_reader_does() -> None:
+    assert assemble_markdown(html('<pre><code>x = 1\n</code></pre>')).markdown == '```\nx = 1\n```'
+    assert assemble_markdown(html('<pre><code>x = 1\n\n</code></pre>')).markdown == '```\nx = 1\n\n```'
+    parsed = html('<pre>a\rb\r\nc</pre><p>after</p>')
+    result = assemble_markdown(parsed)
+    assert result.markdown == '```\na\nb\nc\n```\n\nafter'
+    assert [(span.first_line, span.last_line) for span in result.spans] == [(1, 5), (7, 7)]
+    assert_traced(parsed, result)
+
+
+def test_a_header_row_between_body_rows_is_counted_and_said() -> None:
+    parsed = html('<table><tr><td>x</td><td>1</td></tr><tr><th>Section</th><th>Total</th></tr>'
+                  '<tr><td>y</td><td>2</td></tr></table>')
+    result = assemble_markdown(parsed)
+    assert result.markdown == ('> table:1: 1 header row is written as a body row.\n\n'
+                               '|  |  |\n| --- | --- |\n| x | 1 |\n| Section | Total |\n| y | 2 |')
+    [table] = result.record()['tables']
+    assert (table['header_basis'], table['extra_header_rows']) == ('none_declared', 1)
+    declared = assemble_markdown(html('<table><tr><th>K</th></tr><tr><td>a</td></tr><tr><th>Sub</th></tr></table>'))
+    assert declared.markdown.startswith('> table:1: 1 further header row is written as a body row.\n\n| K |')
+    assert declared.record()['tables'][0]['extra_header_rows'] == 1
+
+
+def test_an_ordered_list_starts_where_the_source_says() -> None:
+    assert assemble_markdown(html('<ol start="5"><li>five</li><li>six</li></ol>')).markdown == '5. five\n6. six'
+    assert assemble_markdown(html('<ol start="0"><li>zero</li></ol>')).markdown == '0. zero'
+    assert assemble_markdown(html('<ol><li>a<ol start="3"><li>c</li></ol></li></ol>')).markdown == '1. a\n   3. c'
+    parsed = ParsedDocument(format='custom', parser='plugin', segments=(DocumentSegment(
+        text='Item', locator='a', metadata={'block_role': 'list_item', 'list_kind': 'ordered', 'list_start': 'x'}),))
+    assert assemble_markdown(parsed).markdown == '1. Item'
+    unnamed = ParsedDocument(format='custom', parser='plugin', segments=(
+        DocumentSegment(text='a', locator='a', metadata={'block_role': 'list_item', 'list_kind': 'ordered'}),
+        DocumentSegment(text='Aside', locator='b'),
+        DocumentSegment(text='b', locator='c', metadata={'block_role': 'list_item', 'list_kind': 'ordered'})))
+    assert assemble_markdown(unnamed).markdown == '1. a\n\nAside\n\n1. b', 'only a named list resumes its count'
+
+
+def test_a_nested_numbered_list_after_a_nested_bullet_list_counts_from_its_own_start() -> None:
+    result = assemble_markdown(html('<ol><li>a<ul><li>x</li></ul><ol><li>y</li></ol></li></ol>'))
+    assert result.markdown == '1. a\n   - x\n   1. y'
+
+
+def test_separate_lists_that_would_touch_are_told_apart_by_their_marker() -> None:
+    result = assemble_markdown(html('<ul><li>a</li></ul><ul><li>b<ul><li>b1</li></ul></li></ul><ul><li>c</li></ul>'
+                                    '<ol><li>d</li></ol><ol><li>e</li></ol><ol><li>f</li></ol>'))
+    assert result.markdown == '- a\n\n* b\n  * b1\n\n- c\n\n1. d\n\n1) e\n\n1. f'
+    apart = assemble_markdown(html('<ul><li>a</li></ul><p>p</p><ul><li>b</li></ul>'))
+    assert apart.markdown == '- a\n\np\n\n- b'
+
+
+def test_a_table_segment_without_cells_is_written_after_its_grid_not_dropped() -> None:
+    from scone_memory.ingestion.formats.table_types import DocumentTableCell
+
+    def grid_row(text: str, row: int) -> DocumentSegment:
+        cell = DocumentTableCell(table_locator='t', locator=f't/{row}', row=row, column=0, text=text, start=0,
+                                 end=len(text), is_header=row == 0)
+        return DocumentSegment(text=text, locator=f'row:{row}', table_cells=(cell,),
+                               metadata={'table_locator': 't', 'table_status': 'structured'})
+
+    parsed = ParsedDocument(format='custom', parser='plugin', segments=(
+        grid_row('K', 0), DocumentSegment(text='loose', locator='loose', metadata={'table_locator': 't'}),
+        grid_row('v', 1)))
+    result = assemble_markdown(parsed)
+    assert result.markdown == ('> t: 1 segment the document puts between its rows is written after it.\n\n'
+                               '| K |\n| --- |\n| v |\n\nloose')
+    assert_traced(parsed, result)
+    text = ParsedDocument(format='custom', parser='plugin', segments=(
+        DocumentSegment(text='a', locator='a', metadata={'table_locator': 't', 'table_status': 'text_fallback'}),
+        DocumentSegment(text='aside', locator='aside'),
+        DocumentSegment(text='b', locator='b', metadata={'table_locator': 't', 'table_status': 'text_fallback'})))
+    assert assemble_markdown(text).markdown == (
+        '> t was read as text, not as a grid; its lines follow as paragraphs. 1 segment the document puts between '
+        'its rows is written after it.\n\na\n\nb\n\naside')

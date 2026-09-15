@@ -273,6 +273,9 @@ class _HTML(HTMLParser):
         #: a paragraph after a nested list names the item it still belongs to.
         self.items: dict[int, str] = {}
         self.item_count = 0
+        #: The start an <ol> at each stack position declares, where it is a
+        #: number a Markdown list can begin at.
+        self.starts: dict[int, str | None] = {}
 
     def flush(self) -> None:
         text = ''.join(self.parts)
@@ -285,23 +288,37 @@ class _HTML(HTMLParser):
 
     def declared_role(self) -> dict[str, str]:
         """The innermost heading, list item, figure caption or preformatted
-        element around the text; outside all of them, nothing."""
+        element around the text, and the list item it sits in; outside all of
+        them, nothing."""
         for index in range(len(self.stack) - 1, -1, -1):
             tag = self.stack[index][0]
             if tag in _HEADINGS:
-                return {'block_role': 'heading', 'heading_level': tag[1]}
-            if tag == 'pre':
-                return {'block_role': 'code'}
-            if tag == 'figcaption':
-                return {'block_role': 'caption'}
-            if tag == 'li':
-                lists = [name for name, _ in self.stack[:index] if name in _LISTS]
-                role = {'block_role': 'list_item', 'list_level': str(max(0, len(lists) - 1)),
-                        'list_item_id': self.items[index]}
-                if lists:
-                    role.update(list_id=str(self.lists), list_kind='ordered' if lists[-1] == 'ol' else 'bullet')
-                return role
+                role = {'block_role': 'heading', 'heading_level': tag[1]}
+            elif tag == 'pre':
+                role = {'block_role': 'code'}
+            elif tag == 'figcaption':
+                role = {'block_role': 'caption'}
+            elif tag == 'li':
+                role = {'block_role': 'list_item'}
+            else:
+                continue
+            return {**role, **self.enclosing_item()}
         return {}
+
+    def enclosing_item(self) -> dict[str, str]:
+        """The innermost list item open: its depth, its ordinal and the list it
+        is in. Ids carry the MIME part's prefix, so two parts' lists stay apart."""
+        index = next((i for i in range(len(self.stack) - 1, -1, -1) if self.stack[i][0] == 'li'), None)
+        if index is None:
+            return {}
+        lists = [position for position in range(index) if self.stack[position][0] in _LISTS]
+        item = {'list_level': str(max(0, len(lists) - 1)), 'list_item_id': f'{self.prefix}{self.items[index]}'}
+        if lists:
+            item.update(list_id=f'{self.prefix}{self.lists}',
+                        list_kind='ordered' if self.stack[lists[-1]][0] == 'ol' else 'bullet')
+            if (start := self.starts.get(lists[-1])) is not None:
+                item['list_start'] = start
+        return item
 
     def preformatted(self) -> bool:
         return any(tag == 'pre' for tag, _ in self.stack)
@@ -318,8 +335,13 @@ class _HTML(HTMLParser):
             if not hidden:
                 self.tables.boundary()
         self.tables.start(tag, values, hidden)
-        if tag in _LISTS and not any(name in _LISTS for name, _ in self.stack):
-            self.lists += 1
+        if tag in _LISTS:
+            if not any(name in _LISTS for name, _ in self.stack):
+                self.lists += 1
+            start = values.get('start') or ''
+            self.starts[len(self.stack)] = start if tag == 'ol' and re.fullmatch(r'[0-9]{1,9}', start) else None
+        if tag == 'table' and self.tables.table is not None:
+            self.tables.table.context = self.enclosing_item()
         if tag == 'br' and not hidden:
             self.parts.append('\n')
             self.tables.data('\n')
