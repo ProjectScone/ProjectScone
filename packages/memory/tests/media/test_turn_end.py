@@ -72,15 +72,31 @@ def test_a_question_word_first_is_not_evidence_that_the_turn_is_finished(text):
 
 
 @pytest.mark.parametrize("text, cue", [
-    ("what are you waiting for", "'for' may be stranded by 'what'"),
     ("where did you send it to", "'to' may be stranded by 'where'"),
-    ("where's the party at", "'at' may be stranded by 'where'"),
     ("who is this for", "'for' may be stranded by 'who'"),
     ("how much is it for", "'for' may be stranded by 'how much'"),
-    ("How many people is the table for", "'for' may be stranded by 'how many'"),
+    ("How many of them is that for", "'for' may be stranded by 'how many'"),
+    ("where are you from", "'from' may be stranded by 'where'"),
 ])
 def test_a_preposition_a_wh_phrase_can_strand_is_neither_held_nor_called_complete(text, cue):
     assert judge_text(text) == Judgement(UNSURE, cue)
+
+
+@pytest.mark.parametrize("text, cue", [
+    ("What's the best way to", "trailing 'to'"),
+    ("How much does it cost to", "trailing 'to'"),
+    ("Who should I talk to about", "trailing 'about'"),
+    ("What would you recommend for", "trailing 'for'"),
+    ("What do I need to bring to", "trailing 'to'"),
+    # Finished questions this holds too, and the hold is what they cost.
+    ("what are you waiting for", "trailing 'for'"),
+    ("How many people is the table for", "trailing 'for'"),
+])
+def test_a_wh_phrase_does_not_excuse_a_preposition_that_a_word_before_it_may_still_take(text, cue):
+    # A noun, verb or adjective can go on past a preposition ("the best way
+    # to go", "talk to her about it"); a pronoun cannot, so only after one is
+    # the wh-phrase the preposition's likely object.
+    assert judge_text(text) == Judgement(INCOMPLETE, cue)
 
 
 @pytest.mark.parametrize("verdict, cue", [("maybe", "no cue"), (COMPLETE, None)])

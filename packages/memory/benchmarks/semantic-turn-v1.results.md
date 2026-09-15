@@ -46,10 +46,10 @@ model, recognizer or recording was used.
 | premature endings | 17 | 5 |
 | cut utterances answered early | 16 / 16 | 5 / 16 |
 | complete utterances answered early | 0 / 16 | 0 / 16 |
-| complete turns held | 0 / 16 | 2 / 16 |
-| added latency on complete turns | 0 ms | median 0 ms, mean 188 ms, max 1500 ms |
+| complete turns held | 0 / 16 | 3 / 16 |
+| added latency on complete turns | 0 ms | median 0 ms, mean 281 ms, max 1500 ms |
 | added latency on a rescued cut's final turn | — | 0 ms (all 16) |
-| release reasons | silence 49 | semantic_complete 24, silence 10, semantic_incomplete_timeout 3 |
+| release reasons | silence 49 | semantic_complete 24, silence 9, semantic_incomplete_timeout 4 |
 
 The five still answered early are the five written to be missed: cut-04,
 cut-09 and cut-16 (no cue, released as `silence`), cut-15 (punctuated by
@@ -64,12 +64,21 @@ need is", "how do I get from"); it was removed, and `when`, `why` and a bare
 `how` no longer excuse a trailing preposition. Premature endings and held
 complete turns are unchanged; four releases moved from `semantic_complete`
 to `silence` (cut-04's first fragment, done-06, done-08, done-14), and
-`test_the_fixture_measurement` now pins the reasons as well as the counts. The two held complete turns are the two
-written with a trailing `to`; each waited the full 1.5 s hold.
+`test_the_fixture_measurement` now pins the reasons as well as the counts.
+
+The three held complete turns are the two written with a trailing `to` and
+done-14 ("what are you waiting for"); each waited the full 1.5 s hold.
+Until a later review, a wh-phrase first excused any trailing preposition,
+and done-14 was answered at the pause (2 / 16 held, mean 188 ms, silence 10,
+semantic_incomplete_timeout 3). That review found the fixture could see only
+the benefit of the excuse: it had no cut wh-question on a preposition. The
+excuse now needs a pronoun just before the preposition (see below); that
+costs done-14 the hold and changes no premature ending here.
 
 Wall clock:
 
-- `judge_text`: 6641, 5338, 7953, 25095, 21108 ns per call; median
+- `judge_text` (measured before the pronoun condition, one set lookup more
+  per excused preposition, was added; not re-measured): 6641, 5338, 7953, 25095, 21108 ns per call; median
   7953 ns (8 µs). After the review fixes (a word pattern that reads digits
   and every script, the question-word rule removed), the rules before and
   after, interleaved with alternating order, 5 repeats of 2000 loops over
@@ -88,9 +97,14 @@ Wall clock:
 
 A later fix, measured outside the fixture (which has no noise). A held
 clause ("I need a flight to"), then speech starting and, 0.5 s later, a
-final transcript with no words, as the HTTP recognizer yields for a cough;
-default bounds (hold 1.5 s, turn 10 s), a real `VoiceSession` with scripted
-providers. Before, the empty transcript was ignored and the turn waited
+final transcript with no words, from a scripted recognizer; default bounds
+(hold 1.5 s, turn 10 s), a real `VoiceSession` with scripted providers.
+This is not what `scone serve` does with a cough: its HTTP recognizers
+raise on an empty transcription rather than yield an empty transcript, so
+the session ends and the held clause is stored as `session_ended`,
+unanswered (`test_the_served_recognizer_ends_the_session_on_a_wordless_sound`).
+The resumed hold applies only to a recognizer that reports an empty final
+transcript. A noise transcribed as words joins the held turn; not measured. Before, the empty transcript was ignored and the turn waited
 for its bound; now it runs the hold again from that transcript. Wall time
 from the clause's transcript to its release, 3 repeats interleaved with
 alternating order, load average 58–69:
@@ -102,6 +116,32 @@ alternating order, load average 58–69:
 
 Noise that never yields a final transcript still waits the turn's bound.
 The fixture replay has no such events, so its counts above do not move.
+
+## Wh-questions ending on a preposition
+
+Added after review, outside the fixture and not authored blind: eight cut
+wh-questions (the review's five plus three) and eight finished questions
+that strand a preposition, all unpunctuated, each judged by `judge_text`
+under three versions of the excuse. A cut judged `incomplete` is held for
+its rest; anything else about it is answered at the pause. A finished one
+judged `incomplete` waits the 1.5 s hold.
+
+| excuse for a trailing preposition after a wh-phrase | cuts held | finished questions held |
+| --- | --- | --- |
+| any word before it (before) | 0 / 8 | 0 / 8 |
+| a pronoun just before it (now) | 7 / 8 | 4 / 8 |
+| none | 8 / 8 | 8 / 8 |
+
+Cuts: "What's the best way to", "How much does it cost to", "Who should I
+talk to about", "What would you recommend for", "What do I need to bring
+to", "Where's the closest place to", "Which of these is easiest for", and
+"How much would it cost to ship it to", which the pronoun rule still
+answers early. Finished: "who is this for", "where did you send it to",
+"what is that for" and "where are you from" are answered at the pause;
+"what are you waiting for", "where's the party at", "who are you talking
+to" and "how many people is the table for" are held. The split depends on
+how these sixteen were written, and a recognizer that punctuates finished
+questions is judged `complete` by the question mark before this rule is read.
 
 ## What this does not show
 

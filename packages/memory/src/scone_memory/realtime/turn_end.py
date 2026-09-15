@@ -14,10 +14,12 @@ silence threshold and produces its final transcript. A detector then
 judges the text heard so far. Complete, or no evidence either way, and
 the turn ends there, at the threshold the recognizer already waited. An
 open clause holds the turn for up to ``hold`` seconds more; the speaker
-starting again (or a noise onset the recognizer takes for speech) keeps
-it open until ``max_duration`` after its first final transcript, and
-their next words join it. Speech that ends without words (a cough the
-recognizer transcribes as nothing) runs the hold again from its end. The
+starting again (or a noise onset the recognizer takes for speech, or a
+streaming recognizer's partial words) keeps it open until
+``max_duration`` after its first final transcript, and their next words
+join it. Speech that a recognizer reports as an empty final transcript
+runs the hold again from its end. (The HTTP recognizers do not report
+one: an empty answer is their error, and the session ends.) The
 hold is added to the recognizer's pause, never a replacement for it.
 
 Every bound says when it bit. Each released turn carries a receipt whose
@@ -71,6 +73,13 @@ FILLERS = frozenset("um umm uh uhh uhm er erm hmm".split())
 #: object, as "could you send it to" is. A question word first is no
 #: evidence on its own that a turn is finished: "what I really need is".
 STRANDING = frozenset(["who", "whom", "whose", "what", "which", "where", "how much", "how many"])
+#: Only a pronoun just before the preposition lets a wh-phrase excuse it. A
+#: noun, verb or adjective there can go on past the preposition ("what's the
+#: best way to go", "who should I talk to about it", "what would you
+#: recommend for a cold"), and those cuts are the commonest in a spoken
+#: question; a pronoun cannot. So "who is this for" is unsure, and a finished
+#: "what are you waiting for" is held.
+PRONOUNS = frozenset("it this that these those them him her me us you one".split())
 #: Marks after which the speaker is plainly still going.
 OPEN_ENDINGS = ("...", "…", ",", ";", ":", "-", "–", "—")
 #: Closing marks that may follow a sentence's final punctuation.
@@ -104,8 +113,9 @@ def judge_text(text: str) -> Judgement:
     An open quote or bracket, a trailing filler, or a trailing mark such as
     a comma is incomplete whatever else is true. Then terminal punctuation
     is complete. A trailing conjunction or article is incomplete; so is a
-    trailing preposition, unless the text opens with a wh-phrase that can
-    be its object ("where did you send it to"), which is unsure. Anything
+    trailing preposition, unless a pronoun comes just before it and the text
+    opens with a wh-phrase that can be its object ("where did you send it
+    to"), which is unsure. Anything
     else is unsure, and is left to the silence that already ended it."""
     stripped = text.strip()
     if stripped.count("(") > stripped.count(")"):
@@ -128,7 +138,7 @@ def judge_text(text: str) -> Judgement:
     last, first = words[-1], words[0].split("'")[0]  # "where's" opens like "where"
     if first == "how":
         first = " ".join(words[:2])  # "how much" can be an object; "how do" cannot
-    if last in PREPOSITIONS and first in STRANDING:
+    if last in PREPOSITIONS and first in STRANDING and words[-2] in PRONOUNS:
         return Judgement(UNSURE, f"'{last}' may be stranded by '{first}'")
     if last in CONJUNCTIONS or last in ARTICLES or last in PREPOSITIONS:
         return Judgement(INCOMPLETE, f"trailing '{last}'")

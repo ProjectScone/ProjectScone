@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.realtime.audio import AudioChunk, ReplyCompleted, SpeechStarted, TextDelta, Transcript
 from scone_memory.realtime.turn_end import COMPLETE, INCOMPLETE, UNSURE, Judgement, LexicalEndOfTurn
+from scone_memory.providers.transcription import SelfHostedOpenAITranscription, TranscriptionProviderError
 from scone_memory.realtime.voice import VoiceSession
 
 SPACE, SID = "voice-turns", "turn-session"
@@ -174,6 +176,53 @@ async def test_speech_starting_again_keeps_the_turn_open_past_the_hold(memory):
         [user] = await rig.users(1)
         assert user.content == "I need a flight to Boston."
         await rig.finish()
+
+
+async def test_partial_words_keep_the_turn_open_past_the_hold(memory):
+    # A streaming recognizer reports words before it finishes them: the
+    # speaker is talking, so the clause is not answered on its own.
+    async with Rig(memory, turn_detector_factory=LexicalEndOfTurn, turn_hold=.3, turn_max_duration=5) as rig:
+        await rig.say(Transcript("I need a flight to"))
+        for partial in ("Bos", "Boston on"):
+            await asyncio.sleep(.2)
+            await rig.say(Transcript(partial, final=False))
+        await asyncio.sleep(.5)  # past the hold that ran from the clause
+        assert rig.session.stored_count == 0, "the partials said the speaker was still going"
+        await rig.say(Transcript("Boston on Friday."))
+        [user] = await rig.users(1)
+        assert (user.content, user.metadata["turn_end"]) == ("I need a flight to Boston on Friday.", "semantic_complete")
+        assert len(rig.model.contexts) == 1
+        await rig.finish()
+
+
+async def test_a_partial_with_no_words_does_not_keep_the_turn_open(memory):
+    async with Rig(memory, turn_detector_factory=LexicalEndOfTurn, turn_hold=.3, turn_max_duration=5) as rig:
+        await rig.say(Transcript("I need a flight to"), Transcript(" ", final=False))
+        [user] = await rig.users(1)
+        assert user.metadata["turn_end"] == "semantic_incomplete_timeout"
+        assert rig.session.last_turn_receipt.held_ms < 1500, "released at the hold, not the turn's bound"
+        await rig.finish()
+
+
+async def test_the_served_recognizer_ends_the_session_on_a_wordless_sound(memory):
+    # The HTTP recognizers `scone serve` uses refuse an empty answer instead
+    # of yielding an empty final transcript, so the resumed hold above is not
+    # what a served cough does: the session fails, and the held clause is
+    # stored under session_ended without being answered.
+    answers = ["I need a flight to", ""]
+    stt = SelfHostedOpenAITranscription(
+        base_url="http://127.0.0.1:8000/v1/", model="whisper",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"text": answers.pop(0)})))
+    loud, quiet = AudioChunk(b"\xe0\x2e" * 320, 16000), AudioChunk(b"\x00\x00" * 320, 16000)
+    rig = Rig(memory, stt_factory=lambda: stt, turn_detector_factory=LexicalEndOfTurn, turn_hold=5)
+    async with rig:
+        for chunk in [loud] * 15 + [quiet] * 25 + [loud] * 10 + [quiet] * 25:
+            await rig.transport.input.put(chunk)
+        with pytest.raises(TranscriptionProviderError, match="no transcript"):
+            await asyncio.wait_for(rig.running, 3)
+    [user] = await rig.users(1)
+    assert (user.content, user.metadata["turn_end"]) == ("I need a flight to", "session_ended")
+    assert rig.model.contexts == [] and answers == []
 
 
 async def test_speech_that_ends_without_words_resumes_the_hold(memory):

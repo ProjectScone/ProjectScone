@@ -86,8 +86,9 @@
                                    mid-clause ("book a table for") is held 1.5 s more for the rest
                                    of it, instead of being answered at the recognizer's pause; speech
                                    starting while it is held extends the wait to 10 s after its
-                                   first transcript, and a transcript with no words (a cough) runs
-                                   the 1.5 s hold again (default 0; no model; `scone serve` voice
+                                   first transcript; an empty transcription (a cough) is the HTTP
+                                   recognizer's error, which ends the session with a held turn
+                                   stored, not answered (default 0; no model; `scone serve` voice
                                    personas only)
 
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
