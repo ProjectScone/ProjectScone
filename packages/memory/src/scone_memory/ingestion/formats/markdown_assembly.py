@@ -40,6 +40,15 @@ Rules, each with a test:
   further block or table row is written; the record gives the first
   extracted-text byte not written and how many segments were not wholly
   written.
+- **What a segment carries and Markdown does not show is counted.** A
+  heading level alone (an OpenDocument ``text:h``) is a heading. A chart is
+  quoted like other side content, its series one line each, not made a
+  table. Among the segments written, the record counts link targets the
+  text kept without (``link_targets_unwritten``), pages whose bookmark
+  section is not written as a heading (``sections_unwritten``), text a
+  reader named unreadable and wrote as extracted (``unreadable_segments``),
+  and Word paragraphs whose style chain ran short before it said whether
+  they are headings (``headings_unresolved``).
 """
 from __future__ import annotations
 
@@ -68,6 +77,7 @@ _INLINE = re.compile(r'[\\`*\[\]<|~]|(?<![^\W_])_|_(?![^\W_])|&(?=#?[0-9A-Za-z]+
 _LINE_START = re.compile(r'[#>+=-]')
 _ORDINAL = re.compile(r'([0-9]{1,9})([.)])(?=\s|$)')
 _LEVEL = re.compile(r'[0-9]{1,3}')
+_HEADING_LEVEL = re.compile(r'[1-9][0-9]{0,2}')
 _START = re.compile(r'[0-9]{1,9}')
 #: What a Markdown reader takes as the end of a line.
 _BREAK = re.compile(r'\r\n|\r|\n')
@@ -146,6 +156,13 @@ class MarkdownDocument:
     #: List items opened, whether by a list item's text or by a block (code,
     #: a heading, a table) that is the first thing in its item.
     list_items: int = 0
+    #: Among segments wholly written: links whose target the Markdown does not carry,
+    #: segments whose ``section`` is not written, text a reader named unreadable,
+    #: and paragraphs whose heading level was not resolved.
+    link_targets_unwritten: int = 0
+    sections_unwritten: int = 0
+    unreadable_segments: int = 0
+    headings_unresolved: int = 0
 
     def record(self) -> dict[str, object]:
         blocks: dict[str, int] = {}
@@ -161,6 +178,8 @@ class MarkdownDocument:
                 'tables': [table.record() for table in self.tables],
                 'headings_clamped': self.headings_clamped, 'list_levels_clamped': self.list_levels_clamped,
                 'list_kinds_unsaid': self.list_kinds_unsaid, 'roles_unreadable': self.roles_unreadable,
+                'link_targets_unwritten': self.link_targets_unwritten, 'sections_unwritten': self.sections_unwritten,
+                'unreadable_segments': self.unreadable_segments, 'headings_unresolved': self.headings_unresolved,
                 'bound': {'max_bytes': self.max_bytes, 'cut': self.cut_at is not None, 'cut_at': self.cut_at,
                           'segments_omitted': self.segments_omitted},
                 'spans': [span.record() for span in self.spans]}
@@ -368,7 +387,11 @@ class _Writer:
             lines, source = self.trimmed(index)
             kind: SpanKind = 'list_continuation' if placed else 'list_item'
             return self.emit('\\\n'.join(_line(line) for line in lines), kind, (source,))
-        if role == 'heading' and re.fullmatch(r'[1-9]', metadata.get('heading_level', '')):
+        # A level with no role is a heading too: it is how the OpenDocument reader, and the
+        # outline the chunker cuts at, say so.
+        if role is None and 'heading_level' in metadata:
+            role = 'heading'
+        if role == 'heading' and _HEADING_LEVEL.fullmatch(metadata.get('heading_level', '')):
             lines, source = self.trimmed(index)
             level = int(metadata['heading_level'])
             if level > MAX_HEADING_LEVEL:
@@ -523,6 +546,15 @@ def _labels(raw: str | None) -> list[str]:
     return labels if isinstance(labels, list) and all(isinstance(label, str) for label in labels) else []
 
 
+def _links(raw: str | None) -> int:
+    """How many links a segment's ``links`` metadata records; none where it is not a list."""
+    try:
+        links = json.loads(raw) if raw else []
+    except ValueError:
+        return 0
+    return len(links) if isinstance(links, list) else 0
+
+
 def _interleaved(count: int) -> str:
     if not count:
         return ''
@@ -563,8 +595,14 @@ def assemble_markdown(parsed: ParsedDocument, *, max_bytes: int = MAX_MARKDOWN_B
         cut_at = min([cut.at, *(offset for index, offset in enumerate(writer.offsets)
                                 if index not in writer.written and index != partial)])
     omitted = 0 if cut_at is None else len(parsed.segments) - len(writer.written)
-    declared = any('block_role' in s.metadata or s.table_cells for s in parsed.segments)
+    declared = any('block_role' in s.metadata or 'heading_level' in s.metadata or s.table_cells
+                   for s in parsed.segments)
+    written = [parsed.segments[index].metadata for index in sorted(writer.written)]
     return MarkdownDocument(parsed.format, parsed.parser, ''.join(writer.parts), tuple(writer.spans),
                             tuple(writer.tables), len(parsed.segments), declared, writer.headings_clamped,
                             writer.list_levels_clamped, writer.list_kinds_unsaid, writer.roles_unreadable,
-                            max_bytes, cut_at, omitted, writer.list_items)
+                            max_bytes, cut_at, omitted, writer.list_items,
+                            link_targets_unwritten=sum(_links(metadata.get('links')) for metadata in written),
+                            sections_unwritten=sum(1 for metadata in written if metadata.get('section')),
+                            unreadable_segments=sum(1 for metadata in written if metadata.get('unreadable') == 'true'),
+                            headings_unresolved=sum(1 for metadata in written if 'heading_level_unresolved' in metadata))
