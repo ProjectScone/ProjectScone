@@ -373,7 +373,7 @@ class VoiceSession:
         # alone as the session's error, or as a note on the error that
         # stopped it.
         now = time.perf_counter()
-        ends: list[tuple[TurnEnd, KeypadEntry | None]] = []
+        ends = []  # (turn, the keypad entry that finished it)
         for entry in self._keypad.drain(now, "session_ended") if self._keypad is not None else ():
             released = self._turns.keyed(entry.text, now, reason="session_ended")
             ends += [(end, entry if end is released[-1] else None) for end in released]

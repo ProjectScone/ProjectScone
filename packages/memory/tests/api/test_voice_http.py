@@ -271,3 +271,42 @@ def test_semantic_turns_are_the_hosts_choice_and_hold_an_open_clause(tmp_path, s
         assert said == [("Tell me which star Juniper points to at night.", "semantic_complete")]
     else:
         assert sorted(said) == [("Tell me which star Juniper points to", "silence"), ("at night.", "silence")]
+
+
+@pytest.mark.parametrize("keypad", ["off", "collect"])
+def test_keys_from_the_client_are_the_hosts_choice_and_become_one_turn(tmp_path, keypad):
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    app = create_conversation_app(engine, KEYS, tmp_path / "keys.db", None, public_text_streaming=True,
+                                  catalog=catalog(), voice_keypad=keypad)
+    with TestClient(app) as client:
+        client.headers.update(AUTH)
+        assert client.get("/v1/conversations/capabilities").json()["voice_keypad"] == keypad
+        sid = create_voice(client).json()["session_id"]
+        with client.websocket_connect(f"/v1/conversations/{sid}/audio") as socket:
+            socket.send_text(json.dumps(HELLO))
+            assert json.loads(socket.receive_text())["type"] == "ready"
+            for key in "42#":
+                socket.send_text(json.dumps({"type": "keypad", "key": key}))
+            # Admitted keys and then the end would simply finish the input, so a
+            # regression that took keys while off fails here instead of waiting.
+            socket.send_text(json.dumps({"type": "end"}))
+            if keypad == "off":
+                assert json.loads(socket.receive_text()) == {"type": "error", "reason": "unsupported control message"}
+            while socket.receive()["type"] != "websocket.close":
+                pass
+        state = client.get(f"/v1/conversations/{sid}").json()["state"]
+        episodes = client.get(f"/v1/conversations/{sid}/transcript").json()["episodes"]
+    users = [e for e in episodes if e["metadata"]["role"] == "user"]
+    if keypad == "off":
+        assert state == "failed" and users == []
+    else:
+        [user] = users
+        assert (user["content"], user["metadata"]["turn_end"], user["metadata"]["keypad_ended"]) == \
+            ("[keypad] 42#", "keypad", "terminator")
+        assert user["metadata"]["keypad_sources"] == "eee"
+
+
+def test_a_keypad_mode_the_service_does_not_know_is_refused(tmp_path):
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with pytest.raises(ValueError, match="voice_keypad"):
+        create_conversation_app(engine, KEYS, tmp_path / "keys.db", None, catalog=catalog(), voice_keypad="loud")

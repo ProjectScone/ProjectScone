@@ -5,7 +5,10 @@ construction; text frames carry JSON control. Client to server: ``{"type":
 "end"}`` finishes the input. Server to client: audio frames prefixed with a
 header naming the turn (see ``frame``), ``{"type": "clear", "turn_id"}`` to
 drop a turn's buffered playback, and ``{"type": "error", "reason"}`` before
-the socket closes on a frame the format does not admit. A frame the format
+the socket closes on a frame the format does not admit. With the keypad on,
+``{"type": "keypad", "key": "5"}`` from the client is one key of a dial pad,
+yielded among the audio as a ``Keypress``; off, it is not a control this
+socket takes. A frame the format
 does not admit fails the session; nothing is resampled or reinterpreted.
 No provider, device or framework is imported here.
 """
@@ -16,6 +19,7 @@ import json
 import struct
 
 from .audio import AudioChunk
+from .keypad import Keypress, keypad_key
 
 _FORMAT = struct.Struct("<IB")  # sample_rate, channels; preceded by a length-prefixed turn id
 _MAX_TURN_ID = 255
@@ -51,7 +55,8 @@ class WebSocketAudioTransport:
     requires, instead of writing into a closed socket.
     """
 
-    def __init__(self, websocket, *, sample_rate: int, channels: int = 1, max_frame_bytes: int = 64000):
+    def __init__(self, websocket, *, sample_rate: int, channels: int = 1, max_frame_bytes: int = 64000,
+                 keypad: bool = False):
         # The format's own checks apply to a probe chunk so a bad format
         # fails here, at the host, not on the first frame.
         AudioChunk(b"\x00\x00" * channels if channels in (1, 2) else b"\x00\x00", sample_rate, channels)
@@ -59,6 +64,7 @@ class WebSocketAudioTransport:
             raise ValueError("max_frame_bytes must be an integer in 2..1000000")
         self._socket = websocket
         self._sample_rate, self._channels, self._max_frame = sample_rate, channels, max_frame_bytes
+        self._keypad = keypad is True
         self._disconnected = False
         self._closed = False
 
@@ -84,16 +90,26 @@ class WebSocketAudioTransport:
             if control is None:
                 await self._fail("unsupported control message")
                 raise ValueError("unsupported control message")
+            if isinstance(control, Keypress):
+                yield control
+                continue
             return
 
-    @staticmethod
-    def _control(text):
-        """The one accepted control, ``end``; anything else is None."""
+    def _control(self, text):
+        """``end``, a ``Keypress`` when the keypad is on, or None for anything else."""
         try:
             decoded = json.loads(text) if isinstance(text, str) else None
         except ValueError:
             return None
-        return "end" if isinstance(decoded, dict) and decoded.get("type") == "end" and len(decoded) == 1 else None
+        if not isinstance(decoded, dict):
+            return None
+        if decoded.get("type") == "end" and len(decoded) == 1:
+            return "end"
+        key = decoded.get("key")
+        if (self._keypad and decoded.get("type") == "keypad" and len(decoded) == 2
+                and isinstance(key, str) and keypad_key(key) == key):
+            return Keypress(key, "event")
+        return None
 
     async def _fail(self, reason: str):
         """Say why before closing; the reason names the rule, never the data."""
