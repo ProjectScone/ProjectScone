@@ -161,6 +161,20 @@ async def test_the_grounding_gate_of_model_extraction_applies_to_every_triple():
     assert report.proposed == () and await engine.documents.list_facts(SPACE, include_closed=True) == []
 
 
+async def test_a_triple_whose_two_ends_are_one_name_is_rejected_and_counted():
+    # "Relation quotes participate in the coverage audit" came back from a
+    # small model as (coverage audit, participate_in, coverage audit).
+    engine = await opened_with(LEDGER)
+    chat = FakeChat([reply({**GOOD_STORES, "subject": "SQLite", "object": "sqlite"}, GOOD_STORES,
+                           {**GOOD_STORES, "subject": "Redis", "object": "Redis"})])
+
+    report = await extract_dynamic_schema(engine, SPACE, chat)
+
+    assert report.rejected_reasons == {"self_reference": 1, "subject_not_in_quote": 1}, \
+        "an ungrounded triple is counted by what the gate refused it for"
+    assert [p.object for p in report.proposed] == ["ledger"]
+
+
 async def test_an_entry_that_is_not_a_whole_triple_is_malformed_and_counted():
     engine = await opened()
     await engine.remember(SPACE, LEDGER)

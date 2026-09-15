@@ -4,7 +4,9 @@ Run with Python 3.14 and PYTHONPATH=packages/memory/src, from packages/memory.
 
 ``run`` (model calls): stores every document in ``docs/`` in an in-memory
 engine, takes a seeded sample of ``--chunks`` chunks of at least
-``--min-chars`` characters, and stores each sampled chunk as an episode of
+``--min-chars`` characters (or the chunks saved by an earlier run, with
+``--chunks-from``: a seeded sample moves when a document changes), and
+stores each sampled chunk as an episode of
 its own in two fresh engines. The suggested vocabulary is ``--vocabulary``:
 ``scone``, Scone's fixed schema (the entity kinds ``entities.kinds.EntityKind``
 names and the predicates its kind hints know), or ``llamaindex``, the
@@ -14,8 +16,8 @@ them off, on the same chunks. Saved to ``--out``: both reports, every raw
 reply, and the sampled chunks.
 
 ``replay`` (no model): runs the pass again over the saved chunks with the
-saved replies in call order, as the pass is now and with a rule turned
-back: ``no-settle`` does not settle a quote's whitespace, ``old-clause``
+saved replies in call order (a call that failed fails again), as the pass
+is now and with a rule turned back: ``no-settle`` does not settle a quote's whitespace, ``old-clause``
 also reads a quote's clause as it was before the full-stop fix. The same
 replies, so a difference is the rule's.
 """
@@ -36,7 +38,7 @@ from scone_memory.bench.questions import store_corpus
 from scone_memory.entities import kinds as kind_hints
 from scone_memory.ingestion import distill, dynamic_schema
 from scone_memory.ingestion.dynamic_schema import extract_dynamic_schema
-from scone_memory.providers.llm import FakeChat, OpenAICompatibleChat
+from scone_memory.providers.llm import ChatError, FakeChat, OpenAICompatibleChat
 
 SPACE = "corpus"
 DOCS = Path(__file__).resolve().parent.parent / "docs"
@@ -118,7 +120,8 @@ async def arm(chunks: list[dict[str, object]], chat: OpenAICompatibleChat, *, al
 
 
 async def run(args: argparse.Namespace) -> None:
-    chunks = await sample(args.chunks, args.seed, args.min_chars)
+    chunks = (json.loads(Path(args.chunks_from).read_text())["chunks"] if args.chunks_from
+              else await sample(args.chunks, args.seed, args.min_chars))
     chat = OpenAICompatibleChat(args.url, args.model, timeout=args.timeout)
     result: dict[str, object] = {
         "model": args.model, "seed": args.seed, "min_chars": args.min_chars, "vocabulary": args.vocabulary,
@@ -145,13 +148,11 @@ async def replay(args: argparse.Namespace) -> None:
                 "old-clause": (lambda read, text: (read, False), _old_clause)}
     for name in ("open", "closed"):
         replies = saved[name]["replies"]
-        if any("reply" not in call for call in replies):
-            raise SystemExit(f"{name}: a call failed when measured, so the replies cannot be replayed in order")
         for variant, (settled, clause_rule) in variants.items():
             dynamic_schema._settled = settled  # type: ignore[assignment]
             distill._clause_around = clause_rule  # type: ignore[assignment]
             try:
-                chat = FakeChat([call["reply"] for call in replies])
+                chat = FakeChat([call["reply"] if "reply" in call else ChatError(call["error"]) for call in replies])
                 report = await extract_dynamic_schema(
                     await stored(saved["chunks"]), SPACE, chat, entity_kinds=kinds, predicates=predicates,
                     allow_new_types=saved[name]["record"]["allow_new_types"], max_calls=len(saved["chunks"]),
@@ -181,6 +182,7 @@ def main() -> None:
     go.add_argument("--model", default="llama3.2-ctx8k")
     go.add_argument("--timeout", type=float, default=300.0)
     go.add_argument("--vocabulary", choices=("scone", "llamaindex"), default="scone")
+    go.add_argument("--chunks-from", help="a saved run whose chunks to use instead of sampling")
     again = sub.add_parser("replay")
     again.add_argument("--out", required=True)
     args = parser.parse_args()
