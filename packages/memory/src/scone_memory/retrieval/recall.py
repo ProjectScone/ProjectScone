@@ -14,7 +14,7 @@ from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING
 
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
-from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, RerankTrace
+from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
@@ -76,6 +76,10 @@ class RecallRuntime:
     #: the reader actually got.
     demote_superseded: bool = True
     similarity_floor: float | None = None
+    #: How much newer memory is favoured in fusion: the term's size at age
+    #: zero and the age at which it halves. Zero weight favours nothing.
+    recency_weight: float = fusion.W_RECENCY
+    recency_half_life_days: float = fusion.RECENCY_HALF_LIFE_DAYS
     #: The width the floor was measured at, when it came from a measured
     #: policy. The query's own vector is checked against it, because an
     #: embedder that never reports a width still has one.
@@ -337,20 +341,19 @@ async def recall(
     weights = [runtime.vector_weight, 1.0]
     if graph_boost:
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
-    fuse = fusion.relative_scores if fusion_mode == "score" else fusion.rrf
-    fused = (fuse([vector_lane, text_lane, entity_hits], weights=[1.0, 1.0, ENTITY_WEIGHT]) if graph_boost
-             else fuse([vector_lane, text_lane]))
         lanes.append(entity_hits)
         weights.append(ENTITY_WEIGHT)
     if runtime.context_lane:
         ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
         lanes.append(context_hits)
         weights.append(CONTEXT_WEIGHT)
-    fused = fusion.rrf(lanes, weights=weights)
+    fuse = fusion.relative_scores if fusion_mode == "score" else fusion.rrf
+    fused = fuse(lanes, weights=weights)
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
     now = runtime.clock()
     items = [
-        fusion.Fused(cid, score + fusion.recency_boost(chunks[cid].created_at, now), similarity.get(cid))
+        fusion.Fused(cid, score + fusion.recency_boost(chunks[cid].created_at, now, weight=runtime.recency_weight,
+                                                       half_life_days=runtime.recency_half_life_days), similarity.get(cid))
         for cid, score in fused.items()
         if cid in chunks
     ]

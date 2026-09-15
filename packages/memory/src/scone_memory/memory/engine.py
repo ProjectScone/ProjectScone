@@ -30,7 +30,7 @@ from ..ingestion.records import (
     _Pending as _Pending, _DupOf as _DupOf,
     content_hash as content_hash, contextual_prefix as contextual_prefix,
 )
-from ..retrieval import fact_recall
+from ..retrieval import fact_recall, fusion
 from ..entities.meanings import RelationMeanings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -127,7 +127,7 @@ ATTACHMENT_TYPES = (
     "application/pdf", "application/json", "text/plain", "text/markdown", "text/csv",
     "audio/mpeg", "audio/wav", "audio/webm", "video/mp4", "video/webm",
     "application/octet-stream", "text/html", "application/xml", "text/xml", "application/x-ndjson",
-    "text/tab-separated-values", "message/rfc822", "application/rtf", "application/vnd.ms-outlook",
+    "text/tab-separated-values", "message/rfc822", "application/mbox", "application/rtf", "application/vnd.ms-outlook",
     "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
     "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -198,6 +198,11 @@ class MemoryEngine:
         heading_context: bool = False,
         code_graph: bool = False,
         similarity_floor: Optional[float] = None,
+        #: How much newer memory is favoured in fusion: the recency term's
+        #: size at age zero and the age at which it halves. The defaults
+        #: break near-ties only; zero weight turns the term off.
+        recency_weight: float = fusion.W_RECENCY,
+        recency_half_life_days: float = fusion.RECENCY_HALF_LIFE_DAYS,
         demote_restated: bool = True,
         demote_superseded: bool = True,
         blobs: Optional[BlobStore] = None,
@@ -360,6 +365,9 @@ class MemoryEngine:
         #: no judgement; the floor is chosen from a measured sweep, never
         #: guessed here.
         self.similarity_floor = similarity_floor
+        fusion.validate_recency(recency_weight, recency_half_life_days)
+        self.recency_weight = float(recency_weight)
+        self.recency_half_life_days = float(recency_half_life_days)
 
     async def _emit(self, space: str, kind: str, payload: dict, dedup_key: Optional[str] = None) -> Optional[Event]:
         if self.events is None:
@@ -1075,6 +1083,7 @@ class MemoryEngine:
             rerank_timeout=self.rerank_timeout, contextual_embeddings=self.contextual_embeddings,
             demote_restated=self.demote_restated, demote_superseded=self.demote_superseded,
             similarity_floor=self.similarity_floor,
+            recency_weight=self.recency_weight, recency_half_life_days=self.recency_half_life_days,
             floor_dim=self.abstention.dim if self.abstention is not None else None,
             vector_block=self.vector_block,
             synonyms=self.synonyms,

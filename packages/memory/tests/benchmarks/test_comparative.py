@@ -124,7 +124,6 @@ def test_our_passages_fold_to_distinct_sessions_as_the_references_nodes_do():
 
 
 
-async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_it_ran():
 async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_it_ran(reference):
     def make_engine():
         return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
