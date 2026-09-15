@@ -123,6 +123,31 @@ still performs an uncheckpointed preview before starting blob release. Those
 paths, per-space write contention and provisioned-service throughput need more
 work and measurement before claiming a ten-million-image catalog.
 
+## Built-in store hot paths, 2026-09-15
+
+[`benchmarks/hot_paths.py`](../benchmarks/hot_paths.py) ingests this package's
+own docs and source, read from one pinned git revision, into the in-memory and
+SQLite stores with the hash embedder, then asks 200 seeded queries. It reports
+ingestion seconds, chunks per second and recall p50/p95, in wall time and in
+this process's CPU time, and `--dump` writes every recall's ids and scores so
+two trees can be shown to return the same results.
+
+```sh
+cd packages/memory
+PYTHONPATH=src python benchmarks/hot_paths.py --json metrics.json --dump recalls.json
+PYTHONPATH=src python benchmarks/hot_paths.py --stores memory --queries 60 --profile profiles/
+```
+
+On 10,635 chunks, three interleaved runs per tree, median recall CPU time fell
+from 561 ms to 168 ms (in-memory) and from 524 ms to 378 ms (SQLite); ingestion
+CPU time fell by about a third on both. Every recall's output was byte-identical
+before and after. The in-memory vector index now keeps each point's norm, and
+the in-memory text lane keeps a posting set per term, which grew its memory from
+31.1 MB to 57.0 MB on that corpus. SQLite's wall-clock recall p95 did not improve
+on the loaded machine that ran it. Methods, per-run numbers, profiles and what
+was left alone are in the [results](../benchmarks/hot-paths-v1.results.md).
+Hash embeddings exercise chunking, storage and fusion, not semantic quality.
+
 ## Ten-million-vector target
 
 Uncompressed float32 vectors alone require the following storage for one copy:

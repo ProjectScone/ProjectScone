@@ -16,6 +16,7 @@ import sqlite3
 import time
 from array import array
 from collections.abc import Iterator
+from operator import mul
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import AsyncIterator, Mapping, Optional, Sequence
@@ -1107,8 +1108,12 @@ class SqliteVectorIndex:
         if as_of:
             sql += " AND created_at <= ?"
             params.append(as_of)
-        query = array("f", vector)
-        qnorm = math.sqrt(sum(x * x for x in query))
+        # Single precision, as the vectors are kept, taken out as floats once
+        # rather than boxed again for every row. sum over map(mul) adds the
+        # same products in the same order as a generator would, so every
+        # score is the same to the last bit.
+        query = array("f", vector).tolist()
+        qnorm = math.sqrt(sum(map(mul, query, query)))
         scored: list[tuple[int, float]] = []
         for row in self.conn.execute(sql, params):
             if tags and not set(tags) <= set(json.loads(row["tags"])):
@@ -1119,10 +1124,11 @@ class SqliteVectorIndex:
                     continue
                 if conditions is not None and not conditions.matches(meta):
                     continue
-            stored = array("f")
-            stored.frombytes(row["vector"])
-            dot = sum(a * b for a, b in zip(query, stored))
-            snorm = math.sqrt(sum(x * x for x in stored))
+            packed = array("f")
+            packed.frombytes(row["vector"])
+            stored = packed.tolist()
+            dot = sum(map(mul, query, stored))
+            snorm = math.sqrt(sum(map(mul, stored, stored)))
             scored.append((row["chunk_id"], dot / (qnorm * snorm) if qnorm and snorm else 0.0))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         return scored[:limit]

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
+from functools import lru_cache
 import hashlib
 import math
+from operator import mul
 import unicodedata
 from typing import Sequence
 
@@ -34,12 +37,26 @@ class HashEmbedder:
 
     def _one(self, text: str) -> list[float]:
         vec = [0.0] * self.dim
-        for token in tokenize(text):
-            digest = hashlib.blake2b(token.encode(), digest_size=8).digest()
-            bucket = int.from_bytes(digest[:4], "little") % self.dim
-            sign = 1.0 if digest[4] & 1 else -1.0
-            vec[bucket] += sign
-        norm = math.sqrt(sum(v * v for v in vec))
+        # Each distinct token once, with its count: every bucket holds a
+        # whole number, which a float keeps exactly in any order of adding.
+        for token, count in Counter(tokenize(text)).items():
+            bucket, sign = _slot(token, self.dim)
+            vec[bucket] += sign * count
+        norm = math.sqrt(sum(map(mul, vec, vec)))
         if norm == 0:
             return vec
         return [v / norm for v in vec]
+
+
+#: How many distinct tokens' buckets and signs are remembered, most recent
+#: first. This sizes a cache, not a result: a token that has fallen out is
+#: hashed again, which costs time and never changes a vector, and
+#: ``_slot.cache_info()`` says how full it is.
+_SLOT_CACHE_SIZE = 65_536
+
+
+@lru_cache(maxsize=_SLOT_CACHE_SIZE)
+def _slot(token: str, dim: int) -> tuple[int, float]:
+    """The bucket a token lands in and the sign it adds there."""
+    digest = hashlib.blake2b(token.encode(), digest_size=8).digest()
+    return int.from_bytes(digest[:4], "little") % dim, 1.0 if digest[4] & 1 else -1.0
