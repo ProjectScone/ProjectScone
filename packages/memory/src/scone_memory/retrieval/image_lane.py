@@ -28,7 +28,10 @@ image embedder is not that one: it is told so when it opens (``writer_block``)
 and writes nothing there, since one write would record the index as mixed and
 leave it unusable by either embedder. Any other index cannot record a writer,
 so the lane there searches only the vectors tagged with its own embedder's id
-and ignores the rest (``records_writer``).
+and ignores the rest (``records_writer``), saying how many live images it
+ignored when that leaves its window short (``search_images``). Such an index
+serves one image model: an image has one vector, keyed by its chunk, so
+another model's write replaces it.
 
 LlamaIndex's multi-modal index keeps image nodes in an ``image`` vector
 store namespace and appends the image results to the text results; this lane
@@ -90,6 +93,12 @@ class ImageSearch:
     #: Rows the last search returned, removed ones included. A window they
     #: filled hid deeper images whether or not those rows were live.
     returned: int
+    #: On an index that cannot record its writer: live images under the
+    #: recall's filters whose vector this embedder did not tag, so the lane
+    #: left them out. Looked for only when the lane's own window was not full.
+    ignored: int = 0
+    #: The search for them filled its window too: ``ignored`` is a lower bound.
+    ignored_at_least: bool = False
 
 
 @dataclass(frozen=True)
@@ -298,25 +307,42 @@ async def search_images(lane: ImageLane, documents: DocumentStore, space: str, q
     A condition the index cannot evaluate is left to the recall's post-filter,
     as it is for the vector lane. A hit whose chunk is gone is a forgotten
     image's vector: it is removed and the index searched again, up to
-    ``IMAGE_SEARCHES`` times."""
+    ``IMAGE_SEARCHES`` times.
+
+    Where the index cannot record its writer, the search is narrowed to this
+    embedder's tag. When that leaves the window short, the index is searched
+    once more without the tag, and the live images it finds beyond the lane's
+    own are counted as ``ignored``: another model's vectors, or ones written
+    before vectors were tagged, which the lane cannot compare with."""
     [vector] = await lane.embedder.embed_texts([query])
-    if not records_writer(lane.vectors):
-        # Nothing refuses another model's vectors here: its own tag leaves them out.
-        where = {**where, IMAGE_WRITER: lane.embedder.id}
-    removed = 0
+    tagged = not records_writer(lane.vectors)
+    # Nothing refuses another model's vectors here: its own tag leaves them out.
+    own_where = {**where, IMAGE_WRITER: lane.embedder.id} if tagged else where
+    removed, short = 0, True
     for _ in range(IMAGE_SEARCHES):
-        if conditions is not None and getattr(lane.vectors, "narrows_conditions", False):
-            found = await cast(_ConditionNarrowing, lane.vectors).search(space, vector, depth, as_of, tags, where,
-                                                                         conditions=conditions)
-        else:
-            found = await lane.vectors.search(space, vector, depth, as_of, tags, where)
+        found = await _search(lane.vectors, space, vector, depth, as_of, tags, own_where, conditions)
         live = await _live(documents, space, [chunk_id for chunk_id, _ in found])
         stale = [chunk_id for chunk_id, _ in found if chunk_id not in live]
         if not stale:
-            return ImageSearch(found, removed, False, len(found))
+            short = False
+            break
         await lane.vectors.delete(stale)
         removed += len(stale)
-    return ImageSearch([hit for hit in found if hit[0] in live], removed, True, len(found))
+    hits = [hit for hit in found if hit[0] in live]
+    ignored, at_least = 0, False
+    if tagged and len(found) < depth:
+        untagged = await _search(lane.vectors, space, vector, depth, as_of, tags, where, conditions)
+        others = [chunk_id for chunk_id, _ in untagged if chunk_id not in live]
+        ignored, at_least = len(await _live(documents, space, others)), len(untagged) >= depth
+    return ImageSearch(hits, removed, short, len(found), ignored, at_least)
+
+
+async def _search(vectors: VectorIndex, space: str, vector: Sequence[float], depth: int, as_of: Optional[str],
+                  tags: tuple[str, ...], where: Mapping[str, str], conditions: object) -> list[tuple[int, float]]:
+    if conditions is not None and getattr(vectors, "narrows_conditions", False):
+        return await cast(_ConditionNarrowing, vectors).search(space, vector, depth, as_of, tags, where,
+                                                               conditions=conditions)
+    return await vectors.search(space, vector, depth, as_of, tags, where)
 
 
 async def remove_forgotten(documents: DocumentStore, vectors: VectorIndex) -> int | None:

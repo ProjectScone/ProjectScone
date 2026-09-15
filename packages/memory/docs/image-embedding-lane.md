@@ -75,12 +75,28 @@ for item in result.items:
     Milvus, Chroma, LanceDB, Redis, ElastiCache, LangChain, a custom one): the index
     cannot record a writer, so the lane searches only vectors whose
     `image_embedder` is its own embedder's id, as a `where` condition in the index,
-    and ignores the rest. It cannot count what it ignored. Two image models can
-    therefore share such an index, each seeing only its own vectors, and a vector
-    written before vectors were tagged (by an engine older than this) is ignored
-    until its image is written again: rebuild the lane once after upgrading
-    (`reembed_images`, see [Rebuilding the lane](#rebuilding-the-lane)); an exact
-    retry of `ingest_image` also writes it.
+    and ignores the rest. A vector written before vectors were tagged (by an
+    engine older than this) is ignored until its image is written again: rebuild
+    the lane once after upgrading (`reembed_images`, see
+    [Rebuilding the lane](#rebuilding-the-lane)); an exact retry of `ingest_image`
+    also writes it.
+
+    When that search leaves the lane's window short, the lane searches the index
+    once more under the same filters without its tag and counts the live images
+    it finds beyond its own. `degraded` then says `image lane: ignored N image
+    vectors under this recall's filters that <embedder id> did not tag (another
+    image model's, or written before image vectors were tagged); rebuild them with
+    reembed_images()`, with `at least N` when that second search filled its window
+    too. A recall whose own window is full makes no second search and says
+    nothing about vectors it did not tag. The count is exact on an index that
+    searches exactly; an approximate index can miss vectors in either search.
+
+    **One tagged index serves one image model.** An image has one vector, keyed by
+    its caption's chunk id, whichever model wrote it last: another model's
+    `ingest_image` or `reembed_images` replaces the first model's vector for that
+    image, and the first model's lane loses it (a recall of its whose window is
+    short then says it ignored it, as above). Two models writing to one tagged index take its images from
+    each other. Give each model an image index of its own.
     The width is recorded, not searched on: an index holds one width.
 
   On a `recorded` index, an engine whose image embedder is not the recorded one
@@ -168,6 +184,10 @@ The same pass is `scone-memory --space catalog reembed-images --limit 200
 [--before ID]` (add `--json` for the report) and `POST /v1/images/reembed
 {"limit": 200, "before": null}`, which a key that may write the space can call;
 `GET /v1/capabilities` has `images.reembed` true when the engine can serve it.
+The image index is shared by every space, but a key reaches only its own, so
+the route's `spaces_pending` names at most the key's own space, and
+`pending_elsewhere` is true when some other space is still pending; it never
+names that space. The CLI and Python report name every pending space.
 The route takes one ingest slot for the whole pass, as an ingest does, so a
 server whose slots are all embedding answers 429 `ingest_busy`.
 Both refuse (`InvalidInput`, HTTP 422) on an engine without the image lane, and
@@ -204,8 +224,8 @@ What `writer` says depends on the index:
   an image `failed` over the old model's vector, stays `rebuilding` and names the
   spaces in `spaces_pending`: rebuild those (or run the failed space again) and
   the pass that completes last records the writer. A write by another image
-  embedder between that check and the record raises `VectorWriterChanged`; run
-  the pass again. `refused` means another image embedder wrote to the index
+  embedder between that check and the record raises `VectorWriterChanged`
+  (HTTP 409 with `code: writer_changed`); run the pass again. `refused` means another image embedder wrote to the index
   while the pass ran: the record is mixed, any image the pass reached after that
   write is `failed`, and the next pass takes the marker again.
 - **An index that cannot record a writer** (`tagged`): nothing is recorded or
@@ -307,7 +327,8 @@ still removes the vector when it next opens. The image index is not covered by `
 again but does not write their image vectors, and a crash between storing an image's
 episode and writing its vector leaves the image without a vector, until
 `ingest_image` is retried or the space is rebuilt. On an index that cannot
-record its writer, the lane cannot count the other models' vectors it ignores. Captions made from one template ("Scan 0001, shelf A",
+record its writer, the lane counts the vectors it ignores only when its own window
+is short, and one image model's writes replace another's (see What the lane holds). Captions made from one template ("Scan 0001, shelf A",
 "Scan 0002, shelf B") look to recall's restatement rule (`demote_restated`) like
 one claim restated, and it orders the newest first after fusion, whatever rank the
 image lane gave them.
