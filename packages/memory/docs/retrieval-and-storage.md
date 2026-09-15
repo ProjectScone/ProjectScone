@@ -837,8 +837,22 @@ a citation that was not checked is the thing least worth trusting.
 **Languages other than Python get what can be read and not what would
 have to be inferred.** For the brace family the declarations come from
 the same scanner that cuts those files into chunks, and imports are read
-from the lines that write them (`from "./x"`, a bare `import "x"`,
-`require("x")`, a Go import block, a Rust `use`). **No call is claimed**:
+from the lines that write them, each language by its own spelling:
+`from "./x"`, a bare `import "x"` and `require("x")` (JavaScript,
+TypeScript), a Go import block, a Rust `use` kept whole with a group
+(`use a::{b, c::{d, self}}`) spread into every path it names, a PHP `use`
+with its namespace and `require`/`include` as a file, Java, Kotlin and
+Scala `import a.b.C` (a group spread, `.*` the package, an alias not the
+name), C# `using`, Swift `import`, a C-family `#include`/`#import` (a
+quoted one a file, an angle one a header's name), Zig's `@import`, and
+Dart's `import`/`export`/`part` (a scheme is a package, anything else a
+file). A package is named as written; a path is resolved as a relative
+import is, and a module path inside the project -- `crate::store::Shelf`
+from the nearest `src`, `super::` and `self::` from the module,
+`com.acme.store.Shelf` from where the file's `package` line roots it --
+is resolved to the file that holds the module (`src/store.rs`,
+`src/util/mod.rs`, `com/acme/store/Shelf.java`) when whoever walked the
+tree can confirm one, and kept as written otherwise. **No call is claimed**:
 resolving a call means knowing what a name refers to, which needs a
 parser this does not have, and an edge nobody can check is worse than no
 edge. Python gets calls because Python's own parser gives them.
