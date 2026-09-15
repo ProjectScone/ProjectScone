@@ -12,14 +12,23 @@ never a guess at what its words mean. The first rule that applies decides:
    object too for a many-valued predicate, as the ledger keys it) changed
    value at least ``dynamic_changes`` times in the ``change_window_days``
    ending now. The slot's first value is not a change, nor is the same
-   value stated again after a gap. Dynamic, however long this value held.
-3. ``tenure``: the claim has held for at least ``static_after_days``:
-   static; otherwise dynamic.
+   value stated again after a gap. A value closed at the instant it began
+   (superseded at the same instant) never held, so it is no change and no
+   value. Dynamic, however long this value held.
+3. ``tenure``: the claim's value has held unbroken for at least
+   ``static_after_days``: static; otherwise dynamic. Unbroken means across
+   the slot's earlier rows of the same value that reach its start, as when
+   a value is backfilled to an earlier day or stated again from the
+   instant it was closed; a different value, or a gap, breaks it.
 
 The static bucket keeps the profile's own order: most restated, then
-newest. The dynamic bucket is ordered by weight, ``(1 + restatements) *
-0.5 ** (days since last stated / half_life_days)``, so what was said often
-long ago fades behind what was said lately. Static claims do not decay.
+newest. The dynamic bucket is ordered by weight, ``stated * 0.5 ** (days
+since last stated / half_life_days)``, where ``stated`` counts the claim
+and its restatements up to now: each statement adds as much weight as the
+first, and each half-life since the last one halves it. So a claim stated
+``n`` times falls behind one stated once only after ``log2(n)`` half-lives
+more; with the default 30 days, six statements two months ago still lead
+one yesterday. Static claims do not decay.
 
 Each bucket has its own count and byte bound, and says which cut it. The
 bytes are those of the bucket's claim records as compact JSON, the same
@@ -32,7 +41,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, cast
 
 from ..core.errors import InvalidInput
@@ -46,6 +55,10 @@ MAX_BUCKET_LIMIT = 50
 #: Bytes one bucket's claims may take, at least and at most.
 MIN_BUCKET_BYTES, MAX_BUCKET_BYTES = 100, 16000
 _DAY_SECONDS = 86400.0
+#: When a row that is still open ends: after every moment it is compared with.
+_OPEN = datetime.max.replace(tzinfo=timezone.utc)
+#: One row of a slot's history: when it began, its id, its value, when it ended.
+_Row = tuple[datetime, int, str, datetime]
 
 
 def _days(value: object, what: str, *, above_zero: bool) -> float:
@@ -139,6 +152,7 @@ class Placement:
 
     bucket: str
     rule: str
+    #: Days the claim's value has held unbroken, up to now.
     held_days: float
     changes: int
     #: Dynamic claims only: when the claim was last stated, and its weight.
@@ -178,31 +192,56 @@ def _slot(fact: Fact, many_valued: frozenset[str]) -> tuple[str, ...]:
     return (fact.subject, fact.predicate)
 
 
-def _changes(ledger: Sequence[Fact], wanted: set[tuple[str, ...]], many_valued: frozenset[str], now: datetime,
-             window_days: float) -> dict[tuple[str, ...], int]:
-    """How many times each wanted slot took a different value in the window ending now.
+def _histories(ledger: Sequence[Fact], wanted: set[tuple[str, ...]],
+               many_valued: frozenset[str]) -> dict[tuple[str, ...], list[_Row]]:
+    """The rows each wanted slot held, by when each began, then by id.
 
     Only the slots of the claims being placed are read: a ledger read holds
-    up to 20,000 facts, and a profile places at most 200. No change after
-    now is looked for: a later value in a slot ends the one before it, and
-    the profile shows only active claims, so a claim with a later change in
-    its slot is never placed."""
-    slots: dict[tuple[str, ...], list[tuple[datetime, int, str]]] = {}
+    up to 20,000 facts, and a profile places at most 200. A row closed at or
+    before the instant it began never held at any moment -- the ledger
+    closes a value that way when another supersedes it at the same instant
+    -- so, like a proposed or declined claim, it is not history."""
+    slots: dict[tuple[str, ...], list[_Row]] = {}
     for fact in ledger:
         slot = _slot(fact, many_valued)
-        if fact.in_ledger and slot in wanted:
-            slots.setdefault(slot, []).append((parse_rfc3339(fact.valid_from), fact.fact_id, fact.object))
-    since = now - timedelta(days=window_days)
-    counted: dict[tuple[str, ...], int] = {}
-    for slot, held in slots.items():
-        held.sort()  # by when each value began, then by id
-        counted[slot] = sum(1 for (_, _, before), (began, _, after) in zip(held, held[1:])
-                            if after != before and since < began)
-    return counted
+        if not fact.in_ledger or slot not in wanted:
+            continue
+        began = parse_rfc3339(fact.valid_from)
+        ended = _OPEN if fact.valid_until is None else parse_rfc3339(fact.valid_until)
+        if ended <= began:
+            continue
+        slots.setdefault(slot, []).append((began, fact.fact_id, fact.object, ended))
+    for held in slots.values():
+        held.sort()  # by when each began, then by id: ids are unique, so no further field is compared
+    return slots
 
 
-def _place(fact: Fact, rules: BucketRules, now: datetime, changes: int, restated: Sequence[str]) -> Placement:
-    held = (now - parse_rfc3339(fact.valid_from)).total_seconds() / _DAY_SECONDS
+def _changes(held: Sequence[_Row], since: datetime) -> int:
+    """How many times a slot took a different value after ``since``.
+
+    No change after now is looked for: a later value in a slot ends the one
+    before it, and the profile shows only active claims, so a claim with a
+    later change in its slot is never placed."""
+    return sum(1 for before, after in zip(held, held[1:]) if after[2] != before[2] and since < after[0])
+
+
+def _held_since(fact_id: int, held: Sequence[_Row]) -> datetime:
+    """When a claim's value began to hold unbroken: its own start, or the
+    start of an earlier row of the same value that reaches it. The rows are
+    in order of start, so walking back stops at the first different value."""
+    index = next(at for at, row in enumerate(held) if row[1] == fact_id)
+    began, _, value, _ = held[index]
+    for earlier, _, other, ended in reversed(held[:index]):
+        if other != value:
+            break
+        if ended >= began:
+            began = earlier
+    return began
+
+
+def _place(fact: Fact, rules: BucketRules, now: datetime, changes: int, held_since: datetime,
+           restated: Sequence[str]) -> Placement:
+    held = (now - held_since).total_seconds() / _DAY_SECONDS
     if fact.predicate in rules.static_predicates:
         bucket, rule = "static", "override"
     elif fact.predicate in rules.dynamic_predicates:
@@ -215,10 +254,12 @@ def _place(fact: Fact, rules: BucketRules, now: datetime, changes: int, restated
         bucket, rule = "dynamic", "tenure"
     if bucket == "static":
         return Placement(bucket, rule, held, changes)
+    # A restatement dated after now has not been made yet: it is neither when
+    # the claim was last stated nor weight.
     stated = [fact.valid_from, *(when for when in restated if parse_rfc3339(when) <= now)]
     last = max(stated, key=parse_rfc3339)
     since = (now - parse_rfc3339(last)).total_seconds() / _DAY_SECONDS
-    weight = (1 + len(restated)) * 0.5 ** (since / rules.half_life_days)
+    weight = len(stated) * 0.5 ** (since / rules.half_life_days)
     return Placement(bucket, rule, held, changes, last, weight)
 
 
@@ -247,13 +288,16 @@ def bucketed(ranked: Sequence[Fact], ledger: Sequence[Fact], *, restated: Mappin
     """Place the profile's candidates, already in profile order, and bound each bucket.
 
     ``ledger`` is every fact the profile read, in every status: the slot
-    history the ``changes`` rule counts. ``restated`` holds the days each
+    history the ``changes`` and ``tenure`` rules read. ``restated`` holds the days each
     candidate was stated again."""
     moment = parse_rfc3339(now)
-    changes = _changes(ledger, {_slot(fact, many_valued) for fact in ranked}, many_valued, moment,
-                       rules.change_window_days)
-    placements = {fact.fact_id: _place(fact, rules, moment, changes[_slot(fact, many_valued)],
-                                       restated[fact.fact_id]) for fact in ranked}
+    histories = _histories(ledger, {_slot(fact, many_valued) for fact in ranked}, many_valued)
+    since = moment - timedelta(days=rules.change_window_days)
+    placements: dict[int, Placement] = {}
+    for fact in ranked:
+        held = histories[_slot(fact, many_valued)]
+        placements[fact.fact_id] = _place(fact, rules, moment, _changes(held, since),
+                                          _held_since(fact.fact_id, held), restated[fact.fact_id])
     static = [fact for fact in ranked if placements[fact.fact_id].bucket == "static"]
     dynamic = sorted((fact for fact in ranked if placements[fact.fact_id].bucket == "dynamic"),
                      key=lambda fact: -cast(float, placements[fact.fact_id].weight))

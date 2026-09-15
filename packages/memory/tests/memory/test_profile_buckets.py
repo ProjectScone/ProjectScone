@@ -14,8 +14,8 @@ never by what its words seem to mean:
   a slot that keeps changing is dynamic, however long this value held;
 - then how long this claim has held: long enough is static, less is dynamic.
 
-The dynamic bucket is ordered by recency, decaying with the time since a
-claim was last stated; the static bucket is not. Each bucket has its own
+The dynamic bucket is ordered by weight: how often a claim was stated,
+decaying with the time since it was last stated; the static bucket is not. Each bucket has its own
 count and byte bound and says when either cut it, and each shown claim
 names the rule that placed it. Off unless asked for: today's profile is
 unchanged.
@@ -170,6 +170,59 @@ async def test_an_excluded_value_is_still_history():
     assert placed(profile, current)["changes"] == 1
 
 
+async def test_a_value_superseded_at_the_instant_it_began_never_held_and_is_not_a_change():
+    """Corrected twice on the same day it was stated: the ledger closes the
+    first two at the instant they began, so only the last value ever held."""
+    memory = await engine()
+    for city in ("Porto", "Oporto"):
+        await memory.assert_fact(SPACE, "mark", "lives_in", city, valid_from=ago(200))
+    current = await memory.assert_fact(SPACE, "mark", "lives_in", "Lisbon", valid_from=ago(200))
+    ledger = await memory.documents.list_facts(SPACE, include_closed=True)
+    assert sorted((f.valid_from == f.valid_until, f.object) for f in ledger) == [
+        (False, "Lisbon"), (True, "Oporto"), (True, "Porto")]
+    profile = await memory.profile(SPACE, buckets=BucketBounds())
+    assert placed(profile, current) == {"bucket": "static", "rule": "tenure", "held_days": 200.0, "changes": 0}
+
+
+async def test_a_value_is_held_since_it_began_across_rows_that_meet():
+    """The ledger may split one unbroken value into rows that meet: backfilled
+    to an earlier start, or stated again from the instant it was closed."""
+    memory = await engine()
+    current = await memory.assert_fact(SPACE, "mark", "lives_in", "Lisbon", valid_from=ago(10))
+    await memory.assert_fact(SPACE, "mark", "lives_in", "Lisbon", valid_from=ago(500))
+    profile = await memory.profile(SPACE, buckets=BucketBounds())
+    assert placed(profile, current) == {"bucket": "static", "rule": "tenure", "held_days": 500.0, "changes": 0}
+
+    clock = Clock(ago(300))
+    memory = await engine(clock)
+    first = await memory.assert_fact(SPACE, "mark", "lives_in", "Lisbon", valid_from=ago(500))
+    await memory.close_fact(SPACE, first.fact_id, "ended")
+    clock.now = NOW
+    again = await memory.assert_fact(SPACE, "mark", "lives_in", "Lisbon", valid_from=ago(300))
+    profile = await memory.profile(SPACE, buckets=BucketBounds())
+    assert placed(profile, again)["held_days"] == 500.0
+
+
+async def test_a_value_is_held_since_it_resumed_not_since_it_first_held():
+    """Vegetarian, vegan, then vegetarian again from 100 days ago, closed and
+    stated again from that instant 20 days ago: the two latest rows meet, so
+    the value has held 100 days; the vegan row breaks it from the first."""
+    clock = Clock(ago(20))
+    memory = await engine(clock, profile_bucket_rules=BucketRules.of(dynamic_changes=3))
+    await memory.assert_fact(SPACE, "mark", "diet", "vegetarian", valid_from=ago(500))
+    await memory.assert_fact(SPACE, "mark", "diet", "vegan", valid_from=ago(300))
+    resumed = await memory.assert_fact(SPACE, "mark", "diet", "vegetarian", valid_from=ago(100))
+    await memory.close_fact(SPACE, resumed.fact_id, "lapsed")
+    clock.now = NOW
+    current = await memory.assert_fact(SPACE, "mark", "diet", "vegetarian", valid_from=ago(20))
+    ledger = await memory.documents.list_facts(SPACE, include_closed=True)
+    assert sorted((f.valid_from, f.valid_until, f.object) for f in ledger) == [
+        (ago(500), ago(300), "vegetarian"), (ago(300), ago(100), "vegan"), (ago(100), ago(20), "vegetarian"),
+        (ago(20), None, "vegetarian")]
+    profile = await memory.profile(SPACE, buckets=BucketBounds())
+    assert placed(profile, current) == {"bucket": "static", "rule": "tenure", "held_days": 100.0, "changes": 2}
+
+
 async def test_a_proposed_value_is_not_a_change():
     memory = await engine(profile_bucket_rules=BucketRules.of(dynamic_changes=1))
     current = await memory.assert_fact(SPACE, "mark", "lives_in", "Lisbon", valid_from=ago(400))
@@ -252,10 +305,12 @@ async def test_a_dynamic_claim_stated_again_lately_is_recent_again():
 async def test_a_restatement_dated_after_now_is_not_when_a_claim_was_last_stated():
     memory = await engine(profile_bucket_rules=BucketRules.of(dynamic_predicates=["plans"]))
     fact = await memory.assert_fact(SPACE, "mark", "plans", "a trip", valid_from=ago(10))
-    await memory.assert_fact(SPACE, "mark", "plans", "a trip", valid_from=ago(-5))
+    for days in (-5, -30):
+        await memory.assert_fact(SPACE, "mark", "plans", "a trip", valid_from=ago(days))
     profile = await memory.profile(SPACE, buckets=BucketBounds())
     assert placed(profile, fact)["last_stated"] == ago(10)
-    assert placed(profile, fact)["weight"] <= 2
+    # Neither is a restatement yet, so neither adds weight: stated once, ten days ago.
+    assert placed(profile, fact)["weight"] == round(0.5 ** (10 / 30), 4)
 
 
 async def test_each_bucket_has_its_own_count_bound_and_says_when_it_cut():
