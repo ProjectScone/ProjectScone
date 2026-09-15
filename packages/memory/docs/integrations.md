@@ -134,6 +134,15 @@ with `--model MODEL_NAME`, `--embedding-cache EXISTING_BGE_CACHE`, and
 retrieval, and offline reranking on the same synthetic cases. It measures passage
 retrieval, not generated-answer accuracy.
 
+## Listwise model reranking
+
+`ListwiseReranker` asks a chat model to order the candidates rather than score
+them, a bounded window at a time, reads its answer strictly, falls back to fused
+order on its own deadline with the reason, and leaves a receipt of its calls and
+moves on `result.rerank.listwise`. `SCONE_RERANKER_LISTWISE=1` selects it on the
+configured chat model. See [listwise reranking](listwise-reranking.md), with the
+LongMemEval-S measurement.
+
 ## Any LangChain VectorStore as the vector index
 
 ```python
