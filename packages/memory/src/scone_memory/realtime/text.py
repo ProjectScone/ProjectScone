@@ -23,12 +23,18 @@ from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import AdaptiveRetriever
+from ..retrieval.followup import REWRITE_TIMEOUT_S
+from ..providers.llm import ChatModel
 from .answer_requirements import AnswerRequirements, validated_requirements
 from .answer_review import AnswerReviewer, AnswerReviewLimits, ReviewedAnswer, review_answer, require_contextual_reviewer
 from .context import ContextReceipt, MemoryContext
 from .evidence_answer import EvidenceAnswerError, EvidenceSelector, construct_evidence_answer, _ABSTENTION
 from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
+from .timing import TurnTiming
+
+#: Seconds a turn's timing may take to record before the turn goes on without it.
+NOTE_TIMEOUT = 2.0
 from .review_evidence import prepare_review_evidence
 from .tool_answer import tool_context_receipt, review_tool_answer
 
@@ -147,7 +153,8 @@ class TextConversation:
                  tool_limits: ToolLoopLimits | None = None, tool_initial_search: bool = False,
                  tool_compute: bool = False, tool_tables: bool = False, history_policy: str = "refuse",
                  standing_profile: "ProfilePolicy | None" = None, profile_limit: int = 10,
-                 max_profile_bytes: int = 1000):
+                 max_profile_bytes: int = 1000, followup_queries: str = "off",
+                 followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
@@ -167,6 +174,8 @@ class TextConversation:
         if tool_model_factory is not None and any(value is not None for value in
                 (evidence_selector, adaptive_retriever)):
             raise ValueError("tool mode cannot combine independent retrieval or extractive evidence")
+        if tool_model_factory is not None and followup_queries != "off":
+            raise ValueError("followup_queries is for ordinary search; tool mode chooses its own searches")
         if tool_model_factory is not None and neighbor_chunks != 0:
             raise ValueError("neighbor_chunks is for ordinary search; tool mode uses read_memory")
         if type(tool_compute) is not bool or (tool_compute and tool_model_factory is None):
@@ -232,7 +241,9 @@ class TextConversation:
                                       adaptive_retriever=adaptive_retriever, recall_timeout=recall_timeout,
                                       neighbor_chunks=neighbor_chunks, reading_order=reading_order,
                                       standing_profile=standing_profile,
-                                      profile_limit=profile_limit, max_profile_bytes=max_profile_bytes)
+                                      profile_limit=profile_limit, max_profile_bytes=max_profile_bytes,
+                                      followup_queries=followup_queries, followup_model=followup_model,
+                                      followup_timeout=followup_timeout)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task[dict] | None = None
         self._closed = False
@@ -323,13 +334,22 @@ class TextConversation:
 
     async def _reply(self, messages, turns, evicted, on_text):
         token = _OWNER.set(self)
+        timing = TurnTiming()
+
+        async def seen(chunk):
+            # The first public text of the answer, provisional or final.
+            timing.mark("first_token")
+            if on_text is not None:
+                await on_text(chunk)
+
         try:
             async with asyncio.timeout(self._timeout) as budget:
                 turn_id = uuid4().hex
                 turns = [*turns[:-1], turn_id]
                 self._evicted_turns.update(evicted)
                 user_id = await self._record(turn_id, "user", messages[-1]["content"])
-                text, receipt, answer_review, evidence_answer = await self._execute(messages, on_text, budget.when())
+                text, receipt, answer_review, evidence_answer = await self._execute(
+                    messages, seen if on_text is not None else None, budget.when(), timing=timing)
                 complete = [*messages, {"role": "assistant", "content": text}]
                 complete_turns = [*turns, turn_id]
                 if _bytes(complete) > self._max_history:
@@ -351,6 +371,7 @@ class TextConversation:
                     tool_source_status=receipt.get('tool_retrieval', {}).get('source_status'))
                 self._history = complete
                 self._turns = complete_turns
+                timing.mark("done")
                 result = dict(turn_id=turn_id, text=text, provider_completion="unverified",
                             user_episode_id=user_id, assistant_episode_id=assistant_id,
                             memory_context=receipt,
@@ -361,17 +382,38 @@ class TextConversation:
                     result["answer_review"] = answer_review
                 if evidence_answer is not None:
                     result["evidence_answer"] = evidence_answer
-                return result
+            # The turn is done and in memory; its timing is noted outside the
+            # turn's deadline, so a slow log cannot undo a turn that stands.
+            await self._note_turn(turn_id, timing)
+            return result
         finally:
             _OWNER.reset(token)
 
-    async def _execute(self, messages, on_text, deadline=None):
+    async def _note_turn(self, turn_id, timing):
+        # The turn is done; its timing is evidence about it, and a log that
+        # cannot take the evidence, or takes too long, must not undo the
+        # turn. A turn being cancelled is not noted: the caller is done with it.
+        current = asyncio.current_task()
+        if self._closed or (current is not None and current.cancelling()):
+            return
+        try:
+            async with asyncio.timeout(NOTE_TIMEOUT):
+                await self._memory.record_turn(self._space, session_id=self._session_id, turn_id=turn_id, mode="text",
+                                               latency_ms=timing.record())
+        except (Exception, TimeoutError) as error:
+            logging.getLogger(__name__).warning("turn_timing.failed", extra={
+                "event": "turn_timing.failed", "session_id": self._session_id, "turn_id": turn_id,
+                "exception_type": type(error).__name__})
+
+    async def _execute(self, messages, on_text, deadline=None, timing=None):
         if self._tool_factory is not None:
             return await self._execute_tools(messages, on_text, deadline)
         # Only a windowed conversation has turns to admit; every other one calls
         # `prepare` exactly as before, so hosts that substitute it keep working.
         admitted = {'admit_turn_ids': frozenset(self._evicted_turns)} if self._evicted_turns else {}
         request, receipt = await self._context.prepare(messages, **admitted)
+        if timing is not None:
+            timing.mark("context")
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
         if self._evidence_selector is not None and receipt["status"] == "prepared":

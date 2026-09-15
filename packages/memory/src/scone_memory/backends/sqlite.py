@@ -1127,6 +1127,20 @@ class SqliteVectorIndex:
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         return scored[:limit]
 
+    async def vectors_of(self, space: str, chunk_ids: Sequence[int]) -> dict[int, list[float]]:
+        """The stored vectors of these chunks in the space; a chunk without one is absent."""
+        found: dict[int, list[float]] = {}
+        ids = list(chunk_ids)
+        for start in range(0, len(ids), 500):
+            batch = ids[start:start + 500]
+            marks = ",".join("?" * len(batch))
+            for row in self.conn.execute(f"SELECT chunk_id, vector FROM vectors WHERE space = ? AND chunk_id IN ({marks})",
+                                         [space, *batch]):
+                stored = array("f")
+                stored.frombytes(row["vector"])
+                found[row["chunk_id"]] = list(stored)
+        return found
+
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         self.conn.executemany("DELETE FROM vectors WHERE chunk_id = ?", [(c,) for c in chunk_ids])
         self.conn.commit()

@@ -28,6 +28,7 @@ the same rule, including the audio socket's hello.
 
 | Route | What |
 |---|---|
+| `POST /v1/chat-imports` | Import an uploaded WhatsApp, Telegram, Discord or Slack export as one conversation memory per message, keyed so a grown export adds only what is new; see [Chat exports](chat-exports.md) |
 | `POST /v1/documents/pdf` · `GET /v1/episodes/{id}/pdf?chunk_id=...` | Parse an uploaded PDF text layer and inspect retained page evidence; see [PDF ingestion](pdf-ingestion.md) for dependency capabilities and bounds |
 | `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?}`; unknown fields are refused |
 | `DELETE /v1/episodes/{id}` | forget |

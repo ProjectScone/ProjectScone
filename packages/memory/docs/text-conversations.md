@@ -82,6 +82,33 @@ the conversation. A submitted user message can remain after a cancelled/failed
 reply. An uncertain store acknowledgment must not be automatically retried.
 Cooperative cleanup can exceed a deadline; it is not hard process termination.
 
+## Turn latency
+
+Every completed turn, text or voice, records one `conversation_turn`
+event in the evidence log (the log recall's timings go to): the session
+and turn ids, the mode, and `latency_ms` measured from the moment the
+question was heard -- a transcript settled, or a text turn arrived --
+with the process clock: `context` (memory prepared for the turn),
+`first_token` (the first public text of the answer), `first_audio` (the
+first audio sent to the listener; voice only) and `total` (the reply
+recorded). A moment that did not come is absent, never zero: a text
+turn has no first audio, and a text turn nobody streams has no first
+token. A turn that failed records no event at all: the timing is noted
+once the reply stands in memory, outside the turn's own deadline, so
+these figures are over completed turns and say nothing about failures
+(the `remember` events with an `error` field do). Recording the timing
+never undoes the turn: a log that refuses it, or takes more than two
+seconds, is warned about and the turn stands; a turn being cancelled is
+not noted. With no event log attached nothing is recorded.
+
+`GET /v1/metrics` reads the events back as `conversation.<mode>.turns`
+and `conversation.<mode>.latency_ms.<moment>.p50` / `.p95` (nearest
+rank), each with its `n` and the definition above; they are operational
+timings on the machine that served the turns and say nothing about
+answer quality. The leading voice framework reports these figures per
+turn as it goes; here they are evidence in the log, so the same figure
+can be read a week later over the window it came from.
+
 ## Memory preparation
 
 `TextConversation` and `MemoryContext` accept `where`, `kind`,

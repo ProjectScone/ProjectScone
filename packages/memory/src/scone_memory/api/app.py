@@ -39,7 +39,7 @@ from ..retrieval.filters import read_conditions
 from ..retrieval.receipts import staged
 from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
-from . import file_documents, pdf_documents
+from . import chat_imports, file_documents, pdf_documents
 from .responses import LedgerJSONResponse
 
 if TYPE_CHECKING:
@@ -56,6 +56,13 @@ if TYPE_CHECKING:
 INLINE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+class AttributeBody(BaseModel):
+    """An answer, and the stored chunks it was composed from."""
+
+    answer: str = Field(min_length=1)
+    chunk_ids: list[int] = Field(min_length=1)
 
 
 class RetryBody(BaseModel):
@@ -111,7 +118,7 @@ class EpisodeBody(BaseModel):
     source: Optional[str] = None
     created_at: Optional[str] = None
     #: How this record is cut; unset keeps the server's rule.
-    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
+    chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
@@ -149,7 +156,7 @@ class FactBody(BaseModel):
 #: decisions of review belong to review and full; every other write belongs
 #: to write and full. A key with no role recorded is full.
 _REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/reconsider", "/reopen",
-                 "/v1/facts/decide")
+                 "/v1/facts/decide", "/v1/entities/merges", "/v1/entities/merges/close")
 
 
 def _is_decision(path: str) -> bool:
@@ -477,7 +484,8 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.code_context": True, "recall.highlights": True,
+            "recall.window": True, "recall.sentence_window": True, "recall.compress": True, "recall.merge": True, "recall.code_context": True,
+            "recall.highlights": True, "recall.lanes": True, "recall.phrases": True, "recall.diversity": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -486,6 +494,7 @@ def create_app(
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
             "documents.files": True, "documents.provenance": True, "documents.ocr.tables": True,
+            "chats.imports": True,
             "integrity.read": True,
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
@@ -494,9 +503,9 @@ def create_app(
             "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
-            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "recall.graph_boost": True, "recall.lessons": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
             # The route is served; without a configured model it refuses.
             "chat.openai_compatible": True,
@@ -560,6 +569,7 @@ def create_app(
     file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr,
                                               assert_current_space=assert_current_space, document_media=document_media, document_video=document_video,
                                               url_import=url_import)
+    chat_imports.mount_chat_import_routes(app, engine, space_for, ingest_slot, assert_current_space=assert_current_space)
     if document_import_service is not None:
         from .document_jobs import mount_document_job_routes
         mount_document_job_routes(app, document_import_service, space_for, assert_current_space)
@@ -567,7 +577,7 @@ def create_app(
         from .directory_sync import mount_directory_sync_routes
         mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
-    mount_entity_routes(app, engine, space_for, synthesis_factory=synthesis_factory)
+    mount_entity_routes(app, engine, space_for, actor_for, synthesis_factory=synthesis_factory)
     from .openai_proxy import mount_openai_proxy_routes
     mount_openai_proxy_routes(app, engine, space_for, synthesis_factory,
                               assert_current_space=assert_current_space)
@@ -912,6 +922,20 @@ def create_app(
         return parted.record() | {"space": space, "applied": applied,
                                   "rerank": rerank, "graph_boost": graph_boost}
 
+    @app.post("/v1/answers/attribute")
+    async def post_attribution(body: AttributeBody, space: str = Depends(space_for)) -> dict[str, object]:
+        """Which of the named chunks each sentence of the answer came from:
+        quoted (a shared run of words, with its span), overlapping (most of
+        its content words in one passage) or unattributed, with numbers the
+        passage does not hold named. Found without a model. Word overlap is
+        not support; the record states its unmeasured rules and never claims
+        accuracy. Chunk ids this space does not hold are named in
+        ``chunks_missing``, and ones it holds with blank text in ``chunks_empty``."""
+        from ..retrieval.attribution import attribute_to_chunks
+
+        made, missing, empty = await attribute_to_chunks(engine, space, body.answer, body.chunk_ids)
+        return {**made.record(), "chunks_missing": list(missing), "chunks_empty": list(empty)}
+
     @app.get("/v1/answers/temporal")
     async def get_temporal_answer(
         q: str = Query(min_length=1, max_length=MAX_QUERY),
@@ -947,7 +971,7 @@ def create_app(
         evidence_graph: bool = False,
         graph_analysis: bool = False,
         candidate_limit: Optional[int] = Query(default=None, ge=1, le=1000),
-        fusion: Literal["rank", "score"] = Query(default="rank", description="Fuse the lanes by rank (default) or by "
+        fusion: Literal["rank", "score", "distribution"] = Query(default="rank", description="Fuse the lanes by rank (default), by each lane's scores scaled to its own range (score), or by each lane's mean and spread (distribution)."
                                                   "each lane's scores scaled to its own range."),
         withhold_kinds: Optional[str] = Query(
             default=None, alias="withhold",
@@ -958,6 +982,26 @@ def create_app(
         window: int = Query(default=0, ge=0, le=MAX_WINDOW,
                             description="Widen every returned passage by this many bytes either "
                                         "side, read from the episode. 0 leaves them as indexed."),
+        window_unit: Literal["bytes", "sentences"] = Query(
+            default="bytes",
+            description="What window counts. With sentences, each passage grows to the whole "
+                        "sentences it touches and then this many more either side (at most 20); "
+                        "0 completes only the sentences it touches."),
+        merge: bool = Query(default=False,
+                            description="Join neighbouring chunks of one episode into the passage holding "
+                                        "them, and say which chunks went in and what share was retrieved."),
+        merge_min_share: Optional[float] = Query(default=None, ge=0, le=1,
+                                       description="Leave a merge as fragments when retrieved chunks "
+                                                   "cover less than this share of its bytes."),
+        compress: Optional[float] = Query(
+            default=None, ge=0, le=1,
+            description="Cut what a sentence window added back to at most this share of its "
+                        "sentences, those naming the most of the question; the sentences "
+                        "retrieved are never cut. Needs window_unit=sentences. Unmeasured."),
+        compress_scorer: Literal["terms", "embedding"] = Query(
+            default="terms",
+            description="How compress scores a sentence: the question's words it names, "
+                        "or its cosine to the question under this space's embedder."),
         code_context: bool = Query(default=False,
                                    description="Quote the declaration's signature and the file's "
                                                "imports beside a code passage, with their line "
@@ -975,11 +1019,24 @@ def create_app(
                                                       "code context included. `window` is not "
                                                       "bounded by it: its own size in bytes is "
                                                       "the budget the caller already set."),
+        require: list[str] = Query(default=[], description="A phrase every returned passage must hold, as whole "
+                                                            "words; repeat for more. Checked before the limit."),
+        exclude: list[str] = Query(default=[], description="A phrase no returned passage may hold; repeat for more."),
+        diversity: Optional[float] = Query(default=None, ge=0, le=1,
+                                           description="Fill the answer's places by relevance less likeness to "
+                                                       "passages already placed, weighted from 0 to 1, so "
+                                                       "near-copies do not take several. Unmeasured."),
+        lanes: Optional[str] = Query(default=None,
+                                     description="The lanes to run, comma separated: vector, text, or both "
+                                                 "(the default). A lane not named is not run; the answer's "
+                                                 "lanes names those that answered."),
         graph_boost: bool = Query(default=False, description="Add the entity lane: passages naming the question's "
                                                               "entities or their neighbours in the knowledge graph."),
         infer: bool = Query(default=False, description="Read the question's own words for a scope -- a date, a kind "
                                                         "of memory, tags, a place -- and search with it where no filter "
                                                         "was set by hand; the answer says what was read and applied."),
+        lessons: bool = Query(default=False, description="Put beside each passage what people said about it in "
+                                                          "feedback. The order is not changed."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
@@ -998,14 +1055,16 @@ def create_app(
             tag_list = list(searched.tags)
             inferred = searched.record(asked_scope)
         policy: tuple[str, ...] = ()
+        names_read = None
         if withhold_kinds:
-            from ..retrieval.withhold import chosen_kinds
+            from ..retrieval.withhold import chosen_kinds, names_for
 
             # Checked before the search, not after it: a policy naming a
             # kind that does not exist is a mistake in the request, and
             # searching first spends the work -- and logs a recall event
             # -- for an answer nobody receives.
             policy = chosen_kinds(tuple(k.strip() for k in withhold_kinds.split(",") if k.strip()))
+            names_read = await names_for(engine, space, policy, as_of=as_of)
             # Withholding covers the items and the facts. The expansions
             # below build their own structures, which it does not reach,
             # so asking for both is refused rather than answered with a
@@ -1030,29 +1089,74 @@ def create_app(
                     "withhold cannot be combined with code_context: code context quotes the "
                     "file again after withholding, which would hand back what was withheld; "
                     "ask for one or the other")
+        if merge_min_share is not None and not merge:
+            raise InvalidInput("merge_min_share is a floor under a merge; ask for merge with it")
+        if lessons and merge:
+            # A merged passage keeps its best-scored chunk's fields and drops its neighbours', so
+            # their lessons would vanish, or a judged-useless neighbour would ride under a good one.
+            raise InvalidInput("lessons cannot be combined with merge: a merged passage joins chunks judged "
+                               "separately, and one lesson cannot stand for them; ask for one or the other")
+        if merge and compress is not None:
+            # A merged passage is reported under its best chunk, so the
+            # other retrieved chunks inside it would not be pinned, and
+            # compression could cut the very text that was retrieved.
+            raise InvalidInput("merge cannot be combined with compress: a merged passage is reported under "
+                               "one chunk, so compress would not keep the others it holds; ask for one")
+        if compress is not None and window_unit != "sentences":
+            # Checked before the search. Without a window of sentences
+            # there is nothing compress may cut, and an answer returned
+            # unchanged would read as though it had been applied.
+            raise InvalidInput("compress cuts what a window of sentences added around a hit; "
+                               "ask for window_unit=sentences with it")
         result = await engine.recall(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
+            lessons=lessons,
+            **({"lanes": [lane.strip() for lane in lanes.split(",") if lane.strip()]} if lanes is not None else {}),
+            require=require, exclude=exclude, diversity=diversity,
         )
         opened = None
-        if window:
+        retrieved = list(result.items)
+        if window or window_unit == "sentences":
             from ..retrieval.window import widen
 
             # Before withholding, so the bytes it opens are scanned like
             # any other. After it, a window would be an unscanned surface
             # holding exactly the text the policy was asked to remove.
-            opened = await widen(engine, space, result.items, before=window, after=window)
+            opened = await widen(engine, space, result.items, before=window, after=window, unit=window_unit)
             result = result.model_copy(update={
                 "items": list(opened.items),
                 "returned_bytes": sum(len(one.text.encode()) for one in opened.items)})
+        joined = None
+        if merge:
+            from ..retrieval.merging import merge_neighbours
+
+            # After any window and before withholding, so withholding scans
+            # the text a merge reads between the fragments it joins.
+            joined = await merge_neighbours(engine, space, result.items, min_share=merge_min_share or 0.0,
+                                            hits=retrieved)
+            result = result.model_copy(update={
+                "items": list(joined.items),
+                "returned_bytes": sum(len(one.text.encode()) for one in joined.items)})
+        cut = None
+        if compress is not None:
+            from ..retrieval.compress import compress as compress_passages
+
+            # After widening, which is what it cuts, and before
+            # withholding, so what withholding scans is what is returned.
+            cut = await compress_passages(result.items, q, hits=retrieved, keep=compress, scorer=compress_scorer,
+                                          embedder=engine.embedder)
+            result = result.model_copy(update={
+                "items": list(cut.items), "returned_bytes": cut.bytes_after})
         kept = None
         if policy:
             from ..retrieval.withhold import withhold
 
             kept = withhold(result.items, facts=list(result.facts) + list(result.history),
-                            kinds=policy)
+                            kinds=policy, names=names_read.names if names_read else None,
+                            names_capped=bool(names_read and names_read.capped))
             result = result.model_copy(update={
                 "items": list(kept.items),
                 "facts": list(kept.facts[:len(result.facts)]),
@@ -1069,6 +1173,9 @@ def create_app(
             "degraded": result.degraded,
             "fusion": result.fusion,
             "narrowing": result.narrowing.model_dump() if result.narrowing is not None else None,
+            "lanes": result.lanes,
+            **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
+            **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),
@@ -1079,6 +1186,7 @@ def create_app(
             # that nothing withheld is not a finding of nothing present.
             response["withheld"] = {"count": kept.withheld, "by_kind": dict(kept.by_kind),
                                     "kinds_applied": list(kept.kinds_applied),
+                                    "names_known": dict(kept.names_known), "names_skipped": kept.names_skipped,
                                     "unscanned": kept.unscanned,
                                     # Beside a count of zero unscanned,
                                     # what was scanned is the half that
@@ -1086,6 +1194,12 @@ def create_app(
                                     "surfaces": list(kept.surfaces), "why": kept.why}
         if opened is not None:
             response["widened"] = staged(opened.record())
+        if result.lessons_read is not None:
+            response["lessons_read"] = result.lessons_read
+        if joined is not None:
+            response["merged"] = staged(joined.record())
+        if cut is not None:
+            response["compressed"] = cut.record()
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
         if inferred is not None:
@@ -1387,6 +1501,19 @@ def create_app(
         event = await engine.feedback(space, body.recall_event_id, body.chunk_id, body.useful, body.note)
         return {"recorded": event.event_id}
 
+    @app.get("/v1/lessons")
+    async def get_lessons(
+        window_days: int = Query(default=90, ge=1, le=3650), half_life_days: float = Query(default=30, gt=0, le=3650),
+        min_corroboration: int = Query(default=2, ge=1, le=100), max_events: int = Query(default=5000, ge=1, le=20000),
+        space: str = Depends(space_for),
+    ) -> dict:
+        """What people said about the space's passages over the last ``window_days``: per
+        passage, the latest judgement of each recall weighed by age, and stated as preferred,
+        tentative, contested or dead end, with whether the passage can still be read."""
+        found = await engine.lessons(space, window_days=window_days, half_life_days=half_life_days,
+                                     min_corroboration=min_corroboration, max_events=max_events)
+        return found.record()
+
     @app.get("/v1/metrics")
     async def get_metrics(
         since: Optional[str] = None, until: Optional[str] = None, limit: int = 5000, space: str = Depends(space_for)
@@ -1520,6 +1647,8 @@ def item_json(item: RecallItem) -> dict:
     }
     if item.rerank_score is not None:
         result["rerank_score"] = item.rerank_score
+    if item.lessons is not None:
+        result["lessons"] = item.lessons
     return result
 
 
