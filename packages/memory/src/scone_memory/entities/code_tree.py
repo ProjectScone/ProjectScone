@@ -3,7 +3,7 @@
 Code enters the graph as facts its readers record: a file ``defines`` a
 declaration (``pkg/store.py:Shelf``), a declaration defines a method
 (``pkg/store.py:Shelf.put``), a file ``imports`` another, a declaration
-``calls`` one. The tree is those paths and definitions laid out as a
+``calls`` one, a document ``references`` a file it links. The tree is those paths and definitions laid out as a
 file explorer lays them out, each node saying how many files and
 declarations sit beneath it and what it calls, imports and inherits,
 and what does each of those to it.
@@ -13,7 +13,7 @@ It holds only what the facts hold, and says what it left out:
 - an entity is placed only when a code relation holds it and its label is
   a path or a declaration qualified by one, so a prose name shaped like a
   file (``Node.js``) is not taken for one;
-- a file or declaration that only a call or an import names was not read
+- a file or declaration that only a call, an import or a link in a document names was not read
   where it is defined, and is marked so rather than drawn like one that was;
 - children past ``max_children`` under one node are counted, never dropped
   in silence, and so are the relations past ``MAX_LINKS`` in one list.
@@ -36,7 +36,8 @@ MAX_CHILDREN = 200
 MAX_LINKS = 50
 #: The predicates a node's relations are read from, and the name of each in reverse.
 _REVERSED = {"defines": "defined_by", "imports": "imported_by", "calls": "called_by", "inherits": "inherited_by",
-             "mixes_in": "mixed_into", "depends_on": "depended_on_by", "develops_with": "developed_with_by"}
+             "mixes_in": "mixed_into", "depends_on": "depended_on_by", "develops_with": "developed_with_by",
+             "references": "referenced_by"}
 # A file: a last path segment carrying an extension. A path may hold spaces.
 _FILE = re.compile(r"[^:\n]*?[^/:\n]\.[A-Za-z0-9_+-]{1,16}")
 
@@ -220,8 +221,8 @@ def code_tree(projection: EntityProjection, *, max_children: Optional[int] = Non
     if not_code:
         parts.append(f"{not_code} entities are not source files or declarations and are not in the tree")
     if undefined:
-        parts.append(f"{undefined} files or declarations are known only from a call or an import, "
-                     "not read where they are defined")
+        parts.append(f"{undefined} files or declarations are known only from a call, an import or a link in a "
+                     "document, not read where they are defined")
     if cut:
         parts.append(f"{cut} children past the cap of {max_children} under one node are counted, not listed")
     return CodeTree(root=root, not_code=not_code, undefined=undefined, cut=cut, max_children=max_children,
@@ -292,7 +293,8 @@ _PAGE_CODE = """
   var NAMES = {calls:'Calls', called_by:'Called by', imports:'Imports', imported_by:'Imported by',
     defines:'Defines', defined_by:'Defined by', inherits:'Inherits', inherited_by:'Inherited by',
     mixes_in:'Mixes in', mixed_into:'Mixed into', depends_on:'Depends on', depended_on_by:'Depended on by',
-    develops_with:'Develops with', developed_with_by:'Developed with by'};
+    develops_with:'Develops with', developed_with_by:'Developed with by', references:'References',
+    referenced_by:'Referenced by'};
   function choose(id){
     var node = byId[id];
     if (!node){ return; }
@@ -303,7 +305,7 @@ _PAGE_CODE = """
     inspect.appendChild(text('h2', node.path || node.name));
     var counts = node.kind === 'declaration' ? '' : node.files + ' files, ';
     inspect.appendChild(text('p', node.kind + ' · ' + counts + node.declarations + ' declarations beneath' +
-      (node.defined ? '' : ' · known only from a call or an import, not read where it is defined'), 'muted'));
+      (node.defined ? '' : ' · known only from a call, an import or a link in a document, not read where it is defined'), 'muted'));
     Object.keys(node.counts).sort().forEach(function(name){
       inspect.appendChild(text('h3', (NAMES[name] || name) + ' (' + node.counts[name] + ')'));
       var list = document.createElement('ul');

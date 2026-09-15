@@ -178,3 +178,31 @@ def test_the_page_names_the_projection_and_the_read_it_lays_out():
     assert f"projection {projection.digest[:12]} at revision 4" in header
     assert "all facts as of 2025-06-01T00:00:00Z" in header and "read limited by max_facts" in header
     assert data(text)["projection"] == projection.digest
+
+
+def test_the_inspector_names_every_code_relation_in_both_directions():
+    from scone_memory.entities.code_tree import _REVERSED
+
+    code = page().split('<script id="tree-code">', 1)[1]
+    for name in (*_REVERSED, *_REVERSED.values()):
+        assert re.search(rf"\b{name}:'[A-Z][a-z ]+'", code), name
+    nodes = {node["path"]: node for node in data(page([fact(1, "pkg/a.py", "defines", "pkg/a.py:run"),
+                                                        fact(2, "docs/guide.md", "references", "pkg/a.py")]))["nodes"]}
+    assert nodes["pkg/a.py"]["counts"] == {"defines": 1, "referenced_by": 1}
+    assert nodes["docs/guide.md"]["links"]["references"] == [["pkg/a.py", nodes["pkg/a.py"]["id"], [2]]]
+
+
+def test_the_page_script_parses():
+    """A quote in the script's words closes its string; only a parser sees that."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed here; the script's syntax is checked where it is")
+    code = page().split('<script id="tree-code">', 1)[1].split("</script>", 1)[0]
+    checked = subprocess.run([node, "-e", "new Function(process.argv[1])", code], capture_output=True, text=True,
+                             timeout=30)
+    assert checked.returncode == 0, checked.stderr

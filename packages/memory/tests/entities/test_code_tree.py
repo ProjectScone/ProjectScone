@@ -209,3 +209,27 @@ def test_a_package_named_like_a_file_is_not_placed_as_one():
                                 "  file tasks.py", "    declaration run"]
     assert made.not_code == 3
     assert find(made.root, "tasks.py").entity_id is not None, "its own entity, not a stand-in"
+
+
+def test_every_code_predicate_is_read_in_both_directions():
+    """The tree reads every relation the classifier calls code, so each needs
+    a name in reverse: `references` joined the code predicates when documents
+    entered the graph, and a tree of a mapped repository failed on it."""
+    from scone_memory.entities.classify import CODE_PREDICATES
+    from scone_memory.entities.code_tree import _REVERSED
+
+    assert set(_REVERSED) == set(CODE_PREDICATES)
+    assert len(set(_REVERSED.values())) == len(_REVERSED) and not set(_REVERSED.values()) & set(_REVERSED)
+
+
+def test_a_document_that_links_a_file_sits_in_the_tree_and_the_file_says_what_links_it():
+    made = tree([fact(1, "pkg/a.py", "defines", "pkg/a.py:run"),
+                 fact(2, "docs/guide.md", "references", "pkg/a.py"),
+                 fact(3, "docs/guide.md", "references", "pkg/b.py")])
+    assert shape(made.root) == ["directory ", "  directory docs", "    file guide.md",
+                                "  directory pkg", "    file a.py", "      declaration run", "    file b.py"]
+    guide, linked, unread = find(made.root, "guide.md"), find(made.root, "a.py"), find(made.root, "b.py")
+    assert guide.defined and [link.label for link in guide.links["references"]] == ["pkg/a.py", "pkg/b.py"]
+    assert [(link.label, link.fact_ids) for link in linked.links["referenced_by"]] == [("docs/guide.md", (2,))]
+    assert linked.defined and not unread.defined, "b.py says nothing the graph holds; a link is all that names it"
+    assert "known only from a call, an import or a link in a document" in made.why
