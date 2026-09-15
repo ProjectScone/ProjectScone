@@ -1084,6 +1084,11 @@ def create_app(
                     "ask for one or the other")
         if merge_min_share is not None and not merge:
             raise InvalidInput("merge_min_share is a floor under a merge; ask for merge with it")
+        if lessons and merge:
+            # A merged passage keeps its best-scored chunk's fields and drops its neighbours', so
+            # their lessons would vanish, or a judged-useless neighbour would ride under a good one.
+            raise InvalidInput("lessons cannot be combined with merge: a merged passage joins chunks judged "
+                               "separately, and one lesson cannot stand for them; ask for one or the other")
         if merge and compress is not None:
             # A merged passage is reported under its best chunk, so the
             # other retrieved chunks inside it would not be pinned, and
