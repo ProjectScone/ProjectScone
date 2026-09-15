@@ -461,6 +461,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="insist on one route instead of letting the rule choose; synthesize is never chosen "
                         "by the rule and needs a model (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
     p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with, or a synthesis reads")
+    p.add_argument("--synthesis-mode", choices=("evidence", "refine", "accumulate"),
+                   help="with --route synthesize: notes folded into a summary (evidence, the default), one answer "
+                        "refined round by round (refine), or one answer per passage joined (accumulate); every "
+                        "mode shows only sentences with a quote found in a passage")
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
     p.add_argument("--whole", action="store_true",
                    help="show each passage whole instead of its first 200 characters")
@@ -2226,7 +2230,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 return 2
         routed = await answer_question(engine, space, args.question, now=args.now, limit=args.limit,
                                        route=args.route, max_item_chars=0 if args.whole else DEFAULT_ITEM_CHARS,
-                                       synthesis=synthesis)
+                                       synthesis=synthesis, synthesis_mode=args.synthesis_mode)
         if getattr(args, "json", False):
             print(_ledger_json(routed.record(space)), file=out)
             return 0
