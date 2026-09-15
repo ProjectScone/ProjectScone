@@ -180,6 +180,53 @@ def test_a_hub_rejoining_a_community_the_guards_left_alone_is_a_member_once(monk
     assert sorted(labels[member] for member in home.members) == sorted([*(f"c{n}" for n in range(8)), "hub"])
 
 
+def test_with_externals_hubs_are_the_graphs_own_and_both_modularities_leave_externals_out(monkeypatch):
+    """An external is out of the partition before hubs are picked: `typing`,
+    imported by every file, has the most links of all, but none to the
+    graph's own entities, so it is never detached and never rejoined, only
+    attached for reading. Both modularities are over the graph's own
+    entities, as the final one is when nothing is detached."""
+    import scone_memory.entities.analysis as module
+
+    edges = (clique("a", 12) + clique("b", 12) + [("a0", "b0")] + clique("c", 4) + clique("d", 4)
+             + [("hub", f"a{n}") for n in range(12)] + [("hub", f"b{n}") for n in range(4)])
+    files = sorted({node for edge in edges for node in edge} - {"hub"})
+    imports = [Fact(fact_id=len(edges) + n + 1, space="alpha", subject=name, predicate="imports", object="typing",
+                    valid_from="2025-01-01T00:00:00Z") for n, name in enumerate(files)]
+    projection = project_entities("alpha", facts(edges) + imports, revision=1)
+    ids = {entity.label: entity.entity_id for entity in projection.entities}
+    labels = {entity_id: label for label, entity_id in ids.items()}
+    real = module._partition
+    calls = []
+
+    def lumping(graph, resolution):
+        calls.append(sorted(graph))
+        if len(calls) == 1:
+            group = lambda prefixes, size: sorted(ids[f"{p}{n}"] for p in prefixes for n in range(size))
+            lumped = [group("ab", 12), group("c", 4), group("d", 4)]
+            grouped = {node for part in lumped for node in part}
+            return lumped + [[node] for node in sorted(graph) if node not in grouped], 1
+        return real(graph, resolution)
+
+    monkeypatch.setattr(module, "_partition", lumping)
+    analysis = analyze_projection(projection, detach_hubs=95)
+    assert analysis.external == {ids["typing"]}
+    most = max(analysis.importance, key=lambda item: item.degree)
+    assert most.entity_id == ids["typing"] and most.degree > 1.5 * len(edges) / len(files), "the most-linked entity"
+    assert ids["hub"] not in calls[0] and ids["typing"] not in calls[0], "found without the hub or the external"
+    assert analysis.coverage.hubs_detached == 1 and analysis.coverage.split_oversized == 1
+    members = [labels[member] for community in analysis.communities for member in community.members]
+    assert sorted(members) == sorted(ids), "every entity is in exactly one community, once"
+    of = {labels[member]: community.community_id for community in analysis.communities for member in community.members}
+    assert of["hub"] == of["a0"] != of["b0"], "the hub rejoined where most of its links go"
+    own = adjacency([(ids[left], ids[right]) for left, right in edges])
+    lumped = {ids[f"{p}{n}"]: "ab" for p in "ab" for n in range(12)} | {ids["hub"]: "ab"}
+    lumped |= {ids[f"{p}{n}"]: p for p in "cd" for n in range(4)}
+    assert analysis.coverage.modularity_before_guards == pytest.approx(module._modularity(own, lumped))
+    final = {member: of[labels[member]] for member in own}
+    assert analysis.modularity == pytest.approx(module._modularity(own, final))
+
+
 def test_a_piece_of_a_split_is_looked_at_again_until_none_splits(monkeypatch):
     """Its own partition can leave a piece that is itself two modules: here
     it gives two 30-cliques as one piece beside a third. The piece is
