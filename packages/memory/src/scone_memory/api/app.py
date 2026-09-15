@@ -39,7 +39,7 @@ from ..retrieval.filters import read_conditions
 from ..retrieval.receipts import staged
 from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
-from . import file_documents, pdf_documents
+from . import chat_imports, file_documents, pdf_documents
 from .responses import LedgerJSONResponse
 
 if TYPE_CHECKING:
@@ -486,6 +486,7 @@ def create_app(
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
             "documents.files": True, "documents.provenance": True, "documents.ocr.tables": True,
+            "chats.imports": True,
             "integrity.read": True,
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
@@ -558,6 +559,7 @@ def create_app(
     file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr,
                                               assert_current_space=assert_current_space, document_media=document_media, document_video=document_video,
                                               url_import=url_import)
+    chat_imports.mount_chat_import_routes(app, engine, space_for, ingest_slot, assert_current_space=assert_current_space)
     if document_import_service is not None:
         from .document_jobs import mount_document_job_routes
         mount_document_job_routes(app, document_import_service, space_for, assert_current_space)
