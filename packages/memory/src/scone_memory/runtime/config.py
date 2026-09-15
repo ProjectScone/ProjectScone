@@ -74,6 +74,12 @@
                                        review; unset = every submitted fact is a ledger claim, which
                                        is what the Rust server does without --propose-below
 
+    SCONE_FOLLOWUP_QUERIES off | carry | rewrite   served text conversations also search a follow-up turn
+                                   ("since when?") with what earlier user turns named (carry), or as a
+                                   self-hosted model restates it (rewrite); off by default
+    SCONE_FOLLOWUP_URL, SCONE_FOLLOWUP_MODEL, SCONE_FOLLOWUP_API_KEY, SCONE_FOLLOWUP_TIMEOUT (5)
+                                   rewrite only: its own self-hosted endpoint, never another setting's key
+
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)
     SCONE_API_KEY     one key for the space "default" (used when SCONE_API_KEYS is unset)
@@ -95,6 +101,7 @@ if TYPE_CHECKING:
 
 from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
+from ..retrieval.followup import REWRITE_TIMEOUT_S
 from ..retrieval.fusion import RECENCY_HALF_LIFE_DAYS, W_RECENCY, validate_recency
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 
@@ -268,17 +275,26 @@ class Settings:
     adaptive_max_evidence_bytes: int = 16000
     adaptive_graph_hops: int = 0
     adaptive_search_history: bool = False
+    #: SCONE_FOLLOWUP_QUERIES: off, carry (earlier turns' named terms searched
+    #: beside a follow-up), or rewrite (a self-hosted model restates it).
+    followup_queries: str = "off"
+    followup_url: str | None = None
+    followup_model: str | None = None
+    followup_api_key: str | None = field(default=None, repr=False)
+    followup_timeout: float = REWRITE_TIMEOUT_S
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         from .conversation_review import validate_review_settings
+        from .conversation_followup import validate_followup_settings
         from .conversation_retrieval import validate_adaptive_settings
         from .conversation_tools import validate_tool_settings
 
         validate_review_settings(self)
         validate_adaptive_settings(self)
+        validate_followup_settings(self)
         validate_tool_settings(self)
         if self.qdrant_hnsw_ef is not None and (type(self.qdrant_hnsw_ef) is not int or self.qdrant_hnsw_ef < 1):
             raise InvalidInput("SCONE_QDRANT_HNSW_EF must be a positive integer")
@@ -494,6 +510,11 @@ class Settings:
             adaptive_max_evidence_bytes=_environment_integer("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", env.get("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", "16000")),
             adaptive_graph_hops=_environment_integer("SCONE_ADAPTIVE_GRAPH_HOPS", env.get("SCONE_ADAPTIVE_GRAPH_HOPS", "0")),
             adaptive_search_history=parse_flag("SCONE_ADAPTIVE_SEARCH_HISTORY", env.get("SCONE_ADAPTIVE_SEARCH_HISTORY")),
+            followup_queries=env.get("SCONE_FOLLOWUP_QUERIES") or "off",
+            followup_url=env.get("SCONE_FOLLOWUP_URL") or None,
+            followup_model=env.get("SCONE_FOLLOWUP_MODEL") or None,
+            followup_api_key=env.get("SCONE_FOLLOWUP_API_KEY") or None,
+            followup_timeout=parse_seconds("SCONE_FOLLOWUP_TIMEOUT", env.get("SCONE_FOLLOWUP_TIMEOUT"), REWRITE_TIMEOUT_S),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
