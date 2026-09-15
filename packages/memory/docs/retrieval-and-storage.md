@@ -2277,10 +2277,42 @@ outvote the text lane's right ones. Measured on LongMemEval-S with that
 embedder, the text lane alone was ahead of the fused ranking.
 `SCONE_VECTOR_WEIGHT` (`MemoryEngine(..., vector_weight=)`) is the
 vector lane's weight against the text lane's 1.0 — a number above 0 and
-at most 4, 1.0 by default — and every recall event records
-`fusion_weights`, so a ranking can always be read back to the voices
-that made it. Change it only on a number: the pull request that added it
-carries the measurement.
+at most 4 — and every recall event records `fusion_weights`, so a
+ranking can always be read back to the voices that made it. Unset, it
+follows the embedder: 1.0 for any embedder but hashed tokens, and 0.01
+for hashed tokens. Change it only on a number.
+
+The hashed default is measured against LlamaIndex's best retrieval
+(its BM25 retriever fused with its vector retriever) on LongMemEval-S,
+both sides on the same hashed vectors, sessions folded from passages
+([results](../benchmarks/northstar-defaults-2026-09-14.results.md)):
+
+| hashed vector weight | frozen 50: R@5 / all@5 / R@15 / MRR | 100 other items: R@5 / all@5 / R@15 / MRR |
+|---|---|---|
+| 1.0 | 0.84 / 0.72 / 0.92 / 0.759 | 0.93 / 0.74 / 0.98 / 0.789 |
+| 0.25 (the default before) | 0.88 / 0.72 / 0.98 / 0.807 | 0.95 / 0.79 / 0.99 / 0.852 |
+| **0.01** | **0.90 / 0.76 / 1.00 / 0.838** | **0.96 / 0.84 / 0.99 / 0.885** |
+| LlamaIndex BM25 + vector | 0.88 / 0.74 / 0.98 / 0.831 | 0.91 / 0.71 / 0.99 / 0.810 |
+
+Every voice the hashed vector lane had in the order cost the ranking.
+At 0.01 the fused ranking scored exactly as the text lane alone did on
+both samples, and its top five sessions were the text lane's in 149 of
+the 150 items. The
+lane still runs at that weight: it gives the confidence signal
+(`top_similarity`, the similarity floor), it answers alone when the text
+lane fails, and a passage only it found can still come back.
+`SCONE_VECTOR_WEIGHT=0.25` restores the previous
+default. Relative-score fusion and larger chunks also moved the numbers
+on these samples; neither is a default, and the results file says why.
+
+The weight is a voice against the text lane, so it applies only when the
+text lane brings passages. When it brings none (`lanes=["vector"]`, a text
+lane that failed, or one that found nothing), the vector lane ranks at a
+full voice of 1.0, and that recall's `fusion_weights` says so. The recency
+term is sized against a full voice: at a hundredth, the vector lane's
+first and second places differ by what about half an hour of age is
+worth to that term (at 1.0, about two days), so newer passages would
+come back first instead of closer ones.
 
 ### Both stores agree on every script
 
