@@ -138,6 +138,20 @@ async def test_a_report_is_read_and_labelled_at_one_instant(moved):
     assert "acme" in keys and "beta" not in keys
 
 
+async def test_export_writes_obsidian_notes_into_a_vault(engine, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Own.md").write_text("mine\n", encoding="utf-8")
+    code, text = await graph(engine, "export", "--format", "obsidian", "--into", str(vault))
+    receipt = json.loads(text)
+    assert code == 0 and receipt["written"] >= 3 and receipt["kept_theirs"] == [] and receipt["folder"] == "scone"
+    assert (vault / "scone" / "index.md").exists() and (vault / "Own.md").read_text(encoding="utf-8") == "mine\n"
+    with pytest.raises(InvalidInput, match="obsidian format only"):
+        await graph(engine, "export", "--format", "json", "--into", str(vault))
+    with pytest.raises(InvalidInput, match="two destinations"):
+        await graph(engine, "export", "--format", "obsidian", "--into", str(vault), "--out", str(tmp_path / "z.zip"))
+
+
 async def test_an_export_says_the_instant_it_was_read_at(moved):
     code, text = await graph(moved, "export", "--format", "json")
     about = json.loads(text)["graph"]["about"]
