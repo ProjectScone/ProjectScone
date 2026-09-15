@@ -481,7 +481,15 @@ async def recall(
         "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
     }
     lane_hits: list[list[tuple[int, float]]] = [vector_lane, text_lane]
-    weights = [runtime.vector_weight, 1.0]
+    # The vector lane's weight is its voice against the text lane's. With
+    # nothing from the text lane (not asked, failed, or found nothing) it
+    # has nothing to speak against, and a light voice would only shrink its
+    # rank scores under the recency term, which is sized against a full
+    # voice: at a hundredth, half an hour of age outranks an exact match.
+    # So it speaks at full voice, and the event records the voice it had.
+    vector_voice = runtime.vector_weight if text_lane else 1.0
+    evidence["fusion_weights"] = {"vector": vector_voice, "text": 1.0}
+    weights = [vector_voice, 1.0]
     if graph_boost:
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
         lane_hits.append(entity_hits)
