@@ -404,10 +404,19 @@ async def sync_directory(
     limit: int = MAX_FILES,
     max_bytes: int = MAX_BYTES,
     ignore: bool = True,
+    repo: Optional[str] = None,
 ) -> SyncReceipt:
     """Bring ``space`` into step with ``root``, or say what that would do.
     ``ignore`` reads the tree's `.gitignore` and `.sconeignore` files and
-    leaves what they exclude unread; off, the tree is read whole."""
+    leaves what they exclude unread; off, the tree is read whole. ``repo``
+    names the repository: every file is held as `repo/path`, so several
+    repositories synced into one space keep their files apart."""
+    from .repositories import repository_prefix
+
+    try:
+        prefix = repository_prefix(repo)
+    except ValueError as refused:
+        raise InvalidInput(str(refused)) from None
     where = pathlib.Path(root)
     if not where.is_dir():
         raise InvalidInput(f"{root} is not a directory to sync")
@@ -438,10 +447,10 @@ async def sync_directory(
     tally = _Tally()
     # Relative imports are followed to files this tree holds: the ones
     # walked now and the ones the marker already remembers.
-    resolve = file_resolver({*(path.relative_to(where).as_posix() for path in reading), *known})
+    resolve = file_resolver({*(prefix + path.relative_to(where).as_posix() for path in reading), *known})
     seen: set[str] = set()
     for path in reading:
-        here = path.relative_to(where).as_posix()
+        here = prefix + path.relative_to(where).as_posix()
         seen.add(here)
         # One byte past the limit: enough to know the file is longer
         # without reading the rest of it. Reading a gigabyte to keep a
