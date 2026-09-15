@@ -388,6 +388,21 @@ async def test_cycles_prints_the_loops_and_what_holds_one_apart(engine):
     assert code == 0 and report["status"] == "cycles" and (report["totals"]["cycles"], report["totals"]["held_apart"]) == (1, 1)
 
 
+async def test_stats_and_hubs_print_the_graph_counted_and_its_most_linked(engine):
+    code, text = await graph(engine, "stats")
+    assert code == 0 and "stats: space default" in text and "facts by origin:" in text
+    code, shown = await graph(engine, "stats", "--json")
+    counted = json.loads(shown)
+    assert code == 0 and counted["totals"]["entities"] >= 2 and counted["facts"]["origin"]
+    code, text = await graph(engine, "hubs", "--limit", "1")
+    assert code == 0 and "hubs: space default" in text and "1. " in text and "neighbours" in text
+    code, shown = await graph(engine, "hubs", "--json", "--above", "90")
+    ranked = json.loads(shown)
+    assert code == 0 and ranked["totals"]["above"] == 90.0 and len(ranked["hubs"]) <= ranked["totals"]["own"]
+    with pytest.raises(InvalidInput, match="1 to 100"):
+        await graph(engine, "hubs", "--limit", "0")
+
+
 async def temporal(engine, *arguments: str) -> tuple[int, str]:
     out = io.StringIO()
     code = await run(build_parser().parse_args(["when", *arguments]), engine, io.StringIO(""), out)

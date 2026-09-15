@@ -28,6 +28,17 @@ def test_tokens_are_estimated_per_word_part_digit_run_mark_and_unspaced_characte
     assert estimated_tokens("") == 2
 
 
+def test_a_word_is_counted_by_its_parts_whatever_its_case_and_script():
+    """Most words are one part, and are counted without the part rule; these
+    are the words that are not, and must not be taken for one."""
+    assert estimated_tokens("iPhoneXR") == 1 + 2 + 1 + 2
+    assert estimated_tokens("PDFs") == 1 + 1 + 2, "capitals then a small letter: PD and Fs"
+    assert estimated_tokens("café") == 1 + 1 + 2, "an accented letter is a part of its own"
+    assert estimated_tokens("NASA Hello hello") == 1 + 2 + 2 + 2
+    assert estimated_tokens("x") == 1 + 2 and estimated_tokens("Q") == 1 + 2
+    assert estimated_tokens("〇五") == 2 + 2, "a run of unspaced script is a token a character, a numeral first too"
+
+
 def wrap(text: str) -> str:
     return f"Source: notes.md\n{text}"
 

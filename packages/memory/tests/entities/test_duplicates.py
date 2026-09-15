@@ -651,6 +651,32 @@ async def test_a_persons_initial_does_not_make_their_name_a_module_path():
     assert ("j.andersen", "j.anderson") in pairs, found.pairs
 
 
+async def test_a_bare_name_a_code_relation_touches_is_an_identifier_and_a_persons_name_is_not():
+    """Mapping this package suggested `json.dump` and `json.dumps` as one
+    thing at 0.6, and `http.client.HTTPConnection` and `HTTPSConnection`
+    at 0.847: bare dotted names, which their shape alone cannot tell from
+    a person's initials. The graph can: what a code relation touches is
+    a symbol, and two symbols one letter apart are two symbols."""
+    engine = await engine_with(
+        ("pkg/out.py:write", "calls", "json.dumps"), ("pkg/out.py:write", "calls", "json.dump"),
+        ("pkg/net.py", "imports", "http.client.HTTPConnection"), ("pkg/net.py", "imports", "http.client.HTTPSConnection"),
+        ("J.Anderson", "works_at", "Acme"), ("J.Andersen", "works_at", "Acme"),
+        # A company is the subject of a code relation; it is still a name.
+        ("alice chen", "works_at", "Acme Robotics"), ("bob stone", "works_at", "Acme Robtics"),
+        ("Acme Robotics", "depends_on", "Stripe"),
+    )
+    try:
+        found = await likely_duplicates(engine, "alpha", min_score=0.0, limit=100)
+    finally:
+        await engine.close()
+    suggested = pairs(found)
+    assert ("json.dump", "json.dumps") not in suggested and \
+        ("http.client.httpconnection", "http.client.httpsconnection") not in suggested, suggested
+    assert ("j.andersen", "j.anderson") in suggested, "a person's initial is still a name, judged by spelling"
+    assert ("acme robotics", "acme robtics") in suggested, \
+        "the subject of a code relation is judged by its shape, and a company is a name"
+
+
 def test_what_counts_as_an_identifier_rather_than_a_name():
     """The rule itself, case by case, because it decides whether a pair is
     judged by spelling at all and every miss is silent in both

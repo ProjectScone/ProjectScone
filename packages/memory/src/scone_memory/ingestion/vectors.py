@@ -15,6 +15,11 @@ from __future__ import annotations
 
 import math
 
+#: Value types whose every instance is a number and never a bool, so a vector
+#: made only of them needs only its finiteness checked, in one C-level pass.
+#: Anything else -- a subclass, a numpy scalar, a bool -- is judged value by value.
+_PLAIN_NUMBERS = frozenset((float, int))
+
 
 def validated_vectors(response: object, count: int, dimension: int) -> list[list[float]]:
     """Vectors from one batch, checked. ``dimension`` is the width already
@@ -41,8 +46,11 @@ def validated_vectors(response: object, count: int, dimension: int) -> list[list
         if len(vector) != expected:
             raise ValueError('embedding vector does not match the configured dimension')
         try:
-            valid = all(isinstance(value, (int, float)) and not isinstance(value, bool)
-                        and math.isfinite(value) for value in vector)
+            if set(map(type, vector)) <= _PLAIN_NUMBERS:
+                valid = all(map(math.isfinite, vector))
+            else:
+                valid = all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                            and math.isfinite(value) for value in vector)
         except OverflowError:
             valid = False
         if not valid:
