@@ -90,6 +90,8 @@ class BuiltinDocumentParser:
                               **({'tables': str(tables[p.number].proposed),
                                   'tables_unreadable': str(tables[p.number].unreadable)}
                                  if p.number in tables and tables[p.number].proposed else {}),
+                              **({'tables_headed': str(tables[p.number].headed), 'header_basis': 'pdf_first_row'}
+                                 if p.number in tables and tables[p.number].headed else {}),
                               **({'section': _section(p.section)} if p.section else {})},
                     regions=tuple(DocumentTextRegion(text=r.text, box=r.box, score=r.score,
                         block=r.block, paragraph=r.paragraph, line=r.line, label=r.label,

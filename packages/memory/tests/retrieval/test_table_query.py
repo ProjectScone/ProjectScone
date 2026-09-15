@@ -241,3 +241,84 @@ async def test_rows_without_the_column_are_counted_and_duplicate_headers_stay_tw
         assert refused.value.reason == 'non_numeric_cell'
     finally:
         await memory.close()
+
+
+def test_a_title_above_the_header_is_not_a_row_and_columns_keep_the_grid_s_order():
+    """A PDF page's table reaches the query with a title across it above the
+    header row, and a wrapped word under one column that the page's text
+    reaches before the row above it."""
+    from types import SimpleNamespace
+
+    from scone_memory.ingestion.formats.table_types import DocumentTableCell, DocumentTableHeader
+    from scone_memory.ingestion.formats.types import DocumentSegment
+    from scone_memory.retrieval.table_query import tables_from
+
+    words = ['Top ten', 'No.', 'Name', 'Net worth', '(USD)', '1', 'Bill Gates', '$40 billion']
+    text = '\n'.join(words)
+    spans = {}
+    offset = 0
+    for word in words:
+        spans[word] = (offset, offset + len(word.encode()))
+        offset += len(word.encode()) + 1
+    table = 'page:1/table:1'
+
+    def head(column):
+        text_, = [w for w in ('No.', 'Name', 'Net worth') if ('No.', 'Name', 'Net worth').index(w) == column]
+        return DocumentTableHeader(locator=f'{table}/cell:1,{column}', text=text_, association='column')
+
+    def cell(row, column, word, *, span=1, header=False, under=None):
+        return DocumentTableCell(table_locator=table, locator=f'{table}/cell:{row},{column}', row=row, column=column,
+                                 column_span=span, is_header=header, text=word, start=spans[word][0], end=spans[word][1],
+                                 headers=(head(under),) if under is not None else ())
+    cells = (cell(0, 0, 'Top ten', span=3), cell(1, 0, 'No.', header=True), cell(1, 1, 'Name', header=True),
+             cell(1, 2, 'Net worth', header=True), cell(2, 2, '(USD)', under=2),
+             cell(3, 0, '1', under=0), cell(3, 1, 'Bill Gates', under=1), cell(3, 2, '$40 billion', under=2))
+    segment = DocumentSegment(text=text, locator='page:1', metadata={'header_basis': 'pdf_first_row'}, table_cells=cells)
+    [found] = tables_from(SimpleNamespace(segments=(segment,)))
+    assert found.columns == ('No.', 'Name', 'Net worth'), "in the grid's order, though '(USD)' came first in the text"
+    assert [row.number for row in found.rows] == [2, 3], "the title above the header is not a row"
+    assert found.rows[1].cells['Net worth'].text == '$40 billion' and found.basis == 'pdf_first_row'
+
+
+async def test_a_row_label_th_does_not_make_the_rows_above_it_a_title():
+    """The title skip is for tables whose header was read from their shape; an
+    HTML ``th`` on a row label below data rows is not such a header."""
+    from types import SimpleNamespace
+
+    from scone_memory.ingestion.formats.registry import BuiltinDocumentParser
+    from scone_memory.ingestion.formats.types import DocumentLimits
+    from scone_memory.retrieval.table_query import tables_from
+
+    html = b'<table><tr><td>West</td><td>10</td></tr><tr><th>Total</th><td>10</td></tr></table>'
+    parsed = await BuiltinDocumentParser().parse(html, 'totals.html', DocumentLimits())
+    [found] = tables_from(SimpleNamespace(segments=parsed.segments))
+    assert len(found.rows) == 2 and found.rows[0].cells['column 1'].text == 'West'
+
+
+def test_a_page_s_other_table_without_a_header_says_so():
+    from types import SimpleNamespace
+
+    from scone_memory.ingestion.formats.table_types import DocumentTableCell, DocumentTableHeader
+    from scone_memory.ingestion.formats.types import DocumentSegment
+    from scone_memory.retrieval.table_query import tables_from
+
+    words = ['No.', 'Name', '1', 'Bill Gates', '6', 'Lakshmi Mittal']
+    text = '\n'.join(words)
+    at = {}
+    offset = 0
+    for word in words:
+        at[word] = (offset, offset + len(word.encode()))
+        offset += len(word.encode()) + 1
+
+    def cell(table, row, column, word, *, header=False, under=None):
+        headers = (DocumentTableHeader(locator=f'{table}/cell:0,{column}', text=under, association='column'),) if under else ()
+        return DocumentTableCell(table_locator=table, locator=f'{table}/cell:{row},{column}', row=row, column=column,
+                                 is_header=header, text=word, start=at[word][0], end=at[word][1], headers=headers)
+    cells = (cell('page:1/table:1', 0, 0, 'No.', header=True), cell('page:1/table:1', 0, 1, 'Name', header=True),
+             cell('page:1/table:1', 1, 0, '1', under='No.'), cell('page:1/table:1', 1, 1, 'Bill Gates', under='Name'),
+             cell('page:1/table:2', 0, 0, '6'), cell('page:1/table:2', 0, 1, 'Lakshmi Mittal'))
+    segment = DocumentSegment(text=text, locator='page:1', table_cells=cells,
+                              metadata={'header_basis': 'pdf_first_row', 'tables_headed': '1', 'tables': '2'})
+    headed, other = tables_from(SimpleNamespace(segments=(segment,)))
+    assert headed.basis == 'pdf_first_row' and headed.columns == ('No.', 'Name')
+    assert other.basis == 'cell_headers' and other.columns == ('column 1', 'column 2'), "the basis names where a table's own columns came from"
