@@ -524,6 +524,11 @@ def build_parser() -> argparse.ArgumentParser:
     # that appears first (argparse reports it as unknown and exits 2).
     p = sub.add_parser("agent-hook", help="observe an agent's hook payload from stdin and post it as an agent event",
                        add_help=False)
+    p = sub.add_parser("hooks", help="keep a repository's graph current from git's own hooks: install, status, uninstall")
+    p.add_argument("action", choices=["install", "status", "uninstall"])
+    p.add_argument("--root", default=".", help="a directory inside the repository (default .)")
+    p.add_argument("--no-graph", action="store_true", help="map the files without recording claims")
+    p.add_argument("--env-file", help="a file the hook sources before mapping, for settings it must not carry itself")
     return parser
 
 
@@ -2247,6 +2252,22 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         return run_hook(rest, (stdin or sys.stdin).read(), env, stdout=out or sys.stdout)
     if rest:
         build_parser().error(f"unrecognized arguments: {' '.join(rest)}")
+    if args.command == "hooks":
+        from ..runtime import githooks
+
+        try:
+            if args.action == "install":
+                record = githooks.install(args.root, space=args.space, graph=not args.no_graph, env=env,
+                                          env_file=args.env_file).record()
+            elif args.action == "status":
+                record = githooks.status(args.root).record()
+            else:
+                record = githooks.uninstall(args.root)
+        except (SconeError, OSError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps(record, indent=None if getattr(args, "json", False) else 1), file=out or sys.stdout)
+        return 0
     if args.command == "serve-conversations":
         try:
             settings = settings_for_cli(env)
