@@ -128,6 +128,19 @@ embedder and image index` in `degraded`; `ingest_image` on it returns
 `image_lane="not_configured"`. A failing image embedder degrades the lane the same
 way, with its error.
 
+## When an image's vector cannot be made
+
+`ingest_image` stores the image, its context and the caption episode before it
+asks the image embedder for a vector. When the embedder raises (a model that is
+down, an image it refuses) or the image index will not take the write, the
+receipt is `image_lane="failed"` with `image_lane_error` naming the error's type
+and message (`ConnectionError: image model unreachable`); `POST /v1/images`
+answers 200 with the same fields. The image is stored and linked, and the text
+lanes find it by its caption; only the image lane lacks it. An exact retry of
+`ingest_image` writes the vector. A forget that lands while the image is embedded
+still raises `Gone` (or `NotFound`), and an index recording another image embedder
+still answers `blocked`.
+
 The lane's weight in fusion is `IMAGE_WEIGHT = 1.0`, the text lane's own. It is
 not tuned: there is no image retrieval benchmark here and no model to run one.
 
