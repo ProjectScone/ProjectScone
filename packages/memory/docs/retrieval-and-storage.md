@@ -4919,6 +4919,19 @@ With 20,000 facts on SQLite, a view costs:
 - The drawings show at most 200 entities and 600 relations, and say what
   they left out.
 
+### Proposing triples under a suggested vocabulary
+
+A pass run by hand with a chat model (`ingestion.dynamic_schema.extract_dynamic_schema`,
+`scone dynamic-schema`) asks, per chunk, for the triples the chunk states
+with the kind of each end, under suggested entity kinds and predicates
+and a switch that allows or forbids new ones. A triple is kept only with
+a span quoted verbatim from the chunk and past the distiller's grounding
+gate; it is stored as a proposal for review, never as a held claim. Kinds
+and predicates outside the suggestion are reported as proposed vocabulary
+with example quotes, and calls, triples per chunk and new types are
+bounded, each saying when it cut. Off by default, one model call per
+chunk. See [dynamic-schema-extraction.md](dynamic-schema-extraction.md).
+
 ## Which embedder wrote the vectors
 
 A cosine means something only between vectors that one embedder made under
