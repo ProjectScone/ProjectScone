@@ -45,24 +45,42 @@ worker's model: setting them for the reranker starts the distiller as well.
 A listwise pass takes seconds per call, so it keeps its own deadline
 (`timeout`) rather than the engine's `rerank_timeout`, which caps a scorer
 at 10 s. That makes it a reranker for recall calls that can wait: the
-recall API and the benches.
+recall API, the MCP `memory_recall` tool, the tools' `search_memory`, filesystem
+search, image recall and the benches, one pass per recall.
 
-A conversation's `MemoryContext` prepares each turn's evidence under its own
-`recall_timeout` (2 s by default). A pass longer than that budget would have
-the whole recall cancelled, every turn, with no evidence and no fallback, so
-`MemoryContext` refuses to be built when the engine's listwise reranker has a
-`timeout` above its `recall_timeout`
-(`recall_timeout must be at least the listwise reranker's timeout`). Under a
-budget at least as long as the pass, a pass that runs out falls back to fused
-order and the turn gets its evidence.
+**Conversations do not run it.** A conversation's `MemoryContext` prepares
+each turn's evidence under a `recall_timeout` of 2 s by default (voice
+always 2 s), and the model call measured below took 19.7 s at the median.
+So a turn recalls with `rerank=False` when the engine's reranker is a
+`ListwiseReranker`, keeps fused order, and its context receipt carries
+`"listwise_rerank": "skipped"`. That holds for every budget, for the
+follow-up search, and for a reranker assigned to `engine.reranker` after the
+context was built. Adaptive retrieval never reranks, so its turns carry the
+same key. A scorer (the cross encoder, `SCONE_RERANKER_FACTORY`) still
+reranks a turn. Text and voice conversations start with
+`SCONE_RERANKER_LISTWISE=1` as they do without it.
 
-On the server this means: with `SCONE_RERANKER_LISTWISE=1`, voice sessions
-(always 2 s) do not start, and text conversations start only with
-`SCONE_ADAPTIVE_RETRIEVAL=1` and a `SCONE_ADAPTIVE_TIMEOUT` at least the
-pass's `timeout`. The start route answers 503 `conversation runtime failed to
-initialize`; it does not pass the reason on. The refusal is checked when the
-context is built, so a reranker assigned to `engine.reranker` afterwards is
-not checked.
+**Several recalls for one request share one `timeout`.** `recall_parts`
+(`GET /v1/recall/parts` and the CLI's `recall --parts`), which searches up to
+four parts one after another, and `integrations.chat.recall_context` with a
+follow-up search run their recalls inside `one_listwise_budget()`: each pass
+has what the passes before it left, measured as the time the passes took
+(searching and fusing between them is not counted). A pass that finds
+nothing left calls no model, keeps fused order, and says
+`listwise timeout: the 60s this request allows listwise passes ran out;
+fused order kept`, as does a pass cut short by what was left. Wrap your own
+multi-recall code the same way:
+
+```python
+from scone_memory.retrieval.listwise import one_listwise_budget
+
+with one_listwise_budget():
+    first = await memory.recall("notes", "Who calibrates Juniper?")
+    second = await memory.recall("notes", "Where does Birch run the archive?")
+```
+
+A recall with fewer than two candidates has no order to ask for: it calls
+no model and its receipt shows `model_calls: 0`.
 
 ## What it does
 
@@ -93,6 +111,8 @@ fused order.
    `degraded` carries the reason (`listwise timeout after 60s; fused order
    kept`, or `listwise model failed: ChatError; fused order kept` — the
    type, never the message), and the receipt shows how far the pass got.
+   Inside `one_listwise_budget()` the deadline is what earlier passes left
+   (above).
    The engine's `rerank_timeout` (at most 10 s) is a scorer's budget and
    does not apply to a listwise pass.
 
