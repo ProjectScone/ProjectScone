@@ -108,10 +108,10 @@ twelve unrelated notes, on the in-memory and SQLite stores (identical on both).
 With the lane off, the right image was in the top three for 0 of 5 questions.
 With it on, the lane itself ranked the right image first for 5 of 5, and in the
 fused top three it came second (behind the passage saying the question's words)
-for 4 of 5. For the fifth the hashed text vector lane happened to rank two other
-captions third and fourth, and each of those, with its place in the image lane,
-outranked the lane's first choice at weight 1.0: in a recall of six the right
-image came fourth.
+for 4 of 5. For the fifth the hashed text vector lane happened to rank other captions
+near its top, and those, with their places in the image lane, outranked the
+lane's first choice at weight 1.0, so it fell out of the top three
+(in a recall of ten, where every lane looks deeper, it came third).
 
 Because the embedder's text side is told which phrase shows which image, this
 proves the lane's plumbing (the separate index, fusion, provenance, filters and

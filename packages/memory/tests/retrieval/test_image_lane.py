@@ -178,7 +178,7 @@ async def test_the_lane_finds_the_right_image_for_text_queries(stores):
     engine = await lane_engine(stores)
     try:
         stored = await fill(engine)
-        lane_first, off_top3, fused_ranks = 0, 0, []
+        lane_first, off_top3, fused_ranks, deep_ranks = 0, 0, [], []
         for color, question in QUESTIONS.items():
             off = await engine.recall("s", question, limit=3)
             assert all("image" not in item.lanes for item in off.items)
@@ -187,6 +187,8 @@ async def test_the_lane_finds_the_right_image_for_text_queries(stores):
             deep = await engine.recall("s", question, limit=10, image_lane=True)
             [first] = [item for item in deep.items if item.lanes.get("image") == 1]
             lane_first += first.metadata["image_original"] == stored[color]
+            deep_ranks.append(next(n for n, item in enumerate(deep.items, 1)
+                                   if item.metadata.get("image_original") == stored[color]))
             on = await engine.recall("s", question, limit=3, image_lane=True)
             assert not [note for note in on.degraded if note.startswith("image lane")]
             ranks = [n for n, item in enumerate(on.items, 1) if item.metadata.get("image_original") == stored[color]]
@@ -201,10 +203,12 @@ async def test_the_lane_finds_the_right_image_for_text_queries(stores):
         assert lane_first == 5, "the lane itself ranks the right image first for every question"
         # Fused, the passage saying the question's words comes first, and the
         # right image second. For "purple tulips" the hashed text vector lane
-        # happens to rank two other captions third and fourth, and each of
-        # those, with its image-lane place, outranks the lane's first choice at
-        # IMAGE_WEIGHT 1.0: the image falls to fourth, out of the top three.
+        # happens to rank other captions near the top, and those, with their
+        # image-lane places, outrank the lane's first choice at IMAGE_WEIGHT
+        # 1.0: the image falls out of the top three.
         assert fused_ranks == [2, 2, 2, 2, None]
+        # Deeper lanes change the fused order: in a recall of ten it comes third.
+        assert deep_ranks == [2, 2, 2, 2, 3]
 
     finally:
         await engine.close()
