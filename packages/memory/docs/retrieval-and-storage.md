@@ -865,6 +865,19 @@ code and pipe tables and is already used by retrieval and source
 inspection. Only what that parser deliberately leaves out is new:
 setext headings, numbered and lettered clauses, `Q:`/`A:` pairs.
 
+Chinese and Japanese numbering is a clause too, with or without a space
+after it: `第三条`, `第2章`, `一、`, `（二）`, `1、`. A numeral alone is not a
+clause, so `第一次` ("the first time") and `一九八四年` stay prose.
+
+Both chunkers also cut Chinese and Japanese prose where it divides itself.
+Its sentences end at a full-width stop (`。！？`) with nothing after it,
+and before this every chunk of such text was cut at exactly the byte
+target, inside a word. A full-width stop now counts as a sentence end,
+with any closing quote or bracket after it kept in the sentence. With no
+stop in reach, the later of a space and a full-width pause (`，、；：`) is
+the cut. Text with no full-width punctuation chunks byte for byte as it
+did, and a test holds the spans taken before the change.
+
 Measured over this repository's own 23 documents, 437,141 bytes, at
 commit 90ea0ce:
 
