@@ -9,6 +9,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
+from scone_memory.core.models import RerankTrace
 from scone_memory.providers.llm import ChatError, FakeChat
 from scone_memory.retrieval.listwise import (ListwiseFallbackError, ListwiseReranker, parse_permutation, passage_text,
                                              sliding_windows)
@@ -302,6 +303,14 @@ async def test_a_scorer_trace_carries_no_listwise_key(engine):
     result = await engine.recall("alpha", "which record answers", limit=2, candidate_limit=8)
     assert set(result.model_dump(mode="json")["rerank"]) == {
         "status", "ordering", "candidates_considered", "candidates_sent", "candidates_omitted", "payload_bytes", "duration_ms"}
+
+
+def test_the_trace_schema_stays_typed_and_names_the_receipt():
+    # Leaving the key out of a scorer's trace must not turn the trace's
+    # schema into an untyped object.
+    trace = RerankTrace.model_json_schema(mode="serialization")
+    assert {"status", "ordering", "candidates_sent", "listwise"} <= set(trace["properties"])
+    assert "ListwiseReceipt" in trace["$defs"]
 
 
 async def test_recall_says_when_a_window_was_partial(engine):
