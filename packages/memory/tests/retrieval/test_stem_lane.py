@@ -57,9 +57,9 @@ async def test_recall_finds_the_family_and_says_which_prefixes_it_added(stores):
     engine = await engine_with(stores, lexical_stems=True)
     found = await engine.recall("s", "the bills and the invoice", limit=3)
     assert found.items[0].text == BILLING and found.items[0].lanes.get("text") == 1
-    assert found.prefixes == {"added": ["bill", "invoic"], "applied": True, "exact_forms": False}
+    assert found.prefixes == {"added": ["bill", "invoic"], "applied": True, "exact_forms": True}
     plain = await engine.recall("s", "Lisbon in March", limit=3)
-    assert plain.prefixes == {"added": [], "applied": True, "exact_forms": False}, "a query with no family to add still says so"
+    assert plain.prefixes == {"added": [], "applied": True, "exact_forms": True}, "a query with no family to add still says so"
 
 
 async def test_without_the_flag_the_family_is_missed_and_nothing_is_recorded(stores):
@@ -74,7 +74,7 @@ async def test_a_store_without_prefix_terms_answers_and_says_the_prefixes_were_n
 
     engine = await engine_with(Plain(), lexical_stems=True)
     found = await engine.recall("s", "the bills", limit=3)
-    assert found.prefixes == {"added": ["bill"], "applied": False, "exact_forms": False}
+    assert found.prefixes == {"added": ["bill"], "applied": False, "exact_forms": True}
     assert all("text" not in item.lanes for item in found.items)
 
 
@@ -86,7 +86,7 @@ async def test_the_recall_event_carries_the_counts_and_the_flag_is_a_boolean():
     await engine.remember("s", BILLING)
     await engine.recall("s", "bills", limit=1)
     [event] = await engine.events.query("s", kind="recall")
-    assert event.payload["prefixes"] == {"added": 1, "applied": True, "exact_forms": False}
+    assert event.payload["prefixes"] == {"added": 1, "applied": True, "exact_forms": True}
     with pytest.raises(InvalidInput, match="lexical_stems"):
         MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), lexical_stems="yes")  # type: ignore[arg-type]
 
@@ -119,6 +119,6 @@ async def test_exact_forms_reach_the_store_and_the_record_says_so(stores):
 
 
 def test_the_exact_forms_flag_is_a_boolean():
-    assert MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).lexical_exact_forms is False
+    assert MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).lexical_exact_forms is True
     with pytest.raises(InvalidInput, match="lexical_exact_forms"):
         MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), lexical_exact_forms=1)  # type: ignore[arg-type]

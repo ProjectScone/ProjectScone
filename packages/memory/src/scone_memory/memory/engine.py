@@ -233,7 +233,7 @@ class MemoryEngine:
         synonyms: "Synonyms | None" = None,
         context_lane: bool = False,
         lexical_stems: bool = True,
-        lexical_exact_forms: bool = False,
+        lexical_exact_forms: bool = True,
         vector_weight: Optional[float] = None,
         chunk_tokens: int | None = None,
         chunk_overlap_tokens: int = 0,
@@ -267,7 +267,10 @@ class MemoryEngine:
             raise InvalidInput("lexical_exact_forms must be a boolean")
         #: With stem prefixes: whether a passage holding the query's own word
         #: in a family has the family weighed at that word's idf (still one
-        #: term, counted once). Nothing without ``lexical_stems``.
+        #: term, counted once). Nothing without ``lexical_stems``. On by
+        #: default: on LongMemEval-S it raised MRR on the frozen 50, the 100
+        #: items outside them and 100 further items, and lost no R@5
+        #: (benchmarks/exact-forms-2026-09-15.results.md).
         self.lexical_exact_forms = lexical_exact_forms
         if type(context_lane) is not bool:
             raise InvalidInput("context_lane must be a boolean")
