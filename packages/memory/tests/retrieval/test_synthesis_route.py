@@ -227,3 +227,71 @@ async def test_a_partial_synthesis_says_so_in_its_text_and_a_whole_one_does_not(
                                       "--limit", "12", "--synthesis-mode", "accumulate"])
     assert await run(args, engine, io.StringIO(""), out) == 0
     assert out.getvalue().rstrip("\n").endswith("partial: 6 passage(s) unread: the bound of 6 round(s) was reached")
+
+
+class FactsChat:
+    """Takes each passage's opening words as its one fact, and answers with one sentence citing every fact given."""
+
+    def __init__(self) -> None:
+        self.systems: list[str] = []
+
+    async def complete(self, system: str, user: str) -> str:
+        import re
+
+        from scone_memory.retrieval import synthesis as module
+
+        self.systems.append(system)
+        if system == module._ANSWER_SYSTEM:
+            ids = re.findall(r"^\[(f\d+)\]", user, flags=re.M)
+            return json.dumps({"answer": [{"sentence": "What the launch notes say.", "facts": ids}]})
+        passage = user.split("Passage:\n", 1)[1]
+        return json.dumps({"facts": [{"fact": "A launch note.", "quote": " ".join(passage.split()[:3])}]})
+
+
+async def test_at_the_routes_own_limits_facts_reads_six_passages_and_writes_one_answer_from_six_facts():
+    from scone_memory.retrieval import synthesis as module
+
+    engine = await launch_memory()
+    model = FactsChat()
+    answered = await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=model, limit=12,
+                                     synthesis_mode="facts")
+    assert model.systems == [module._FACTS_SYSTEM] * 6 + [module._ANSWER_SYSTEM]
+    detail = answered.detail
+    assert detail["mode"] == "facts" and detail["model_calls"] == 7
+    assert detail["passages"]["read"] == 6 and detail["passages"]["unread"] == 6
+    assert detail["facts"] == {"extracted": 6, "used": 6, "unsent": 0, "sentences_dropped_uncited": 0}
+    assert detail["status"] == "partial" and detail["truncated"] is True
+    (sentence,) = detail["sentences"]
+    cited = [citation["passage"] for citation in sentence["citations"]]
+    assert len(cited) == 6 == len(set(cited)), "one sentence citing the six passages read"
+    assert answered.text.splitlines() == [f"What the launch notes say. [{', '.join(cited)}]",
+                                          "partial: 6 passage(s) unread: the bound of 6 round(s) was reached"]
+
+
+async def test_the_command_line_takes_the_facts_mode(monkeypatch):
+    import io
+
+    from scone_memory.runtime import config as runtime_config
+    from scone_memory.runtime.cli import build_parser, run
+
+    engine = await memory()
+    monkeypatch.setattr(runtime_config, "build_chat", lambda settings: FactsChat())
+    out = io.StringIO()
+    args = build_parser().parse_args(["--space", SPACE, "--json", "answer", QUESTION, "--route", "synthesize",
+                                      "--limit", "2", "--synthesis-mode", "facts"])
+    assert await run(args, engine, io.StringIO(""), out) == 0
+    detail = json.loads(out.getvalue())["detail"]
+    assert detail["mode"] == "facts" and detail["model_calls"] == 3 and detail["facts"]["extracted"] == 2
+
+
+def test_over_http_the_facts_mode_is_a_query_parameter():
+    from fastapi.testclient import TestClient
+
+    from scone_memory.api import create_app
+
+    engine = asyncio.run(memory())
+    with TestClient(create_app(engine, {"key-a": SPACE}, synthesis_factory=FactsChat)) as client:
+        said = client.get("/v1/answer", params={"q": QUESTION, "route": "synthesize", "limit": 2, "synthesis_mode": "facts"},
+                          headers={"Authorization": "Bearer key-a"}).json()
+    assert said["detail"]["mode"] == "facts" and said["detail"]["status"] == "synthesized"
+    assert said["detail"]["facts"] == {"extracted": 2, "used": 2, "unsent": 0, "sentences_dropped_uncited": 0}

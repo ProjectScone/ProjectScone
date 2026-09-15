@@ -447,9 +447,9 @@ unless the fourth route is asked for by name:
    the route is refused. `scone answer --route synthesize --limit 30`.
 
    That is the **evidence** mode, the default. `synthesis_mode` picks one
-   of two more, the reference framework's Refine and Accumulate, and both
-   keep the rule that a sentence is shown only with a quote the framework
-   found in a passage:
+   of three more -- the reference framework's Refine and Accumulate, and
+   `facts` -- and all keep the rule that a sentence is shown only with a
+   quote the framework found in a passage:
 
    - **refine** threads one answer through the rounds. The first round
      that leaves a note is the answer; each later round is one call that
@@ -480,15 +480,37 @@ unless the fourth route is asked for by name:
      each call kept, in passage order, with no fold; a sentence must quote
      the passage its own call held. It spends the most calls on the
      passages it reads.
+   - **facts** extracts first and writes second. Each passage is one call
+     that asks for the atomic facts the passage states that bear on the
+     question, each a short sentence with a quote from that passage. The
+     passage is named by the framework, not the model, so a fact cannot
+     cite the wrong one; a fact whose quote is not in the passage its call
+     held is dropped and counted under `notes.dropped_unquoted` (one with no
+     quote under `notes.dropped_malformed`). When any fact survives, one
+     more call writes the answer from the checked facts alone -- each fact
+     with its quote, never the passages -- and every sentence must name
+     the facts it uses (`f1`, `f2`, ...). A sentence that names none of the
+     facts it was given is dropped and counted, and a shown sentence
+     carries the quotes of the facts it names. That call holds at most one
+     round's bytes of facts, in the order they were found; the facts past
+     it are not sent, are counted, and the answer is `truncated`. An answer
+     that cannot be read, fails or cites nothing, or a first fact too
+     large for the round, leaves the facts shown as they are, with a
+     reason, and the answer is `partial`. `detail.facts` gives
+     `extracted` (facts kept with a checked quote), `used` (distinct facts
+     the shown sentences name), `unsent` and `sentences_dropped_uncited`;
+     `folded` says the answer was written. In the other modes
+     `detail.facts` is `null`.
 
    In every mode the calls are bounded by the rounds bound (six by
-   default; `evidence` may add its one fold), and passages past it are
-   left unread, counted, and the answer is `partial`. A `partial` answer's
+   default; `evidence` may add its one fold and `facts` its one answer),
+   and passages past it are left unread, counted, and the answer is
+   `partial`. A `partial` answer's
    text ends with one line, `partial:` and the reasons, so `scone answer`
    without `--json` says what was left unread or cut. `detail` names the
    `mode`, the `model_calls`, and under `passages` how many were read and
    how many the shown sentences `cited`. A mode on any other route is
-   refused. `scone answer --route synthesize --synthesis-mode refine`,
+   refused. `scone answer --route synthesize --synthesis-mode facts`,
    `GET /v1/answer?route=synthesize&synthesis_mode=accumulate`,
    `answer_question(..., route="synthesize", synthesis_mode="refine")`.
 
@@ -498,8 +520,10 @@ unless the fourth route is asked for by name:
    its passages hold. Twelve passages of about 600 bytes fit one round:
    `refine` makes one call, the same call `evidence` makes, and has nothing
    to refine; `accumulate` reads six of the twelve, one call each, and is
-   `partial`. `refine` refines only when the passages read overflow a
-   round, and `accumulate` reads them all only when `limit` is six or less.
+   `partial`; `facts` reads the same six, one call each, and writes its
+   answer from what they gave, seven calls in all. `refine` refines only when the passages
+   read overflow a round, and `accumulate` and `facts` read them all only
+   when `limit` is six or less.
    A measurement on eight multi-session questions with a local 8B model
    set rounds of 6,000 bytes and a bound of 16, limits the route does not
    use, so that its twelve passages (6.6 to 7.2 kB) took two rounds: no
