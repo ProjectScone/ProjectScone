@@ -825,10 +825,35 @@ MemoryEngine(store, index, embedder, structure_aware=True)
 That is the engine's rule for every record. One record can choose for
 itself: `remember(..., chunking="structure")`, `scone remember --chunking
 structure`, `"chunking": "structure"` on `POST /v1/episodes` and in each
-batch record (`length`, `code`, `structure` or `semantic`; unset keeps
+batch record (`length`, `code`, `structure`, `semantic` or `unit`; unset keeps
 the rule). The receipt says which way was actually used -- `code` for a
 code source unless the record said otherwise -- and, for structure, the
 chunker's own counts (`at_boundary`, `by_size`, `over_target`, `capped`).
+
+An imported Word, OpenDocument or HTML file is stored as its paragraphs'
+text, where a heading is a line like any other. Its reader keeps each
+heading's level beside the text (`heading_level`), and a structure cut of
+that file reads those headings back from the manifest kept with the
+episode: it cuts at them whatever the line says, and the receipt carries
+`document_headings`, the number of the file's own headings it read. A
+record that is not an imported file carries no such count. A manifest
+that does not match the episode's text is refused rather than ignored.
+
+`unit` cuts an imported file one chunk per unit its reader named: a PDF
+page, a slide (with its notes), a table or sheet row, a spreadsheet
+cell's row (and a legacy `.xls` row), a JSON Lines record, an image or video frame or an audio segment.
+Consecutive paragraphs in no unit, such as a Word document's body text
+between two tables, are one `text` unit. A unit longer than the target
+is split exactly as the length cut would split it, and the receipt says
+so: `units`, `split_units`, `by_size` (chunks those splits added) and
+`kinds`, the units by kind. It is asked for per file: `chunking` on
+`POST /v1/documents` and `POST /v1/documents/pdf`, or on
+`ingest_document`, `store_document` and `ingest_pdf`. A record whose
+reader named no units, including anything that is not an imported file,
+is refused before its episode is stored. The units come from the
+manifest kept with the episode, so recovery cuts the same way. A file
+imported again with a different `chunking` is the same episode, so the
+first cut stands.
 The choice is kept on the episode's metadata under `chunking`, so a
 recovery after an interruption cuts the way the record asked; `code` on
 a source whose name does not say its language, a mode not on the list,
@@ -897,14 +922,18 @@ about: "within 30 days" under "## Refund policy" in "# Chapter 4" is,
 once cut, only "within 30 days". With `heading_context=True`
 (`SCONE_HEADING_CONTEXT=1`) each chunk's embedding input starts with the
 path of headings above it, outermost first, and a code chunk's starts
-with its file and the declarations it sits inside.
+with its file and the declarations it sits inside. For an imported file,
+the headings its reader marked count as well, each running to the next
+of the same or a higher level; recovery reads the same ones, so a
+recovered chunk is embedded as an uninterrupted one would have been.
 
 - **Only what is embedded changes.** Stored text is untouched, so recall
   still returns the exact excerpt.
 - **The path is bounded.** At most `MAX_HEADING_CONTEXT_BYTES`; a longer
   path keeps its innermost headings, and the receipt counts the chunks it
   was cut for.
-- **It is part of the vector writer's identity.** Vectors embedded with
+- **It is part of the vector writer's identity** (`heading-path-v2` since
+  imported files' own headings joined the path). Vectors embedded with
   headings and vectors embedded without them never answer one search
   together: turning the setting on or off for an existing store reads as
   a mismatch until the vectors are rebuilt.

@@ -525,7 +525,7 @@ class Added(BaseModel):
     #: landed on a boundary, what was split by size, whether a unit ran
     #: over the target and whether the unit bound bit. None on a receipt
     #: that stored nothing.
-    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
+    chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     structure: Optional[dict[str, object]] = None
     #: With heading context on: how many chunks were embedded with a line
     #: of context in front, how many bytes that added, and how many lines
