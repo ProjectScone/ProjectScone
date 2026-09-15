@@ -62,17 +62,18 @@ unmeasured, and its threshold fails.
 | Path false positives | 0 | at most 0 |
 | Fragmentation | 1.2 | at most 1.2 |
 | Alias B-cubed F1 | 0.935 | at least 0.9 |
-| View bytes (knowledge, report, context) | 9,366, 5,721, 684 | recorded |
+| View bytes (knowledge, report, context) | 9,366, 5,791, 684 | recorded |
 | Build time per 10,000 facts | about 0.5 s | recorded |
 
-Artefact: `baac3a0baa964ed0918c29bd0fe93c2d359a838c958d77f26c16711e972876db`. The scores
-match the first recording (`44ceae91…`). The hash has moved five times
+Artefact: `ee90d8c091c147e92f682d9658983b09a1760b05234c87dcc628d3cf0f1ba35c`. The scores
+match the first recording (`44ceae91…`). The hash has moved six times
 since, and no score has changed on any of them: when the
 missing-evidence and out-of-view counts joined the report
 (`daceac58…`); when the knowledge view began saying when things held
 (`e92a2920…`); when it said where its relation vocabulary came from
 (`74c9275f…`); when the report began counting externals (`60f8be68…`);
-and now that the analysis says what its community guards did.
+when the analysis said what its community guards did (`baac3a0b…`);
+and now that the guards meet main's hubs held apart and code kinds.
 
 The second move added 465 bytes, both of them the view saying what it
 used to leave a reader to assume: every relation now lists the stretches
@@ -127,6 +128,28 @@ entities give no community a guard would look at:
 
 Checked as the third was: removing those six keys and writing the old
 version back gives 5,586 bytes, the previous recording.
+
+The sixth move adds **70 bytes to the report** and nothing to the
+knowledge view or the context packet, and came from merging main into
+the guards. Main's #57 holds hubs apart when `exclude_hubs` is given,
+so the analysis coverage carries two more fields and the report's
+analysis says whether the partition was found without the hubs; this
+fixture asks for no percentile:
+
+```json
+"exclude_hubs": null, "hubs_held_apart": 0,
+"hubs_held_apart": false
+```
+
+(the first two in `analysis.coverage`, the third in `analysis`). Main's
+#84 raised the kind hints to `kinds/2`, a string of the same length, in
+both the knowledge view and the report, and with it the projection
+digest, a hash of the same length. Checked by diffing the report and
+the view the fixture gives on the branch before the merge and after:
+those are the whole difference, and removing the three keys and writing
+back `kinds/1` and the old digest gives 5,721 bytes, the previous
+recording. #57's directory names change no label here, since no member
+of this fixture is a path, and no community, score or count moved.
 
 ## What the numbers say
 
