@@ -388,3 +388,157 @@ async def test_an_idle_event_is_validated_like_a_turn_s_timing(memory):
         assert await unlogged.record_idle(SPACE, session_id=SID, count=1, action="end", silent_ms=1.0) is None
     finally:
         await unlogged.close()
+
+
+class SlowLog(InMemoryEventLog):
+    """An event log whose append waits, as one over a network does."""
+
+    def __init__(self, seconds):
+        super().__init__()
+        self.seconds = seconds
+        self.started = 0
+
+    async def append(self, event):
+        self.started += 1
+        await asyncio.sleep(self.seconds)
+        return await super().append(event)
+
+
+@pytest.fixture
+async def slow_memory():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=SlowLog(.05)).open()
+    yield engine
+    await engine.close()
+
+
+async def test_the_idle_that_ends_the_session_is_logged_by_a_log_that_waits(slow_memory):
+    r = rig(slow_memory, idle=IdlePolicy(.1, end_after=1))
+    async with r:
+        await asyncio.wait_for(r.running, 3)
+    assert r.session.end_reason == "idle" and slow_memory.events.started == 1
+    [event] = await idle_events(slow_memory)
+    assert event.payload["action"] == "end", "the only lasting record of why the session ended"
+    assert "turn_id" not in event.payload, "nothing was said"
+    assert {task for task in asyncio.all_tasks() if not task.done()} == {asyncio.current_task()}, \
+        "nothing the session started outlives it"
+
+
+@pytest.mark.parametrize("prompt", ["Still there?", None], ids=["prompt", "noted"])
+async def test_an_idle_the_user_talks_over_is_still_logged_by_a_log_that_waits(slow_memory, prompt):
+    async with rig(slow_memory, idle=IdlePolicy(.2, prompt=prompt, end_after=5)) as r:
+        await until(lambda: r.session.idles == 1)
+        await asyncio.sleep(.01)
+        await r.say(SpeechStarted())  # the caller answers while the idle is being written
+        async with asyncio.timeout(2):
+            while not await idle_events(slow_memory):
+                await asyncio.sleep(.005)
+        [event] = await idle_events(slow_memory)
+        assert event.payload["action"] == ("prompt" if prompt else "noted")
+        await until(lambda: not r.session._notes)  # a written note is not kept
+        await r.say(Transcript(""))
+        await r.finish()
+
+
+LOUD, QUIET = AudioChunk(b"\xe0\x2e" * 320, 16000), AudioChunk(b"\x00\x00" * 320, 16000)
+
+
+class Loudness(Resource):
+    """An activity detector that hears speech in a loud frame and none in a quiet one."""
+
+    async def detect(self, chunk):
+        return chunk.pcm[:2] == LOUD.pcm[:2]
+
+
+class Duplex(Resource):
+    """A streaming recognizer: one task takes the audio as it comes, and
+    the events are whatever the test puts, until a None."""
+
+    def __init__(self):
+        super().__init__()
+        self.events: asyncio.Queue = asyncio.Queue()
+
+    async def transcribe(self, audio):
+        async def take():
+            async for _ in audio:
+                pass
+
+        sender = asyncio.create_task(take())
+        try:
+            while (event := await self.events.get()) is not None:
+                yield event
+        finally:
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+
+
+class SlowJudge(Resource):
+    """An end-of-turn model that answers inside the judging deadline, but not at once."""
+
+    async def judge(self, text):
+        from scone_memory.realtime.turn_end import COMPLETE, Judgement
+
+        await asyncio.sleep(.3)
+        return Judgement(COMPLETE, "model")
+
+
+async def finish_duplex(r, stt):
+    await r.transport.input.put(None)
+    await asyncio.sleep(.05)  # the recognizer's sender takes the end of the audio
+    await stt.events.put(None)
+    await asyncio.wait_for(r.running, 3)
+
+
+async def frames(r, *chunks):
+    for chunk in chunks:
+        await r.transport.input.put(chunk)
+        await asyncio.sleep(.02)
+
+
+async def test_a_noise_the_detector_hears_start_and_stop_while_a_turn_is_judged_still_starts_the_wait(memory):
+    stt = Duplex()
+    async with rig(memory, idle=IdlePolicy(.2, end_after=None), stt_factory=lambda: stt,
+                   activity_factory=Loudness, turn_detector_factory=SlowJudge) as r:
+        await stt.events.put(SpeechStarted())
+        await stt.events.put(Transcript("Book it."))
+        await asyncio.sleep(.1)  # the turn is being judged, with the controller held
+        await frames(r, LOUD, QUIET, QUIET)  # a knock: speech heard to start, then to stop
+        await until(lambda: r.session.idles >= 1, 2)
+        await finish_duplex(r, stt)
+
+
+class Long(Synthesizer):
+    """Synthesis far faster than playback: ``seconds`` of audio for the
+    first text, handed over at once, and a moment of audio after that."""
+
+    def __init__(self, seconds):
+        super().__init__()
+        self.chunks, self.calls = round(seconds * 10), 0
+
+    async def synthesize(self, text):
+        self.calls += 1
+        for _ in range(self.chunks if self.calls == 1 else 1):
+            yield AudioChunk(b"\x01\x00" * 1600, 16000)  # 100 ms
+
+
+async def test_an_idle_waits_for_a_reply_to_have_played_before_it_prompts(memory):
+    async with rig(memory, tts=Long(1.0), idle=IdlePolicy(.2, end_after=None)) as r:
+        await r.say(SpeechStarted(), Transcript("Tell me a story."))
+        await until(lambda: len({turn for _, turn in r.transport.at}) == 2)
+        reply, first = r.transport.at[0][1], r.transport.at[0][0]
+        prompt_at = next(at for at, turn in r.transport.at if turn != reply)
+        assert 1.0 + .2 <= prompt_at - first < 1.0 + .2 + .4, "a second of reply audio plays, then the user is waited on"
+        assert r.session.last_idle_receipt.silent_ms >= 200
+        await r.finish()
+
+
+async def test_a_reply_that_was_cleared_does_not_hold_the_wait_for_audio_no_one_will_hear(memory):
+    async with rig(memory, tts=Long(3.0), idle=IdlePolicy(.2, end_after=None)) as r:
+        await r.say(SpeechStarted(), Transcript("Tell me a story."))
+        await until(lambda: r.session.stored_count == 2)
+        await r.say(SpeechStarted(), Transcript("Stop."))  # clears the long reply; the answer is short
+        await until(lambda: r.session.stored_count == 4)
+        answered = time.perf_counter()
+        await until(lambda: r.session.idles == 1, 2)
+        assert time.perf_counter() - answered < 1.0, "the first reply's unplayed three seconds were cleared"
+        await r.finish()

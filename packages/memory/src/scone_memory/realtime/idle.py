@@ -114,7 +114,8 @@ class IdleWatch:
         self._pauses, self.deadline = self._pauses + 1, None
 
     def resume(self, now: float) -> None:
-        """One pause ended; the wait starts again when none is left."""
+        """One pause ended; the wait starts again when none is left. ``now``
+        may be later than the clock: when the bot's audio is expected to have played."""
         if not self._pauses:
             raise RuntimeError("an idle watch resumed without a pause")
         self._pauses -= 1

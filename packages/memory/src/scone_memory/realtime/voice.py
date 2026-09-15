@@ -21,7 +21,7 @@ from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
 from .context import MemoryContext
 from .idle import IdlePolicy, IdleReceipt, IdleWatch
-from .keypad import KeypadCollector, KeypadEntry, KeypadPolicy, Keypress, keypad_key
+from .keypad import KeypadCollector, KeypadEntry, KeypadPolicy, Keypress, joined, keypad_key
 from .lifecycle import cancel_once as _cancel_once, settle as _settle
 from .timing import TurnTiming
 from .turn_end import (HOLD_S, INCOMPLETE, MAX_DURATION_S, UNSURE, EndOfTurnDetector, Judgement, TurnEnd, TurnHold,
@@ -41,6 +41,8 @@ from .audio import (
 
 _OWNER: ContextVar[object | None] = ContextVar("scone_voice_owner", default=None)
 _EOF = object()
+#: The activity detector heard speech stop; queued with the audio, so it is acted on after the start before it.
+_STOPPED = object()
 
 
 def _bytes(value) -> int:
@@ -140,6 +142,18 @@ class VoiceSession:
         self._strategy = strategy
         #: When speech in the turn not yet taken began, which a strategy times it from.
         self._onset: float | None = None
+        #: The speech the onset was taken from stopped with no words since: the
+        #: next sign of speech, with no turn held, is new speech.
+        self._speech_ended = False
+        #: The recognizer's latest speech start has had no words since.
+        self._started_wordless = False
+        #: Keypad entries held in the pending turn by a strategy waiting for its submit key.
+        self._held_keys: list[KeypadEntry] = []
+        #: When the audio sent since output was last cleared is expected to have
+        #: played, at real time from when each piece was handed to the transport.
+        self._played = 0.0
+        #: Idle notes being written; a talked-over prompt does not cancel them.
+        self._notes: set[asyncio.Task[None]] = set()
         self._idle_policy = idle
         self._idle: IdleWatch | None = None
         self._idle_ended = False
@@ -315,9 +329,10 @@ class VoiceSession:
                             raise ValueError("speech activity detector must return bool")
                         if detected and not speaking:
                             await queue.put(SpeechStarted())
-                        elif speaking and not detected and self._idle is not None:
-                            self._idle.spoke(time.perf_counter())  # the detector heard the speech stop
-                            held.set()  # and the wait for the user has a deadline again
+                        elif speaking and not detected:
+                            # In the order heard: the speech start queued before it
+                            # may not have been acted on yet.
+                            await queue.put(_STOPPED)
                         speaking = detected
                     await queue.put(chunk)
             await queue.put(_EOF)
@@ -325,6 +340,13 @@ class VoiceSession:
         async def audio():
             nonlocal input_drained
             while (chunk := await queue.get()) is not _EOF:
+                if chunk is _STOPPED:
+                    async with control:
+                        self._speech_ended = True  # unless words for it come first
+                        if self._idle is not None:
+                            self._idle.spoke(time.perf_counter())  # the detector heard the speech stop
+                            held.set()  # and the wait for the user has a deadline again
+                    continue
                 if isinstance(chunk, SpeechStarted):
                     # Duplex recognizers may consume PCM in a separate task.
                     # A shared controller keeps old cleanup from clearing the
@@ -342,9 +364,13 @@ class VoiceSession:
                     async with control:
                         if isinstance(event, SpeechStarted):
                             await self._interrupt(transport)
+                            # Started again with no words for its last start: that speech gave none.
+                            self._speech_ended = self._speech_ended or self._started_wordless
                             self._speaking(time.perf_counter())  # heard by the recognizer
+                            self._started_wordless = True
                         elif is_question(event):
                             heard = time.perf_counter()
+                            self._started_wordless = False  # the speech has its words
                             if self._idle is not None:
                                 self._idle.spoke(heard)
                             await self._interrupt(transport)  # new words supersede output, even while held
@@ -374,6 +400,7 @@ class VoiceSession:
                                 self._idle.spoke(now)  # speech ended
                             if not self._turns.pending:
                                 self._onset = None  # speech with no words is no part of a turn
+                            self._started_wordless = False  # the recognizer's start came to nothing
                             self._turns.speech_stopped(now=now)
                             for entry in self._keypad.no_words(now) if self._keypad is not None else ():
                                 await self._keyed(entry, now, transport, model, tts)
@@ -381,6 +408,7 @@ class VoiceSession:
                         elif event.text.strip():
                             # Words not yet final (a streaming recognizer's partial):
                             # the speaker is still talking, as when speech starts.
+                            self._speech_ended = self._started_wordless = False
                             self._speaking(time.perf_counter())  # a partial
             async with control:
                 now = time.perf_counter()
@@ -431,6 +459,8 @@ class VoiceSession:
             for task in pending:
                 _cancel_once(task)
             results = await asyncio.gather(*pending, return_exceptions=True)
+            # An idle note is the record of what happened, and is bounded by NOTE_TIMEOUT.
+            await asyncio.gather(*self._notes, return_exceptions=True)
             if self._output_turn is not None and (self._reply is None or self._reply.cancelled()
                                                  or self._reply.exception() is not None):
                 await transport.clear(self._output_turn)
@@ -449,8 +479,8 @@ class VoiceSession:
         ends = []  # (turn, the keypad entry that finished it)
         for entry in self._keypad.drain(now, "session_ended") if self._keypad is not None else ():
             released = self._turns.keyed(entry.text, now, reason="session_ended")
-            ends += [(end, entry if end is released[-1] else None) for end in released]
-        ends += [(end, None) for end in self._turns.drain(now, reason="session_ended")]
+            ends += [(end, self._turn_keys(entry if end is released[-1] else None)) for end in released]
+        ends += [(end, self._turn_keys(None)) for end in self._turns.drain(now, reason="session_ended")]
         for end, entry in ends:
             self.last_turn_receipt = end.receipt  # before the record, so a failed one still says why
             if entry is not None:
@@ -489,8 +519,9 @@ class VoiceSession:
             self._keypad.speech(now)
         if self._idle is not None:
             self._idle.speaking(now)
-        if self._onset is None:
+        if self._onset is None or (self._speech_ended and not self._turns.pending):
             self._onset = now
+        self._speech_ended = False  # this speech is the one being timed
 
     def _decide(self, judgement: Judgement, heard: float) -> Judgement:
         # The strategy sees the turn's speech from its first sign to these words.
@@ -511,16 +542,20 @@ class VoiceSession:
         if receipt is None:
             return False
         self.last_idle_receipt, self.idles = receipt, self.idles + 1
+        turn_id = uuid4().hex
+        prompt = watch.policy.prompt if receipt.action != "end" else None
+        # Its own task: the conversation ending, or the user talking over the
+        # prompt, does not cancel the record of the idle.
+        note = asyncio.create_task(self._note_idle(receipt, turn_id if prompt is not None else None))
+        self._notes.add(note)
+        note.add_done_callback(self._notes.discard)
         if receipt.action == "end":
             self._idle_ended = True
-            await self._note_idle(receipt, None)
             return True
-        turn_id = uuid4().hex
-        prompt = watch.policy.prompt
         if prompt is not None:
             await self._interrupt(transport)  # audio of the turn before may still be queued
             self._output_turn = turn_id
-        self._reply = self._started(self._nudge(transport, tts, turn_id, self._generation, receipt, prompt))
+        self._reply = self._started(self._nudge(transport, tts, turn_id, self._generation, receipt, prompt, note))
         return False
 
     def _started(self, work) -> asyncio.Task[None]:
@@ -534,13 +569,16 @@ class VoiceSession:
         return task
 
     def _replied(self, watch: IdleWatch) -> None:
-        watch.resume(time.perf_counter())
+        # The bot has stopped speaking once what it sent has played.
+        watch.resume(max(time.perf_counter(), self._played))
         self._wake.set()  # the wait for the user has a deadline again
 
-    async def _nudge(self, transport, tts, turn_id, generation, receipt: IdleReceipt, prompt: str | None):
-        # The idle is noted first, so one the user talks over is still in
-        # the log; the prompt is kept as said only once it was.
-        await self._note_idle(receipt, turn_id if prompt is not None else None)
+    async def _nudge(self, transport, tts, turn_id, generation, receipt: IdleReceipt, prompt: str | None,
+                     note: asyncio.Task[None]):
+        # The idle is noted before the prompt is spoken; the user talking
+        # over it cancels the prompt, not the note. The prompt is kept as
+        # said only once it was.
+        await asyncio.shield(note)
         if prompt is None:
             return
         async with asyncio.timeout(self._turn_timeout):  # a prompt is a turn
@@ -571,17 +609,25 @@ class VoiceSession:
         if submit is not None and not entry.keys.endswith(submit):
             waiting = Judgement(INCOMPLETE, f"{self._strategy.name}: waiting for {submit}")
             for end in self._turns.keyed(entry.text, now, hold=waiting):
-                await self._begin(end, now, transport, model, tts)
+                await self._begin(end, now, transport, model, tts)  # a turn the entry did not join
+            self._held_keys.append(entry)
             return
         released = self._turns.keyed(entry.text, now)
         for end in released:
             await self._begin(end, now, transport, model, tts, keypad=entry if end is released[-1] else None)
+
+    def _turn_keys(self, entry: KeypadEntry | None) -> KeypadEntry | None:
+        # The receipt of the turn being released: the entries held in it and
+        # the one that finished it, as one.
+        entries, self._held_keys = [*self._held_keys, *([entry] if entry is not None else [])], []
+        return joined(entries) if entries else None
 
     async def _begin(self, end: TurnEnd, now: float, transport, model, tts, keypad: KeypadEntry | None = None):
         # Callers hold the controller, so a released turn and new speech
         # cannot interleave. The turn was heard when its last transcript
         # arrived, before any hold: a person waited from then.
         heard = now - end.receipt.held_ms / 1000
+        keypad = self._turn_keys(keypad)
         self._onset = None  # the next turn's speech is timed from its own start
         await self._interrupt(transport)  # a second turn released at once supersedes the first
         messages = [*self._history, {"role": "user", "content": end.text}]
@@ -598,6 +644,7 @@ class VoiceSession:
 
     async def _interrupt(self, transport):
         self._generation += 1
+        self._played = 0.0  # output cleared or superseded is not waited on to play
         reply, self._reply = self._reply, None
         cancelled = False
         if reply is not None:
@@ -653,6 +700,8 @@ class VoiceSession:
                 self._current(generation)
                 check_audio(chunk, self._max_audio)
                 await transport.send(chunk, turn_id)
+                self._played = max(self._played, time.perf_counter()) + len(chunk.pcm) / (
+                    2 * chunk.channels * chunk.sample_rate)
                 if timing is not None:
                     timing.mark("first_audio")
                 emitted = True
