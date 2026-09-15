@@ -233,7 +233,7 @@ async def test_the_vector_weight_is_a_number_that_reaches_every_engine():
 
     settings = Settings.from_env({"SCONE_VECTOR_WEIGHT": "0.5"})
     assert settings.vector_weight == 0.5 and Settings.from_env({}).vector_weight is None and "vector_weight" in ENGINE_SETTINGS
-    assert (await build_in_process_engine(Settings.from_env({}), HashEmbedder())).vector_weight == 0.25, "unset follows the embedder"
+    assert (await build_in_process_engine(Settings.from_env({}), HashEmbedder())).vector_weight == 0.01, "unset follows the embedder"
     engine = await build_engine(settings)
     try:
         assert engine.vector_weight == 0.5
