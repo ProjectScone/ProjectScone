@@ -91,8 +91,9 @@ def fingerprint(content: str, text: str) -> str:
 
 
 def question(recorded: object) -> str:
-    """Which question a judged recall asked: a hash of the query its event recorded (itself a
-    hash by default), so two recalls of the same words are one question."""
+    """Which question a judged recall asked: a hash of the query its event recorded, hashed as
+    the event log hashes a query by default (``feedback`` hashes one kept in the clear first),
+    so two recalls of the same words are one question."""
     return hashlib.sha256(str(recorded).encode()).hexdigest()[:16]
 
 

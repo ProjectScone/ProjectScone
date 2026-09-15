@@ -266,6 +266,23 @@ async def test_one_caller_asking_the_same_question_again_corroborates_nothing():
     assert after.feedback_prior is not None and after.feedback_prior["boosted"] == 0 and after.feedback_prior["tentative"] == 1
 
 
+async def test_the_same_words_are_one_question_whether_their_query_was_kept_in_the_clear_or_hashed():
+    clock = Clock("2026-05-01T00:00:00.000Z")
+    engine = await engine_with(clock, weight=0.0002)
+    try:
+        second = (await engine.recall("default", QUERY, lanes=TEXT)).items[1].chunk_id
+        marks = []
+        for kept_in_the_clear in (True, False):
+            engine.record_queries = kept_in_the_clear
+            shown = await engine.recall("default", QUERY, lanes=TEXT)
+            marks.append(await engine.feedback("default", shown.event_id, second, True))
+        after = await engine.recall("default", QUERY, lanes=TEXT)
+    finally:
+        await engine.close()
+    assert marks[0].payload["question"] == marks[1].payload["question"], "turning query recording on corroborates nothing"
+    assert after.feedback_prior is not None and after.feedback_prior["boosted"] == 0 and after.feedback_prior["tentative"] == 1
+
+
 async def test_the_bound_limits_each_term_not_who_a_passage_can_pass():
     """Both lanes put the leader first; a leader sunk and a follower lifted close twice the bound."""
     clock = Clock("2026-05-01T00:00:00.000Z")

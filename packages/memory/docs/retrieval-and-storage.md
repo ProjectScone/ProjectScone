@@ -265,8 +265,10 @@ a term to each fused candidate's score, the way recency is added, from the
 judgements of the last 90 days. Zero reads no feedback and leaves recall as
 it was. Needs an event log. The judgements are weighed as lessons weigh them
 (+1 useful, −1 not, halving every 30 days), but per question rather than per
-recall: `feedback` records a hash of the question its recall asked, and
-asking the same question again and judging again replaces the judgement.
+recall: `feedback` records a hash of the question its recall asked (the
+same for the same words whether `record_queries` kept them in the clear or
+not), and asking the same question again and judging again replaces the
+judgement.
 Four rules sit on top:
 
 - useful judgements count only once two questions' do. One useful judgement
