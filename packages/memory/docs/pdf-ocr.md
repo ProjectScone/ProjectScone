@@ -207,14 +207,28 @@ engine` or `layout: inferred`.
 
 The `aligned-rows-v2` strategy groups retained OCR rectangles into
 candidate cells and checks for common column gaps across at least three
-consecutive rows. A row of fewer cells beside the full rows -- a title
-across the table, a "Total" beside two numbers -- is read as cells that
-span the grid's columns, each over the contiguous columns its own width
-covers (`column_span`), judged against the full rows' column extents;
-nothing narrower is widened, and a row that fits no column stays
-unassigned. Prose is kept out by its shape: a sentence above the grid
-(a citation like `[28]` closing it counts) is not its title, nor is a
-wrapped word over a later column; at the grid's foot a row opening with
+consecutive rows. A currency sign on its own, set apart from the number
+to its right as a statement sets them, is that number's cell, and the
+gutter before the cell runs to the number. A row of fewer cells beside
+the full rows -- a title across the table, a "Total" beside two numbers
+-- is read as cells that span the grid's columns, each over the
+contiguous columns its own width covers (`column_span`: a column inside
+the cell or the cell inside it, or the two overlapping by half of the
+narrower and a tenth of the wider), judged against the full rows'
+column extents; nothing narrower is widened, and a row that fits no
+column stays unassigned. The rows of fewer cells just above the first
+full row are the grid's own too -- a title across it, a caption over
+its value columns ("Three Months Ended March 31," with the years below,
+placed loosely: a caption centred over two columns falls short of half
+of the last, so a tenth of its own width claims one), the years over a
+blank label column -- placed the nearest first, each just above the one
+below, up to three (`MAX_HEADER_ROWS`); a run of two rows too short to
+be a grid is read that way as well, so a row of years displaced by the
+three-column row beneath it heads that grid. Prose is kept out by its
+shape: a sentence above the grid (a citation like `[28]` closing it
+counts) is not its title, nor is a wrapped word over a later column
+(a lone cell over one column short of the first); at the grid's foot a
+row opening with
 a footnote's mark or holding a line of prose (a sentence, six words or
 forty characters) is its note or the prose below it, not its last row,
 while a total, a subtotal across its numbers or a wrapped word is; three rows of
@@ -239,10 +253,15 @@ come in the order the page's text reads them, each keeping its row and
 column, so a table a recognizer read column by column cites its columns
 in turn; a table whose cells do not sit together in the page's text is
 left out rather than cited wrongly, and the segment's `tables` and
-`tables_unreadable` metadata count both. A table's header is read from
-its shape: the first row filling every column is the header when none
-of its cells is a number (a bare year is a label) and a column below it
-is mostly numbers; its cells say `is_header`, every cell below carries a
+`tables_unreadable` metadata count both. A cell's text is the page's
+bytes, spaces and all, so a statement's `$` stands apart from its number
+as on the page (the table query reads `$        2,903` as it reads
+`$2,903`). A table's header is read from its shape: the first row
+filling every column, or every column but the first (a statement's
+years over its blank label column), is the header when none of its
+cells is a value -- a number, a loss in parentheses, a percentage or a
+dash, while a bare year is a label -- and a column below it is mostly
+values; its cells say `is_header`, every cell below carries a
 `column` reference to the header over it, and the segment says
 `header_basis: pdf_first_row` and counts `tables_headed`, so the table
 query names the columns. A table of words alone gets no header, as

@@ -142,3 +142,65 @@ async def test_a_pdf_table_s_columns_are_named_for_the_table_query():
     plain = await BuiltinDocumentParser().parse(placed(table_page([("Revenue", "2,903", "6,854"), ("Costs", "1,650", "2,720"),
                                                                    ("Total", "4,553", "9,574")])), 'plain.pdf', DocumentLimits())
     assert 'header_basis' not in plain.segments[0].metadata and not any(c.is_header for c in plain.segments[0].table_cells)
+
+
+def test_a_statement_s_values_are_numbers_and_its_years_over_a_blank_column_are_the_header():
+    from scone_memory.ocr.table_cells import _is_number, header_row
+    from scone_memory.ocr.tables import infer_tables
+    assert all(_is_number(t) for t in ('(1,133)', '$ (1,133)', '—', '-', '100.0 %', '12%', '$ 2,903', '(0.06)'))
+    assert not any(_is_number(t) for t in ('2021', '(1,133', '()', 'Revenue', '', '— 5'))
+    # Years over a blank label column head the grid; a row of values does not.
+    def line(text, left, right, row):
+        return OcrRegion(text=text, box=(left, .1 + row * .04, right, .125 + row * .04), label='table')
+    rows = [('Revenue', '$ 2,903', '$ 6,854'), ('Loss from operations', '(1,524)', '(482)'), ('Other', '—', '1,710'),
+            ('Margin', '52.0 %', '58.7 %')]
+    regions = [line('2021', .55, .6, 0), line('2022', .8, .85, 0)]
+    for number, (label, first, second) in enumerate(rows, 1):
+        regions += [line(label, .02, .3, number), line(first, .5, .6, number), line(second, .75, .85, number)]
+    [table] = infer_tables(regions).tables
+    assert table.rows == 5 and header_row(table) == 0
+    [table] = infer_tables(regions[2:]).tables
+    assert header_row(table) is None, "a first row of values is no header"
+
+
+async def test_a_statement_page_s_signs_captions_and_losses_reach_the_table_query():
+    import re
+    from types import SimpleNamespace
+    from scone_memory.ingestion.formats.registry import BuiltinDocumentParser
+    from scone_memory.ingestion.formats.types import DocumentLimits
+    from scone_memory.retrieval.table_query import Condition, TableQueryArgs, answer_from, tables_from
+    # The page as a filing sets it: a caption over the value columns, the
+    # years over a blank label column, a currency sign at each column's
+    # left edge on the first and last rows, far from its right-aligned
+    # number, a section's name on a row of its own, losses in parentheses
+    # and a dash where there is no amount.
+    ops = [(72, 760, "CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS", 10), (330, 740, "Three Months Ended March 31,", 10),
+           (360, 726, "2021", 10), (470, 726, "2022", 10)]
+    rows = [("Revenue", "2,903", "6,854", True), ("Costs and expenses", None, None, False), ("Cost of revenue", "1,710", "4,026", False),
+            ("Operations and support", "423", "574", False), ("Loss from operations", "(1,524)", "(482)", False),
+            ("Other income", "—", "1,710", False), ("Net loss", "(108)", "(5,930)", True)]
+    for i, (label, first, second, signed) in enumerate(rows):
+        y = 712 - 14 * i
+        ops.append((72, y, label, 10))
+        if first is not None:
+            ops += [(345, y, first, 10), (455, y, second, 10)]
+        if signed:
+            ops += [(300, y, "$", 10), (410, y, "$", 10)]
+    parsed = await BuiltinDocumentParser().parse(placed(ops), 'operations.pdf', DocumentLimits())
+    [segment] = parsed.segments
+    validate_tables(parsed.segments)
+    assert segment.metadata['tables'] == '1' and segment.metadata['tables_headed'] == '1'
+    encoded = segment.text.encode()
+    assert all(encoded[c.start:c.end].decode() == c.text for c in segment.table_cells), "every cell is the page's own bytes"
+    signed = sorted(c.text for c in segment.table_cells if c.text.startswith('$'))
+    assert len(signed) == 4 and all(re.fullmatch(r'\$ {2,}[\d,()]+', text) for text in signed), signed
+    assert [c.text for c in segment.table_cells if c.is_header] == ['2021', '2022']
+    [table] = tables_from(SimpleNamespace(segments=parsed.segments))
+    assert table.columns == ('column 1', '2021', '2022') and table.basis == 'pdf_first_row'
+    assert [row.cells['column 1'].text for row in table.rows] == [label for label, *_ in rows], "the caption above the header is not a row"
+    lost = answer_from((table,), TableQueryArgs(operation='sum', column='2022',
+                                               where=(Condition(column='column 1', op='contains', value='loss'),)))
+    assert lost.value == '-6412' and {' '.join(c.text.split()) for c in lost.cells} == {'(482)', '$ (5,930)'}
+    revenue = answer_from((table,), TableQueryArgs(operation='sum', column='2021',
+                                                  where=(Condition(column='column 1', op='==', value='Revenue'),)))
+    assert revenue.value == '2903'

@@ -51,7 +51,8 @@ Reason = Literal['table_not_found', 'table_required', 'column_not_found', 'colum
 _NUMBER = re.compile(r'^[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$')
 _CURRENCY = '$€£¥'
 NUMERIC_FORM = ('a cell is a number when, after removing surrounding whitespace, a leading currency sign and '
-                'thousands separators, it is digits with an optional sign and decimal part')
+                'thousands separators, it is digits with an optional sign and decimal part, or such digits in '
+                'parentheses, which is a negative')
 
 
 class Condition(BaseModel):
@@ -163,8 +164,11 @@ def number(text: str) -> Optional[Fraction]:
         sign, body = body[0], body[1:].lstrip()
     if body and body[0] in _CURRENCY:
         body = body[1:].lstrip()
-    # One sign at most: "--5" and "- -5" are not numbers by the rule, and
-    # an empty cell is no number at all rather than a crash.
+    # Digits in parentheses are a negative, as a statement shows a loss.
+    if len(body) >= 2 and body[0] == '(' and body[-1] == ')' and not sign:
+        sign, body = '-', body[1:-1].strip()
+    # One sign at most: "--5", "- -5" and "(-5)" are not numbers by the
+    # rule, and an empty cell is no number at all rather than a crash.
     if not body or body[0] in '+-' or not _NUMBER.match(body):
         return None
     return Fraction(sign + body.replace(',', ''))

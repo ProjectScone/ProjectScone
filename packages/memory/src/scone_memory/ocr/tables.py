@@ -10,7 +10,7 @@ retain the exact source.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import re
 from statistics import median
@@ -30,6 +30,14 @@ _SENTENCE_END = ('.', '!', '?', ';', ':', ',')
 _CITATION = re.compile(r'(?:\s*\[\d{1,4}\])+\s*$')
 #: Cells at least this wide, as a share of the page, can be prose.
 MIN_PROSE_WIDTH = 0.15
+#: A currency sign set on its own, as a statement sets it beside a number.
+_CURRENCY = '$\u20ac\u00a3\u00a5'
+#: What a number a sign belongs to may open with: a digit, a parenthesis
+#: (an accounting negative) or a dash standing for none.
+_NUMBER_START = '0123456789(-\u2013\u2014'
+#: Rows of fewer cells held above a grid as its possible title, caption
+#: or header rows; more than this is prose, not a header.
+MAX_HEADER_ROWS = 3
 
 
 def _is_title(text: str) -> bool:
@@ -106,15 +114,20 @@ def _box(regions: Sequence[OcrRegion], indices: Sequence[int]) -> Box:
             max(regions[i].box[2] for i in indices), max(regions[i].box[3] for i in indices))
 
 
-def _reaches(left: float, right: float, start: float, end: float) -> bool:
+def _reaches(left: float, right: float, start: float, end: float, loosely: bool = False) -> bool:
     """Whether a cell over ``left``..``right`` covers the column band
-    ``start``..``end``: the band inside the cell, or the two overlapping by
+    ``start``..``end``: one inside the other, or the two overlapping by
     half of the narrower and a tenth of the wider -- so a wide cell grazing
-    a narrow band does not claim it, and a narrow number inside a wide
-    band sits in it."""
+    a narrow band does not claim it, and a narrow word inside a wide band
+    sits in it. ``loosely``, for a lone cell above the grid -- a title or
+    a caption, centred over the columns it names and so short of half of
+    the last -- a tenth of the cell's own width is enough."""
     overlap = min(right, end) - max(left, start)
-    return (left <= start and right >= end) or (
-        overlap >= 0.5 * min(right - left, end - start) and overlap >= 0.1 * max(right - left, end - start))
+    if (left <= start and right >= end) or (start <= left and right <= end):
+        return True
+    if loosely:
+        return overlap >= 0.1 * (right - left)
+    return overlap >= 0.5 * min(right - left, end - start) and overlap >= 0.1 * max(right - left, end - start)
 
 
 def _rows(regions: Sequence[OcrRegion], gap: float) -> list[_Row]:
@@ -138,15 +151,46 @@ def _rows(regions: Sequence[OcrRegion], gap: float) -> list[_Row]:
         gutters: list[tuple[float, float]] = []
         for index in sorted(band, key=lambda i: (regions[i].box[0], i)):
             box = regions[index].box
-            if not cells or box[0] - right >= gap:
+            # A currency sign on its own, set apart from the number to its
+            # right as a statement sets them, is that number's cell.
+            sign = bool(cells) and len(cells[-1]) == 1 and len(regions[cells[-1][0]].text.strip()) == 1 and (
+                regions[cells[-1][0]].text.strip() in _CURRENCY and regions[index].text[:1] in _NUMBER_START)
+            if not cells or (box[0] - right >= gap and not sign):
                 if cells:
                     gutters.append((right, box[0]))
                 cells.append([])
+            elif sign and gutters and len(cells[-1]) == 1:
+                # The sign stands at its column's edge, far from the number:
+                # the gutter before the cell runs to the number, or a wide
+                # number in the column before would close it.
+                gutters[-1] = (gutters[-1][0], box[0])
             cells[-1].append(index)
             right = max(right, box[2])
         bounds = _box(regions, band)
         rows.append(_Row(bounds[1], bounds[3], tuple(tuple(cell) for cell in cells), tuple(gutters)))
     return rows
+
+
+def _near(above: _Row, below: _Row) -> bool:
+    """Whether ``above`` sits just over ``below``: no further than twice
+    the taller of the two."""
+    return above.bottom <= below.top and below.top - above.bottom <= 2 * max(
+        above.bottom - above.top, below.bottom - below.top)
+
+
+def _heads(row: _Row, spans: tuple[tuple[int, int], ...], text: Callable[[Sequence[int]], str]) -> bool:
+    """Whether a row of fewer cells placed as ``spans`` above a grid reads
+    as its title, caption or header: no cell a sentence, and a lone cell
+    across the table from its first column or over two or more columns
+    (a caption over the values), not a wrapped word over one column. A
+    row set past the first column is a caption, and the comma closing
+    "Three Months Ended March 31," -- the years follow below -- is not a
+    sentence's, as it is at the margin."""
+    for cell in row.cells:
+        line = text(cell).rstrip()
+        if not _is_title(line.rstrip(',') if spans[0][0] > 0 else line):
+            return False
+    return len(row.cells) > 1 or spans[0][0] == 0 or spans[0][1] >= 2
 
 
 def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
@@ -196,7 +240,7 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
             columns.append((min(box[0] for box in boxes), max(box[2] for box in boxes)))
         return columns
 
-    def placed(row: _Row) -> tuple[tuple[int, int], ...] | None:
+    def placed(row: _Row, loosely: bool = False) -> tuple[tuple[int, int], ...] | None:
         """A row of fewer cells placed on the grid's columns, each cell over
         the contiguous bands its width covers (``_reaches``), no two cells
         sharing one and none left over; None when the row does not fit."""
@@ -205,7 +249,7 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
         used = 0
         for indices in row.cells:
             left, _, right, _ = _box(regions, indices)
-            covered = [j for j, (start, end) in enumerate(columns) if _reaches(left, right, start, end)]
+            covered = [j for j, (start, end) in enumerate(columns) if _reaches(left, right, start, end, loosely)]
             if not covered or covered != list(range(covered[0], covered[-1] + 1)) or covered[0] < used:
                 return None
             taken.append((covered[0], len(covered)))
@@ -236,10 +280,13 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
         tables.append(TableCandidate(rows=len(group), columns=len(group[full[0]].cells), cells=tuple(cells)))
         assigned.update(i for cell in cells for i in cell.regions)
 
-    lead: _Row | None = None
+    #: Rows of fewer cells the grid below may own as its title, caption or
+    #: header rows -- the rows just above it that joined no grid, and the
+    #: rows of a run too short to be one -- the nearest last.
+    pending: list[_Row] = []
 
     def close() -> None:
-        nonlocal group, spanning, lead
+        nonlocal group, spanning, pending
         if not group:
             return
         # At the foot of the grid, a row of fewer cells that opens with a
@@ -250,20 +297,36 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
                                               or any(_is_prose(_text(cell)) for cell in group[-1].cells)):
             del spanning[len(group) - 1]
             group.pop()
-        # A row of fewer cells just above the first full row -- a title
-        # across the table -- is placed now that the grid is known. A
-        # sentence is not a title, and neither is a wrapped word over a
-        # column short of the first.
+        # The rows of fewer cells just above the first full row -- a title
+        # across the table, a caption over its values, a header of years
+        # over a blank label column -- are placed now that the grid is
+        # known, the nearest first and no further than they sit in a chain
+        # (``_near``) and read as a heading (``_heads``). A sentence is not
+        # a title, and neither is a wrapped word over a column short of
+        # the first.
         full = [position for position in range(len(group)) if position not in spanning]
-        if lead is not None and len(full) >= 3 and lead.bottom <= group[0].top and _is_title(_text(lead.cells[0])) and (
-                group[0].top - lead.bottom <= 2 * max(lead.bottom - lead.top, group[0].bottom - group[0].top)):
-            spans = placed(lead)
-            if spans is not None and spans[0][0] == 0:
-                group.insert(0, lead)
+        if len(full) >= 3:
+            columns = len(group[full[0]].cells)
+            for row in reversed(pending):
+                spans = placed(row) if len(row.cells) < columns else None
+                if len(row.cells) == 1 and len(row.cells) < columns:
+                    # A caption centred over the columns it names falls
+                    # short of half of the last: placed loosely, when that
+                    # reaches two or more.
+                    loose = placed(row, loosely=True)
+                    spans = loose if loose is not None and loose[0][1] >= 2 else spans
+                if spans is None or not _near(row, group[0]) or not _heads(row, spans, _text):
+                    break
+                group.insert(0, row)
                 spanning = {position + 1: places for position, places in spanning.items()}
                 spanning[0] = spans
+            pending = []
+        else:
+            # A run too short to be a grid may be the header rows of the
+            # grid below it: two years over a blank label column.
+            pending = (pending + group)[-MAX_HEADER_ROWS:]
         emit()
-        group, spanning, lead = [], {}, None
+        group, spanning = [], {}
 
     for row in _rows(regions, gap):
         width = len(group[-1].cells) if group else 0
@@ -298,10 +361,11 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
             gutters = row.gutters
             if 2 <= len(row.cells) <= 12:
                 group.append(row)
+            elif len(row.cells) == 1:
+                # A row of one cell may be the title of the grid below.
+                pending = (pending + [row])[-MAX_HEADER_ROWS:]
             else:
-                # A row of one cell may be the title of the grid below;
-                # any other row between them is not.
-                lead = row if len(row.cells) == 1 else None
+                pending = []
     close()
     unassigned = tuple(i for i in range(len(regions)) if i not in assigned)
     notes: list[Literal['geometry_only', 'unassigned_regions', 'no_aligned_grid']] = ['geometry_only']
