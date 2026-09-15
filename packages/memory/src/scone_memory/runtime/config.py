@@ -54,6 +54,12 @@
                                  alternatively load preprovisioned CPU model files; both required
     SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS, *_THREADS, *_BATCH_SIZE
                                  optional offline tuning (defaults 512, 2, 8); no model downloads
+    SCONE_RERANKER_LISTWISE=1     alternatively the chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL) orders the
+                                 candidates listwise, a window at a time, with a receipt of its calls
+    SCONE_RERANKER_LISTWISE_WINDOW, *_STEP, *_PASSAGE_BYTES, *_TIMEOUT
+                                 passages per call 2..20 (default 20), step 1..window-1 (default half the
+                                 window), bytes per passage 64..8192 (default 1024), seconds for the whole
+                                 pass >0..600 (default 60; SCONE_RERANK_TIMEOUT does not apply to it)
     SCONE_EVENTS      memory | sqlite | mongo | postgres | elasticsearch | none  (default follows SCONE_DOCUMENTS)
                       (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
@@ -61,6 +67,7 @@
     SCONE_EVENTS_MAX     in-memory sink ring size (default 10000)
 
     SCONE_CHAT_URL, SCONE_CHAT_MODEL   OpenAI-compatible chat model for consolidation; unset = no distiller
+                                       (also the listwise reranker's model; setting it for that starts the distiller)
     SCONE_CHAT_API_KEY                 optional bearer
     SCONE_CHAT_THINK   true | false    for Ollama reasoning models; unset leaves the field out
     SCONE_CHAT_TIMEOUT                 seconds one chat call may take (default 180)
@@ -114,6 +121,7 @@ from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
 from ..retrieval.followup import REWRITE_TIMEOUT_S
 from ..retrieval.fusion import RECENCY_HALF_LIFE_DAYS, W_RECENCY, validate_recency
+from ..retrieval.listwise import DEFAULT_PASSAGE_BYTES, DEFAULT_TIMEOUT, DEFAULT_WINDOW, validate_listwise_options
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 
 
@@ -229,6 +237,13 @@ class Settings:
     reranker_cross_encoder_max_pair_tokens: int | None = None
     reranker_cross_encoder_threads: int | None = None
     reranker_cross_encoder_batch_size: int | None = None
+    #: Whether the chat model orders recall's candidates listwise
+    #: (retrieval/listwise.py); the tuning below is None for its defaults.
+    reranker_listwise: bool = False
+    reranker_listwise_window: int | None = None
+    reranker_listwise_step: int | None = None
+    reranker_listwise_passage_bytes: int | None = None
+    reranker_listwise_timeout: float | None = None
     rerank_limit: int = 32
     rerank_max_bytes: int = 64000
     rerank_timeout: float = 1.0
@@ -367,6 +382,30 @@ class Settings:
                 raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} must be an integer in {minimum}..{maximum}")
             if self.reranker_cross_encoder_dir is None:
                 raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} requires the cross encoder directory and model")
+        self._validate_listwise()
+
+    def _validate_listwise(self) -> None:
+        if type(self.reranker_listwise) is not bool:
+            raise InvalidInput("SCONE_RERANKER_LISTWISE must be 1 or 0")
+        tuning = {"WINDOW": self.reranker_listwise_window, "STEP": self.reranker_listwise_step,
+                  "PASSAGE_BYTES": self.reranker_listwise_passage_bytes, "TIMEOUT": self.reranker_listwise_timeout}
+        if not self.reranker_listwise:
+            for name, value in tuning.items():
+                if value is not None:
+                    raise InvalidInput(f"SCONE_RERANKER_LISTWISE_{name} requires SCONE_RERANKER_LISTWISE=1")
+            return
+        if self.reranker_factory is not None or self.reranker_cross_encoder_dir is not None:
+            raise InvalidInput("SCONE_RERANKER_LISTWISE cannot be combined with SCONE_RERANKER_FACTORY "
+                               "or SCONE_RERANKER_CROSS_ENCODER_DIR")
+        if not (self.chat_url and self.chat_model):
+            raise InvalidInput("SCONE_RERANKER_LISTWISE orders with the chat model and needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+        try:
+            validate_listwise_options(*listwise_options(self))
+        except InvalidInput as error:
+            message = str(error)
+            for word in ("window", "step", "passage_bytes", "timeout"):
+                message = message.replace(f"listwise {word}", f"SCONE_RERANKER_LISTWISE_{word.upper()}")
+            raise InvalidInput(message) from None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
@@ -486,6 +525,16 @@ class Settings:
                 env["SCONE_RERANKER_CROSS_ENCODER_THREADS"]) if "SCONE_RERANKER_CROSS_ENCODER_THREADS" in env else None),
             reranker_cross_encoder_batch_size=(_environment_integer("SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE",
                 env["SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE"]) if "SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE" in env else None),
+            reranker_listwise=parse_flag("SCONE_RERANKER_LISTWISE", env.get("SCONE_RERANKER_LISTWISE")),
+            reranker_listwise_window=(_environment_integer("SCONE_RERANKER_LISTWISE_WINDOW", env["SCONE_RERANKER_LISTWISE_WINDOW"])
+                                      if env.get("SCONE_RERANKER_LISTWISE_WINDOW") else None),
+            reranker_listwise_step=(_environment_integer("SCONE_RERANKER_LISTWISE_STEP", env["SCONE_RERANKER_LISTWISE_STEP"])
+                                    if env.get("SCONE_RERANKER_LISTWISE_STEP") else None),
+            reranker_listwise_passage_bytes=(_environment_integer("SCONE_RERANKER_LISTWISE_PASSAGE_BYTES",
+                                                                  env["SCONE_RERANKER_LISTWISE_PASSAGE_BYTES"])
+                                             if env.get("SCONE_RERANKER_LISTWISE_PASSAGE_BYTES") else None),
+            reranker_listwise_timeout=(parse_seconds("SCONE_RERANKER_LISTWISE_TIMEOUT", env["SCONE_RERANKER_LISTWISE_TIMEOUT"], 0.0)
+                                       if env.get("SCONE_RERANKER_LISTWISE_TIMEOUT") else None),
             rerank_limit=_environment_integer("SCONE_RERANK_LIMIT", env.get("SCONE_RERANK_LIMIT", "32")),
             rerank_max_bytes=_environment_integer("SCONE_RERANK_MAX_BYTES", env.get("SCONE_RERANK_MAX_BYTES", "64000")),
             rerank_timeout=parse_seconds("SCONE_RERANK_TIMEOUT", env.get("SCONE_RERANK_TIMEOUT"), 1.0),
@@ -820,6 +869,16 @@ def _reranker_spec(spec: str) -> tuple[str, str]:
     return module, name
 
 
+def listwise_options(settings: Settings) -> tuple[int, int, int, float]:
+    """The listwise pass's window, step, passage bytes and deadline, defaults filled in."""
+    window = DEFAULT_WINDOW if settings.reranker_listwise_window is None else settings.reranker_listwise_window
+    step = window // 2 if settings.reranker_listwise_step is None else settings.reranker_listwise_step
+    passage_bytes = (DEFAULT_PASSAGE_BYTES if settings.reranker_listwise_passage_bytes is None
+                     else settings.reranker_listwise_passage_bytes)
+    timeout = DEFAULT_TIMEOUT if settings.reranker_listwise_timeout is None else settings.reranker_listwise_timeout
+    return window, step, passage_bytes, timeout
+
+
 def build_reranker(settings: Settings) -> Reranker | None:
     """Load an explicit offline model or trusted code; no default is selected.
 
@@ -840,6 +899,12 @@ def build_reranker(settings: Settings) -> Reranker | None:
                 batch_size=settings.reranker_cross_encoder_batch_size or 8)
         except Exception:
             raise InvalidInput("SCONE_RERANKER_CROSS_ENCODER requires valid preprovisioned model files and scone-memory[offline-rerank]") from None
+    if settings.reranker_listwise:
+        from ..retrieval.listwise import ListwiseReranker
+
+        window, step, passage_bytes, timeout = listwise_options(settings)
+        return ListwiseReranker(build_chat(settings), window=window, step=step, passage_bytes=passage_bytes,
+                                timeout=timeout)
     if settings.reranker_factory is None:
         return None
     module, name = _reranker_spec(settings.reranker_factory)

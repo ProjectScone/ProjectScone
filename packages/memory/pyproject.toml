@@ -26,7 +26,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
-dependencies = ["pydantic>=2.5"]
+dependencies = ["pydantic>=2.12"]
 
 [project.optional-dependencies]
 # A syntax tree for the brace family, so a call can be bound to the
