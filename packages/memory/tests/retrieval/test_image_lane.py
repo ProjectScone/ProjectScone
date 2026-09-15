@@ -203,13 +203,12 @@ async def test_the_lane_finds_the_right_image_for_text_queries(stores):
         assert off_top3 == 0, "without the lane the captions cannot find these images"
         assert lane_first == 5, "the lane itself ranks the right image first for every question"
         # Fused, the passage saying the question's words comes first, and the
-        # right image second. For "purple tulips" the hashed text vector lane
-        # happens to rank other captions near the top, and those, with their
-        # image-lane places, outrank the lane's first choice at IMAGE_WEIGHT
-        # 1.0: the image falls out of the top three.
-        assert fused_ranks == [2, 2, 2, 2, None]
-        # Deeper lanes change the fused order: in a recall of ten it comes third.
-        assert deep_ranks == [2, 2, 2, 2, 3]
+        # right image second, in a recall of three and of ten. At the hashed
+        # vector lane's previous voice (vector_weight=0.25) it ranked other
+        # captions near the top for "purple tulips", and that image fell out
+        # of the top three ([2, 2, 2, 2, None]; third in a recall of ten).
+        assert fused_ranks == [2, 2, 2, 2, 2]
+        assert deep_ranks == [2, 2, 2, 2, 2]
 
     finally:
         await engine.close()
