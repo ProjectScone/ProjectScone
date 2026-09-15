@@ -161,3 +161,45 @@ def test_destructors_operators_trait_parameters_and_a_deep_expression():
     java = "class K { String s = " + " + ".join(['"a"'] * 1500) + "; void m() { n(); } void n() {} }\n"
     assert grammar_claims(java, "src/K.java") == (), "an expression nested past the bound cuts the file, without an error"
     assert defines(code_claims(java, "src/K.java", language="braces")) >= {"K"}, "and the line reader stands"
+
+
+def resolver(*paths, published=None, known=()):
+    from scone_memory.ingestion.code_resolution import file_resolver
+
+    return file_resolver(paths, published, known)
+
+
+def test_a_bare_call_binds_to_what_an_import_brought_in_within_and_across_repositories():
+    rust = ("use crate::util::helper;\nuse crate::util::other as o;\nuse crate::store::*;\nuse crate::api;\n"
+            "fn f(p: i32) { helper(); o(); stray(); api(); }\nfn g() { let helper = 1; helper() }\n")
+    found = code_claims(rust, "src/main.rs", language="braces", resolve=resolver("src/util.rs", "src/store.rs", "src/api.rs"))
+    assert calls(found) == {("f", "helper"), ("f", "other")}, \
+        "the import's item by its name or alias; a glob, a module and a shadowed name bind nothing"
+    assert {c.object for c in found if c.predicate == "calls"} == {"src/util.rs:helper", "src/util.rs:other"}
+    assert code_claims(rust, "src/main.rs", language="braces", resolve=None) and \
+        calls(code_claims(rust, "src/main.rs", language="braces", resolve=None)) == set(), \
+        "nobody walked the tree: the imports stay names and bind nothing"
+    java = "package app;\nimport static lib.Text.trim;\nimport lib.Store;\nclass Main { void run() { trim(); } }\n"
+    found = code_claims(java, "app/Main.java", language="braces", resolve=resolver("lib/Text.java", "lib/Store.java"))
+    assert {c.object for c in found if c.predicate == "calls"} == {"lib/Text.java:Text.trim"}, "a static import binds its member"
+    crossing = ("use smfs_core::daemon::protocol::request;\nfn run() { request() }\n")
+    walked = resolver("smfs/src/main.rs", published={"smfs-core": "smfs-core"},
+                      known=["smfs-core/src/daemon/protocol.rs", "smfs-core/src/lib.rs"])
+    found = code_claims(crossing, "smfs/src/main.rs", language="braces", resolve=walked)
+    assert ("smfs/src/main.rs", "imports", "smfs-core/src/daemon/protocol.rs") in triples(found)
+    assert {c.object for c in found if c.predicate == "calls"} == {"smfs-core/src/daemon/protocol.rs:request"}, \
+        "an import of what another repository publishes binds the call to that repository's file"
+
+
+def test_a_use_inside_a_rust_mod_binds_there_alone_and_a_kotlin_alias_is_the_bound_name():
+    from scone_memory.ingestion.code_graph import _brace_claims
+
+    rust = ("use crate::stuff::*;\nfn top() { thing() }\n#[cfg(test)]\nmod tests {\n    use crate::other::thing;\n"
+            "    fn t() { thing() }\n}\n")
+    found = code_claims(rust, "src/main.rs", language="braces", resolve=resolver("src/stuff.rs", "src/other.rs"))
+    assert {c.object for c in found if c.predicate == "calls"} == {"src/other.rs:thing"}
+    assert calls(found) == {("tests.t", "thing")}, "top's thing is the glob's, unbound; only tests' use binds"
+    bound: list = []
+    _brace_claims("package app\nimport app.shapes.Circle as Shape\nimport app.shapes.Square\n", "app/Draw.kt",
+                  resolver("app/shapes/Circle.kt", "app/shapes/Square.kt"), bound)
+    assert set(bound) == {("", "Shape", "app/shapes/Circle.kt:Circle"), ("", "Square", "app/shapes/Square.kt:Square")}

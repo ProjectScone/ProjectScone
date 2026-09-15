@@ -199,9 +199,16 @@ class _FileResolver:
 
 
     def package(self, module: str, language: str) -> Optional[str]:
-        """The file a module of a published package is, when a manifest in
-        the space publishes the package and the file was read here or in
-        another repository; None otherwise. ``language`` says how a module
+        """The file a module of a published package is (see ``package_item``)."""
+        found, _ = self.package_item(module, language)
+        return found
+
+    def package_item(self, module: str, language: str) -> tuple[Optional[str], list[str]]:
+        """The file a module of a published package is, and what of the
+        module path was left over -- the item the import names in that file
+        (`crate_name::store::Shelf` is `src/store.rs` and `Shelf`) -- when a
+        manifest in the space publishes the package and the file was read
+        here or in another repository; None otherwise. ``language`` says how a module
         maps to a path: `python` (`pkg.a.b` under `src/pkg`, `pkg` or
         `lib/pkg`), `js` (`@scope/name/sub` under the package's directory,
         `src` or `lib`, an index for the package itself), `rust`
@@ -209,7 +216,7 @@ class _FileResolver:
         for the crate), `go` (an import path below the module's path, a
         directory of Go files)."""
         if not self.published or not module:
-            return None
+            return None, []
         files = self.seen | self.known
 
         def under(base: str, rest: str) -> str:
@@ -220,29 +227,29 @@ class _FileResolver:
             parts = module.split(".")
             root = self.published.get(parts[0])
             if root is None:
-                return None
+                return None, []
             tail = "/".join(parts)
             for base in (under(root, "src"), root, under(root, "lib")):
                 for candidate in (under(base, f"{tail}.py"), under(base, f"{tail}/__init__.py")):
                     if candidate in files:
-                        return candidate
-            return None
+                        return candidate, []
+            return None, []
         if language == "js":
             segments = module.split("/")
             name = "/".join(segments[:2]) if module.startswith("@") else segments[0]
             root = self.published.get(name)
             if root is None:
-                return None
+                return None, []
             rest = "/".join(segments[2:] if module.startswith("@") else segments[1:])
             for base in (root, under(root, "src"), under(root, "lib"), under(root, "dist")):
                 stems = [under(base, rest), under(base, f"{rest}/index")] if rest else [under(base, "index")]
                 for stem in stems:
                     if rest and stem == under(base, rest) and stem in files:
-                        return stem
+                        return stem, []
                     for suffix in ("ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"):
                         if f"{stem}.{suffix}" in files:
-                            return f"{stem}.{suffix}"
-            return None
+                            return f"{stem}.{suffix}", []
+            return None, []
         if language == "rust":
             parts = module.split("::")
             # A crate at the mapped root publishes from "", which is a root too.
@@ -250,17 +257,18 @@ class _FileResolver:
             if root is None:
                 root = self.published.get(parts[0])
             if root is None:
-                return None
+                return None, []
             base = under(root, "src")
             for length in range(len(parts) - 1, 0, -1):
                 stem = under(base, "/".join(parts[1:length + 1]))
                 for candidate in (f"{stem}.rs", f"{stem}/mod.rs"):
                     if candidate in files:
-                        return candidate
+                        # What follows the module is an item in it: `crate_name::a::b::Thing`.
+                        return candidate, parts[length + 1:]
             for candidate in (under(base, "lib.rs"), under(base, "main.rs")):
                 if candidate in files:
-                    return candidate
-            return None
+                    return candidate, parts[1:]
+            return None, []
         if language == "go":
             for name, root in sorted(self.published.items(), key=lambda item: -len(item[0])):
                 if module == name or module.startswith(name + "/"):
@@ -269,10 +277,10 @@ class _FileResolver:
                     prefix = directory + "/" if directory else ""
                     if any(path.startswith(prefix) and path.endswith(".go") and "/" not in path[len(prefix):]
                            for path in files):
-                        return directory
-                    return None
-            return None
-        return None
+                        return directory, []
+                    return None, []
+            return None, []
+        return None, []
 
 
 if TYPE_CHECKING:
