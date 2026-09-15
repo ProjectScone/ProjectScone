@@ -33,6 +33,7 @@ from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Record
 from ..core.errors import InvalidInput, NotFound, SconeError
 from ..retrieval.filters import read_conditions
+from ..retrieval.recall import LANES
 from ..ingestion.chunker import DEFAULT_TARGET as DEFAULT_CHUNK_TARGET
 from ..ingestion.chunking_profiles import PROFILES as CHUNKING_PROFILES
 
@@ -2046,7 +2047,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
             lessons=args.lessons, expand_summaries=args.expand_summaries, expand_max_chunks=args.expand_max_chunks,
-            **({"lanes": [lane.strip() for lane in args.lanes.split(",") if lane.strip()]} if args.lanes else {}),
+            lanes=[lane.strip() for lane in args.lanes.split(",") if lane.strip()] if args.lanes else LANES,
             require=args.require, exclude=args.exclude, diversity=args.diversity,
         )
         kept = None

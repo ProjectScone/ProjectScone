@@ -25,7 +25,8 @@ A recall narrowed by `conditions`, `kind`, `source_prefix`, `since` or
 whether the request was applied `in_store` (every row the lane holds was
 eligible) or `postfiltered` (the lane returned its best window and the
 request then removed what did not fit), how deep each lane looked
-(`text_window`, `vector_window`) and returned, how many candidates the
+(`text_window`, `vector_window`, and `image_window` when the recall ran the
+[image lane](image-embedding-lane.md)) and returned, how many candidates the
 filter removed (`postfiltered_out`), and `window_exhausted` -- the filter
 removed candidates while a post-filtered lane's window was full, so a
 memory that fits may lie deeper than the recall looked. An empty answer

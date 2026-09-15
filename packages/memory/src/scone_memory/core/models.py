@@ -285,6 +285,12 @@ class ForgetReceipt(BaseModel):
     claims_kept_other_support: list[int] = Field(default_factory=list)
     claims_kept_not_in_ledger: list[int] = Field(default_factory=list)
     claims_already_excluded: list[int] = Field(default_factory=list)
+    #: What happens to the image lane's vector (``retrieval.image_lane``):
+    #: ``none`` when the episode carries no image from ``ingest_image``;
+    #: ``removed`` when this engine has the lane and deletes it; ``not_reached``
+    #: when it has not, so an image index it cannot see may keep the image's
+    #: vector until an engine with the lane opens on it or meets it in a recall.
+    image_vector: Literal["none", "removed", "not_reached"] = "none"
 
 
 class BulkForgetReport(BaseModel):
@@ -512,6 +518,11 @@ class Narrowing(BaseModel):
     vector_returned: int
     postfiltered_out: int
     window_exhausted: bool
+    #: The image lane (``retrieval.image_lane``), ``off`` unless the recall ran
+    #: it. Its index answers for itself whether it narrows by conditions.
+    image_lane: Literal["in_store", "postfiltered", "off"] = "off"
+    image_window: int = 0
+    image_returned: int = 0
 
 
 class PhraseTrace(BaseModel):

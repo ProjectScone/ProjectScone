@@ -44,11 +44,18 @@ class RedisVectorIndex:
             raise ImportError("RedisVectorIndex needs redis: pip install 'scone-memory[redis]'") from e
         self.client = client or aioredis.from_url(url)
         self.prefix = prefix
+        #: The server as configured, or the injected client itself when it chose the server.
+        self._endpoint: object = url if client is None else id(client)
         self.index = f"{prefix}_idx"
         self.dim: Optional[int] = None
 
     def _key(self, chunk_id: int) -> str:
         return f"{self.prefix}:{int(chunk_id)}"
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self._endpoint, self.prefix)
 
     async def ensure(self, dim: int) -> None:
         from redis.commands.search.field import NumericField, TagField, VectorField
