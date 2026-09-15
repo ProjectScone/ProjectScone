@@ -132,9 +132,18 @@ per-document counts of pages cut, pages kept whole, and lines left out.
   bounded to one metadata value by dropping its outermost titles (`… > `).
 - `pdf_coverage=text_layer` means every page yielded text. It does **not** certify
   that every visible word, figure or table was understood.
-- Encrypted PDFs, malformed files, absent parser dependencies and exceeded limits
-  raise `InvalidInput` before creating an episode. Password handling is not
-  implemented; provide a separately decrypted input when appropriate.
+- An encrypted PDF is opened with the empty password: an owner password alone
+  restricts what a reader may do (SEC filings from EDGAR are made this way)
+  and hides nothing. The parsed record's `encryption` says so (`opened_with:
+  empty_password`, which of the file's passwords `matched`) and names what the
+  owner `restricted` -- `print`, `modify`, `extract`, `annotate`, `fill_forms`,
+  `extract_for_accessibility`, `assemble`, `print_high_quality` -- so a caller
+  who must honour a restriction can check; a file import carries the same on
+  the document's metadata (`pdf_opened_with`, `pdf_password_matched`,
+  `pdf_restricted`). A file whose user password is not empty is refused, as
+  is one whose cipher needs the `cryptography` package when it is absent.
+- Malformed files, absent parser dependencies and exceeded limits raise
+  `InvalidInput` before creating an episode.
 - Parser failures do not indicate that the memory database is unavailable.
 
 The defaults are 25 MiB of PDF input, 100 pages, 2,000,000 extracted UTF-8 bytes
