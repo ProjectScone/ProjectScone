@@ -16,7 +16,7 @@ The native provider interfaces live in `scone_memory.realtime.audio`:
 
 | Interface | Host adapter implements |
 | --- | --- |
-| `AudioTransport` | `receive()` audio stream, `send(chunk, turn_id)`, `clear(turn_id)`, `aclose()` |
+| `AudioTransport` | `receive()` audio stream (which may carry `Keypress` events, see [Keys from the phone](#keys-from-the-phone-dtmf)), `send(chunk, turn_id)`, `clear(turn_id)`, `aclose()` |
 | `SpeechRecognizer` | `transcribe(audio)` yielding speech-start and transcript events, `aclose()` |
 | `VoiceModel` | `respond(messages)` yielding public text deltas and explicit completion, `aclose()` |
 | `SpeechSynthesizer` | `synthesize(text)` yielding PCM chunks, `aclose()` |
