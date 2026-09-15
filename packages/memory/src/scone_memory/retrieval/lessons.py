@@ -79,17 +79,23 @@ def _check(half_life_days: float, min_corroboration: int) -> None:
 
 def judgements_by_passage(events: Iterable[Event], moment: datetime) -> dict[int, list[Event]]:
     """Per judged passage, the latest judgement of each recall made up to ``moment``, oldest first."""
-    latest: dict[tuple[int, int], Event] = {}
-    for event in sorted(events, key=lambda event: (parse_rfc3339(event.ts), event.event_id)):
-        if event.kind != "feedback" or parse_rfc3339(event.ts) > moment:
+    # Each timestamp is parsed once: a ranking prior folds up to MAX_FEEDBACK_EVENTS of these per recall.
+    latest: dict[tuple[int, int], tuple[datetime, int, Event]] = {}
+    for event in events:
+        if event.kind != "feedback":
             continue
-        latest[(int(event.payload["recall_event_id"]), int(event.payload["chunk_id"]))] = event  # type: ignore[call-overload]
-    by_chunk: dict[int, list[Event]] = {}
-    for (_, chunk), event in latest.items():
-        by_chunk.setdefault(chunk, []).append(event)
-    for judged in by_chunk.values():
-        judged.sort(key=lambda event: (parse_rfc3339(event.ts), event.event_id))
-    return by_chunk
+        at = parse_rfc3339(event.ts)
+        if at > moment:
+            continue
+        key = (int(event.payload["recall_event_id"]), int(event.payload["chunk_id"]))  # type: ignore[call-overload]
+        held = latest.get(key)
+        if held is None or (at, event.event_id) > held[:2]:
+            latest[key] = (at, event.event_id, event)
+    by_chunk: dict[int, list[tuple[datetime, int, Event]]] = {}
+    for (_, chunk), judged in latest.items():
+        by_chunk.setdefault(chunk, []).append(judged)
+    return {chunk: [event for _, _, event in sorted(judged, key=lambda held: held[:2])]
+            for chunk, judged in by_chunk.items()}
 
 
 def judgement_weight(event: Event, moment: datetime, half_life_days: float) -> float:
