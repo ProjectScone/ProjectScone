@@ -2333,7 +2333,12 @@ the same `status` and `as_of`:
 - **Communities**: found by modularity optimisation over recorded
   relations, weighted by the facts behind each pair, and split into
   connected parts. Each is named after its most central members, with
-  cohesion, kinds and predicates.
+  cohesion, kinds and predicates. A community of files is named by the
+  directory they share, then its central members with that directory
+  left off (`scone_memory/ingestion/ · code_graph.py · manifests.py`):
+  when at least two members are paths, most are, and every path sits
+  under one directory. Three file names are not what a person calls a
+  subsystem; its directory is.
 - **Central entities**: by PageRank, with degree, fact weight,
   betweenness (exact up to 500 entities, from 64 evenly spaced sources
   beyond) and participation across communities.
@@ -2360,11 +2365,22 @@ Two parameters tune the analysis:
   With no event log, or no recall kept, it says usage is unknown and
   names nothing as unreached. It also says what the log keeps and which
   events it could not count.
-- `exclude_hubs` (a degree percentile, 50 to 100) leaves entities whose
-  number of neighbours is above that percentile out of the central
-  entities, and lists them under `hubs_excluded` instead. A hub that
-  everything links to otherwise leads every ranking. Excluded hubs stay
-  in their communities.
+- `exclude_hubs` (a degree percentile, 50 to 100; `--exclude-hubs` on
+  the command line) holds the graph's own entities whose number of
+  neighbours is above that percentile (nearest rank, among the graph's
+  own) apart, the way externals are held apart without asking: out of
+  the community partition, the community names, the surprising
+  connections and the counts of links between communities, and out of
+  the central ranking; each is attached for reading to the community it
+  links most (one whose every neighbour is itself held apart stands
+  alone, as an external does), and listed under `hubs_excluded` with
+  that community. A base class every file inherits, or a person every
+  note mentions, otherwise glues every community into one and leads
+  every ranking. The coverage says how many were held apart
+  (`hubs_held_apart`), and the Markdown lists them under "Hubs held
+  apart". A report built over an analysis that was not run with the
+  percentile ranks the same hubs out by the same rule and says the
+  partition was found with them in it.
 
 **What the graph names and never reads is kept apart, without asking.**
 In a code graph every file imports `typing`, so `typing` was the most

@@ -304,6 +304,9 @@ def build_parser() -> argparse.ArgumentParser:
     g = graph.add_parser("report", help="communities, central entities, surprising links and questions")
     g.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
     g.add_argument("--resolution", type=float, default=1.0, help="how fine the communities are (default 1)")
+    g.add_argument("--exclude-hubs", type=float, default=None, metavar="PERCENTILE",
+                   help="hold entities with more links than this degree percentile (50 to 100) out of the "
+                        "community partition and the central ranking, and list them apart")
     g.add_argument("--usage", action="store_true", help="also say what recent recalls returned, and what they never reach")
     g = graph.add_parser("path", help="how two entities connect, each hop with its facts")
     g.add_argument("source")
@@ -1346,6 +1349,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
     # NaN fails the comparison, so it is refused too.
     if command == "report" and not 0 < args.resolution <= 10:
         raise InvalidInput("--resolution must be a number above 0 and at most 10")
+    if command == "report" and args.exclude_hubs is not None and not 50 <= args.exclude_hubs <= 100:
+        raise InvalidInput("--exclude-hubs must be a percentile from 50 to 100")
     named = {"path": [args.source, args.target] if command == "path" else [],
              "context": args.names if command == "context" else [],
              "entity": [args.name] if command == "entity" else [],
@@ -1537,7 +1542,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
               file=out)
         return 0
     if command == "report":
-        report = await report_record(engine, space, as_of=when, resolution=args.resolution, usage=args.usage)
+        report = await report_record(engine, space, as_of=when, resolution=args.resolution,
+                                     exclude_hubs=args.exclude_hubs, usage=args.usage)
         print(render_markdown(report) if args.markdown else _ledger_json(report), file=out)
         return 0
     projection, coverage = await load_projection(engine, space, mode="current", as_of=when)

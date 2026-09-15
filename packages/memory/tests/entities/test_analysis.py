@@ -70,6 +70,53 @@ def test_the_bridging_entities_rank_highest_for_betweenness():
     assert abs(sum(item.pagerank for item in analysis.importance) - 1.0) < 1e-6
 
 
+def test_a_hub_held_apart_lets_the_groups_it_glued_come_apart():
+    rows = two_teams()
+    number = len(rows)
+    for person in ("Ana", "Ben", "Cho", "Dev", "Eli", "Fay"):
+        number += 1
+        rows.append(fact(number, "Hub", "knows", person))
+    projection = project_entities("alpha", rows, revision=1)
+    names = labels(projection)
+    glued = analyze_projection(projection)
+    assert glued.hubs == frozenset() and glued.coverage.hubs_held_apart == 0 and glued.coverage.exclude_hubs is None
+    apart = analyze_projection(projection, exclude_hubs=80)
+    [hub] = apart.hubs
+    assert names[hub] == "hub" and apart.coverage.hubs_held_apart == 1 and apart.coverage.exclude_hubs == 80
+    own = sorted(sorted(names[m] for m in community.members if m not in apart.hubs) for community in apart.communities)
+    assert own == [["ana", "ben", "cho", "dev"], ["eli", "fay", "gus", "hal"]], "the partition is found without the hub"
+    [attached] = [community for community in apart.communities if hub in community.members]
+    assert {names[m] for m in attached.members} == {"ana", "ben", "cho", "dev", "hub"}, \
+        "the hub is attached to the community it links most: four links against two"
+    assert all(hub not in community.top_entities for community in apart.communities), "a hub names no community"
+    assert not any(hub in (s.subject_id, s.object_id) for s in apart.surprising_connections), "a link to a hub is no surprise"
+    assert next(item for item in apart.importance if item.entity_id == hub).participation == 0.0
+    assert apart.coverage.record()["hubs_held_apart"] == 1
+    with pytest.raises(ValueError, match="50 to 100"):
+        analyze_projection(projection, exclude_hubs=10)
+    shuffled = list(rows)
+    random.Random(7).shuffle(shuffled)
+    again = analyze_projection(project_entities("alpha", shuffled, revision=1), exclude_hubs=80)
+    assert again.hubs == apart.hubs and [c.label for c in again.communities] == [c.label for c in apart.communities]
+
+
+def test_a_community_of_files_is_named_by_the_directory_they_share():
+    rows = [fact(1, "src/pkg/a.py", "imports", "src/pkg/b.py"), fact(2, "src/pkg/b.py", "imports", "src/pkg/c.py"),
+            fact(3, "src/pkg/a.py", "defines", "src/pkg/a.py:Thing"), fact(4, "src/pkg/c.py", "imports", "src/pkg/a.py"),
+            fact(5, "web/app.ts", "imports", "web/lib/util.ts"), fact(6, "web/lib/util.ts", "imports", "web/lib/fmt.ts"),
+            fact(7, "web/app.ts", "imports", "web/lib/fmt.ts"),
+            fact(8, "top.py", "imports", "other.py"), fact(9, "other.py", "imports", "third.py"), fact(10, "third.py", "imports", "top.py")]
+    analysis = analyze_projection(project_entities("alpha", rows, revision=1))
+    by_label = sorted(community.label for community in analysis.communities)
+    placed = [label for label in by_label if label.split(" · ")[0].endswith("/")]
+    assert [label.split(" · ")[0] for label in placed] == ["src/pkg/", "web/"], "files under one directory are named by it"
+    [root] = [label for label in by_label if label not in placed]
+    assert set(root.split(" · ")) <= {"top.py", "other.py", "third.py"}, "files at the root keep their central members' names"
+    assert all(" · src/pkg/" not in label and "src/pkg/a.py" not in label for label in by_label), \
+        "the shared directory is not repeated on each member"
+    assert any(label.startswith("src/pkg/ · ") and "a.py" in label for label in placed)
+
+
 def test_communities_are_named_after_their_most_central_members():
     projection = project_entities("alpha", two_teams(), revision=1)
     analysis = analyze_projection(projection)
