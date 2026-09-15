@@ -101,6 +101,7 @@
       "recall.graph_boost": true,
       "recall.lessons": true,
       "recall.expand_summaries": true,
+      "recall.tree": true,
       "graph.knowledge_paging": true,
       "graph.knowledge_seeds": true,
       "chat.openai_compatible": true,

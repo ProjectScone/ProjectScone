@@ -584,6 +584,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fan-in", type=int, default=6, help="nodes one summary is written from (2 to 24, default 6)")
     p.add_argument("--max-levels", type=int, default=5, help="levels above the chunks (1 to 5, default 5)")
     p.add_argument("--dry-run", action="store_true", help="write the tree and print it without storing it")
+    p = sub.add_parser("tree-recall", help="descend the stored summary trees to the chunks under the best branches, "
+                                           "each with the path of summaries that led there; no model is called")
+    p.add_argument("query")
+    p.add_argument("--limit", type=int, help="chunks returned (1 to 50, default 10)")
+    p.add_argument("--branching", type=int, help="summaries kept at each step, across documents (1 to 10, default 2)")
+    p.add_argument("--max-depth", type=int, help="steps down the trees (1 to 5, default 5)")
+    p.add_argument("--text", action="store_true", help="score each step by BM25 too, fused by rank")
+    p.add_argument("--episode", type=int, action="append", dest="episodes", default=None,
+                   help="a document to descend, repeatable; every document with a stored tree when unset")
+    p.add_argument("--kind", help="only documents of this kind")
+    p.add_argument("--source-prefix", help="only documents whose source starts with this text (literal)")
+    p.add_argument("--tag", action="append", default=[], help="only documents holding this tag, repeatable")
+    p.add_argument("--since", help="only documents that happened at or after this instant")
+    p.add_argument("--until", help="only documents that happened at or before this instant")
     p = sub.add_parser("chunk-questions", help="write the question lane with the configured chat model (SCONE_CHAT_URL, "
                                                "SCONE_CHAT_MODEL): questions each chunk answers, kept only with a quote "
                                                "from the chunk; needs SCONE_QUESTION_LANE=1")
@@ -1846,6 +1860,23 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(f"  {reason}", file=out)
         if tree.root is not None:
             print(tree.root.text, file=out)
+        return 0
+
+    if args.command == "tree-recall":
+        traversal = await engine.tree_recall(space, args.query, limit=args.limit, branching=args.branching,
+                                             max_depth=args.max_depth, text=args.text, episode_ids=args.episodes,
+                                             kind=args.kind, source_prefix=args.source_prefix, tags=args.tag,
+                                             since=args.since, until=args.until)
+        if args.json:
+            emit(traversal.record())
+            return 0
+        print(traversal.why, file=out)
+        for item in traversal.items:
+            sim = f" sim={item.similarity:.2f}" if item.similarity is not None else ""
+            print(f"{item.score:.3f}{sim}  #{item.episode_id}  {item.text.strip()[:200]}", file=out)
+            steps = item.via_tree["path"] if item.via_tree is not None else []
+            if isinstance(steps, list):
+                print("      via " + " > ".join(f"level {step['level']} #{step['episode_id']}" for step in steps), file=out)
         return 0
 
     if args.command == "chunk-questions":
