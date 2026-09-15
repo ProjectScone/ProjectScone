@@ -15,10 +15,11 @@ from typing import Sequence, cast
 from ..core.errors import InvalidInput, SconeError
 from ..core.models import Added, MAX_CONTENT_BYTES
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
-from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
+from ..core.validation import KINDS, MAX_METADATA_KEYS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
 from .semantic_chunks import semantic_spans
 from .structure_chunks import structured_spans
+from .chunking_profiles import profile_named, profiled_spans
 from .embedding_cache import EmbeddingCache, cache_key
 from .code import code_context, code_language, code_spans
 from .document_outline import DocumentOutline
@@ -189,10 +190,28 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
     if asked is not None and held is not None and asked != held:
         raise InvalidInput(f"metadata says chunking={held!r} but the record asks for {asked!r}")
     mode = asked if asked is not None else held
+    named, kept = record.chunking_profile, clean_meta.get("chunking_profile")
+    if named is not None and kept is not None and named != kept:
+        raise InvalidInput(f"metadata says chunking_profile={kept!r} but the record asks for {named!r}")
+    profile = named if named is not None else kept
+    if profile is not None:
+        # Refused here rather than at the cut, so a duplicate or one record
+        # of a partial batch is answered too.
+        profile_named(profile)
+        if mode not in (None, "structure"):
+            raise InvalidInput(f"chunking_profile={profile!r} names boundaries for chunking=structure, "
+                               f"not chunking={mode!r}")
+        mode = "structure"
+        clean_meta["chunking_profile"] = profile
     if mode is not None:
         # Whether the mode exists and fits the source is `cut_for`'s to say,
         # and it says so before anything is stored.
         clean_meta["chunking"] = mode
+    if len(clean_meta) > MAX_METADATA_KEYS:
+        # Counted after both are added, or the episode is stored with more
+        # keys than its own export may carry back in.
+        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys, counting chunking and "
+                           f"chunking_profile, which are stored on the episode when a record names them")
     try:
         for value in (record.source or '', *clean_tags, *clean_meta.values()):
             value.encode('utf-8')
@@ -295,7 +314,8 @@ def context_lines(content: str, source: str | None, spans: Sequence[tuple[int, i
 
 
 async def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
-    cut = await cut_for(runtime, new.content, new.source, new.metadata.get("chunking"), episode=new)
+    cut = await cut_for(runtime, new.content, new.source, new.metadata.get("chunking"),
+                        new.metadata.get("chunking_profile"), episode=new)
     byte_offsets = [(sp.start, sp.end) for sp in byte_spans(new.content, cut.spans)]
     receipt: dict[str, object] | None = None
     if runtime.heading_context:
@@ -427,7 +447,8 @@ class Cut:
 
 
 async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
-                  chunking: str | None = None, *, episode: NewEpisode | None = None) -> Cut:
+                  chunking: str | None = None, profile: str | None = None, *,
+                  episode: NewEpisode | None = None) -> Cut:
     """Where to cut, and which way it was: at declarations when the source
     is code and the name it was stored under says which language, at the
     document's own headings and clauses when asked, where its subject
@@ -440,8 +461,16 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
     without an embedder and receive length-cut chunks believing they
     were something else.
 
+    A ``profile`` is structure chunking at that genre's boundaries, and
+    is the record's own choice over a code source too.
+
     Given the ``episode``, a structure cut also cuts at the headings an
     imported file marked itself, which its text alone does not show."""
+    if profile:
+        profiled = profiled_spans(content, runtime.chunk_target, profile=profile,
+                                  headings=await headings_of(runtime, episode))
+        return Cut(list(profiled.spans), "structure",
+                   {key: value for key, value in profiled.record().items() if key not in ("spans", "chunks")})
     if chunking is not None and chunking not in CHUNKINGS:
         raise InvalidInput(f"chunking must be one of {', '.join(CHUNKINGS)}, not {chunking!r}")
     language = code_language(source) if (runtime.code_aware or chunking == "code") else None
@@ -478,9 +507,10 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
 
 
 async def spans_for(runtime: IngestionRuntime, content: str, source: str | None,
-                    chunking: str | None = None, *, episode: NewEpisode | None = None) -> list[Span]:
+                    chunking: str | None = None, profile: str | None = None, *,
+                    episode: NewEpisode | None = None) -> list[Span]:
     """The spans of ``cut_for``, for callers that need only where."""
-    return (await cut_for(runtime, content, source, chunking, episode=episode)).spans
+    return (await cut_for(runtime, content, source, chunking, profile, episode=episode)).spans
 
 
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record], *,
@@ -646,7 +676,7 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
             )
             if not chunks:
                 spans = await spans_for(runtime, episode.content, episode.source, episode.metadata.get("chunking"),
-                                        episode=as_new)
+                                        episode.metadata.get("chunking_profile"), episode=as_new)
                 chunks = await runtime.documents.insert_chunks(
                     [
                         NewChunk(

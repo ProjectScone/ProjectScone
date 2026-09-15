@@ -21,6 +21,7 @@ from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import GRAPH_REASONS, AdaptiveRetriever
 from ..retrieval.conversation_plan import ConversationPlan, overview_evidence, plan_conversation_retrieval
 from ..retrieval.followup import MODES as FOLLOWUP_MODES, REWRITE_TIMEOUT_S, Followup, fused, plan_followup
+from ..retrieval.listwise import ListwiseReranker
 from ..providers.llm import ChatModel
 from ..retrieval.overview import OverviewResult
 from ..core.models import Fact, RecallItem, RecallResult
@@ -167,6 +168,9 @@ class ContextReceipt(TypedDict):
     #: With follow-up queries on: what the latest message was searched
     #: with beside itself, carried from which message, or why nothing was.
     followup: NotRequired[dict[str, object]]
+    #: "skipped" on a search turn whose engine reranks listwise with a model:
+    #: the turn kept fused order rather than wait seconds per model call.
+    listwise_rerank: NotRequired[str]
 
 
 class MemoryContext:
@@ -192,6 +196,9 @@ class MemoryContext:
     fused by rank with the message and inside the same scope; see
     ``retrieval.followup``. Adaptive retrieval plans its own queries, so the
     two are not combined.
+    An engine reranker that is a ``ListwiseReranker`` is not run for a turn:
+    its model calls take seconds each, past any turn's budget, so the turn
+    keeps fused order and the receipt's ``listwise_rerank`` says so.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str, *, where: Mapping[str, str] | None = None,
@@ -409,6 +416,10 @@ class MemoryContext:
             event_id: int | None
             degraded: list[str]
             search_timeout = None if plan.mode == "search" and self._adaptive_retriever is not None else self._timeout
+            # A listwise pass takes seconds per model call; a turn cannot wait
+            # for one inside its recall budget, so it keeps fused order and the
+            # receipt says so. Adaptive search never reranks. A scorer still runs.
+            rerank = not isinstance(self._memory.reranker, ListwiseReranker)
             async with asyncio.timeout(search_timeout):
                 if plan.mode == "overview":
                     overview = await self._overview(admit)
@@ -419,11 +430,14 @@ class MemoryContext:
                                     "has_more": overview.has_more, "next_before": overview.next_before})
                     coverage = _overview_coverage(overview.considered, overview.has_more)
                 else:
+                    if not rerank:
+                        receipt["listwise_rerank"] = "skipped"
                     if self._adaptive_retriever is None:
-                        result = await self._memory.recall(self._space, plan.query, limit=min(20, self._limit * 4), **self._scope.kwargs())
+                        result = await self._memory.recall(self._space, plan.query, rerank=rerank,
+                                                           limit=min(20, self._limit * 4), **self._scope.kwargs())
                         if followup is not None and followup.query is not None:
-                            second = await self._memory.recall(
-                                self._space, followup.query, limit=min(20, self._limit * 4), **self._scope.kwargs())
+                            second = await self._memory.recall(self._space, followup.query, rerank=rerank,
+                                                               limit=min(20, self._limit * 4), **self._scope.kwargs())
                             result, facts_dropped = fused(result, second, limit=min(20, self._limit * 4))
                             followup = replace(followup, facts_dropped=facts_dropped)
                             receipt["followup"] = followup.record()  # again: fusion's cut is known only now

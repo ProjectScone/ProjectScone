@@ -357,6 +357,51 @@ unless the fourth route is asked for by name:
    needs a model (`SCONE_CHAT_URL` and `SCONE_CHAT_MODEL`); without one
    the route is refused. `scone answer --route synthesize --limit 30`.
 
+   That is the **evidence** mode, the default. `synthesis_mode` picks one
+   of two more, the reference framework's Refine and Accumulate, and both
+   keep the rule that a sentence is shown only with a quote the framework
+   found in a passage:
+
+   - **refine** threads one answer through the rounds. The first round
+     that leaves a note is the answer; each later round is one call that
+     sees the answer so far (every sentence with its passage id and quote,
+     not the passages again) and the new round's passages, and returns the
+     whole answer rewritten. A rewritten sentence survives only if its
+     quote is found in a passage read so far; one that quotes nothing, or
+     names a passage not yet read, is dropped and counted like any note. A
+     readable rewrite replaces the answer; a reply that cannot be read, or
+     whose every sentence fails the check, leaves the answer as it stood,
+     and `refine_kept_prior` counts those rounds with a reason each. A
+     rewrite may also leave out a sentence the answer had: the rewrite is
+     the answer, `refine_dropped_carried` counts the checked sentences it
+     left out (matched by passage and quote, so a reworded sentence is
+     carried), and a reason names the round. `notes.kept` counts every
+     sentence each round kept, so a carried sentence is counted once per
+     round. Rounds are packed by bytes, and a round after the first answer
+     carries that answer inside the bound: its passages get
+     `max_round_bytes` less the answer's bytes, and each round's record
+     gives both `bytes` and `answer_bytes`. That is the reference's
+     CompactAndRefine. Passages are never cut, so when the answer leaves no
+     room for the next passage the rounds stop there, the rest are unread
+     with a reason, and the answer is `partial` and `truncated`. Nothing is
+     folded.
+   - **accumulate** gives the model one passage per call and joins what
+     each call kept, in passage order, with no fold; a sentence must quote
+     the passage its own call held. It spends the most calls on the
+     passages it reads.
+
+   In every mode the calls are bounded by the rounds bound (six by
+   default; `evidence` may add its one fold), and passages past it are
+   left unread, counted, and the answer is `partial`. `detail` names the
+   `mode`, the `model_calls`, and under `passages` how many were read and
+   how many the shown sentences `cited`. A mode on any other route is
+   refused. `scone answer --route synthesize --synthesis-mode refine`,
+   `GET /v1/answer?route=synthesize&synthesis_mode=accumulate`,
+   `answer_question(..., route="synthesize", synthesis_mode="refine")`.
+   Measured on eight multi-session questions with a local 8B model, no
+   mode spoke more often than `evidence`, and `refine`'s second round
+   changed no answer ([results](../benchmarks/synthesis-modes-v1.results.md)).
+
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
 `chars_omitted`, and when anything was cut the text ends with one line
@@ -792,8 +837,22 @@ a citation that was not checked is the thing least worth trusting.
 **Languages other than Python get what can be read and not what would
 have to be inferred.** For the brace family the declarations come from
 the same scanner that cuts those files into chunks, and imports are read
-from the lines that write them (`from "./x"`, a bare `import "x"`,
-`require("x")`, a Go import block, a Rust `use`). **No call is claimed**:
+from the lines that write them, each language by its own spelling:
+`from "./x"`, a bare `import "x"` and `require("x")` (JavaScript,
+TypeScript), a Go import block, a Rust `use` kept whole with a group
+(`use a::{b, c::{d, self}}`) spread into every path it names, a PHP `use`
+with its namespace and `require`/`include` as a file, Java, Kotlin and
+Scala `import a.b.C` (a group spread, `.*` the package, an alias not the
+name), C# `using`, Swift `import`, a C-family `#include`/`#import` (a
+quoted one a file, an angle one a header's name), Zig's `@import`, and
+Dart's `import`/`export`/`part` (a scheme is a package, anything else a
+file). A package is named as written; a path is resolved as a relative
+import is, and a module path inside the project -- `crate::store::Shelf`
+from the nearest `src`, `super::` and `self::` from the module,
+`com.acme.store.Shelf` from where the file's `package` line roots it --
+is resolved to the file that holds the module (`src/store.rs`,
+`src/util/mod.rs`, `com/acme/store/Shelf.java`) when whoever walked the
+tree can confirm one, and kept as written otherwise. **No call is claimed**:
 resolving a call means knowing what a name refers to, which needs a
 parser this does not have, and an edge nobody can check is worse than no
 edge. Python gets calls because Python's own parser gives them.
@@ -1224,6 +1283,172 @@ quietest rounds: 13.2 against 5.8 s, 15.1 against 7.3 s, 16.2 against
 8.0 s). Both versions cut every session into the same spans with the
 same receipt at 256, 512, 1,024, and 512 with a 64-token overlap. The
 retrieval numbers above were taken with the first version.
+
+## Cutting a document at its genre's boundaries
+
+Structure chunking reads what any document carries and packs it up to the
+target. It cannot know what a genre knows: that `Article 2` owns the `(a)`
+below it, that `A:` belongs to the `Q:` above it, that a references list is
+not part of the conclusion it follows, or that `Section 4.2 Transfers` is a
+section at all (the plain clause rule wants a bare number). Whoever stores a
+document often does know, so a record can say:
+
+```python
+await engine.remember(space, text, chunking_profile="statute")
+```
+
+`scone remember --chunking-profile statute`, `"chunking_profile": "statute"`
+on `POST /v1/episodes` and in each batch record, or the same key in a
+`--jsonl` record (the `--chunking` and `--chunking-profile` flags are
+refused with `--jsonl` rather than silently not applied to its records). The profiles are `statute`, `paper`, `manual`, `qa` and
+`resume` (`ingestion/chunking_profiles.py`, `PROFILES`).
+
+**Why a field and not another chunking mode.** A profile is a set of
+boundaries for structure chunking, not another way to cut: `chunking` stays
+the closed set of modes, and `chunking_profile` names what one of them cuts
+at. A profile implies `chunking="structure"` (stored explicitly), naming it
+with `length`, `code`, `semantic` or `unit` is refused, and the receipt's `chunking`
+still reads `structure`. It is not called `profile` because that already
+names a space's profile of facts (`GET /v1/profile`), and one name serves the
+record, the metadata key, the HTTP field and the flag.
+
+Each profile is data: a tuple of named rules, each a line pattern with a rank.
+The structure chunker's line scan asks the profile what each line is, so
+Markdown and setext headings, tables, fences and front matter are read
+exactly as without one, and a heading whose title matches a rule is named by
+it (`## References` is `references`). A plain line matching a rule sits where
+that rank sat as a heading, or just above the nearest deeper rank that did,
+so a plain `References` after `## Conclusion` is its sibling and kept apart
+from it, and a plain `Chapter 3` after `## Article 5` is not its child.
+
+| profile | rules (rank) | kept apart |
+| --- | --- | --- |
+| `statute` | `part` (Part/Title/Book/Division), `chapter` (Chapter, 第…章), `article` (Article/Art./Section/Sec./§/Clause/Rule, 第…条); then `subsection` (4.2), `paragraph` (1.), `numbered` ((1)), `roman` ((iv)), `letter` ((a), a)), `capital` ((A)) nested in the order the article first uses them | nothing |
+| `paper` | `abstract`, `section` (Introduction, Methods, Results, Discussion, Conclusion, Appendix and the usual others, the whole line), `references`, then `subsection` (2.1 Title) and `reference` ([1] or 1., only inside references) | each section, the references |
+| `manual` | `task` (To …:/How to …:), `procedure` (3.2 Title, Chapter 4 …), `step` (1., Step 3:), `substep` ((a), b.) | nothing |
+| `qa` | `question` (Q:/Question:, or a line ending in `?` that opens a paragraph); `answer` (A:/Answer:) is counted and never cut at | each question with its answer |
+| `resume` | `section` (Summary, Experience, Education, Skills, Projects and the rest, the whole line) | each section |
+
+The units are then packed as a tree rather than a list:
+
+- **A subtree that fits the target is never split.** An article with its
+  clauses, a task with its steps, a question with its answer is one chunk
+  when it can be. Small siblings still pack together while they fit.
+- **A heading travels with its first child.** When a subtree is too big,
+  its own text goes into the first chunk of its children if it is only a
+  marker (shorter than `MIN_CHUNK`) or the two fit together; otherwise it is
+  its own chunk, so a long introduction cannot drag a question over the
+  target and split it from its answer. A marker stays with a first child
+  that fits the target on its own even when the two together do not: that
+  chunk is over the target by less than `MIN_CHUNK` and counted in
+  `over_target`, rather than a pair that fits being split.
+- **Kept-apart units never share a chunk with a sibling.**
+- **A table is never cut**, as without a profile.
+- **An imported file's own headings are headings**, as without a profile: a
+  Word, OpenDocument or HTML heading the file marked is a unit, named by the
+  rule its title matches, and the receipt's `document_headings` counts those
+  read.
+- **A unit longer than the target is split by size**, the first piece at the
+  unit and the rest counted in `by_size`.
+
+The receipt carries the structure counts plus which profile cut, how many
+lines each rule matched (including rules that do not cut) and which kind of
+unit each chunk began at:
+
+```json
+{"chunking": "structure",
+ "structure": {"units": 13, "at_boundary": 6, "by_size": 2, "tables": 0, "over_target": 0, "capped": false,
+               "why": "profile statute: 6 chunk(s) begin at one of 13 boundary(ies) its rules found; 2 begin where the byte target fell, inside a unit longer than 700 or outside any unit",
+               "profile": "statute", "matched": {"part": 1, "article": 4, "paragraph": 3, "letter": 5},
+               "began": {"part": 1, "article": 3, "letter": 2}}}
+```
+
+`over_target` under a profile counts every chunk longer than the target,
+whatever put it there: a table kept whole, a heading shorter than
+`MIN_CHUNK` kept with the unit under it, or a last piece shorter than
+`MIN_CHUNK` that the size chunker joins to the one before it. The unit bound
+(`MAX_SECTIONS`) is the structure chunker's, reported the same way in
+`capped`.
+
+The profile is kept on the episode's metadata under `chunking_profile`
+beside `chunking`, so a recovery re-cuts with it, and a record holding it
+only in metadata (an archive import) is cut the same way. An unknown
+profile, one that is not text, a profile with another chunking, or a
+metadata key that says otherwise is refused while the record is validated,
+before anything is stored. That includes a record whose content is already
+stored and would come back as a duplicate, and one record of a partial
+batch, which is answered as failed on its own. The `chunking` and
+`chunking_profile` keys count toward the 16 metadata keys an episode may
+hold, so a record whose own keys leave no room for them is refused rather
+than stored with more keys than its export can be imported with.
+
+**Structure that is not there is not invented.** A named marker must be
+followed by the end of the line, punctuation or a capitalised title, so
+`Section 3 of this Act applies` is a sentence, and so are `Section 3.2 of
+this Agreement` (the point in a number is not punctuation), `Chapter 3. of`
+and `Article 6 (1) of this Regulation` (a lowercase word after punctuation or
+a sub-reference); a paper or resume section
+name must be the whole line, so `Experience shows that…` and `Results were
+mixed` are prose; a question without `Q:` must open a paragraph (after a blank
+line, a heading or a rule), so a rhetorical question inside an answer does
+not start a new pair; a reference
+entry is only read inside references. Each has a test.
+
+**Measured** with `benchmarks/chunking_profiles.py` on two synthetic
+fixtures generated from a fixed seed, at the default target of 700: a statute
+of 12,292 characters (3 parts, 13 articles, 14 numbered paragraphs, 27
+lettered clauses) and a Q&A file of 13,190 characters (24 pairs, answers of 75
+to 761 characters, some of two paragraphs). All three ways of cutting are
+scored against the profile's own units; the full output is in
+`benchmarks/chunking-profiles-v1.results.md`.
+
+| | length | structure | statute profile |
+| --- | --- | --- | --- |
+| chunks | 21 | 23 | 27 |
+| chunks starting at a genre boundary | 11 (52%) | 22 (96%) | 26 (96%) |
+| part or article split from its first clause | 8 of 14 | 4 of 14 | **0 of 14** |
+| part or article that fits the target, split anyway | 4 of 6 | 6 of 6 | **0 of 6** |
+
+| | length | structure | qa profile |
+| --- | --- | --- | --- |
+| chunks | 26 | 27 | 30 |
+| chunks starting at a genre boundary | 16 (62%) | 10 (37%) | 24 (80%) |
+| question split from its answer | 0 of 24 | 15 of 24 | **0 of 24** |
+| pair that fits the target, split anyway | 2 of 16 | 7 of 16 | **0 of 16** |
+
+On the statute the share of chunks starting at a boundary does not move:
+plain structure already starts its chunks at `Article` and `(a)` lines. What
+moves is where the chunk ends: plain structure leaves `Article 2` /
+`Definitions` as the last lines of one chunk and its clauses in the next.
+The only chunk not at a boundary in either is the document's title. On the
+Q&A file plain structure reads `A:` as a boundary of its own and cuts
+between a question and its answer 15 times out of 24; the six chunks under
+the profile that do not start at a question are the second pieces of answers
+longer than the target. Length chunking never separates the two there
+because `Q:` and `A:` sit on adjacent lines, but it splits pairs that fit.
+
+The cost is chunks: 17% more on the statute and 11% more on the Q&A file
+than plain structure, because whole subtrees do not pack as tightly as loose
+units. Whether a reader answers better from these chunks is unmeasured.
+
+Run over this directory's own documents (`--corpus docs`), where no genre
+applies, the rules stay quiet: `qa` and `resume` match nothing, `paper` one
+heading, and `statute` and `manual` 19 numbered-list lines, which are steps.
+Chunk counts under every profile were within 1% of plain structure; the
+counts, which move whenever these documents are edited, are in the results
+file.
+
+**Limits.** English markers, plus 第…章 and 第…条. A `(i)` is read as a roman
+numeral unless it follows `(h)` in the same article (likewise `(v)` after
+`(u)`, `(x)` after `(w)`) and no capital `(A)` is the innermost open
+enumerator: in the United States code's `(h)(1)(A)(i)` it is a clause, and
+after `(h)(1)(2)` the letter. A roman list directly under `(h)` reads its
+`(i)` as the letter. A hard-wrapped line that happens to begin with `(a)` or `12.` reads
+as a marker, as it does in plain structure. The title path is not prepended
+to a chunk as the reference implementation does, because stored text stays
+an exact excerpt; `heading_context` is the way to put Markdown headings into
+the embedding input, and it does not yet read profile markers. Nothing
+chooses a profile for a document: it is declared, per record, or not used.
 
 ## Embedding a chunk with the headings above it
 
@@ -2142,6 +2367,20 @@ index, and an engine with the lane on over a store that does not
 reports `context lane: not kept by …` in `degraded` rather than
 pretending the lane ran.
 
+### The question lane: found by the questions it answers
+
+With `SCONE_QUESTION_LANE=1` (`MemoryEngine(..., question_lane=True)`)
+a pass run by hand with a chat model (`engine.build_chunk_questions`,
+`scone chunk-questions`, `POST /v1/chunk-questions`) writes, per chunk,
+questions the chunk answers, keeps only those whose answering sentence
+is quoted verbatim from the chunk, and puts them in an index of their
+own, apart from the context lane's words. Recall searches it only while
+the question lane is on, as the `question` lane; the passage returned is
+the chunk's own text, and forgetting an episode takes its questions with
+it. Off by default, one model call per
+chunk. See [chunk-questions.md](chunk-questions.md) for what is kept,
+the bounds and the measurement.
+
 ### Fusing by distribution
 
 `--fusion distribution` (`fusion="distribution"` on `recall`, the same name
@@ -2174,10 +2413,42 @@ outvote the text lane's right ones. Measured on LongMemEval-S with that
 embedder, the text lane alone was ahead of the fused ranking.
 `SCONE_VECTOR_WEIGHT` (`MemoryEngine(..., vector_weight=)`) is the
 vector lane's weight against the text lane's 1.0 — a number above 0 and
-at most 4, 1.0 by default — and every recall event records
-`fusion_weights`, so a ranking can always be read back to the voices
-that made it. Change it only on a number: the pull request that added it
-carries the measurement.
+at most 4 — and every recall event records `fusion_weights`, so a
+ranking can always be read back to the voices that made it. Unset, it
+follows the embedder: 1.0 for any embedder but hashed tokens, and 0.01
+for hashed tokens. Change it only on a number.
+
+The hashed default is measured against LlamaIndex's best retrieval
+(its BM25 retriever fused with its vector retriever) on LongMemEval-S,
+both sides on the same hashed vectors, sessions folded from passages
+([results](../benchmarks/northstar-defaults-2026-09-14.results.md)):
+
+| hashed vector weight | frozen 50: R@5 / all@5 / R@15 / MRR | 100 other items: R@5 / all@5 / R@15 / MRR |
+|---|---|---|
+| 1.0 | 0.84 / 0.72 / 0.92 / 0.759 | 0.93 / 0.74 / 0.98 / 0.789 |
+| 0.25 (the default before) | 0.88 / 0.72 / 0.98 / 0.807 | 0.95 / 0.79 / 0.99 / 0.852 |
+| **0.01** | **0.90 / 0.76 / 1.00 / 0.838** | **0.96 / 0.84 / 0.99 / 0.885** |
+| LlamaIndex BM25 + vector | 0.88 / 0.74 / 0.98 / 0.831 | 0.91 / 0.71 / 0.99 / 0.810 |
+
+Every voice the hashed vector lane had in the order cost the ranking.
+At 0.01 the fused ranking scored exactly as the text lane alone did on
+both samples, and its top five sessions were the text lane's in 149 of
+the 150 items. The
+lane still runs at that weight: it gives the confidence signal
+(`top_similarity`, the similarity floor), it answers alone when the text
+lane fails, and a passage only it found can still come back.
+`SCONE_VECTOR_WEIGHT=0.25` restores the previous
+default. Relative-score fusion and larger chunks also moved the numbers
+on these samples; neither is a default, and the results file says why.
+
+The weight is a voice against the text lane, so it applies only when the
+text lane brings passages. When it brings none (`lanes=["vector"]`, a text
+lane that failed, or one that found nothing), the vector lane ranks at a
+full voice of 1.0, and that recall's `fusion_weights` says so. The recency
+term is sized against a full voice: at a hundredth, the vector lane's
+first and second places differ by what about half an hour of age is
+worth to that term (at 1.0, about two days), so newer passages would
+come back first instead of closer ones.
 
 ### Both stores agree on every script
 
@@ -3128,6 +3399,22 @@ the same `status` and `as_of`:
   28 communities became 158, the largest three (341, 205 and 199 entities)
   became 62, 48 and 42, and modularity went from 0.702 to 0.584, with 19
   nested splits and one community kept whole.
+
+  A person's name for a community of people
+  or things ("Acme's Lisbon team") needs a reader: `GET
+  /v1/graph/communities/names` (`limit`, 1 to 50, largest first) asks the
+  server's model for one, showing it the community's central members,
+  kinds and predicates and taking its answer only when it is a name (one
+  line, at most eight words; otherwise `name` is null and `why` says what
+  came back). The computed `label` stays beside every name, the record
+  carries the projection digest and `verified_accuracy: false`, and the
+  route is refused without a model. Opt-in, one model round per
+  community, all inside one deadline (`timeout_s`, 0.1 to 600 seconds,
+  120 by default): a community the deadline or a model failure leaves
+  unnamed says so in its `why`, the names already made stand, and the
+  record counts `communities_asked`, `communities_named`,
+  `communities_timed_out` and `communities_failed`. Never read by the
+  analysis itself.
 - **Central entities**: by PageRank, with degree, fact weight,
   betweenness (exact up to 500 entities, from 64 evenly spaced sources
   beyond) and participation across communities.
@@ -3403,6 +3690,51 @@ answer. It reads and changes nothing.
   moving is said (`ledger_moved_during_read`) rather than answered from
   two different moments.
 
+#### `GET /v1/graph/stats`
+
+The graph counted, for a reader who wants a number rather than a
+report: how many entities, relations (and how many of those are
+implied rather than stated), attributes and facts the projection holds;
+how many communities the analysis found and their modularity; how many
+entities stand alone or are only named by the graph (external); the
+entity kinds and the relation predicates, each with its count (the
+twenty most common listed, the rest counted); and the facts by origin
+(`stated`, `extracted`, `inferred`), by grounding (`quoted`,
+`unquoted`, `unsourced`) and by standing (`active`, `proposed`,
+`closed`). Every number is a count over recorded data; nothing is
+sampled and no model is called. Advertised as `graph.stats`; `scone
+graph stats`, the MCP tool `memory_graph_stats`, the MCP resources
+`scone://graph/stats` and `scone://{space}/graph/stats`, and the ToolBox
+tool `graph_stats` give the same answer. It reads and changes nothing.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
+`coverage.reasons` says when the analysis was truncated, when more
+kinds or predicates exist than are listed, and when the ledger moved
+during the read.
+
+#### `GET /v1/graph/hubs`
+
+The graph's own entities with the most neighbours, most linked first:
+its core abstractions, or its utility hubs (a logger every file
+imports). Each hub carries its label, key and kind, its degree (distinct
+neighbours), fact weight, PageRank, betweenness and community. What the
+graph only names (a library, a cited record) is counted as external and
+not ranked; the report lists those apart. Advertised as `graph.hubs`;
+`scone graph hubs`, the MCP tool `memory_graph_hubs`, the MCP resources
+`scone://graph/hubs` and `scone://{space}/graph/hubs`, and the ToolBox
+tool `graph_hubs` give the same answer. It reads and changes nothing.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `limit` | 10 (1–100) | Hubs shown; the rest are counted |
+| `above` | none (50–100) | Only the hubs above this degree percentile, by the rule the report's `exclude_hubs` uses to hold them apart |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
 #### `GET /v1/graph/cycles`
 
 The dependency cycles a space's code graph holds. A cycle is the one
@@ -3491,6 +3823,14 @@ that decision. Nothing is merged.
   1.23" is not "version 12.3"). Two related to each other are halved, since
   a thing rarely points at itself under another name, and the relation is
   named.
+  A name the projection classified as a code symbol (the object of
+  `calls`, `imports`, `defines` or another code predicate, with a
+  symbol's shape) is never judged by spelling, whatever the finder makes
+  of its shape: `json.dump` and `json.dumps` are two functions, not a
+  misspelling, while `J.Anderson` and `J.Andersen`, objects of no code
+  relation, are still compared. A code relation's subject is judged by
+  its shape alone, since `depends_on` may have a company for a subject
+  and a company one letter from another is still a misspelling.
 - **Every pair that can score is compared, and few others.**
   - Of two names alike by their words, one has all its words matched in
     the other. So each name is filed under the spellings of all its words

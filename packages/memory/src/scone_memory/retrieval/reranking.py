@@ -53,6 +53,8 @@ class RerankOutcome:
     scores: dict[int, float]
     trace: RerankTrace
     failure: str | None = None
+    #: What the result should say although the order was applied.
+    notes: tuple[str, ...] = ()
 
 
 class InvalidRerankOutput(ValueError):
@@ -117,6 +119,22 @@ async def rerank_candidates(reranker: Reranker, query: str, candidates: Sequence
     if not selected:
         trace.duration_ms = round((time.perf_counter() - started) * 1000, 3)
         return RerankOutcome((), {}, trace)
+    # Imported here: the listwise module builds on this one's candidate types.
+    from .listwise import ListwiseReranker
+
+    if isinstance(reranker, ListwiseReranker):
+        # A model pass takes seconds where ``timeout`` is a scorer's budget:
+        # it keeps its own deadline, and never raises but to be cancelled.
+        try:
+            listwise = await reranker.order(query, tuple(selected))
+        finally:
+            trace.duration_ms = round((time.perf_counter() - started) * 1000, 3)
+        trace.listwise = listwise.receipt
+        if listwise.fallback is not None:
+            trace.status = "failed"
+            return RerankOutcome((), {}, trace, listwise.fallback)
+        trace.status, trace.ordering = "applied", "rerank"
+        return RerankOutcome(listwise.ordered, listwise.scores(), trace, notes=listwise.notes)
     try:
         values = await asyncio.wait_for(reranker.rerank(query, tuple(selected)), timeout=timeout)
         scores = _scores(values, selected)

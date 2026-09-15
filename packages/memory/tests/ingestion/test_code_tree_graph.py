@@ -79,3 +79,10 @@ def test_without_the_grammar_pack_nothing_is_claimed_and_a_calls_edge_is_never_m
     monkeypatch.setattr(code_tree, "available", lambda: False)
     monkeypatch.setattr(code_tree_graph, "available", lambda: False)
     assert code_claims(source, "x.rb", language="tree:ruby") == ()
+
+
+def test_map_and_sync_admit_the_files_the_tree_reader_knows():
+    from scone_memory.ingestion.code_tree import TREE_SUFFIXES
+    from scone_memory.ingestion.sync import SUFFIXES
+
+    assert set(TREE_SUFFIXES) <= set(SUFFIXES), "a sync reads Ruby, Lua, shell, Perl and fish files"

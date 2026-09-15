@@ -172,12 +172,19 @@ def _identifier(key: str) -> bool:
     "prose is unaffected" it was written as.
 
     So the test here is the one that cannot be wrong: our code labels
-    carry their path (`pkg/store.py:Shelf.keep`), and no name does. Bare
-    module names keep the old behaviour, false pairs and all. Telling
-    those apart needs evidence from the graph -- whether the entity
-    appears in a code relation -- rather than a guess about a string, and
-    that is the next step if two module names one letter apart ever turn
-    up.
+    carry their path (`pkg/store.py:Shelf.keep`), and no name does. A bare
+    dotted name is judged by the graph instead, in ``_suggest``: an entity
+    the projection classified as a code symbol, the object of a code
+    relation (``calls``, ``imports``, ``defines`` and the rest) with a
+    symbol's shape, is an identifier too. Two module names one letter
+    apart did turn up -- mapping this package suggested `json.dump` and
+    `json.dumps` as one thing at 0.6, and `http.client.HTTPConnection` and
+    `HTTPSConnection` at 0.847 -- and a person's initials are never the
+    object of a code relation. The relation's subject is not read that
+    way: `depends_on` and `connects_to` are code relations whose subject
+    may be a company, and a company one letter from another is still a
+    misspelling. A code relation's subject carries its path, so its shape
+    already says.
     """
     return bool(_QUALIFIED.search(key))
 
@@ -228,13 +235,15 @@ class _Name:
         return self.folded.replace(" ", "")
 
 
-def _name(key: str) -> _Name:
+def _name(key: str, identifier: bool | None = None) -> _Name:
+    """``identifier`` says the graph knows this is a code symbol; unsaid,
+    the key's own shape decides."""
     folded = variant_fold(key)
     every = folded.split()
     words = [word for word in every if word not in STOPWORDS]
     return _Name(folded, frozenset(words), tuple(every), tuple(re.findall(r"\d+", folded)),
                  frozenset("".join(word[0] for word in names) for names in (every, words) if len(names) > 1),
-                 _identifier(key))
+                 _identifier(key) if identifier is None else identifier or _identifier(key))
 
 
 def _aligned(left: frozenset[str], right: frozenset[str], words: _Words,
@@ -457,7 +466,12 @@ async def _suggest(engine: "MemoryEngine", space: str, limit: int, min_score: fl
     complete, read_answer = read_record(read)
     reasons = _reasons(read)
     entities = {entity.entity_id: entity for entity in projection.entities}
-    names = {entity_id: _name(entity.key) for entity_id, entity in entities.items()}
+    # What the projection read as a code symbol is one, whatever the
+    # duplicate finder makes of its shape: `json.dump` and `json.dumps`
+    # are two functions, not a misspelling. Objects only; see `_identifier`.
+    in_code = {role.object_id for role in projection.roles
+               if role.object_id is not None and role.classification.basis == "code_symbol"}
+    names = {entity_id: _name(entity.key, identifier=entity_id in in_code) for entity_id, entity in entities.items()}
     words = _Words()
     candidates, cuts = _candidates(names, words)
     reasons += [f"{cut} {count}{unit}" for cut, unit in (("blocks_skipped", ""), ("spellings_cut", " names"),
