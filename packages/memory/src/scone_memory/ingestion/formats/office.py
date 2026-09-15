@@ -7,7 +7,7 @@ interpreted. Repeated ODS cells/rows carry repeat metadata rather than expanding
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import PurePosixPath
 import posixpath
 import re
@@ -37,7 +37,7 @@ OFFICE_FAMILIES: dict[str, frozenset[str]] = {
     'slides': frozenset({'pptx', 'pptm', 'potx', 'potm', 'ppsx', 'ppsm'}),
 }
 _FAMILY_OF = {member: family for family, members in OFFICE_FAMILIES.items() for member in members}
-OFFICE_EXTENSIONS = frozenset(_FAMILY_OF) | frozenset({'odt', 'ods', 'odp', 'epub'})
+OFFICE_EXTENSIONS = frozenset(_FAMILY_OF) | frozenset({'odt', 'ods', 'odp', 'epub', 'hwpx'})
 _ODF_REVISION_METADATA = frozenset({
     '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}tracked-changes',
     '{urn:oasis:names:tc:opendocument:xmlns:office:1.0}change-info',
@@ -264,9 +264,92 @@ def _row_text(row: Element, output: _Output) -> str:
                         for cell in row if _local(cell.tag) == 'tc'), '\t')
 
 
+#: A built-in Word heading style, by the name Word gives it in every language.
+_HEADING_STYLE = re.compile(r'^heading ([1-9])$', re.IGNORECASE)
+#: How many styles a basedOn chain is followed through. A paragraph whose style's chain
+#: runs longer, or round in a circle, says ``heading_level_unresolved``.
+_STYLE_DEPTH = 16
+#: The level a style gives when its chain was not followed to its end.
+_UNRESOLVED = -1
+
+
+def _outline_level(properties: Element | None) -> int | None:
+    """A paragraph properties' outline level as a heading level: 1 to 9, 0 for explicit body text."""
+    marker = None if properties is None else _child(properties, 'outlineLvl')
+    if marker is None:
+        return None
+    value = _word_attribute(marker, 'val')
+    return int(value) + 1 if value.isdecimal() and int(value) <= 8 else 0
+
+
+def _word_heading_styles(bundle: SafeArchive, source: str, relations: dict[str, tuple[str, str]]) -> dict[str, int]:
+    """The heading level each paragraph style gives, through the styles it is based on, or
+    ``_UNRESOLVED`` for a chain not followed to its end. A document without a readable styles
+    part gives none, and its paragraphs carry no level."""
+    identifiers = [key for key, (_, kind) in relations.items() if kind == 'styles']
+    if len(identifiers) != 1:
+        return {}
+    try:
+        root = bundle.xml(_related(source, relations, identifiers[0], 'styles'), supported_namespaces=_WORD_TEXT_NAMESPACES)
+    except InvalidInput:
+        return {}
+    own: dict[str, int] = {}
+    based: dict[str, str] = {}
+    for style in root:
+        if _local(style.tag) != 'style':
+            continue
+        identifier = _word_attribute(style, 'styleId')
+        if not identifier:
+            continue
+        level = _outline_level(_child(style, 'pPr'))
+        name = _child(style, 'name')
+        named = _HEADING_STYLE.match(_word_attribute(name, 'val')) if name is not None else None
+        if level is not None:
+            own[identifier] = level
+        elif named:
+            own[identifier] = int(named.group(1))
+        parent = _child(style, 'basedOn')
+        if parent is not None:
+            based[identifier] = _word_attribute(parent, 'val')
+    levels: dict[str, int] = {}
+    for identifier in {*own, *based}:
+        current, level = identifier, _UNRESOLVED
+        for _ in range(_STYLE_DEPTH):
+            if current in own:
+                level = own[current]
+                break
+            if current not in based:
+                level = 0
+                break
+            current = based[current]
+        if level:
+            levels[identifier] = level
+    return levels
+
+
+def _paragraph_levels(root: Element, styles: Mapping[str, int]) -> dict[int, int]:
+    """Heading levels of the paragraphs under ``root``, read before their properties are pruned."""
+    levels: dict[int, int] = {}
+    for paragraph in root.iter():
+        if _local(paragraph.tag) != 'p' or paragraph.tag.rpartition('}')[0][1:] not in _WORD_NAMESPACES:
+            continue
+        properties = _child(paragraph, 'pPr')
+        level = _outline_level(properties)
+        if level is None and properties is not None and (style := _child(properties, 'pStyle')) is not None:
+            level = styles.get(_word_attribute(style, 'val'))
+        if level:
+            levels[id(paragraph)] = level
+    return levels
+
+
 def _word_content(
     root: Element, output: _Output, prefix: str, metadata: dict[str, str],
+    styles: Mapping[str, int] | None = None, levels: dict[int, int] | None = None,
 ) -> Iterator[tuple[Element, str, list[Element]]]:
+    # Pruning the first root prunes the text boxes inside it too, before they are detached, so
+    # levels read here are kept in ``levels`` for the boxes' own turn.
+    levels = {} if levels is None else levels
+    levels.update(_paragraph_levels(root, styles or {}))
     _prune_run_metadata(root, output)
     paragraphs = tables = 0
     for block in _blocks(root, {'p', 'tbl'}, include_tags=frozenset(_WORD_REFERENCES)):
@@ -290,7 +373,10 @@ def _word_content(
             paragraphs += 1
             locator = f'{prefix}paragraph:{paragraphs}'
             boxes = _detach_textboxes(block, output)
-            output.add(_run_text(block, output), locator, metadata)
+            level = levels.get(id(block))
+            details = ({**metadata, 'heading_level_unresolved': 'style_chain'} if level == _UNRESOLVED
+                       else {**metadata, 'heading_level': str(level)} if level else metadata)
+            output.add(_run_text(block, output), locator, details)
             yield block, locator, boxes
 
 
@@ -359,12 +445,14 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
     if _local(root.tag) != 'document' or body is None:
         raise InvalidInput('DOCX is missing its document body')
     relations = _relationships(bundle, source)
+    styles = _word_heading_styles(bundle, source, relations)
+    levels: dict[int, int] = {}
     parts: dict[str, tuple[str, dict[str, Element]]] = {}
     emitted: set[tuple[str, str]] = set()
     pending = deque([(body, '', {'member': source})])
     while pending:
         content, prefix, metadata = pending.popleft()
-        for block, locator, boxes in _word_content(content, output, prefix, metadata):
+        for block, locator, boxes in _word_content(content, output, prefix, metadata, styles, levels):
             for number, box in enumerate(boxes, 1):
                 details = {'member': metadata['member'], 'content_role': 'textbox', 'parent_locator': locator}
                 pending.append((box, _word_prefix(locator, f'/textbox:{number}/'), details))
@@ -485,7 +573,10 @@ def _pptx(bundle: SafeArchive, output: _Output) -> None:
     if _local(root.tag) != 'presentation':
         raise InvalidInput('PPTX is missing its presentation')
     relations = _relationships(bundle, source)
-    for number, slide in enumerate(_elements(root, 'sldId'), 1):
+    # Only the presentation's own list names its slides. A deck's sections name them again,
+    # deeper in the file, by numeric id alone.
+    listed = _child(root, 'sldIdLst')
+    for number, slide in enumerate(() if listed is None else listed, 1):
         output.check()
         # A slide has both an unqualified numeric id and a namespaced relationship id.
         identifier = next((value for key, value in slide.attrib.items() if key.endswith('}id')), '')
@@ -680,7 +771,11 @@ def _odf_content(
         if _local(block.tag) != 'table':
             paragraphs += 1
             locator = f'{prefix}paragraph:{paragraphs}'
-            output.add(_visible_text(block, output, odf=True), locator, metadata)
+            details = metadata
+            if _local(block.tag) == 'h':
+                written = next((value for key, value in block.attrib.items() if key.endswith('}outline-level')), '1')
+                details = {**metadata, 'heading_level': str(int(written)) if written.isdecimal() and 1 <= int(written) <= 10 else '1'}
+            output.add(_visible_text(block, output, odf=True), locator, details)
             _odf_annotations(block, output, locator, metadata)
             continue
         tables += 1
@@ -721,6 +816,160 @@ def _epub(bundle: SafeArchive, output: _Output) -> None:
         output.add(_visible_text(body, output), f'chapter:{chapter}/{path}', {'member': path})
 
 
+_HWPX_SECTION = re.compile(r'^Contents/section(\d+)\.xml$')
+#: Elements inside a text run that stand for one character.
+_HWPX_CHARACTERS = {'tab': '\t', 'lineBreak': '\n', 'nbSpace': '\u00a0', 'fwSpace': '\u3000', 'hyphen': '-'}
+#: What a control holding paragraphs of its own is called in a segment.
+_HWPX_CONTROLS = {'header': 'header', 'footer': 'footer', 'footNote': 'footnote', 'endNote': 'endnote',
+                  'hiddenComment': 'comment', 'caption': 'caption', 'drawText': 'textbox'}
+
+
+def _hwpx_sections(bundle: SafeArchive) -> list[str]:
+    """The section members in reading order: the order the package's
+    spine gives (`Contents/content.hpf`, an OPF manifest), else by number.
+    A spine entry whose item is missing from the package is refused, as
+    an EPUB's is."""
+    if 'Contents/content.hpf' in bundle.names:
+        package = bundle.xml('Contents/content.hpf')
+        manifest: dict[str, str] = {}
+        for item in _elements(package, 'item'):
+            identifier, href = item.get('id', ''), item.get('href', '')
+            if identifier and identifier not in manifest:
+                manifest[identifier] = href
+        ordered: list[str] = []
+        for itemref in _elements(package, 'itemref'):
+            listed = manifest.get(itemref.get('idref', ''))
+            if listed is None:
+                raise InvalidInput('HWPX spine refers to a missing manifest item')
+            # An href is written from the package root or from Contents/;
+            # a spine entry that is not a section (the header, settings)
+            # is passed over, and a section the package lacks is refused.
+            path = next((candidate for candidate in (listed, f'Contents/{listed}') if _HWPX_SECTION.match(candidate)), None)
+            if path is None:
+                continue
+            if path not in bundle.names:
+                raise InvalidInput('HWPX spine refers to a section the package does not hold')
+            if path not in ordered:
+                ordered.append(path)
+        if ordered:
+            return ordered
+    found = [(int(match.group(1)), name) for name in bundle.names for match in [_HWPX_SECTION.match(name)] if match]
+    return [name for _number, name in sorted(found)]
+
+
+def _hwpx_text(paragraph: Element, output: _Output, tables: list[Element],
+               sublists: list[tuple[str, Element]]) -> str:
+    """A paragraph's own text: its runs' `t` elements with the characters
+    that stand inside them, stopping at a table and at a control's own
+    paragraphs (`subList`: a header, footer, note, caption or text box),
+    which are collected to be read after the paragraph as segments of
+    their own. Text is taken only from inside a `t`; the whitespace an
+    editor puts between elements is not the document's."""
+    def parts() -> Iterator[str]:
+        stack: list[tuple[Element, bool, str] | str] = [(paragraph, False, 'p')]
+        while stack:
+            output.check()
+            current = stack.pop()
+            if isinstance(current, str):
+                yield current
+                continue
+            element, inside_text, parent = current
+            name = _local(element.tag)
+            if inside_text and element.tail:
+                stack.append(element.tail)
+            if name == 'tbl':
+                tables.append(element)
+                continue
+            if name == 'subList':
+                sublists.append((_HWPX_CONTROLS.get(parent, parent.lower()), element))
+                continue
+            if inside_text and name in _HWPX_CHARACTERS:
+                yield _HWPX_CHARACTERS[name]
+                continue
+            if name in {'tab', 'lineBreak'}:
+                yield _HWPX_CHARACTERS[name]
+                continue
+            within = inside_text or name == 't'
+            stack.extend((child, within, name) for child in reversed(element))
+            if within and element.text:
+                stack.append(element.text)
+    return output.join(parts())
+
+
+def _hwpx_paragraphs(root: Element) -> Iterator[Element]:
+    """Paragraphs in document order, reached without passing through
+    another paragraph: what a control or a cell holds is read by the
+    walk that reaches that control or cell."""
+    stack = [iter(root)]
+    while stack:
+        child = next(stack[-1], None)
+        if child is None:
+            stack.pop()
+            continue
+        if _local(child.tag) == 'p':
+            yield child
+            continue
+        stack.append(iter(child))
+
+
+def _hwpx_block(root: Element, output: _Output, locator: str, metadata: dict[str, str]) -> None:
+    """Every paragraph under `root` as segments, the tables and controls
+    each paragraph holds following it under its own locator."""
+    for number, paragraph in enumerate(_hwpx_paragraphs(root), 1):
+        output.check()
+        tables: list[Element] = []
+        sublists: list[tuple[str, Element]] = []
+        text = _hwpx_text(paragraph, output, tables, sublists)
+        here = f'{locator}/paragraph:{number}'
+        if text.strip():
+            output.add(text, here, dict(metadata))
+        for count, table in enumerate(tables, 1):
+            _hwpx_cells(table, output, here, count)
+        counts: dict[str, int] = {}
+        for kind, sublist in sublists:
+            counts[kind] = counts.get(kind, 0) + 1
+            _hwpx_block(sublist, output, f'{here}/{kind}:{counts[kind]}',
+                        {**metadata, 'content_role': kind, 'parent_locator': here})
+
+
+def _hwpx_cells(table: Element, output: _Output, locator: str, count: int) -> None:
+    """A table's cells as segments: direct rows, direct cells, each cell's
+    paragraphs joined, a nested table read under its cell."""
+    number = 0
+    for row in (child for child in table if _local(child.tag) == 'tr'):
+        for cell in (child for child in row if _local(child.tag) == 'tc'):
+            output.check()
+            number += 1
+            address = _child(cell, 'cellAddr')
+            nested: list[Element] = []
+            inner: list[tuple[str, Element]] = []
+            text = output.join((_hwpx_text(paragraph, output, nested, inner) for paragraph in _hwpx_paragraphs(cell)), '\n')
+            here = f'{locator}/table:{count}/cell:{number}'
+            metadata = {'content_role': 'table_cell', 'parent_locator': locator}
+            if address is not None:
+                metadata.update(row=_attr(address, 'rowAddr', '?'), column=_attr(address, 'colAddr', '?'))
+            if text.strip():
+                output.add(text, here, metadata)
+            for inner_count, table_inside in enumerate(nested, 1):
+                _hwpx_cells(table_inside, output, here, inner_count)
+            counts: dict[str, int] = {}
+            for kind, sublist in inner:
+                counts[kind] = counts.get(kind, 0) + 1
+                _hwpx_block(sublist, output, f'{here}/{kind}:{counts[kind]}', {'content_role': kind, 'parent_locator': here})
+
+
+def _hwpx(bundle: SafeArchive, output: _Output) -> None:
+    """Hangul's XML package (HWPX, KS X 6101): each section's paragraphs in
+    order; a table's cells, and the paragraphs a header, footer, note,
+    caption or text box holds, right after the paragraph that holds them.
+    The binary HWP 5 format is a different container and is not read."""
+    sections = _hwpx_sections(bundle)
+    if not sections:
+        raise InvalidInput('HWPX package has no sections (Contents/section0.xml)')
+    for section_number, path in enumerate(sections, 1):
+        _hwpx_block(bundle.xml(path), output, f'section:{section_number}', {'member': path})
+
+
 def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocument:
     """Extract ordered native text without filesystem extraction or execution."""
     extension = PurePosixPath(filename).suffix.lower().lstrip('.')
@@ -739,6 +988,8 @@ def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDo
                 _pptx(bundle, output)
             elif extension == 'epub':
                 _epub(bundle, output)
+            elif extension == 'hwpx':
+                _hwpx(bundle, output)
             else:
                 _odf(bundle, output, extension)
         output.check()

@@ -12,6 +12,7 @@ import tokenize
 import types
 
 from .custom_tools import AgentTool, ToolContext, _check_dispatch, _encoded
+from .docstring_parameters import parameter_descriptions, without_parameters
 from .function_types import ParameterType, parameter_type, resolve_annotation
 from ..realtime.output_schema import accepts_schema, compile_schema
 
@@ -95,7 +96,12 @@ def _signature(function: Callable[..., object]) -> inspect.Signature:
         raise ValueError('function tool requires an inspectable signature') from None
 
 
-def _namespace(function: Callable[..., object], supplied: Mapping[str, object] | None) -> dict[str, object]:
+#: Characters of one parameter description taken from a docstring.
+MAX_DOCSTRING_DESCRIPTION = 4096
+
+
+def _resolved(function: Callable[..., object]) -> object:
+    """The function a partial, bound method, wrapper or callable object finally runs."""
     target: object = function
     for _ in range(32):
         if isinstance(target, functools.partial):
@@ -111,6 +117,11 @@ def _namespace(function: Callable[..., object], supplied: Mapping[str, object] |
             target = target.__call__
         else:
             break
+    return target
+
+
+def _namespace(function: Callable[..., object], supplied: Mapping[str, object] | None) -> dict[str, object]:
+    target = _resolved(function)
     namespace = dict(getattr(target, '__globals__', {}))
     if supplied is not None:
         if not isinstance(supplied, Mapping) or any(not isinstance(key, str) for key in supplied):
@@ -127,7 +138,8 @@ class _Parameter:
 
 
 def _parameters(signature: inspect.Signature, namespace: Mapping[str, object],
-                context_parameter: str | None) -> tuple[tuple[_Parameter, ...], dict[str, object], str]:
+                context_parameter: str | None,
+                described: Mapping[str, str] | None = None) -> tuple[tuple[_Parameter, ...], dict[str, object], str]:
     if len(signature.parameters) > 32:
         raise ValueError('function tool parameter count limit')
     if context_parameter is not None and (not isinstance(context_parameter, str) or context_parameter not in signature.parameters):
@@ -161,6 +173,8 @@ def _parameters(signature: inspect.Signature, namespace: Mapping[str, object],
                 raise ValueError('function default does not satisfy its annotation')
             defaults[parameter.name] = json.loads(encoded)['value']
             schema['default'] = defaults[parameter.name]
+        if described and parameter.name in described and 'description' not in schema:
+            schema['description'] = described[parameter.name]
         properties[parameter.name] = schema
         parameters.append(_Parameter(parameter.name, positional, contract))
     result: dict[str, object] = {'type': 'object', 'properties': properties, 'additionalProperties': False}
@@ -173,18 +187,33 @@ def function_tool(function: Callable[..., object], *, revision: str,
                   name: str | None = None, description: str | None = None,
                   context_parameter: str | None = None, max_output_bytes: int = 16000,
                   return_direct: bool = False, requires_approval: bool = False,
-                  annotation_namespace: Mapping[str, object] | None = None) -> AgentTool:
+                  annotation_namespace: Mapping[str, object] | None = None,
+                  describe_from_docstring: bool = False) -> AgentTool:
     """Adapt an annotated sync/async function without evaluating annotations.
 
     Names and descriptions default to the callable's name and docstring. Explicit
     revisions describe trusted handler/configuration changes; code is not hashed.
     Defaults are snapshotted and supplied on every call. Only an explicitly named
     context parameter receives the host ToolContext, outside the model schema.
+
+    With ``describe_from_docstring``, each parameter the docstring documents (Google,
+    NumPy or Sphinx style) takes that text as its schema description unless an
+    ``Annotated`` description already gives one, and a description taken from the
+    docstring leaves its parameter section out. Off by default: the schema is part of
+    the digest a pending approval is bound to.
     """
     if not callable(function) or inspect.isgeneratorfunction(function) or inspect.isasyncgenfunction(function):
         raise ValueError('function tools require a synchronous or asynchronous callable')
     signature = _signature(function)
-    parameters, schema, defaults_json = _parameters(signature, _namespace(function, annotation_namespace), context_parameter)
+    # The docstring is the resolved function's, as the signature is: a partial or a bound method has none of its own.
+    written = inspect.getdoc(_resolved(function) if describe_from_docstring else function) or ''
+    documented = parameter_descriptions(written) if describe_from_docstring else None
+    for parameter_name, text in (documented or {}).items():
+        if len(text) > MAX_DOCSTRING_DESCRIPTION:
+            raise ValueError(f'docstring description for parameter {parameter_name!r} exceeds '
+                             f'{MAX_DOCSTRING_DESCRIPTION} characters')
+    parameters, schema, defaults_json = _parameters(signature, _namespace(function, annotation_namespace), context_parameter,
+                                                    documented)
 
     def invoke(arguments: dict[str, object], context: ToolContext) -> object:
         values: dict[str, object] = json.loads(defaults_json)
@@ -201,7 +230,9 @@ def function_tool(function: Callable[..., object], *, revision: str,
         return function(*positional, **keywords)
 
     selected_name = getattr(function, '__name__', '') if name is None else name
-    selected_description = (inspect.getdoc(function) or '') if description is None else description
+    # A docstring that is only its parameter section still describes the tool.
+    selected_description = (((without_parameters(written) or written) if describe_from_docstring else written)
+                            if description is None else description)
     return AgentTool(selected_name, selected_description, revision, schema, invoke, max_output_bytes,
                      return_direct=return_direct, requires_approval=requires_approval)
 
