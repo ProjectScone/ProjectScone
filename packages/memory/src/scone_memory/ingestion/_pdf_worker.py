@@ -115,9 +115,10 @@ def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metada
                 offset += 2
             updates: dict[str, object] = {}
             if columns and text:
-                laid = lay_out_page(text.split('\n'), offset, drop=left_out[number - 1])
+                laid = lay_out_page(text.split('\n'), offset, drop=left_out[number - 1], first_page=number == 1)
                 text = laid.text
                 updates = {'reading_order': laid.receipt, 'running': laid.running, 'regions': laid.regions,
+                           'labels': laid.labels,
                            **({'region_geometry': 'normalized_text_grid'} if laid.regions else {})}
             end = offset + len(text.encode('utf-8'))
             if end > limits.max_text_bytes:
