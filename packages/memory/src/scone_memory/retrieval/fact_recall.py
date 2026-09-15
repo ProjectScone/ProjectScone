@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from copy import deepcopy
 
 from ..core.models import Fact
+from ..entities.merges import is_decision
 from ..core.ports import DocumentStore, TextFilter
 from .episode_scope import episode_fits
 from .fact_search import IndexedFactSearch
@@ -48,7 +49,9 @@ async def facts_for_query(documents: DocumentStore, space: str, query: str, when
             for candidate in raw:
                 if not isinstance(candidate, Fact):
                     raise ValueError("invalid indexed fact")
-                facts.append(Fact.model_validate(candidate.model_dump(), strict=True))
+                # A merge decision is about names, not a claim to answer with.
+                if not is_decision(candidate):
+                    facts.append(Fact.model_validate(candidate.model_dump(), strict=True))
             if len({fact.fact_id for fact in facts}) != len(facts):
                 raise ValueError("duplicate indexed facts")
             for fact in facts:
@@ -80,7 +83,7 @@ async def scan_facts_for_query(documents: DocumentStore, space: str, query: str,
     # Closed facts are included on purpose: asked about 2023, the
     # fact that held in 2023 is the answer even if it closed since.
     for fact in await documents.list_facts(space, include_closed=True):
-        if fact.excluded or not fact.holds_at(when):
+        if fact.excluded or not fact.holds_at(when) or is_decision(fact):
             continue
         overlap = len(terms & set(tokenize(f"{fact.subject} {fact.predicate} {fact.object}")))
         if not overlap:

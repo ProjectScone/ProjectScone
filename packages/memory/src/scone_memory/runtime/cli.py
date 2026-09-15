@@ -299,7 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
     p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, walk, schema, match, "
-                                     "overview, changes, duplicates, export")
+                                     "overview, changes, duplicates, merge, unmerge, merges, export")
     graph = p.add_subparsers(dest="graph_command", required=True)
     g = graph.add_parser("report", help="communities, central entities, surprising links and questions")
     g.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
@@ -371,6 +371,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--limit", type=int, default=50, help="pairs to suggest (1 to 500)")
     g.add_argument("--min-score", type=float, default=0.5, help="suggest only pairs at least this likely (0 to 1)")
     g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
+    g = graph.add_parser("merge", help="record that one name is the entity another names (a review decision)")
+    g.add_argument("alias", help="the name to merge away")
+    g.add_argument("into", help="the name of the entity it is")
+    g.add_argument("--reason", required=True, help="why the two are one; kept on the event")
+    g = graph.add_parser("unmerge", help="close the merge in force for a name: the names part from now")
+    g.add_argument("alias")
+    g.add_argument("--reason", required=True)
+    graph.add_parser("merges", help="the merges the current graph applies, and any it refused")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
                                                                "mermaid", "svg", "canvas", "html", "explorer"])
@@ -1481,6 +1489,31 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
             print(f"  {reach.depth}  {reach.label}  ({reach.through} {reach.via})", file=out)
         if result.by_depth:
             print("reached: " + ", ".join(f"{count} at {depth} hop(s)" for depth, count in sorted(result.by_depth.items())), file=out)
+        return 0
+    if command in ("merge", "unmerge"):
+        import getpass
+
+        from ..core.validation import entity_key
+
+        actor = f"cli:{getpass.getuser()}"
+        if command == "merge":
+            decision = await engine.merge_entities(space, args.alias, args.into, reason=args.reason, actor=actor)
+            done = f"merged: {decision.subject} into {entity_key(decision.object)} (fact {decision.fact_id})"
+        else:
+            decision = await engine.unmerge_entities(space, args.alias, reason=args.reason, actor=actor)
+            done = f"unmerged: {decision.subject} (fact {decision.fact_id} closed {decision.valid_until})"
+        print(json.dumps(decision.model_dump()) if getattr(args, "json", False) else done, file=out)
+        return 0
+    if command == "merges":
+        when = engine.clock()
+        projection, _ = await load_projection(engine, space, mode="current", as_of=when)
+        merges = [{"fact_id": item.fact_id, "alias_key": item.alias_key, "into_key": item.into_key,
+                   "outcome": item.outcome} for item in projection.merges]
+        if getattr(args, "json", False):
+            print(json.dumps({"space": space, "as_of": when, "merges": merges}), file=out)
+        else:
+            print("\n".join(f"{item['alias_key']} -> {item['into_key']} (fact {item['fact_id']}, {item['outcome']})"
+                            for item in merges) or f"no merges in force in {space}", file=out)
         return 0
     if command == "affected":
         from ..entities.affected import affected
