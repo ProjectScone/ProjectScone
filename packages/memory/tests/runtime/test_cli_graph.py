@@ -60,6 +60,17 @@ async def test_report_prints_markdown_or_json(engine):
     assert code == 0 and json.loads(text)["summary"]["entities"] >= 4
 
 
+async def test_report_can_hold_hubs_apart(engine):
+    for number in range(8):
+        await engine.assert_fact("default", f"person {number}", "works_at", "Acme Robotics", valid_from=DAY)
+    code, text = await graph(engine, "report", "--exclude-hubs", "80", "--json")
+    report = json.loads(text)
+    assert code == 0 and [hub["key"] for hub in report["hubs_excluded"]] == ["acme robotics"]
+    assert report["hubs_excluded"][0]["community"] and report["analysis"]["coverage"]["hubs_held_apart"] == 1
+    with pytest.raises(InvalidInput, match="50 to 100"):
+        await graph(engine, "report", "--exclude-hubs", "10")
+
+
 async def test_timeline_prints_an_entitys_items(engine):
     code, text = await graph(engine, "timeline", "alice chen", "--json")
     assert code == 0 and [item["predicate"] for item in json.loads(text)["items"]] == ["works_at"]
