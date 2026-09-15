@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
+import time
 from collections.abc import Callable, Mapping
 from contextlib import aclosing
 from contextvars import ContextVar
@@ -19,6 +21,10 @@ from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
 from .context import MemoryContext
 from .lifecycle import cancel_once as _cancel_once, settle as _settle
+from .timing import TurnTiming
+
+#: Seconds a turn's timing may take to record before the session goes on without it.
+NOTE_TIMEOUT = 2.0
 from .audio import (
     AudioTransport, SpeechRecognizer, VoiceModel, SpeechSynthesizer,
     SpeechStarted, TextDelta, SpeechActivityDetector,
@@ -231,6 +237,7 @@ class VoiceSession:
                         if isinstance(event, SpeechStarted):
                             await self._interrupt(transport)
                         elif is_question(event):
+                            heard = time.perf_counter()
                             await self._interrupt(transport)
                             messages = [*self._history, {"role": "user", "content": event.text}]
                             if _bytes(messages) > self._max_history:
@@ -239,7 +246,7 @@ class VoiceSession:
                             await self._record(turn_id, "user", event.text, speaker=event.speaker)
                             self._history = messages
                             self._output_turn = turn_id
-                            self._reply = asyncio.create_task(self._respond(transport, model, tts, turn_id, self._generation))
+                            self._reply = asyncio.create_task(self._respond(transport, model, tts, turn_id, self._generation, heard))
 
         feeder, listener = asyncio.create_task(feed()), asyncio.create_task(listen())
         try:
@@ -305,7 +312,9 @@ class VoiceSession:
         messages, self.last_memory_receipt = await self._memory_context.prepare(self._history)
         return messages
 
-    async def _respond(self, transport, model, tts, turn_id, generation):
+    async def _respond(self, transport, model, tts, turn_id, generation, heard=None):
+        timing = TurnTiming(heard)
+
         def current():
             if generation != self._generation or self._stop.is_set():
                 raise asyncio.CancelledError()
@@ -318,6 +327,7 @@ class VoiceSession:
                     current()
                     check_audio(chunk, self._max_audio)
                     await transport.send(chunk, turn_id)
+                    timing.mark("first_audio")
                     emitted = True
                     current()
             if not emitted:
@@ -325,6 +335,7 @@ class VoiceSession:
 
         async with asyncio.timeout(self._turn_timeout):
             messages = await self._context()
+            timing.mark("context")
             current()
             reply = Reply(self._max_reply)
             parts, pending = [], ""
@@ -333,6 +344,7 @@ class VoiceSession:
                     current()
                     reply.accept(event)
                     if isinstance(event, TextDelta):
+                        timing.mark("first_token")
                         parts.append(event.text)
                         pending += event.text
                         finished, pending = sentences(pending)
@@ -349,3 +361,23 @@ class VoiceSession:
                 raise RuntimeError("voice history byte limit reached")
             await self._record(turn_id, "assistant", text)
             self._history = history
+            timing.mark("done")
+        # Outside the turn's deadline: the reply was heard and recorded, and
+        # a slow log must not clear audio the listener already has.
+        await self._note_turn(turn_id, "voice", timing)
+
+    async def _note_turn(self, turn_id, mode, timing):
+        # The turn is done; its timing is evidence about it, and a log that
+        # cannot take the evidence, or takes too long, must not undo the
+        # turn. A turn being cancelled or a stopping session is not noted.
+        current = asyncio.current_task()
+        if self._stop.is_set() or (current is not None and current.cancelling()):
+            return
+        try:
+            async with asyncio.timeout(NOTE_TIMEOUT):
+                await self._memory.record_turn(self._space, session_id=self._session_id, turn_id=turn_id, mode=mode,
+                                               latency_ms=timing.record())
+        except (Exception, TimeoutError) as error:
+            logging.getLogger(__name__).warning("turn_timing.failed", extra={
+                "event": "turn_timing.failed", "session_id": self._session_id, "turn_id": turn_id,
+                "exception_type": type(error).__name__})

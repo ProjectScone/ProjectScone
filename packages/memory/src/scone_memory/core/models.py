@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 #: The same vocabulary as the Rust product's schema CHECK, so an episode
 #: means the same thing on both sides (shared spec, section 1).
@@ -389,6 +389,8 @@ class RecallItem(BaseModel):
     #: reader who takes the first result; one who reads or quotes them all
     #: needs to be told, and a passage carries no date that says so.
     superseded: bool = False
+    #: What people said about this passage, when recall was asked for lessons; left out otherwise.
+    lessons: Optional[dict[str, object]] = None
     #: The chunk's own UTF-8 byte span of its episode, half-open, so a
     #: caller can quote the source exactly and cite where it stops.
     start: int = 0
@@ -401,6 +403,14 @@ class RecallItem(BaseModel):
     #: holds it ("Engine.forget"), when the source is code and one holds
     #: all of it.
     declaration: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def omit_unasked_lessons(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # Recall not asked for lessons answers exactly as it did before they existed.
+        value: dict[str, object] = handler(self)
+        if self.lessons is None:
+            value.pop("lessons", None)
+        return value
 
 
 class RerankTrace(BaseModel):
@@ -450,6 +460,38 @@ class Narrowing(BaseModel):
     window_exhausted: bool
 
 
+class PhraseTrace(BaseModel):
+    """What required and excluded phrases did to one recall's passages."""
+
+    required: list[str] = Field(default_factory=list)
+    excluded: list[str] = Field(default_factory=list)
+    #: Fused candidates the phrases were checked against, before the limit.
+    checked: int = 0
+    dropped_required: int = 0
+    dropped_excluded: int = 0
+    #: True when fewer passages came back than the limit after phrases
+    #: dropped some: passages beyond the candidates checked were never read.
+    short: bool = False
+    why: str = ""
+
+
+class DiversityTrace(BaseModel):
+    """What diversity did to one recall's order."""
+
+    weight: float
+    #: Candidates the places were filled from, after any phrases.
+    candidates: int = 0
+    #: Candidates past the budget, left in relevance order after the rest.
+    not_diversified: int = 0
+    #: Where the likeness came from: "index" (stored vectors), "embedded"
+    #: (the candidates embedded once), or "unavailable" (neither; order kept).
+    vectors: str = "index"
+    #: Of the first ``limit`` candidates before the per-episode cap, how many
+    #: are not the ones relevance alone put there.
+    replaced: int = 0
+    why: str = ""
+
+
 class RecallResult(BaseModel):
     #: Id of the evidence event recorded for this recall, when an event
     #: log is attached; feedback refers to it.
@@ -476,9 +518,18 @@ class RecallResult(BaseModel):
     #: post-filtered lane's window was full when the filter removed
     #: candidates. None when nothing narrowed.
     narrowing: Optional[Narrowing] = None
-    #: How the lanes were fused: ``rank`` (reciprocal rank, the default) or
-    #: ``score`` (each lane's scores scaled to its own range, then added).
-    fusion: Literal["rank", "score"] = "rank"
+    #: How the lanes were fused: ``rank`` (reciprocal rank, the default),
+    #: ``score`` (each lane's scores scaled to its own range, then added) or
+    #: ``distribution`` (each lane's scores placed by its mean and spread).
+    fusion: Literal["rank", "score", "distribution"] = "rank"
+    #: The lanes that answered, of those asked for ("vector", "text"). A lane
+    #: not asked for did not run; one that failed is in ``degraded`` instead.
+    #: Empty on a result recall did not build.
+    lanes: list[str] = Field(default_factory=list)
+    #: With ``require`` or ``exclude``: what the phrases dropped. None otherwise.
+    phrases: Optional[PhraseTrace] = None
+    #: With ``diversity``: how the order was changed. None otherwise.
+    diversity: Optional[DiversityTrace] = None
     #: With ``graph_boost``: the entities the entity lane searched for.
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
@@ -490,6 +541,15 @@ class RecallResult(BaseModel):
     #: With stem prefixes on: the prefixes added to the text lane's query
     #: (``added``) and whether the store could take them (``applied``).
     prefixes: Optional[dict[str, object]] = None
+    #: With ``lessons``: what the lessons beside the items were read from, and whether the read was cut.
+    lessons_read: Optional[dict[str, object]] = None
+
+    @model_serializer(mode="wrap")
+    def omit_unasked_lessons_read(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.lessons_read is None:
+            value.pop("lessons_read", None)
+        return value
 
     @property
     def context_reduction(self) -> float:
@@ -524,7 +584,7 @@ class Added(BaseModel):
     #: landed on a boundary, what was split by size, whether a unit ran
     #: over the target and whether the unit bound bit. None on a receipt
     #: that stored nothing.
-    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
+    chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     structure: Optional[dict[str, object]] = None
     #: With heading context on: how many chunks were embedded with a line
     #: of context in front, how many bytes that added, and how many lines

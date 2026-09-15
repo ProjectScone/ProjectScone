@@ -172,6 +172,9 @@ class SyncMemoryEngine:
     def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         return self._run(self._engine.episodes(space, where, limit))
 
+    def scopes(self, space: str) -> dict[str, dict[str, int]]:
+        return self._run(self._engine.scopes(space))
+
     def source_page(self, space: str, *, before: Optional[int] = None,
                     limit: int = 25, kind: Optional[str] = None,
                     conditions: Optional[Mapping[str, object]] = None) -> SourcePage:

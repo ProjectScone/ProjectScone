@@ -29,6 +29,10 @@ from .context import ContextReceipt, MemoryContext
 from .evidence_answer import EvidenceAnswerError, EvidenceSelector, construct_evidence_answer, _ABSTENTION
 from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
+from .timing import TurnTiming
+
+#: Seconds a turn's timing may take to record before the turn goes on without it.
+NOTE_TIMEOUT = 2.0
 from .review_evidence import prepare_review_evidence
 from .tool_answer import tool_context_receipt, review_tool_answer
 
@@ -323,13 +327,22 @@ class TextConversation:
 
     async def _reply(self, messages, turns, evicted, on_text):
         token = _OWNER.set(self)
+        timing = TurnTiming()
+
+        async def seen(chunk):
+            # The first public text of the answer, provisional or final.
+            timing.mark("first_token")
+            if on_text is not None:
+                await on_text(chunk)
+
         try:
             async with asyncio.timeout(self._timeout) as budget:
                 turn_id = uuid4().hex
                 turns = [*turns[:-1], turn_id]
                 self._evicted_turns.update(evicted)
                 user_id = await self._record(turn_id, "user", messages[-1]["content"])
-                text, receipt, answer_review, evidence_answer = await self._execute(messages, on_text, budget.when())
+                text, receipt, answer_review, evidence_answer = await self._execute(
+                    messages, seen if on_text is not None else None, budget.when(), timing=timing)
                 complete = [*messages, {"role": "assistant", "content": text}]
                 complete_turns = [*turns, turn_id]
                 if _bytes(complete) > self._max_history:
@@ -351,6 +364,7 @@ class TextConversation:
                     tool_source_status=receipt.get('tool_retrieval', {}).get('source_status'))
                 self._history = complete
                 self._turns = complete_turns
+                timing.mark("done")
                 result = dict(turn_id=turn_id, text=text, provider_completion="unverified",
                             user_episode_id=user_id, assistant_episode_id=assistant_id,
                             memory_context=receipt,
@@ -361,17 +375,38 @@ class TextConversation:
                     result["answer_review"] = answer_review
                 if evidence_answer is not None:
                     result["evidence_answer"] = evidence_answer
-                return result
+            # The turn is done and in memory; its timing is noted outside the
+            # turn's deadline, so a slow log cannot undo a turn that stands.
+            await self._note_turn(turn_id, timing)
+            return result
         finally:
             _OWNER.reset(token)
 
-    async def _execute(self, messages, on_text, deadline=None):
+    async def _note_turn(self, turn_id, timing):
+        # The turn is done; its timing is evidence about it, and a log that
+        # cannot take the evidence, or takes too long, must not undo the
+        # turn. A turn being cancelled is not noted: the caller is done with it.
+        current = asyncio.current_task()
+        if self._closed or (current is not None and current.cancelling()):
+            return
+        try:
+            async with asyncio.timeout(NOTE_TIMEOUT):
+                await self._memory.record_turn(self._space, session_id=self._session_id, turn_id=turn_id, mode="text",
+                                               latency_ms=timing.record())
+        except (Exception, TimeoutError) as error:
+            logging.getLogger(__name__).warning("turn_timing.failed", extra={
+                "event": "turn_timing.failed", "session_id": self._session_id, "turn_id": turn_id,
+                "exception_type": type(error).__name__})
+
+    async def _execute(self, messages, on_text, deadline=None, timing=None):
         if self._tool_factory is not None:
             return await self._execute_tools(messages, on_text, deadline)
         # Only a windowed conversation has turns to admit; every other one calls
         # `prepare` exactly as before, so hosts that substitute it keep working.
         admitted = {'admit_turn_ids': frozenset(self._evicted_turns)} if self._evicted_turns else {}
         request, receipt = await self._context.prepare(messages, **admitted)
+        if timing is not None:
+            timing.mark("context")
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
         if self._evidence_selector is not None and receipt["status"] == "prepared":
