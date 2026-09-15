@@ -37,7 +37,9 @@ MAX_LINKS = 50
 #: The predicates a node's relations are read from, and the name of each in reverse.
 _REVERSED = {"defines": "defined_by", "imports": "imported_by", "calls": "called_by", "inherits": "inherited_by",
              "mixes_in": "mixed_into", "depends_on": "depended_on_by", "develops_with": "developed_with_by",
-             "references": "referenced_by"}
+             "references": "referenced_by", "imports_when_called": "imported_when_called_by",
+             "imports_for_types": "imported_for_types_by", "uses_type": "type_used_by", "runs_with": "run_with_by",
+             "requires_env": "required_by", "connects_to": "connected_to_by"}
 # A file: a last path segment carrying an extension. A path may hold spaces.
 _FILE = re.compile(r"[^:\n]*?[^/:\n]\.[A-Za-z0-9_+-]{1,16}")
 
@@ -294,7 +296,11 @@ _PAGE_CODE = """
     defines:'Defines', defined_by:'Defined by', inherits:'Inherits', inherited_by:'Inherited by',
     mixes_in:'Mixes in', mixed_into:'Mixed into', depends_on:'Depends on', depended_on_by:'Depended on by',
     develops_with:'Develops with', developed_with_by:'Developed with by', references:'References',
-    referenced_by:'Referenced by'};
+    referenced_by:'Referenced by', imports_when_called:'Imports when called',
+    imported_when_called_by:'Imported when called by', imports_for_types:'Imports for types',
+    imported_for_types_by:'Imported for types by', uses_type:'Uses type', type_used_by:'Type used by',
+    runs_with:'Runs with', run_with_by:'Run with by', requires_env:'Requires env', required_by:'Required by',
+    connects_to:'Connects to', connected_to_by:'Connected to by'};
   function choose(id){
     var node = byId[id];
     if (!node){ return; }

@@ -180,3 +180,25 @@ def test_a_hub_counts_no_link_through_what_the_graph_only_names():
         linked = re.findall(r"^- \[\[communities/[^\]]+\]\] \((\d+) links?\)$",
                             text.split("## Linked communities", 1)[1] if "## Linked communities" in text else "", re.M)
         assert sum(map(int, linked)) == community.boundary_links, (community.label, linked)
+
+
+def test_written_into_a_vault_the_communities_keep_their_tags_and_hubs_and_leave_the_graph_view_alone(tmp_path):
+    """Into a vault a person keeps, the notes go under ``scone/``: a graph
+    view file there would be read by nothing, and the vault's own
+    ``.obsidian/`` is not the writer's, so it is left out. The hubs carry the
+    signature, so a second write updates them instead of keeping them as the
+    person's."""
+    from scone_memory.entities.export import obsidian_files
+    from scone_memory.entities.vault import DEFAULT_FOLDER, signed, write_vault
+
+    projection = project_entities("alpha", ledger(), revision=1)
+    about = {"status": "current", "as_of": "2025-06-01T00:00:00.000Z"}
+    placed = obsidian_files(projection, about, root=f"{DEFAULT_FOLDER}/")
+    assert ".obsidian/graph.json" in vault(projection) and ".obsidian/graph.json" not in placed
+    receipt = write_vault(placed, tmp_path, projection=projection.digest)
+    assert not (tmp_path / DEFAULT_FOLDER / ".obsidian").exists() and not (tmp_path / ".obsidian").exists()
+    hubs = sorted((tmp_path / DEFAULT_FOLDER / "communities").iterdir())
+    assert len(hubs) == len(cached_analysis(projection).communities) and all(signed(hub) for hub in hubs)
+    assert all(tags(hub.read_text(encoding="utf-8")) for hub in hubs)
+    again = write_vault(placed, tmp_path, projection=projection.digest)
+    assert again.kept_theirs == () and again.unchanged == receipt.written

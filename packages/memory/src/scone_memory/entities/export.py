@@ -526,8 +526,8 @@ def obsidian_files(projection: EntityProjection, about: Mapping[str, object], *,
             f"- {literal(attribute.predicate)}: {literal(attribute.value)} ({cited(attribute.fact_ids)})")
     files: dict[str, str] = {}
     # A note carries a signature that says whose it is and nothing that
-    # changes when the rest of the graph does; the projection digest is
-    # the index's.
+    # changes when the rest of the graph does, beyond its community's tag
+    # and hub; the projection digest is the index's.
     signature = "scone_note: 1"
     for entity in projection.entities:
         home = community_of.get(entity.entity_id)
