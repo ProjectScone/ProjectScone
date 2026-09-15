@@ -495,10 +495,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="insist on one route instead of letting the rule choose; synthesize is never chosen "
                         "by the rule and needs a model (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
     p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with, or a synthesis reads")
-    p.add_argument("--synthesis-mode", choices=("evidence", "refine", "accumulate"),
+    p.add_argument("--synthesis-mode", choices=("evidence", "refine", "accumulate", "facts"),
                    help="with --route synthesize: notes folded into a summary (evidence, the default), one answer "
-                        "refined round by round (refine), or one answer per passage joined (accumulate); every "
-                        "mode shows only sentences with a quote found in a passage")
+                        "refined round by round (refine), one answer per passage joined (accumulate), or quoted "
+                        "facts taken from each passage and an answer written from them (facts); every mode shows "
+                        "only sentences with a quote found in a passage")
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
     p.add_argument("--whole", action="store_true",
                    help="show each passage whole instead of its first 200 characters")

@@ -44,7 +44,7 @@ N3 = ("A party is booked in March.", "chunk:3", "booked for the twelfth of March
 
 
 async def test_the_modes_are_named():
-    assert MODES == ("evidence", "refine", "accumulate")
+    assert MODES == ("evidence", "refine", "accumulate", "facts")
 
 
 async def test_an_unknown_mode_is_refused_before_any_call():
