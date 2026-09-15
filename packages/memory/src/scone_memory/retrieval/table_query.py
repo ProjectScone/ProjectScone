@@ -204,14 +204,29 @@ def tables_from(provenance: "DocumentProvenance") -> tuple[Table, ...]:
     #: Per table, the column position a header name was first seen at, so
     #: two headers spelt the same at different positions stay two columns.
     positions: dict[str, dict[str, int]] = {}
+    #: Per table whose header row was read from its shape (a PDF page's),
+    #: the row that header sits in: a row above it is the table's title,
+    #: not a row of it. An HTML reader's ``th`` on a row label says nothing
+    #: of the kind, so only such pages' tables are read this way.
+    first_header: dict[str, int] = {}
+    for segment in provenance.segments:
+        if segment.metadata.get('header_basis') != 'pdf_first_row':
+            continue
+        for cell in segment.table_cells:
+            if cell.is_header:
+                first_header[cell.table_locator] = min(first_header.get(cell.table_locator, cell.row), cell.row)
     offset = 0
     for segment in provenance.segments:
         role = segment.metadata.get('table_role')
         declared = _declared_columns(segment.metadata.get('table_columns'))
         for cell in segment.table_cells:
+            if cell.row < first_header.get(cell.table_locator, 0):
+                continue  # a title across the table, above its header
             draft = drafts.get(cell.table_locator)
             if draft is None:
                 basis = segment.metadata.get('header_basis') or ('delimited_columns' if declared else 'cell_headers')
+                if basis == 'pdf_first_row' and cell.table_locator not in first_header:
+                    basis = 'cell_headers'  # a page's other table, whose shape gave no header
                 draft = drafts[cell.table_locator] = _Draft(segment.metadata.get('table_name') or cell.table_locator,
                                                             basis, [], {}, set())
             column_headers = [h.text for h in cell.headers if h.association in ('column', 'explicit')]
@@ -231,9 +246,14 @@ def tables_from(provenance: "DocumentProvenance") -> tuple[Table, ...]:
                 name = f'column {cell.column + 1}'
             if name not in draft.columns:
                 draft.columns.append(name)
+            positions.setdefault(cell.table_locator, {}).setdefault(name, cell.column)
             draft.rows.setdefault(cell.row, {})[name] = QuotedCell(cell.table_locator, cell.row, name, cell.text,
                                                                    offset + cell.start, offset + cell.end, cell.locator)
         offset += len(segment.text.encode('utf-8')) + 2
+    # Columns in the table's own order, whichever cell the text reached
+    # first: a wrapped word under one column can come before the row above.
+    for locator, draft in drafts.items():
+        draft.columns.sort(key=lambda name: positions[locator].get(name, 0))
     return tuple(Table(locator, draft.name, tuple(draft.columns),
                        tuple(TableRow(number, cells) for number, cells in sorted(draft.rows.items())),
                        len(draft.totals), draft.basis)
