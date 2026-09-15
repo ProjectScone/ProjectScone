@@ -15,14 +15,15 @@ from typing import AsyncIterator, Optional, Union
 from ..realtime.audio import AudioChunk
 from ..realtime.keypad import Keypress
 from .dialects import Dialect
-from .stream import CallEnded, CallStarted, Dtmf, MediaStream
+from .stream import DIGITS, CallEnded, CallStarted, Dtmf, MediaStream
 
 #: Keypresses kept for the session to read. A caller leaning on a key is
 #: not a reason to grow without bound.
 MAX_DIGITS = 64
-#: What reaches the session from the keypad: nothing (the default), or the
-#: keys the carrier reports in its own messages.
-KEYPAD = ("off", "events")
+#: What reaches the session from the keypad: nothing (the default), the
+#: keys the carrier reports in its own messages, the keys heard as tones in
+#: the caller's audio, or both, with a press heard both ways reported once.
+KEYPAD = DIGITS
 
 
 class CarrierTransport:
@@ -37,7 +38,8 @@ class CarrierTransport:
         if keypad not in KEYPAD:
             raise ValueError(f"keypad must be one of {KEYPAD}")
         self._socket = socket
-        self._stream = MediaStream(dialect, rate=rate)
+        # Off still reads the carrier's digits, for ``digits``; it only keeps them from the session.
+        self._stream = MediaStream(dialect, rate=rate, digits="events" if keypad == "off" else keypad)
         self.rate = self._stream.rate
         self.keypad = keypad
         #: Keypresses heard so far, in order, up to MAX_DIGITS.
@@ -46,6 +48,11 @@ class CarrierTransport:
         self.dropped_digits = 0
         self._ended = False
         self._closed = False
+
+    @property
+    def stream(self) -> MediaStream:
+        """The call's reading of the carrier, with its counts of refused and duplicate digits."""
+        return self._stream
 
     @property
     def stream_id(self) -> Optional[str]:

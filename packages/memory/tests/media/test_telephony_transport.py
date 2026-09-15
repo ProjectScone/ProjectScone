@@ -158,3 +158,22 @@ async def test_the_digits_kept_for_reading_say_when_the_bound_bit():
     [item async for item in transport.receive()]
     assert len(transport.digits) == module.MAX_DIGITS
     assert transport.dropped_digits == 3, "a caller leaning on a key is counted past the bound, not forgotten"
+
+
+async def test_a_key_heard_in_the_audio_reaches_the_session_as_an_inband_keypress():
+    import math
+
+    tone = pcm.to_bytes(6000 * math.sin(2 * math.pi * 852 * n / 8000) + 6000 * math.sin(2 * math.pi * 1336 * n / 8000)
+                        for n in range(800))  # "8", 100 ms
+    quiet = b"\x00\x00" * 480
+
+    def chunked(data):
+        return [json.dumps({"event": "media", "media": {"payload": base64.b64encode(g711.ulaw_encode(data[at:at + 320])).decode()}})
+                for at in range(0, len(data), 320)]
+
+    socket = FakeSocket([start(), *chunked(quiet + tone + quiet), dtmf("8"),
+                         json.dumps({"event": "stop", "streamSid": "MZ1"})])
+    transport = CarrierTransport(socket, DIALECTS["twilio"], rate=16000, keypad="inband")
+    presses = [item async for item in transport.receive() if isinstance(item, Keypress)]
+    assert [(p.key, p.source) for p in presses] == [("8", "inband")], "the carrier's own report is not taken in-band only"
+    assert presses[0].tone_ms is not None and presses[0].offset_ms == pytest.approx(60, abs=13)
