@@ -94,3 +94,40 @@ async def test_a_family_most_passages_hold_still_yields_to_the_exact_word(store)
     alone = dict(await store.search_text("s", "billing", 5, TextFilter()))
     assert preferred[exact] == pytest.approx(alone[exact], rel=1e-9)
     assert max(preferred, key=preferred.__getitem__) == exact
+
+
+async def test_sqlite_reads_each_family_once_and_scans_the_index_first(tmp_path):
+    """Looked up per matching row, a prefix is expanded again for every row:
+    seconds a query on 45,000 chunks. The plan scans the index once for the
+    expression and twice per query word a family holds (the family with the
+    word, and the word), and joins the rest by key."""
+    documents = SqliteDocumentStore(str(tmp_path / "plan.db"))
+    try:
+        await put(documents, [EXACT, RELATIVE, "Travellers travelled.", "The traveller left.",
+                              "We waited a while.", "Whilst they slept.", *NOISE])
+        executed: list[str] = []
+        documents.conn.set_trace_callback(executed.append)
+        # Three families: with three, SQLite's own choice put the chunks first
+        # and looked the whole expression up again for each of them.
+        await documents.search_terms("s", "billing while travelling", 5, TextFilter(), prefixes=("bill", "whil", "travell"),
+                                     exact_forms=True)
+        documents.conn.set_trace_callback(None)
+        [search] = [statement for statement in executed if "bm25(" in statement and "LIMIT" in statement]
+        plan = [row[3] for row in documents.conn.execute("EXPLAIN QUERY PLAN " + search)]
+        scans = [step for step in plan if "chunk_lexical_fts" in step]
+        assert len(scans) == 7 and all("INDEX 0:M" in step and "=M" not in step for step in scans), plan
+        assert plan.index(scans[-1]) < min(plan.index(step) for step in plan if step.startswith("SEARCH c ")), plan
+    finally:
+        await documents.close()
+
+
+async def test_sqlite_adds_nothing_for_a_family_whose_only_member_is_the_query_word(tmp_path):
+    from scone_memory.backends.sqlite_lexical import exact_form_rank
+
+    documents = SqliteDocumentStore(str(tmp_path / "only.db"))
+    try:
+        await put(documents, [EXACT, *NOISE])
+        await documents.search_text("s", "billing", 5, TextFilter())
+        assert exact_form_rank(documents.conn, "billing", ("bill",)) == ("", "bm25(chunk_lexical_fts)", "", [])
+    finally:
+        await documents.close()

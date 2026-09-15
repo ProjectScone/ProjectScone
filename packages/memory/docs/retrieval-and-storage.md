@@ -2618,11 +2618,12 @@ would; one holding "billing" and "bills" scores their joint count at
 "billing"'s idf, not the word and then the family again; one holding only
 relatives scores as it did. The extra credit is bounded by the gap
 between the two idfs. Both stores that take prefixes apply it: the
-in-memory scorer directly, and SQLite by reading the family phrase's own
-`bm25()` beside the whole expression and moving that part to the word's
-idf, computed as FTS5 computes it (a count of the rows holding each
-phrase, per query). It does nothing without `SCONE_LEXICAL_STEMS`, and
-the result's `prefixes.exact_forms` says whether it ran. Off by default.
+in-memory scorer directly, and SQLite by moving the family phrase's part
+of `bm25()` to the word's idf, computed as FTS5 computes it. That part is
+read only for rows holding the word (the `bm25()` of the family AND the
+word, less that of the word), two small index reads per query word a
+family holds. It does nothing without `SCONE_LEXICAL_STEMS`, and the
+result's `prefixes.exact_forms` says whether it ran. Off by default.
 
 ### Synonyms the caller wrote down
 
