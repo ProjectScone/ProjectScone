@@ -40,6 +40,12 @@ class Record:
     #: paper, manual, qa, resume); implies ``chunking="structure"``. Kept
     #: on the episode's metadata under ``chunking_profile``.
     chunking_profile: Optional[str] = None
+    #: The similarity at which this record's semantic chunks are joined
+    #: again (``semantic_chunks.semantic_cut``); implies
+    #: ``chunking="semantic"`` and wins over the engine's threshold. None
+    #: keeps the engine's. Kept on the episode's metadata under
+    #: ``semantic_merge_threshold``.
+    semantic_merge_threshold: Optional[float] = None
     #: When this memory is to be forgotten: an RFC 3339 time, a date, or a
     #: duration from the engine's clock (``core.forget_after``). Kept, as the
     #: resolved instant, on the episode's metadata under ``forget_after``.
@@ -48,7 +54,7 @@ class Record:
     @classmethod
     def from_dict(cls, data: Mapping) -> "Record":
         known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata", "dedup_key", "content_hash", "chunking",
-                                      "chunking_profile", "forget_after") if k in data}
+                                      "chunking_profile", "semantic_merge_threshold", "forget_after") if k in data}
         if "content" not in known:
             raise InvalidInput("a record needs content")
         return cls(**known)

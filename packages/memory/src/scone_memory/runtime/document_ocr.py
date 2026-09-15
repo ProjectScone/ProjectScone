@@ -28,8 +28,16 @@ def build_document_ocr(settings: Settings) -> DocumentOcr | None:
             engine_for(language)
     except InvalidInput as error:
         raise ValueError(str(error)) from error
+    layout = None
+    if settings.document_layout_executable is not None:
+        from ..ocr.layout_json import JsonLayoutEngine
+
+        try:
+            layout = JsonLayoutEngine(settings.document_layout_executable)
+        except InvalidInput as error:
+            raise ValueError(f'SCONE_DOCUMENT_LAYOUT_EXECUTABLE: {error}') from error
     configured = DocumentOcr(engine, dpi=settings.document_ocr_dpi, languages=settings.document_ocr_languages,
-                             engine_for=engine_for if settings.document_ocr_languages else None)
+                             engine_for=engine_for if settings.document_ocr_languages else None, layout=layout)
     if not configured.available():
         raise ValueError('document OCR requires the installed scone-memory[pdf-ocr] extra')
     return configured

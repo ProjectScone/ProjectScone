@@ -698,8 +698,14 @@ class Added(BaseModel):
     #: in tokens (``chunk_tokens``) carries its own counts here too, with
     #: ``measure: "tokens"``: sentences cut inside because one alone was
     #: over the target, cuts inside a word, chunks that overlap the one
-    #: before and chunks the count measured over. None on a receipt that
-    #: stored nothing.
+    #: before and chunks the count measured over. A semantic cut under a
+    #: ``semantic_merge_threshold`` (the record's own, or the engine's)
+    #: carries what its second pass did: ``merge_threshold``, ``groups``
+    #: (chunks the first pass made), ``merges``, and each join that did not
+    #: happen counted once, as ``stopped_by_similarity`` or
+    #: ``stopped_by_size`` (alike enough and too long together, or beside a
+    #: sentence the size bound cut: the bound bit), so the three sum to
+    #: ``groups - 1``. None on a receipt that stored nothing.
     chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     structure: Optional[dict[str, object]] = None
     #: With heading context on: how many chunks were embedded with a line
