@@ -890,7 +890,10 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     from ..ingestion.ignore import Ignore, walk_files
 
     rules = None if args.no_ignore else Ignore.load(root)
-    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES, *DOC_SUFFIXES)
+    from ..ingestion.code_tree import TREE_SUFFIXES
+
+    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES, *TREE_SUFFIXES,
+                                                                *DOC_SUFFIXES)
                         or is_manifest(path.relative_to(root).as_posix()) or is_schema(path.name), ignore=rules)
     found = list(walked.files)
     # Resolution belongs here, because this is what knows which files
