@@ -1115,20 +1115,33 @@ MemoryEngine(store, index, embedder, chunk_tokens=512, chunk_overlap_tokens=64) 
   (`estimate-v1`, no model: see "Keeping that context inside the embedder's
   window" below). The count of an empty text -- the start and end markers
   a model adds -- is paid once a chunk, so a 512-token chunk fits a
-  512-token window as that count sees it. The estimate errs high against
-  BGE on this project's documents; it is not a count of the reference's
-  tokens (tiktoken's `cl100k_base`), and on the conversations below a
-  chunk it held to 512 had 330 of those at the median and 640 at most.
-- **The bound says when it did not hold.** The chunk is measured again
-  whole, and `over_target` counts the chunks a tokenizer counted over the
-  target (a tokenizer need not count a chunk as the sum of its
-  sentences); `largest` gives the largest count.
+  512-token window as that count sees it. The estimate is meant to err
+  high, and it is not a bound on any model's count: cutting every tenth
+  LongMemEval-S item's 2,443 sessions at 512 by the estimate, BGE-small's
+  own tokenizer counted 8 of the 16,301 chunks over 512, the largest 534
+  (Portuguese prose); on the first 200 LongMemEval oracle items at 256,
+  1 of 9,590, at 261. Nor is it a count of the reference's tokens
+  (tiktoken's `cl100k_base`): on the conversations below a chunk it held
+  to 512 had 330 of those at the median and 640 at most. An embedder
+  with a window and no tokenizer should be given a target below it.
+- **The bound says when it did not hold -- as its count sees it.** The
+  chunk is measured again whole, and `over_target` counts the chunks the
+  count measured over the target (a tokenizer need not count a chunk as
+  the sum of its sentences); `largest` gives the largest count. Under
+  `estimate-v1` both are the estimate measuring what it packed, the sum
+  of pieces it already held to the target, so `over_target` can be above
+  0 there only beside a hard cut, and says nothing about a model's window.
 - **An overlap repeats whole trailing sentences** of the chunk before, as
   many as fit in `chunk_overlap_tokens`, and gives way from its front when
   it and the next sentence do not fit. With it on, stored spans of
   neighbouring chunks overlap; `overlapped` counts the chunks that start
   with repeated text. Off (0) by default, and refused without
-  `chunk_tokens` or at or above it.
+  `chunk_tokens` or at or above it. It works with table context
+  (`table_context_embeddings`), which embeds each overlapping chunk with
+  the headers it lacks: the spans it checks must be in order -- each
+  starting after the one before starts and ending after it ends -- not
+  disjoint, so a space stored with an overlap can be rebuilt or recovered
+  with table context turned on later.
 - **Only the length cut.** Code, structure, semantic and unit cuts keep the
   character target, and a record's receipt still says `chunking: length`,
   with the token counts under `structure` (`measure: tokens`).
@@ -1183,7 +1196,9 @@ Chunk sizes over the same 2,355 sessions:
 | 1,024 tokens | 8,745 | 3.7 | 3,201 | 666 | 1,325 | 18 |
 | reference, 512 | 11,946 | 5.1 | 2,233 | 482 | | |
 
-No word was hard-cut and no chunk was counted over its target.
+No word was hard-cut, and the estimate counted no chunk over its target
+(which, as above, it could only beside a hard cut: this is not a check
+against a model's window).
 
 What it says: at 512 estimated tokens our engine is ahead of the
 reference at its best at k=5 (R@5 0.92 vs 0.88, all-sessions@5 0.78 vs
