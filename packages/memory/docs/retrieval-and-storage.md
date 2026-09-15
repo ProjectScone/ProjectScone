@@ -506,9 +506,9 @@ unless the fourth route is asked for by name:
    the route is refused. `scone answer --route synthesize --limit 30`.
 
    That is the **evidence** mode, the default. `synthesis_mode` picks one
-   of two more, the reference framework's Refine and Accumulate, and both
-   keep the rule that a sentence is shown only with a quote the framework
-   found in a passage:
+   of three more -- the reference framework's Refine and Accumulate, and
+   `facts` -- and all keep the rule that a sentence is shown only with a
+   quote the framework found in a passage:
 
    - **refine** threads one answer through the rounds. The first round
      that leaves a note is the answer; each later round is one call that
@@ -539,15 +539,46 @@ unless the fourth route is asked for by name:
      each call kept, in passage order, with no fold; a sentence must quote
      the passage its own call held. It spends the most calls on the
      passages it reads.
+   - **facts** extracts first and writes second. Each passage is one call
+     that asks for the atomic facts the passage states that bear on the
+     question, each a short sentence with a quote from that passage. The
+     passage is named by the framework, not the model, so a fact cannot
+     cite the wrong one; a fact whose quote is not in the passage its call
+     held is dropped and counted under `notes.dropped_unquoted` (one with no
+     quote under `notes.dropped_malformed`). When any fact survives, one
+     more call writes the answer from the checked facts alone -- each fact
+     with its quote, never the passages -- and every sentence must name
+     the facts it uses (`f1`, `f2`, ...). A sentence that names none of the
+     facts it was given is dropped and counted, and a shown sentence
+     carries the quotes of the facts it names; a sentence whose fact ids
+     are not a list of strings is dropped as malformed. That call holds at
+     most one round's bytes of facts, in the order they were found; the
+     facts past it are not sent, and when the answer is written they are
+     counted and the answer is `truncated`. An answer that cannot be read
+     or fails, or has no sentence left, or a first fact too large for the
+     round, leaves every fact shown as it is, with a reason that says which
+     (for a reply with no sentence left: it held none, none cited a known
+     fact, or none could be read). The answer is then `partial`, and the
+     answer's bound makes it `truncated` only when an answer was written,
+     since otherwise every fact is shown. `detail.facts` gives
+     `extracted` (facts kept with a checked quote), `used` (distinct facts
+     the shown sentences of a written answer name), `unsent` (facts the
+     written answer's call could not hold), `sentences_dropped_uncited` and
+     `sentences_dropped_malformed`; `used` and `unsent` are 0 when the
+     facts are shown unmerged, and `folded` says the answer was written.
+     In the other modes `detail.facts` is `null`; `detail.fold_dropped_uncited`
+     and `detail.fold_dropped_malformed` count `evidence`'s fold sentences
+     the same way.
 
    In every mode the calls are bounded by the rounds bound (six by
-   default; `evidence` may add its one fold), and passages past it are
-   left unread, counted, and the answer is `partial`. A `partial` answer's
+   default; `evidence` may add its one fold and `facts` its one answer),
+   and passages past it are left unread, counted, and the answer is
+   `partial`. A `partial` answer's
    text ends with one line, `partial:` and the reasons, so `scone answer`
    without `--json` says what was left unread or cut. `detail` names the
    `mode`, the `model_calls`, and under `passages` how many were read and
    how many the shown sentences `cited`. A mode on any other route is
-   refused. `scone answer --route synthesize --synthesis-mode refine`,
+   refused. `scone answer --route synthesize --synthesis-mode facts`,
    `GET /v1/answer?route=synthesize&synthesis_mode=accumulate`,
    `answer_question(..., route="synthesize", synthesis_mode="refine")`.
 
@@ -557,8 +588,10 @@ unless the fourth route is asked for by name:
    its passages hold. Twelve passages of about 600 bytes fit one round:
    `refine` makes one call, the same call `evidence` makes, and has nothing
    to refine; `accumulate` reads six of the twelve, one call each, and is
-   `partial`. `refine` refines only when the passages read overflow a
-   round, and `accumulate` reads them all only when `limit` is six or less.
+   `partial`; `facts` reads the same six, one call each, and writes its
+   answer from what they gave, seven calls in all. `refine` refines only when the passages
+   read overflow a round, and `accumulate` and `facts` read them all only
+   when `limit` is six or less.
    A measurement on eight multi-session questions with a local 8B model
    set rounds of 6,000 bytes and a bound of 16, limits the route does not
    use, so that its twelve passages (6.6 to 7.2 kB) took two rounds: no
@@ -566,6 +599,24 @@ unless the fourth route is asked for by name:
    returned the answer so far with nothing new
    ([results](../benchmarks/synthesis-modes-v1.results.md)). At the route's
    limits those passages fit one round, and `refine` makes no second.
+   `facts` was measured at the modes run's limits too (6,000-byte rounds,
+   a bound of 16 and a 600 s deadline), not at the route's. At the route's
+   limits it reads six of the twelve passages and is `partial`, as above,
+   and that was not measured. At the measured limits one item's `facts`
+   synthesis took a median of 36 to 124 s over three runs on a shared box,
+   against the route's 120 s deadline for a whole synthesis. Three runs on
+   those eight questions (with the passages today's retrieval returns)
+   gave `facts` a text on 8 of 8 against `evidence`'s 7. `facts` wrote an
+   answer on 7, the same as `evidence`, and `evidence`'s missing item was
+   a call that ran to the deadline. `facts` spent 104 calls to
+   `evidence`'s 16. The judge scored its texts less faithful, 0.762
+   against 0.905, but each mean leaves out a different item. On the six
+   items judged on both sides it is 0.722 against 0.889, and the whole
+   gap is one item, `c18a7dc8`, where no evidence session was among the
+   passages: `evidence`'s off-topic sentences scored 1.0 and `facts`'s
+   answer 0.0. The sums its answer wrote on another item cost it 0.167
+   there, and a third item gave that back
+   ([results](../benchmarks/synthesis-facts-v1.results.md)).
 
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
