@@ -10,6 +10,7 @@ from ...core.errors import InvalidInput
 from ...ocr.process import python_worker, run_bounded
 from ..extraction_checkpoint import CheckpointedDocumentParser, CheckpointedPdfParser, ExtractionCheckpoints, checkpoint_dispatch_allowed
 from ..pdf import PdfLimits, PdfParser, PypdfParser, validate_pdf
+from ..text_layer import unreadable
 from .types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument, validate_document
 
 
@@ -22,6 +23,16 @@ def extension(filename: str) -> str:
             or '\x00' in filename):
         raise InvalidInput('document requires a bounded filename with its format extension')
     return PurePosixPath(filename).suffix.lower()
+
+
+def _section(titles: tuple[str, ...], limit: int = 4_096) -> str:
+    """The titles as one metadata value, dropping the outermost until it fits: the innermost
+    section is the one a passage is about."""
+    kept = list(titles)
+    while len(kept) > 1 and len(' > '.join(kept).encode('utf-8')) + (len('… > '.encode('utf-8')) if len(kept) < len(titles) else 0) > limit:
+        kept.pop(0)
+    joined = ' > '.join(kept)
+    return joined if len(kept) == len(titles) else '… > ' + joined
 
 
 class BuiltinDocumentParser:
@@ -61,19 +72,25 @@ class BuiltinDocumentParser:
                 pdf = await self._pdf.parse(data, pdf_limits)
             validate_pdf(pdf, pdf_limits)
             encoded = pdf.text.encode()
+            # Kept, never dropped: named, so a reader knows the page's text is not the page.
+            unreadable_pages = [p.number for p in pdf.pages if unreadable(encoded[p.start:p.end].decode())]
             parsed = ParsedDocument(format='pdf', parser=pdf.parser, segments=tuple(
                 DocumentSegment(text=encoded[p.start:p.end].decode(), locator=f'page:{p.number}',
                     metadata={'page': str(p.number), 'extraction': p.extraction,
+                              **({'unreadable': 'true'} if p.number in unreadable_pages else {}),
                               'width_points': str(p.width_points), 'height_points': str(p.height_points),
                               'rotation': str(p.rotation),
                               **({'ocr_reading_order': p.reading_order.model_dump_json()} if p.reading_order else {}),
-                              **({'ocr_engine': p.ocr_engine} if p.ocr_engine else {})},
+                              **({'ocr_engine': p.ocr_engine} if p.ocr_engine else {}),
+                              **({'section': _section(p.section)} if p.section else {})},
                     regions=tuple(DocumentTextRegion(text=r.text, box=r.box, score=r.score,
-                        block=r.block, line=r.line, start=r.start - p.start, end=r.end - p.start,
+                        block=r.block, paragraph=r.paragraph, line=r.line, start=r.start - p.start, end=r.end - p.start,
                         provider_index=r.provider_index, reading_column=r.reading_column,
                         coordinate_space=p.region_geometry) for r in p.regions))
                 for p in pdf.pages if not p.empty),
-                metadata={'empty_pages': ','.join(str(p.number) for p in pdf.pages if p.empty)})
+                metadata={'empty_pages': ','.join(str(p.number) for p in pdf.pages if p.empty),
+                          **({'unreadable_pages': ','.join(map(str, unreadable_pages))} if unreadable_pages else {}),
+                          **({'outline': pdf.outline} if pdf.outline != 'none' else {})})
         else:
             raw = await run_bounded(python_worker('scone_memory.ingestion.formats.worker',
                 filename, limits.model_dump_json()), data, timeout=limits.timeout_seconds,

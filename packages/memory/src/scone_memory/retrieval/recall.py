@@ -14,7 +14,7 @@ from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING
 
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
-from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
+from ..core.models import DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
@@ -32,6 +32,7 @@ from .entity_lane import ENTITY_WEIGHT, entity_lane
 CONTEXT_WEIGHT = 2.0
 from .episode_scope import episode_fits
 from .filters import Filter, parse_filter
+from .phrases import Phrases, checked_phrases
 if TYPE_CHECKING:
     from .synonyms import Synonyms
     from ..entities.project import EntityProjection
@@ -100,6 +101,94 @@ def _ms(since: float) -> float:
     return round((time.perf_counter() - since) * 1000, 3)
 
 
+def _finished(trace: "PhraseTrace | None", returned: int, limit: int, *, window_full: bool) -> "PhraseTrace | None":
+    """``trace`` told whether the answer came back short after the phrases dropped passages. It is
+    short only when a lane filled its window: otherwise every passage was a candidate, and nothing
+    beyond the window went unchecked."""
+    if trace is None:
+        return None
+    dropped = trace.dropped_required + trace.dropped_excluded
+    short = returned < limit and dropped > 0 and window_full
+    why = (f"{dropped} of the {trace.checked} candidates checked were dropped by the phrases"
+           + (f"; {returned} of {limit} came back, and passages beyond the candidate window were not checked"
+              if short else ""))
+    return trace.model_copy(update={"short": short, "why": why})
+
+
+#: Candidates diversity fills places from; the rest keep relevance order after them.
+MAX_DIVERSIFIED = 200
+
+
+async def _diversified(runtime: "RecallRuntime", space: str, items: list, chunks: dict, weight: float, limit: int,
+                       degraded: list[str]) -> tuple[list, DiversityTrace]:
+    """``items`` with their first places filled by maximal marginal relevance.
+
+    Each place goes to the candidate with the highest relevance (its fused
+    score over the best one's) times ``1 - weight``, less ``weight`` times
+    its greatest cosine to a passage already placed. Only the first
+    ``2 * limit`` places are filled this way, enough to survive the
+    per-episode cap; the rest keep their relevance order."""
+    considered, rest = items[:MAX_DIVERSIFIED], items[MAX_DIVERSIFIED:]
+    ids = [item.chunk_id for item in considered]
+    vectors: dict[int, list[float]] = {}
+    source = "index"
+    try:
+        reader = getattr(runtime.vectors, "vectors_of", None)
+        if callable(reader):
+            vectors = await reader(space, ids)
+        if len(vectors) < len(ids):
+            # One source for every candidate, so each likeness is on one scale.
+            embedded = await runtime.embedder.embed([chunks[cid].text for cid in ids]) if ids else []
+            vectors, source = dict(zip(ids, embedded)), "embedded"
+    except Exception as error:  # noqa: BLE001 - the order is kept and the reason said
+        degraded.append(f"diversity: {type(error).__name__}: {error}")
+        return items, DiversityTrace(weight=weight, candidates=len(considered), not_diversified=len(rest),
+                                     vectors="unavailable", why="no vectors to compare, so relevance order was kept")
+    unit = {cid: _unit(vector) for cid, vector in vectors.items()}
+    top = max((item.score for item in considered), default=0.0) or 1.0
+    remaining = list(considered)
+    placed: list = []
+    while remaining and len(placed) < 2 * limit:
+        def gain(item) -> float:
+            like = max((_dot(unit[item.chunk_id], unit[other.chunk_id]) for other in placed), default=0.0)
+            return (1 - weight) * item.score / top - weight * like
+        best = max(remaining, key=gain)  # the first of equals, so ties keep relevance order
+        placed.append(best)
+        remaining.remove(best)
+    ordered = placed + remaining + rest
+    replaced = len({item.chunk_id for item in ordered[:limit]} - {item.chunk_id for item in items[:limit]})
+    why = f"{replaced} of the first {limit} places went to passages less like those above them"
+    if rest:
+        why += f"; {len(rest)} candidates past the budget of {MAX_DIVERSIFIED} kept relevance order"
+    return ordered, DiversityTrace(weight=weight, candidates=len(considered), not_diversified=len(rest),
+                                   vectors=source, replaced=replaced, why=why)
+
+
+def _unit(vector: Sequence[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vector))
+    return [x / norm for x in vector] if norm else [0.0 for _ in vector]
+
+
+def _dot(left: Sequence[float], right: Sequence[float]) -> float:
+    return sum(a * b for a, b in zip(left, right))
+
+
+#: The lanes a recall may be asked for, in the order they are named.
+LANES: tuple[str, ...] = ("vector", "text")
+
+
+def asked_lanes(lanes: object) -> tuple[str, ...]:
+    """``lanes`` as the known lanes asked for, in their own order; refused when empty or unknown."""
+    if not isinstance(lanes, (list, tuple)):
+        raise InvalidInput(f"lanes is a list naming {' and '.join(LANES)}, not {lanes!r}")
+    unknown = sorted({str(lane) for lane in lanes} - set(LANES))
+    if unknown:
+        raise InvalidInput(f"recall has no lane named {', '.join(unknown)}; its lanes are {', '.join(LANES)}")
+    if not lanes:
+        raise InvalidInput(f"ask for at least one lane: {', '.join(LANES)}")
+    return tuple(lane for lane in LANES if lane in lanes)
+
+
 async def recall(
     runtime: RecallRuntime,
     space: str,
@@ -121,6 +210,10 @@ async def recall(
     entity_projection: "EntityProjection | None" = None,
     entity_unavailable: str | None = None,
     entity_notes: Sequence[str] = (),
+    lanes: Sequence[str] = LANES,
+    require: Sequence[str] = (),
+    exclude: Sequence[str] = (),
+    diversity: Optional[float] = None,
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -166,6 +259,12 @@ async def recall(
     if type(rerank) is not bool:
         raise InvalidInput("rerank must be a boolean")
     active_reranker = runtime.reranker if rerank else None
+    if diversity is not None:
+        if isinstance(diversity, bool) or not isinstance(diversity, (int, float)) or not 0 <= diversity <= 1:
+            raise InvalidInput(f"diversity is a weight from 0 to 1, not {diversity!r}")
+        if active_reranker is not None:
+            raise InvalidInput("diversity and a reranker both set the order, and the reranker would undo the "
+                               "diversity; ask for rerank=false with it")
     if active_reranker is not None:
         validate_rerank_options(runtime.rerank_limit, runtime.rerank_max_bytes, runtime.rerank_timeout)
     boundary = normalise_time(as_of) if as_of else None
@@ -219,10 +318,20 @@ async def recall(
                    "conditions_in_store": None if narrow_by is None else in_store},
     }
 
+    asked = asked_lanes(lanes)
+    # The lanes asked for that failed, recorded where they fail: degraded
+    # also carries notes on lanes that ran (a lexical index behind, the
+    # context lane unkept), which are not failures.
+    failed: set[str] = set()
+    required, excluded = checked_phrases(require, exclude)
     vector_lane: list[tuple[int, float]] = []
     width: int | None = None
-    if runtime.vector_block is not None:
+    if "vector" not in asked:
+        # Not asked for, so not run: no embedding call, and nothing degraded.
+        pass
+    elif runtime.vector_block is not None:
         degraded.append(f"vectors: {runtime.vector_block}")
+        failed.add("vector")
     else:
         try:
             t0 = time.perf_counter()
@@ -238,6 +347,7 @@ async def recall(
             latency["vector"] = _ms(t0)
         except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
             degraded.append(f"vectors: {type(e).__name__}: {e}")
+            failed.add("vector")
 
     # A floor is a number on one embedder's scale. The query it is about
     # to judge says what scale this really is, whatever the embedder said
@@ -252,24 +362,26 @@ async def recall(
         vector_lane = vector_lane[:vector_depth]
 
     text_lane: list[tuple[int, float]] = []
-    try:
-        t0 = time.perf_counter()
-        text_filter = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
-                                 kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
-        if prefix_store is not None and stem_prefixes:
-            text_lane = await prefix_store.search_terms(space, text_query, depth, text_filter, prefixes=stem_prefixes)
-        else:
-            text_lane = await runtime.documents.search_text(space, text_query, depth, text_filter)
-        latency["text"] = _ms(t0)
-        # A store that keeps a derived lexical index brings it up to date a
-        # bounded amount per query; what is still behind is said, since a
-        # passage not yet indexed is a passage this lane could not find.
-        backlog = getattr(runtime.documents, "lexical_backlog", None)
-        behind = backlog(space) if callable(backlog) else 0
-        if behind:
-            degraded.append(f"text: {behind} chunk(s) not yet in the lexical index; the text lane is behind")
-    except Exception as e:  # noqa: BLE001
-        degraded.append(f"text: {type(e).__name__}: {e}")
+    if "text" in asked:
+        try:
+            t0 = time.perf_counter()
+            text_filter = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                                     kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
+            if prefix_store is not None and stem_prefixes:
+                text_lane = await prefix_store.search_terms(space, text_query, depth, text_filter, prefixes=stem_prefixes)
+            else:
+                text_lane = await runtime.documents.search_text(space, text_query, depth, text_filter)
+            latency["text"] = _ms(t0)
+            # A store that keeps a derived lexical index brings it up to date a
+            # bounded amount per query; what is still behind is said, since a
+            # passage not yet indexed is a passage this lane could not find.
+            backlog = getattr(runtime.documents, "lexical_backlog", None)
+            behind = backlog(space) if callable(backlog) else 0
+            if behind:
+                degraded.append(f"text: {behind} chunk(s) not yet in the lexical index; the text lane is behind")
+        except Exception as e:  # noqa: BLE001
+            degraded.append(f"text: {type(e).__name__}: {e}")
+            failed.add("text")
 
     # The context lane: what each passage is under, searched with the same
     # query the text lane got, fused at a lower weight so a passage that
@@ -294,11 +406,15 @@ async def recall(
     if candidate_limit is not None or active_reranker is not None:
         text_lane = text_lane[:depth]
 
-    if len(degraded) == 2:
+    answered = [lane for lane in asked if lane not in failed]
+    evidence["lanes"] = answered
+    if not answered:
+        said = "both lanes failed" if len(asked) == 2 else f"the {asked[0]} lane asked for failed"
         latency["total"] = _ms(started)
         await runtime.emit(space, "recall", {**evidence, "degraded": degraded, "latency_ms": latency,
-                                           "error": "both lanes failed", "fact_ids": [], "history_fact_ids": []})
-        raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
+                                           "error": said, "fact_ids": [], "history_fact_ids": []})
+        raise RuntimeError(("both recall lanes failed: " if len(asked) == 2
+                            else f"the only recall lane asked for, {asked[0]}, failed: ") + "; ".join(degraded))
 
     # The entity lane, only when asked for: passages naming the question's
     # entities or their neighbours, under the same filter as the text lane.
@@ -329,7 +445,7 @@ async def recall(
     # confidence signal. A degraded vector lane cannot judge (None); a
     # lane that ran and found nothing is as weak as evidence gets.
     top_similarity = round(vector_lane[0][1], 6) if vector_lane and not math.isnan(vector_lane[0][1]) else None
-    vector_ran = not any(d.startswith("vectors:") for d in degraded)
+    vector_ran = "vector" in answered
     low_confidence: Optional[bool] = None
     if runtime.similarity_floor is not None and vector_ran and (top_similarity is not None or not vector_lane):
         low_confidence = top_similarity is None or top_similarity < runtime.similarity_floor
@@ -337,18 +453,18 @@ async def recall(
         "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
         "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
     }
-    lanes: list[list[tuple[int, float]]] = [vector_lane, text_lane]
+    lane_hits: list[list[tuple[int, float]]] = [vector_lane, text_lane]
     weights = [runtime.vector_weight, 1.0]
     if graph_boost:
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
-        lanes.append(entity_hits)
+        lane_hits.append(entity_hits)
         weights.append(ENTITY_WEIGHT)
     if runtime.context_lane:
         ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
-        lanes.append(context_hits)
+        lane_hits.append(context_hits)
         weights.append(CONTEXT_WEIGHT)
-    fuse = fusion.relative_scores if fusion_mode == "score" else fusion.rrf
-    fused = fuse(lanes, weights=weights)
+    fuse = {"score": fusion.relative_scores, "distribution": fusion.distribution_scores}.get(fusion_mode, fusion.rrf)
+    fused = fuse(lane_hits, weights=weights)
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
     now = runtime.clock()
     items = [
@@ -358,6 +474,25 @@ async def recall(
         if cid in chunks
     ]
     items = fusion.order(items)
+    phrase_trace: PhraseTrace | None = None
+    if required or excluded:
+        # Across every fused candidate and before the per-episode cap and the
+        # limit, so a passage that fails gives its place to one that holds.
+        dropped = {"required": 0, "excluded": 0}
+        kept_items = []
+        phrases = Phrases(required, excluded)
+        for item in items:
+            fits, rule = phrases.passes(chunks[item.chunk_id].text)
+            if fits:
+                kept_items.append(item)
+            else:
+                dropped[rule] += 1
+        phrase_trace = PhraseTrace(required=required, excluded=excluded, checked=len(items),
+                                   dropped_required=dropped["required"], dropped_excluded=dropped["excluded"])
+        items = kept_items
+    diversity_trace: DiversityTrace | None = None
+    if diversity is not None:
+        items, diversity_trace = await _diversified(runtime, space, items, chunks, float(diversity), limit, degraded)
     episode_of = {cid: c.episode_id for cid, c in chunks.items()}
     capped_items = fusion.cap_per_episode(items, episode_of)
     baseline_allowed = {item.chunk_id for item in capped_items}
@@ -504,7 +639,7 @@ async def recall(
     counts = await runtime.documents.counts(space)
     narrowing_report: Optional[Narrowing] = None
     if narrowing:
-        text_ran = not any(d.startswith("text:") for d in degraded)
+        text_ran = "text" in asked and not any(d.startswith("text:") for d in degraded)
         narrowing_report = Narrowing(
             conditions=narrow_by is not None, kind_or_source_or_dates=episode_bound,
             text_lane="off" if not text_ran else ("in_store" if in_store else "postfiltered"),
@@ -528,7 +663,11 @@ async def recall(
         history=previous,
         degraded=degraded,
         narrowing=narrowing_report,
-        fusion=cast(Literal["rank", "score"], fusion_mode),
+        fusion=cast(Literal["rank", "score", "distribution"], fusion_mode),
+        lanes=answered,
+        diversity=diversity_trace,
+        phrases=_finished(phrase_trace, len(result_items), limit,
+                          window_full=len(vector_lane) >= vector_depth or len(text_lane) >= depth),
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,
@@ -563,6 +702,8 @@ async def recall(
         "history_fact_ids": [f.fact_id for f in previous],
         "returned_bytes": result.returned_bytes,
         "space_bytes": result.space_bytes,
+        **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
+        **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
     })
     if event is not None:
         result.event_id = event.event_id
