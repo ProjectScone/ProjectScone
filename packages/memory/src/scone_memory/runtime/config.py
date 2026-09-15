@@ -345,6 +345,10 @@ class Settings:
             validate_feedback_weight(self.feedback_weight)
         except InvalidInput as error:
             raise InvalidInput(str(error).replace("feedback_weight", "SCONE_FEEDBACK_WEIGHT")) from None
+        if self.feedback_weight > 0 and self.events == "none":
+            # It reads judgements from the event log: with none, recall would be unchanged and nothing would say why.
+            raise InvalidInput("SCONE_FEEDBACK_WEIGHT reads recorded feedback from the event log, "
+                               "which SCONE_EVENTS=none turns off")
         if self.reranker_factory is not None:
             _reranker_spec(self.reranker_factory)
         for name, value in (("DIR", self.reranker_cross_encoder_dir), ("MODEL", self.reranker_cross_encoder_model)):

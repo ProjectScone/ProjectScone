@@ -146,17 +146,15 @@ def prior_terms(events: Iterable[Event], fingerprints: Mapping[int, Optional[str
         if chunk not in fingerprints:
             continue
         says = fingerprints[chunk]
-        latest: dict[str, Event] = {}
-        for event in judged:  # oldest first, so each question keeps its latest judgement
+        kept: list[Event] = []
+        for event in judged:  # the latest judgement of each question, oldest first
             marked, asked = event.payload.get("fingerprint"), event.payload.get("question")
             if says is None or marked is None or asked is None:
                 unverified += 1
             elif marked != says:
                 stale += 1
             else:
-                latest.pop(str(asked), None)  # and moves to when it was last judged
-                latest[str(asked)] = event
-        kept = list(latest.values())
+                kept.append(event)
         last_against = max((index for index, event in enumerate(kept) if not event.payload["useful"]), default=-1)
         counted = [event for index, event in enumerate(kept) if not event.payload["useful"] or index > last_against]
         # Each way, newest (so heaviest) first: only the newest min_corroboration count.

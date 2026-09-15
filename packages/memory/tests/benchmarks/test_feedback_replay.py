@@ -1,25 +1,29 @@
 """Recorded feedback replayed into ranking: paraphrases of judged questions gain, others hold.
 
-The weight was chosen on the replay that judges half a; half b checks it.
-The numbers are in benchmarks/feedback-replay-v1.results.md, and this test
-holds them: a change that makes the prior cost unrelated questions, or stop
-helping, or stop needing corroboration, fails here.
+The weight was chosen on the replay that judges half a with every passage
+stored at one instant; half b checks it. Stored apart, recency breaks the
+ties that kept unrelated questions whole, and the weight costs them. The
+numbers are in benchmarks/feedback-replay-v1.results.md, and this test
+holds them: a change that moves the prior's cost on unrelated questions, or
+stops it helping, or stops it needing corroboration, fails here.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
 
-from scone_memory.bench.feedback_replay import CHOSEN, MAX_JUDGEMENTS, load_subjects, measure, replay, report
+from scone_memory.bench.feedback_replay import (CHOSEN, MAX_JUDGEMENTS, MAX_STORED_HOURS_APART, load_subjects, measure,
+                                               replay, report)
 from scone_memory.core.errors import InvalidInput
 
 SUBJECTS = Path(__file__).resolve().parents[2] / "benchmarks" / "feedback-replay-v1.json"
 
 
-async def test_the_chosen_weight_lifts_judged_paraphrases_and_leaves_unrelated_questions_within_a_hundredth():
+async def test_at_one_instant_the_chosen_weight_lifts_judged_paraphrases_and_leaves_unrelated_questions_within_a_hundredth():
     recorded = {}
     for judge in ("kind", "strict"):
         runs = await measure(SUBJECTS, judge=judge, weights=(CHOSEN, 0.0002))
@@ -30,9 +34,36 @@ async def test_the_chosen_weight_lifts_judged_paraphrases_and_leaves_unrelated_q
             assert run.fell[CHOSEN] == [] and run.held[CHOSEN] == 0, (judge, run.judged_half)
             assert run.mrr(0.0002, "unrelated") < run.mrr(0.0, "unrelated") - 0.01, \
                 "twice the weight costs unrelated questions, as the results say"
-        assert "unrelated" in report(runs)
+        assert "unrelated" in report(runs) and "passages stored at one instant" in report(runs)
     assert recorded["kind"] == [24, 24], "two useful judgements per judged subject"
     assert all(strict > kind for strict, kind in zip(recorded["strict"], recorded["kind"])), "and some against"
+
+
+LEDGER = "unrelated:ledger-backup:How often is the ledger database backed up?"
+
+
+async def test_passages_stored_apart_lose_the_ties_that_kept_unrelated_questions_whole():
+    """Stored at one instant, every passage has the same recency, so the term only settles exact ties.
+    Stored an hour apart, recency's few millionths decide which near-ties it crosses: the chosen
+    weight still lifts judged paraphrases, and it costs an unrelated question more than a hundredth."""
+    for judge in ("kind", "strict"):
+        a, b = await measure(SUBJECTS, judge=judge, weights=(CHOSEN,), stored_hours_apart=1)
+        for run in (a, b):
+            assert run.mrr(CHOSEN, "judged") > run.mrr(0.0, "judged"), (judge, run.judged_half)
+        assert a.fell[CHOSEN] == [] and b.fell[CHOSEN] == [LEDGER], judge
+        assert b.mrr(CHOSEN, "unrelated") == pytest.approx(0.8634, abs=5e-5) and b.mrr(0.0, "unrelated") > 0.8734
+        assert "passages stored 1 h apart, oldest first" in report([a, b])
+
+
+async def test_a_day_apart_no_weight_measured_holds_unrelated_questions_on_both_halves():
+    """The rule that chose the weight, re-applied: 0.00005 holds half a in both orders, and fails half b."""
+    newest_a, _ = await measure(SUBJECTS, judge="kind", weights=(0.00005, CHOSEN), stored_hours_apart=24, newest_first=True)
+    assert newest_a.fell[0.00005] == [] and len(newest_a.fell[CHOSEN]) == 4
+    assert newest_a.mrr(CHOSEN, "unrelated") == pytest.approx(0.7523, abs=5e-5), "0.7963 off"
+    assert "passages stored 24 h apart, newest first" in report([newest_a])
+    oldest_a, oldest_b = await measure(SUBJECTS, judge="kind", weights=(0.00005,), stored_hours_apart=24)
+    assert oldest_a.mrr(0.00005, "unrelated") >= oldest_a.mrr(0.0, "unrelated") - 0.01
+    assert oldest_b.mrr(0.00005, "unrelated") == pytest.approx(0.7778, abs=5e-5) and oldest_b.mrr(0.0, "unrelated") > 0.7878
 
 
 async def test_judgements_piled_on_a_passage_cost_unrelated_questions_no_more_than_two_do():
@@ -75,6 +106,9 @@ async def test_a_subjects_file_of_another_schema_or_a_bad_replay_is_refused(tmp_
     for judgements in (0, MAX_JUDGEMENTS + 1):
         with pytest.raises(InvalidInput, match="judgements"):
             await replay(SUBJECTS, judged_half="a", judgements=judgements)
+    for hours in (-1, MAX_STORED_HOURS_APART + 1, math.inf, math.nan, True, "1"):
+        with pytest.raises(InvalidInput, match="stored_hours_apart"):
+            await replay(SUBJECTS, judged_half="a", stored_hours_apart=hours)  # type: ignore[arg-type]
 
 
 async def test_a_judge_who_was_not_shown_the_answer_marks_nothing_useful(tmp_path):

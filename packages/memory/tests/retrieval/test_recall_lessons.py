@@ -3,7 +3,7 @@
 Feedback is recorded -- a person marks a returned passage useful or not --
 and then nothing reads it but a metrics count. The reference keeps outcomes
 and surfaces them as lessons with decay and corroboration. Here a
-passage's judgements (the latest per recall) are folded into a signed score
+passage's judgements (the latest per question) are folded into a signed score
 that halves every ``half_life_days``, counts of each kind, and a state:
 ``preferred`` only when corroborated by ``min_corroboration`` useful
 judgements and none against, ``dead_end`` when it was only ever judged not
@@ -25,9 +25,12 @@ from scone_memory.retrieval.lessons import fold_lessons
 from scone_memory.testing import Clock
 
 
-def judged(event_id: int, ts: str, chunk: int, useful: bool, recall: int = 1) -> Event:
-    return Event(event_id=event_id, space="default", kind="feedback", ts=ts, schema_version=1,
-                 payload={"recall_event_id": recall, "chunk_id": chunk, "useful": useful, "note": None})
+def judged(event_id: int, ts: str, chunk: int, useful: bool, recall: int = 1, question: str | None = None) -> Event:
+    """A judgement of ``recall``; with ``question``, of the question that recall recorded, as ``feedback`` records now."""
+    payload: dict[str, object] = {"recall_event_id": recall, "chunk_id": chunk, "useful": useful, "note": None}
+    if question is not None:
+        payload["question"] = question
+    return Event(event_id=event_id, space="default", kind="feedback", ts=ts, schema_version=1, payload=payload)
 
 
 NOW = "2026-06-01T00:00:00Z"
@@ -68,6 +71,49 @@ def test_a_judgement_after_now_is_not_counted():
     assert folded == {}
 
 
+def test_one_question_asked_again_and_judged_again_is_one_judgement():
+    """Counted per question, as the ranking prior counts them: asking the same words again does not corroborate."""
+    days = ("2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z")
+    again = fold_lessons([judged(1, days[0], 7, True, recall=1, question="same"),
+                          judged(2, days[1], 7, True, recall=2, question="same")], now=NOW, half_life_days=30, min_corroboration=2)
+    assert (again[7].useful, again[7].state) == (1, "tentative")
+    assert again[7].score == pytest.approx(0.5 ** (30 / 30)) and again[7].last_at == days[1], "at its latest judgement"
+    turned = fold_lessons([judged(1, days[0], 7, True, recall=1, question="same"),
+                           judged(2, days[1], 7, False, recall=2, question="same")], now=NOW, half_life_days=30, min_corroboration=2)
+    assert (turned[7].useful, turned[7].not_useful, turned[7].state) == (0, 1, "dead_end"), "the latest replaces the earlier"
+    two = fold_lessons([judged(1, days[0], 7, True, recall=1, question="one"),
+                        judged(2, days[1], 7, True, recall=2, question="other")], now=NOW, half_life_days=30, min_corroboration=2)
+    assert (two[7].useful, two[7].state) == (2, "preferred")
+    unrecorded = fold_lessons([judged(1, days[0], 7, True, recall=1), judged(2, days[1], 7, True, recall=2)],
+                              now=NOW, half_life_days=30, min_corroboration=2)
+    assert unrecorded[7].state == "preferred", "a judgement recorded before questions were counts per recall, as it did"
+
+
+async def test_a_lesson_and_the_ranking_prior_agree_on_whether_a_passage_is_corroborated():
+    clock = Clock("2026-05-01T00:00:00.000Z")
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=clock,
+                                events=InMemoryEventLog(), feedback_weight=0.0002).open()
+    try:
+        await engine.remember("default", "The harbour crane survey is booked for May.")
+        await engine.remember("default", "The harbour crane was repainted in May.")
+        second = (await engine.recall("default", "harbour crane survey", lanes=("text",))).items[1].chunk_id
+        for _ in range(2):
+            shown = await engine.recall("default", "harbour crane survey", lanes=("text",))
+            await engine.feedback("default", shown.event_id, second, True)
+        once = await engine.recall("default", "harbour crane survey", lanes=("text",), lessons=True)
+        shown = await engine.recall("default", "is the harbour crane survey booked", lanes=("text",))
+        await engine.feedback("default", shown.event_id, second, True)
+        twice = await engine.recall("default", "harbour crane survey", lanes=("text",), lessons=True)
+    finally:
+        await engine.close()
+    lesson = next(item.lessons for item in once.items if item.chunk_id == second)
+    assert once.feedback_prior is not None and once.feedback_prior["tentative"] == 1
+    assert (lesson["state"], lesson["useful"]) == ("tentative", 1), "one question asked twice, as the prior counts it"
+    corroborated = next(item.lessons for item in twice.items if item.chunk_id == second)
+    assert twice.feedback_prior is not None and twice.feedback_prior["boosted"] == 1
+    assert (corroborated["state"], corroborated["useful"]) == ("preferred", 2)
+
+
 async def engine_with_feedback(clock: Clock):
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=clock,
                                 events=InMemoryEventLog()).open()
@@ -84,7 +130,7 @@ async def test_the_engine_reads_lessons_within_its_window_and_says_when_its_boun
         crane = first.items[0].chunk_id
         await engine.feedback("default", first.event_id, crane, True)
         clock.now = "2026-05-20T00:00:00.000Z"
-        second = await engine.recall("default", "crane survey booked")
+        second = await engine.recall("default", "when was the crane survey booked")  # another question corroborates
         await engine.feedback("default", second.event_id, crane, True)
         found = await engine.lessons("default")
         assert found.lessons[crane].state == "preferred" and found.events_read == 2 and found.events_cut is False

@@ -17,12 +17,17 @@ Judges: ``kind`` marks the answering passage useful when it came back;
 ``strict`` also marks not useful every passage shown above it (all five when
 it did not come back). The replay runs once per half judged. No model runs:
 the in-memory stores and ``HashEmbedder``, engine defaults otherwise.
+
+Every passage is stored at one instant unless ``stored_hours_apart`` spaces
+them, so by default recency ties them all and the term only settles exact
+ties; spaced, recency breaks those first and the term crosses near-ties.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +36,7 @@ from ..core.errors import InvalidInput
 from ..embedders.hash import HashEmbedder
 from ..memory.engine import MemoryEngine
 from ..observability.events import InMemoryEventLog
+from ..core.timeutil import parse_rfc3339
 from ..testing import Clock
 from .metrics import reciprocal_rank
 
@@ -40,7 +46,8 @@ SHOWN = 5
 #: How deep the evaluated rank looks: MRR@10.
 DEPTH = 10
 #: The weights measured. 0.0001 was chosen on the replay judging half a (the largest whose
-#: unrelated MRR stayed within 0.01 of off); half b is its held-out check.
+#: unrelated MRR stayed within 0.01 of off); half b is its held-out check. Both with every passage
+#: stored at one instant: stored apart, it costs unrelated questions more (the results say how much).
 WEIGHTS = (0.00005, 0.0001, 0.0002, 0.0005)
 CHOSEN = 0.0001
 #: The most judging days a replay takes: two ways of asking, each asked three times.
@@ -48,6 +55,8 @@ MAX_JUDGEMENTS = 6
 JUDGES = ("kind", "strict")
 HALVES = ("a", "b")
 START = "2026-05-01T09:00:00.000Z"
+#: The widest spacing a replay stores passages at: 48 of them a day apart span 48 days.
+MAX_STORED_HOURS_APART = 24.0
 
 
 @dataclass
@@ -55,6 +64,9 @@ class Replay:
     judged_half: str
     judge: str
     judgements: int
+    #: How far apart the passages were stored, and whether the file's first was the newest.
+    stored_hours_apart: float = 0.0
+    newest_first: bool = False
     #: weight -> set ("judged", "unrelated") -> reciprocal ranks, in question order.
     ranks: dict[float, dict[str, list[float]]] = field(default_factory=dict)
     #: weight -> questions whose rank rose or fell against weight 0, as "set:subject:question".
@@ -82,17 +94,30 @@ def load_subjects(path: Path) -> dict[str, Any]:
 
 
 async def replay(path: Path, *, judged_half: str, judge: str = "strict", judgements: int = 2,
-                 weights: tuple[float, ...] = WEIGHTS) -> Replay:
-    """One replay: judge ``judged_half`` with ``judge`` on ``judgements`` days, then rank."""
+                 weights: tuple[float, ...] = WEIGHTS, stored_hours_apart: float = 0.0,
+                 newest_first: bool = False) -> Replay:
+    """One replay: judge ``judged_half`` with ``judge`` on ``judgements`` days, then rank.
+
+    With ``stored_hours_apart``, the passages are stored that far apart before the judging starts,
+    the file's last the newest (its first with ``newest_first``), so recency no longer ties them."""
     if judged_half not in HALVES or judge not in JUDGES or judgements not in range(1, MAX_JUDGEMENTS + 1):
         raise InvalidInput(f"judged_half is a or b, judge is kind or strict, judgements is 1 to {MAX_JUDGEMENTS}")
+    # NaN and the infinities fail the range check, so it is the only one they need.
+    if isinstance(stored_hours_apart, bool) or not isinstance(stored_hours_apart, (int, float)) \
+            or not 0 <= stored_hours_apart <= MAX_STORED_HOURS_APART:
+        raise InvalidInput(f"stored_hours_apart is a number of hours from 0 to {MAX_STORED_HOURS_APART:g}")
     data = load_subjects(path)
     clock = Clock(START)
     events = InMemoryEventLog()
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=clock,
                                 events=events).open()
     try:
-        episodes = {text: (await engine.remember(SPACE, text)).episode_id for text in data["passages"]}
+        episodes = {}
+        for index, text in enumerate(data["passages"]):
+            back = index + 1 if newest_first else len(data["passages"]) - index
+            stored = parse_rfc3339(START) - timedelta(hours=stored_hours_apart * back)
+            clock.now = stored.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            episodes[text] = (await engine.remember(SPACE, text)).episode_id
         judged = [subject for subject in data["subjects"] if subject["half"] == judged_half]
         for day in range(judgements):
             clock.now = f"2026-05-{2 + day:02d}T09:00:00.000Z"
@@ -114,7 +139,7 @@ async def replay(path: Path, *, judged_half: str, judge: str = "strict", judgeme
         questions += [("unrelated", subject["id"], question, subject["gold"])
                       for subject in data["subjects"] if subject["half"] != judged_half
                       for question in (*subject["asked"], subject["paraphrase"])]
-        result = Replay(judged_half, judge, judgements,
+        result = Replay(judged_half, judge, judgements, float(stored_hours_apart), newest_first,
                         feedback_events=len(await events.query(SPACE, kind="feedback", limit=100_000)))
         every = (0.0, *weights)
         for weight in every:
@@ -138,16 +163,19 @@ async def replay(path: Path, *, judged_half: str, judge: str = "strict", judgeme
         await engine.close()
 
 
-async def measure(path: Path, *, judge: str = "strict", judgements: int = 2,
-                  weights: tuple[float, ...] = WEIGHTS) -> list[Replay]:
+async def measure(path: Path, *, judge: str = "strict", judgements: int = 2, weights: tuple[float, ...] = WEIGHTS,
+                  stored_hours_apart: float = 0.0, newest_first: bool = False) -> list[Replay]:
     """The replay once per half judged."""
-    return [await replay(path, judged_half=half, judge=judge, judgements=judgements, weights=weights) for half in HALVES]
+    return [await replay(path, judged_half=half, judge=judge, judgements=judgements, weights=weights,
+                         stored_hours_apart=stored_hours_apart, newest_first=newest_first) for half in HALVES]
 
 
 def report(replays: list[Replay]) -> str:
     first = replays[0]
     weights = list(first.ranks)
-    lines = [f"judge: {first.judge}; judgements per subject: {first.judgements}",
+    stored = ("at one instant" if not first.stored_hours_apart else
+              f"{first.stored_hours_apart:g} h apart, {'newest' if first.newest_first else 'oldest'} first")
+    lines = [f"judge: {first.judge}; judgements per subject: {first.judgements}; passages stored {stored}",
              "half judged  set        n   " + "  ".join(f"w={weight:<6g}" for weight in weights)]
     for run in replays:
         for kind in ("judged", "unrelated"):
