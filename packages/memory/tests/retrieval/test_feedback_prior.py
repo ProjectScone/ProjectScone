@@ -19,6 +19,7 @@ import pytest
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryEventLog, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.errors import InvalidInput
 from scone_memory.core.ports import Event
+from scone_memory.memory.engine import Record
 from scone_memory.retrieval import feedback_prior
 from scone_memory.retrieval.feedback_prior import MAX_FEEDBACK_BOOST, prior_terms
 from scone_memory.testing import Clock
@@ -175,7 +176,7 @@ async def test_feedback_records_what_the_passage_said_when_it_was_judged():
     finally:
         await engine.close()
     assert episode is not None
-    assert event.payload["fingerprint"] == feedback_prior.fingerprint(episode.content_hash, item.text)
+    assert event.payload["fingerprint"] == feedback_prior.fingerprint(episode.content, item.text)
 
 
 async def test_recall_with_the_weight_off_is_as_it_was_and_on_moves_a_corroborated_passage():
@@ -261,11 +262,15 @@ async def test_a_prior_is_dropped_when_the_rest_of_its_episode_changed_though_it
     async def split(ending: str) -> MemoryEngine:
         engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=clock,
                                     events=events, feedback_weight=0.0002, chunk_target=44).open()
-        await engine.remember("default", "The harbour crane survey is booked for May.\n\n" + ending)
+        # Keyed, as a synced file is: its content hash is its key, the same for both contents.
+        await engine.remember_many("default", [Record("The harbour crane survey is booked for May.\n\n" + ending,
+                                                      dedup_key="notes/crane.md")])
         return engine
 
+    hashes = []
     first = await split("The harbour crane was painted blue in the spring.")
     try:
+        hashes.append(await first.documents.get_episode("default", 1))
         judged_result = await first.recall("default", QUERY, lanes=TEXT)
         judged_item = judged_result.items[0]
         await judge_twice(first, QUERY, judged_item.chunk_id)
@@ -274,12 +279,14 @@ async def test_a_prior_is_dropped_when_the_rest_of_its_episode_changed_though_it
         await first.close()
     rebuilt = await split("The harbour crane was sold for scrap in autumn.")
     try:
+        hashes.append(await rebuilt.documents.get_episode("default", 1))
         after = await rebuilt.recall("default", QUERY, lanes=TEXT)
     finally:
         await rebuilt.close()
     assert kept.feedback_prior is not None and kept.feedback_prior["boosted"] == 1
     same = next(item for item in after.items if item.chunk_id == judged_item.chunk_id)
     assert (same.episode_id, same.text) == (judged_item.episode_id, judged_item.text), "only the episode around it changed"
+    assert len({episode.content_hash for episode in hashes}) == 1, "and its content hash did not"
     assert after.feedback_prior is not None
     assert after.feedback_prior["stale"] == 2 and after.feedback_prior["boosted"] == 0
 

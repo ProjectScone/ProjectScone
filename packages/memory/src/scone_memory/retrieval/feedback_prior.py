@@ -15,7 +15,7 @@ top:
   those no longer count, and the passage must be corroborated again after it;
 - a judgement counts only while the passage says what it said when it was
   judged. ``feedback`` records a fingerprint of the chunk's text and its
-  episode's content hash; a candidate whose fingerprint now differs (a
+  episode's content; a candidate whose fingerprint now differs (a
   rebuilt store handing the same id to other text, to a span of an episode
   whose content changed, or to a span chunked differently) has those
   judgements dropped as ``stale``, and one recorded without a fingerprint is
@@ -70,10 +70,13 @@ def validate_feedback_weight(weight: object) -> None:
         raise InvalidInput(f"feedback_weight must be a finite number from 0 to {MAX_FEEDBACK_WEIGHT}")
 
 
-def fingerprint(content_hash: str, text: str) -> str:
-    """What a judged passage said: its text, and the content hash of the episode it is a span of.
-    Not the episode's id: the same content stored again under another id still says the same thing."""
-    return hashlib.sha256(f"{content_hash}\x00{text}".encode()).hexdigest()
+def fingerprint(content: str, text: str) -> str:
+    """What a judged passage said: its text, and the content of the episode it is a span of.
+
+    The content itself, not the episode's ``content_hash``: a keyed record's hash is its key,
+    the same whatever the content says. Not the episode's id either: the same content stored
+    again under another id still says the same thing."""
+    return hashlib.sha256(f"{content}\x00{text}".encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -158,7 +161,7 @@ async def read_prior(events: "Optional[EventLog]", documents: "DocumentStore", s
         episode = await documents.get_episode(space, episode_id)
         if episode is not None:
             episodes[episode_id] = episode
-    fingerprints = {chunk: fingerprint(episodes[candidates[chunk].episode_id].content_hash,
+    fingerprints = {chunk: fingerprint(episodes[candidates[chunk].episode_id].content,
                                        candidates[chunk].text)
                     for chunk in judged if candidates[chunk].episode_id in episodes}
     relevant = [event for event in kept if int(event.payload["chunk_id"]) in fingerprints]  # type: ignore[call-overload]
