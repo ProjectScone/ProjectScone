@@ -176,6 +176,22 @@ async def test_speech_starting_again_keeps_the_turn_open_past_the_hold(memory):
         await rig.finish()
 
 
+async def test_speech_that_ends_without_words_resumes_the_hold(memory):
+    # A recognizer that hears a cough starts speech and transcribes nothing;
+    # the clause is as open as before, and waiting out the turn's bound for
+    # words that are not coming would leave the speaker in silence.
+    async with Rig(memory, turn_detector_factory=LexicalEndOfTurn, turn_hold=.3, turn_max_duration=5) as rig:
+        await rig.say(Transcript("I need a flight to"), SpeechStarted())
+        await asyncio.sleep(.6)  # past the first hold: the session now waits on the turn's bound
+        assert rig.session.stored_count == 0
+        await rig.say(Transcript(""))
+        [user] = await rig.users(1)
+        receipt = rig.session.last_turn_receipt
+        assert user.content == "I need a flight to" and user.metadata["turn_end"] == "semantic_incomplete_timeout"
+        assert 850 <= receipt.held_ms < 2500, "released one hold after the wordless transcript, not at the bound"
+        await rig.finish()
+
+
 async def test_local_activity_keeps_the_turn_open_too(memory):
     class Detector(Resource):
         def __init__(self):

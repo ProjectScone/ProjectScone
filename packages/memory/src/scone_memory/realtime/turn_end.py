@@ -16,8 +16,9 @@ the turn ends there, at the threshold the recognizer already waited. An
 open clause holds the turn for up to ``hold`` seconds more; the speaker
 starting again (or a noise onset the recognizer takes for speech) keeps
 it open until ``max_duration`` after its first final transcript, and
-their next words join it. The hold is added to the recognizer's pause,
-never a replacement for it.
+their next words join it. Speech that ends without words (a cough the
+recognizer transcribes as nothing) runs the hold again from its end. The
+hold is added to the recognizer's pause, never a replacement for it.
 
 Every bound says when it bit. Each released turn carries a receipt whose
 reason is one of ``REASONS``: ``silence`` (no evidence, or no detector),
@@ -209,9 +210,10 @@ class TurnHold:
     ``heard`` takes a final transcript and its judgement and returns the
     turns it releases (none, one, or two when another speaker or the byte
     bound releases the held turn first). ``speech_started`` keeps a held
-    turn open until the turn's own bound. ``expire`` releases a turn whose
-    deadline has come; ``drain`` releases whatever is held when input ends,
-    or under ``reason`` when the session stops."""
+    turn open until the turn's own bound; ``speech_stopped`` (speech that
+    ended without words) runs the hold again from then. ``expire`` releases
+    a turn whose deadline has come; ``drain`` releases whatever is held when
+    input ends, or under ``reason`` when the session stops."""
 
     def __init__(self, *, hold: float = HOLD_S, max_duration: float = MAX_DURATION_S,
                  max_bytes: int = MAX_BYTES) -> None:
@@ -257,14 +259,22 @@ class TurnHold:
         elif now - self._first >= self.max_duration:
             released.append(self._release("max_duration", now))
         else:
-            bound = self._first + self.max_duration
-            self._capped = now + self.hold >= bound
-            self.deadline = bound if self._capped else now + self.hold
+            self._arm(now)
         return released
+
+    def _arm(self, now: float) -> None:
+        bound = self._first + self.max_duration
+        self._capped = now + self.hold >= bound
+        self.deadline = bound if self._capped else now + self.hold
 
     def speech_started(self, now: float) -> None:
         if self.pending:
             self.deadline, self._capped = self._first + self.max_duration, True
+
+    def speech_stopped(self, now: float) -> None:
+        # The clause is as open as it was; the words it waits for did not come.
+        if self.pending:
+            self._arm(now)
 
     def expire(self, now: float) -> list[TurnEnd]:
         if self.deadline is None or now < self.deadline:

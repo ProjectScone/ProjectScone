@@ -84,6 +84,25 @@ Wall clock:
   cost, so no difference between the modes is measurable here; the
   sign of the median is noise, not a speed-up.
 
+## Noise during a hold
+
+A later fix, measured outside the fixture (which has no noise). A held
+clause ("I need a flight to"), then speech starting and, 0.5 s later, a
+final transcript with no words, as the HTTP recognizer yields for a cough;
+default bounds (hold 1.5 s, turn 10 s), a real `VoiceSession` with scripted
+providers. Before, the empty transcript was ignored and the turn waited
+for its bound; now it runs the hold again from that transcript. Wall time
+from the clause's transcript to its release, 3 repeats interleaved with
+alternating order, load average 58–69:
+
+| | runs (ms) | median | reason |
+| --- | --- | --- | --- |
+| before | 10019, 10051, 10036 | 10036 ms | `max_duration` |
+| after | 2057, 2035, 2113 | 2057 ms | `semantic_incomplete_timeout` |
+
+Noise that never yields a final transcript still waits the turn's bound.
+The fixture replay has no such events, so its counts above do not move.
+
 ## What this does not show
 
 The fixture spells every number out, so a transcript ending on a digit
