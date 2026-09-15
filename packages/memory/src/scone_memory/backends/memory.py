@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from operator import mul
 from itertools import count
 from bisect import bisect_left, bisect_right, insort
 from typing import Mapping, Optional, Sequence
@@ -564,6 +565,9 @@ class InMemoryVectorIndex:
 
     def __init__(self) -> None:
         self._points: dict[int, VectorPoint] = {}
+        #: Each held point's vector norm, taken when it was written, so a
+        #: search pays one dot product per point rather than two norms more.
+        self._norms: dict[int, float] = {}
         self.dim: Optional[int] = None
         self._writer: tuple[str, str] | None = None
         #: Writes that have taken the record and not yet returned, by writer.
@@ -649,6 +653,7 @@ class InMemoryVectorIndex:
             validate_vector(point.vector, self.dim)
         for point in points:
             self._points[point.chunk_id] = point
+            self._norms[point.chunk_id] = _norm(point.vector)
 
     async def search(
         self,
@@ -661,6 +666,8 @@ class InMemoryVectorIndex:
         conditions: "Filter | None" = None,
     ) -> list[tuple[int, float]]:
         validate_vector(vector, self.dim)
+        query_norm = _norm(vector)
+        norms = self._norms
         scored = []
         for point in self._points.values():
             if point.space != space:
@@ -673,7 +680,12 @@ class InMemoryVectorIndex:
                 continue
             if conditions is not None and not conditions.matches(point.metadata):
                 continue
-            scored.append((point.chunk_id, _cosine(vector, point.vector)))
+            norm = norms[point.chunk_id]
+            # sum over map(mul) adds the same products in the same order as a
+            # generator, so the score is the plain formula's to the last bit;
+            # math.sumprod rounds differently and would reorder near-ties.
+            scored.append((point.chunk_id, 0.0 if query_norm == 0 or norm == 0
+                           else sum(map(mul, vector, point.vector)) / (query_norm * norm)))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         return scored[:limit]
 
@@ -685,15 +697,12 @@ class InMemoryVectorIndex:
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         for chunk_id in chunk_ids:
             self._points.pop(chunk_id, None)
+            self._norms.pop(chunk_id, None)
 
     async def delete_space(self, space: str) -> None:
         self._points = {chunk_id: p for chunk_id, p in self._points.items() if p.space != space}
+        self._norms = {chunk_id: self._norms[chunk_id] for chunk_id in self._points}
 
 
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+def _norm(vector: Sequence[float]) -> float:
+    return math.sqrt(sum(map(mul, vector, vector)))
