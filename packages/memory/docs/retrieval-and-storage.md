@@ -531,6 +531,14 @@ unless the fourth route is asked for by name:
    returned the answer so far with nothing new
    ([results](../benchmarks/synthesis-modes-v1.results.md)). At the route's
    limits those passages fit one round, and `refine` makes no second.
+   At the same limits, three runs on those eight questions (with the
+   passages today's retrieval returns) gave `facts` a text on 8 of 8
+   against `evidence`'s 7. `facts` wrote an answer on 7, the same as
+   `evidence`, and `evidence`'s missing item was a call that ran to the
+   deadline. `facts` spent 104 calls to `evidence`'s 16, and the judge
+   scored its texts less faithful, 0.762 against 0.905: the answer pass
+   can write sums and claims its cited facts do not make
+   ([results](../benchmarks/synthesis-facts-v1.results.md)).
 
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and

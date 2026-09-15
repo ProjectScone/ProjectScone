@@ -29,6 +29,16 @@ and judging; our modes' texts were the same in all four runs. No mode spoke more
 (7 of 8); `refine`'s second rounds returned the answer so far and wrote nothing
 new, and `accumulate` spent 5.6 times the calls and spoke on 6.
 
+The [facts-first synthesis run](synthesis-facts-v1.results.md) puts the
+`facts` mode (quoted facts from each passage, then an answer written
+from them) beside `evidence` and a rerun of TreeSummarize, on the same
+eight questions and today's passages, three runs with identical texts.
+`facts` gave a text on 8 of 8 against `evidence`'s 7. It wrote an answer
+on 7, as `evidence` did, and `evidence`'s missing item was a call that
+ran to the deadline. `facts` spent 6.5 times the calls and was judged
+less faithful (0.762 against 0.905; TreeSummarize 0.730). Relevancy was
+0 for every side.
+
 ## Retrieval defaults against LlamaIndex
 
 The [north star defaults sweep](northstar-defaults-2026-09-14.results.md)
