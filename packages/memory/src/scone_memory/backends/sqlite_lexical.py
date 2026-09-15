@@ -95,41 +95,58 @@ def _hits(conn: sqlite3.Connection, phrase: str) -> int:
     return int(conn.execute("SELECT count(*) FROM chunk_lexical_fts WHERE chunk_lexical_fts MATCH ?", (phrase,)).fetchone()[0])
 
 
-def exact_form_rank(conn: sqlite3.Connection, query: str, prefixes: Sequence[str]) -> tuple[str, str, list[object]]:
-    """The rank expression, the joins it reads and their parameters, in the
-    order they appear, for a family search that weighs the query's own words.
+def exact_form_rank(conn: sqlite3.Connection, query: str, prefixes: Sequence[str]) -> tuple[str, str, str, list[object]]:
+    """The common table expressions, the rank expression, the joins it reads
+    and their parameters, in the order they appear, for a family search that
+    weighs the query's own words.
 
     bm25() scores a prefix phrase at the family's idf and cannot weigh one
     row's phrase differently from another's. A row holding one of the
     query's own words in a family has that phrase's part moved to the idf
-    of the rarest such word it holds: the family phrase's own bm25() is
-    read beside the whole expression's, and the difference between the two
-    idfs, as a multiple of it, is added. The family is still one phrase,
-    counted once, as ``Bm25.search`` counts it with ``exact_forms``; a row
-    holding only relatives keeps its rank.
+    of the rarest such word it holds: the family phrase's part of that
+    row's bm25() is read, and the difference between the two idfs, as a
+    multiple of it, is added. The family is still one phrase, counted once,
+    as ``Bm25.search`` counts it with ``exact_forms``; a row holding only
+    relatives keeps its rank.
+
+    The part is read only for rows holding the word, as the bm25() of the
+    family AND the word less the bm25() of the word alone (each phrase keeps
+    its idf over the whole index in any expression), each into a
+    materialized table. Joined as a subquery instead, SQLite looked the
+    prefix up again for every matching row, seconds a query on 45,000
+    chunks; read for every row the family holds and tested there for the
+    word, it cost three times the lane's own time.
     """
     stems = [term(prefix) for prefix in prefixes if prefix]
     tokens = [term(token) for token in tokenize(query)]
-    rank, joins, selected, joined = "bm25(chunk_lexical_fts)", "", [], []
+    tables: list[str] = []
+    rank, joins, phrases, multiples = "bm25(chunk_lexical_fts)", "", [], []
     rows = int(conn.execute("SELECT count(*) FROM chunk_lexical").fetchone()[0])
     for number, stem in enumerate(stems):
         forms = [token for token in tokens if token.startswith(stem)]
-        if not forms:
-            continue
         family = '"' + stem.replace('"', '""') + '"*'
         family_idf = _fts5_idf(rows, _hits(conn, family))
-        # The rarest form first: a CASE takes the first form a row holds.
+        # The rarest form first: coalesce takes the first form a row holds. A
+        # form as common as its family (no row holds a relative without it)
+        # moves nothing, and costs no scan.
         weighed = sorted(((_fts5_idf(rows, _hits(conn, '"' + form.replace('"', '""') + '"')), form) for form in forms),
                          reverse=True)
-        alias = f"family{number}"
-        rank += " + coalesce(CASE" + "".join(f" WHEN instr(' ' || cl.terms || ' ', ?) > 0 THEN ? * {alias}.rank"
-                                             for _ in weighed) + " END, 0.0)"
+        moves: list[str] = []
         for idf, form in weighed:
-            selected += [f" {form} ", idf / family_idf - 1]
-        joins += (f" LEFT JOIN (SELECT rowid AS chunk_id, bm25(chunk_lexical_fts) AS rank FROM chunk_lexical_fts"
-                  f" WHERE chunk_lexical_fts MATCH ?) AS {alias} ON {alias}.chunk_id = c.id")
-        joined.append(family)
-    return rank, joins, [*selected, *joined]
+            if idf <= family_idf:
+                continue
+            word = '"' + form.replace('"', '""') + '"'
+            alias = f"family{number}_{len(moves)}"
+            for name, phrase in ((alias, f"{family} AND {word}"), (f"{alias}_word", word)):
+                tables.append(f"{name} AS MATERIALIZED (SELECT rowid AS chunk_id, bm25(chunk_lexical_fts) AS rank"
+                              " FROM chunk_lexical_fts WHERE chunk_lexical_fts MATCH ?)")
+                joins += f" LEFT JOIN {name} ON {name}.chunk_id = c.id"
+                phrases.append(phrase)
+            moves.append(f"? * ({alias}.rank - {alias}_word.rank)")
+            multiples.append(idf / family_idf - 1)
+        if moves:
+            rank += " + coalesce(" + ", ".join(moves) + ", 0.0)"
+    return ("WITH " + ", ".join(tables) + " " if tables else ""), rank, joins, [*phrases, *multiples]
 
 
 @contextmanager

@@ -548,12 +548,16 @@ class SqliteDocumentStore:
             return []
         _, behind = synchronize_lexical(self.conn, space)
         self._lexical_behind[space] = behind
-        rank, joins, parameters = (exact_form_rank(self.conn, query, prefixes) if exact_forms
-                                   else ("bm25(chunk_lexical_fts)", "", []))
+        tables, rank, joins, parameters = (exact_form_rank(self.conn, query, prefixes) if exact_forms
+                                           else ("", "bm25(chunk_lexical_fts)", "", []))
+        # CROSS JOIN keeps the space's chunks inside the index scan. Left to
+        # itself, with the exact-form tables SQLite started from the chunks and
+        # matched the expression again for each one, expanding every prefix
+        # per row: a minute for one query on 45,000 chunks.
         sql = (
-            f"SELECT c.id AS id, {rank} AS rank, e.tags AS tags, e.metadata AS metadata"
+            f"{tables}SELECT c.id AS id, {rank} AS rank, e.tags AS tags, e.metadata AS metadata"
             " FROM chunk_lexical_fts JOIN chunk_lexical cl ON cl.chunk_id = chunk_lexical_fts.rowid"
-            " JOIN chunks c ON c.id = cl.chunk_id"
+            " CROSS JOIN chunks c ON c.id = cl.chunk_id"
             " JOIN episodes e ON e.id = c.episode_id"
             f"{joins}"
             " WHERE chunk_lexical_fts MATCH ? AND c.space = ?"
