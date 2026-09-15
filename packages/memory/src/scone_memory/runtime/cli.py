@@ -366,6 +366,10 @@ def build_parser() -> argparse.ArgumentParser:
     g = graph.add_parser("health", help="what in the graph wants attention, counted with examples")
     g.add_argument("--limit", type=int, default=None, help="examples shown for each concern")
     g.add_argument("--max-bytes", type=int, default=None)
+    g = graph.add_parser("cycles", help="files that cannot load without each other, each with one shortest loop; "
+                                        "and the loops held apart only by imports that run when called or never")
+    g.add_argument("--limit", type=int, default=None, help="groups shown of each kind (1 to 100; default 20)")
+    g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
 
     g = graph.add_parser("duplicates", help="entities that may be one thing under two names, and why (nothing merged)")
     g.add_argument("--limit", type=int, default=50, help="pairs to suggest (1 to 500)")
@@ -1433,6 +1437,19 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
             raise InvalidInput(str(refused)) from None
         print(_ledger_json(found_health.record(space, status="current", as_of=when))
               if getattr(args, "json", False) else found_health.text, file=out)
+        return 0
+    if command == "cycles":
+        from ..entities.cycles import DEFAULT_LIMIT as CYCLES_LIMIT, MAX_BYTES as CYCLES_BYTES, CyclesError, graph_cycles
+
+        when = engine.clock()
+        try:
+            found_cycles = await graph_cycles(
+                engine, space, limit=args.limit if args.limit is not None else CYCLES_LIMIT, as_of=when,
+                max_bytes=args.max_bytes if args.max_bytes is not None else CYCLES_BYTES)
+        except CyclesError as refused:
+            raise InvalidInput(str(refused)) from None
+        print(_ledger_json(found_cycles.record(space, status="current", as_of=when))
+              if getattr(args, "json", False) else found_cycles.text, file=out)
         return 0
 
     if command == "meanings":

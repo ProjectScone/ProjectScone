@@ -59,6 +59,12 @@ MAX_QUOTE_CHARS = 2_000
 #: What a claim can say. Each is a predicate in the ledger like any other.
 DEFINES = "defines"
 IMPORTS = "imports"
+#: An import that runs only when the function holding it is called, and
+#: one that never runs (`if TYPE_CHECKING:`). A file that loads needs the
+#: modules its `imports` name; it does not need these to load, so a loop
+#: closed by one is a loop the code already works around.
+IMPORTS_WHEN_CALLED = "imports_when_called"
+IMPORTS_FOR_TYPES = "imports_for_types"
 CALLS = "calls"
 #: What a class is built on. A hierarchy is how people navigate a
 #: codebase and no call edge says anything about it.
@@ -127,6 +133,11 @@ _SPECIFIERS = frozenset("public private protected internal virtual override seal
 #: down, so it can be read; what a name in the body refers to is not, so
 #: it is not guessed at. Nothing here claims a call for these languages.
 _FROM = re.compile(r"""\bfrom\s+["']([^"']+)["']""")
+#: The start of an ECMAScript import or re-export statement, and one that
+#: brings in types alone (`import type {...} from`, `export type {...} from`),
+#: which the compiler erases: it never runs, however many lines it spans.
+_ES_STATEMENT = re.compile(r"^\s*(?:import|export)\b")
+_ES_TYPE_ONLY = re.compile(r"^\s*(?:import|export)\s+type\s")
 _BARE = re.compile(r"""^\s*import\s+["']([^"']+)["']""")
 _REQUIRE = re.compile(r"""\brequire\s*\(\s*["']([^"']+)["']""")
 _QUOTED = re.compile(r"""^\s*(?:_\s+|\w+\s+)?["']([^"']+)["']\s*$""")
@@ -417,7 +428,7 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     # What the file holds, and what holds what: a class defines its
     # methods, and the file defines the class, so the graph has the
     # nesting people read.
-    def walk(node: ast.AST, owner: str, inside: Optional[str]) -> None:
+    def walk(node: ast.AST, owner: str, inside: Optional[str], deferred: Optional[str] = None) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 name = f"{inside}.{child.name}" if inside else child.name
@@ -429,10 +440,20 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                         target = _base(base, path, named, imported)
                         if target:
                             say(whole, INHERITS, target, child.lineno)
-                walk(child, whole, name)
+                # A class body runs when the module loads; a function body
+                # runs when the function is called, so an import in it does.
+                walk(child, whole, name, deferred if isinstance(child, ast.ClassDef) else (deferred or "called"))
+            elif isinstance(child, ast.If) and _type_checking(child.test):
+                # `if TYPE_CHECKING:` never runs; what it imports is for the
+                # checker, and it is claimed as that. Its `else:` runs
+                # whenever the module does (the backport idiom puts the
+                # real import there), so it keeps the timing it is in.
+                walk(ast.Module(body=child.body, type_ignores=[]), owner, inside, "types")
+                walk(ast.Module(body=child.orelse, type_ignores=[]), owner, inside, deferred)
             elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                predicate = {None: IMPORTS, "called": IMPORTS_WHEN_CALLED, "types": IMPORTS_FOR_TYPES}[deferred]
                 for module in _imported(child, path, resolve):
-                    say(path, IMPORTS, module, child.lineno)
+                    say(path, predicate, module, child.lineno)
                 # One entry per alias, keeping the name it had in its
                 # module. Pairing every alias with every module of a
                 # multi-name import made `import json, csv` claim both
@@ -461,12 +482,18 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                         if where:
                             imported[alias.asname or alias.name] = (where, None)
             else:
-                walk(child, owner, inside)
+                walk(child, owner, inside, deferred)
 
     walk(tree, path, None)
     _calls(tree, path, named, imported, say, _unbound)
     _meaning(content, path, "python", say)
     return tuple(found)
+
+
+def _type_checking(test: ast.AST) -> bool:
+    """Whether an `if` guards on TYPE_CHECKING (bare or qualified)."""
+    return ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
+            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"))
 
 
 def _base(node: ast.AST, path: str, named: dict[str, str],
@@ -832,6 +859,9 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
                 say(subject, relation, held.get(written, written), number)
 
     inside = False
+    # Whether the statement a line continues began `import type` or
+    # `export type`: a wrapped one names its module some lines later.
+    types_only = False
     for number, line in enumerate(lines, start=1):
         if _OPENS.match(line):
             inside = True
@@ -844,12 +874,15 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
             if named:
                 say(path, IMPORTS, named.group(1), number)
             continue
+        if _ES_STATEMENT.match(line):
+            types_only = bool(_ES_TYPE_ONLY.match(line))
         for pattern in (_FROM, _BARE, _REQUIRE):
             match = pattern.search(line)
             if match:
                 where = _named(match.group(1), path, resolve)
                 if where:
-                    say(path, IMPORTS, where, number)
+                    say(path, IMPORTS_FOR_TYPES if pattern is _FROM and types_only else IMPORTS, where, number)
+                types_only = False
                 break
         else:
             used = _USE.match(line)

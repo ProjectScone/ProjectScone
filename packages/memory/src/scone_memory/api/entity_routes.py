@@ -30,6 +30,7 @@ from ..entities.timeline import TimelineEntityAmbiguous, TimelineEntityMissing, 
 from ..entities.grounding import checked_facts
 from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
                                     likely_duplicates)
+from ..entities.cycles import DEFAULT_LIMIT as CYCLES_LIMIT, MAX_BYTES as CYCLES_BYTES, MAX_LIMIT as CYCLES_MAX, graph_cycles
 from ..entities.health import (DEFAULT_EXAMPLES as HEALTH_EXAMPLES, MAX_BYTES as HEALTH_BYTES, MAX_EXAMPLES,
                                graph_health)
 from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
@@ -651,6 +652,20 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         is counted with examples. It reads and changes nothing."""
         when = _moment(engine, as_of)
         found = await graph_health(engine, space, limit=limit, status=status, as_of=when, max_bytes=max_bytes)
+        return found.record(space, status=status, as_of=when)
+
+    @app.get("/v1/graph/cycles")
+    async def get_cycles(
+        limit: int = Query(default=CYCLES_LIMIT, ge=1, le=CYCLES_MAX, description="Groups shown of each kind."),
+        max_bytes: int = Query(default=CYCLES_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """Dependency cycles in the code graph: files that cannot load
+        without each other, each group with one shortest loop and the facts
+        behind every hop; and, apart from them, the loops held open only by
+        imports that run when called or never. It reads and changes nothing."""
+        when = _moment(engine, as_of)
+        found = await graph_cycles(engine, space, limit=limit, status=status, as_of=when, max_bytes=max_bytes)
         return found.record(space, status=status, as_of=when)
 
     @app.get("/v1/entities/duplicates")
