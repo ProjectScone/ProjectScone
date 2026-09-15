@@ -17,7 +17,9 @@ from ..core.errors import InvalidInput
 from ..ocr.process import python_worker, run_bounded
 from ..ocr.tesseract import png_dimensions
 from ..ocr.types import OcrEngine, OcrResult
+from ..ocr.labels import infer_labels, label_from_engine, running_keys
 from ..ocr.layout import ReadingMode, OrderedRegions, order_columns
+from ..ocr.types import LayoutEngine, LayoutResult
 from .extraction_checkpoint import ExtractionCheckpoints
 from .pdf import ParsedPdf, PdfLimits, PdfPage, PdfTextRegion, PypdfParser, validate_pdf
 from .text_layer import unreadable
@@ -79,14 +81,20 @@ def _page_text(result: OcrResult, offset: int, max_bytes: int,
 
 
 def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], limits: PdfLimits, *,
-                     reading_order: ReadingMode = 'provider') -> ParsedPdf:
-    """Rebuild absolute UTF-8 spans from native text and validated page results."""
+                     reading_order: ReadingMode = 'provider',
+                     layouts: Mapping[int, LayoutResult] | None = None) -> ParsedPdf:
+    """Rebuild absolute UTF-8 spans from native text and validated page results.
+    Every recognized page's regions come back labelled: by the layout engine's
+    boxes for a page in ``layouts``, by the rules otherwise (with the running
+    lines judged across every recognized page first, as a text layer's are)."""
     if reading_order not in ('provider', 'columns_ltr', 'columns_rtl'):
         raise InvalidInput('unsupported OCR reading order')
     encoded = parsed.text.encode('utf-8')
     pages: list[PdfPage] = []
     texts: list[str] = []
     offset = 0
+    layouts = layouts or {}
+    running = running_keys({number: result.regions for number, result in recognized.items()})
     for page in parsed.pages:
         if page.number > 1:
             offset += 2
@@ -97,8 +105,14 @@ def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], lim
             order = None if reading_order == 'provider' else order_columns(result.regions,
                 direction='rtl' if reading_order == 'columns_rtl' else 'ltr')
             text, regions = _page_text(result, offset, limits.max_text_bytes, order)
+            if page.number in layouts:
+                labelled, labels = label_from_engine(regions, layouts[page.number])
+            else:
+                labelled, labels = infer_labels(regions, first_page=page.number == 1,
+                                                running={key for key, first in running.items() if first != page.number})
+            regions = tuple(region.model_copy(update={'label': label}) for region, label in zip(regions, labelled))
             updates = {'extraction': 'ocr', 'ocr_engine': result.engine, 'regions': regions,
-                       'reading_order': order.receipt if order else None, 'running': (),
+                       'reading_order': order.receipt if order else None, 'running': (), 'labels': labels,
                        'region_geometry': 'normalized_displayed_page_top_left'}
         elif page.regions:
             # A text-layer page laid out in reading order keeps its regions,
@@ -125,6 +139,9 @@ class _PageReceipt(BaseModel):
     binding: str = Field(pattern=r'^[a-f0-9]{64}$')
     page: int = Field(ge=1, le=1000)
     result: OcrResult
+    #: What the layout engine saw on the page, when one ran; part of the
+    #: binding, so a receipt made without an engine is not reused with one.
+    layout: LayoutResult | None = None
 
 
 def needs_recognition(encoded: bytes, page: PdfPage, options: OcrPdfOptions) -> bool:
@@ -137,7 +154,7 @@ def needs_recognition(encoded: bytes, page: PdfPage, options: OcrPdfOptions) -> 
 
 
 def _checkpoint_binding(data: bytes, parsed: ParsedPdf, options: OcrPdfOptions,
-                        limits: PdfLimits) -> str:
+                        limits: PdfLimits, layout: str | None = None) -> str:
     dependencies: dict[str, str] = {}
     for package in ('pypdf', 'pypdfium2'):
         try:
@@ -146,22 +163,26 @@ def _checkpoint_binding(data: bytes, parsed: ParsedPdf, options: OcrPdfOptions,
             dependencies[package] = 'unavailable'
     payload = {'strategy': 'ocr-page-observations-v1',
         'original': hashlib.sha256(data).hexdigest(),
-        'inspection': hashlib.sha256(parsed.model_dump_json().encode()).hexdigest(),
+        # The inspection's labels are the rules' reading of the text layer,
+        # not part of what the pages are; a receipt made before the rules
+        # read anything still binds to the same inspection.
+        'inspection': hashlib.sha256(parsed.model_dump_json(exclude={'pages': {'__all__': {'labels'}}}).encode()).hexdigest(),
         'options': options.model_dump(), 'limits': limits.model_dump(),
-        'dependencies': dependencies}
+        'dependencies': dependencies, **({'layout': layout} if layout else {})}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _page_receipt(raw: bytes, binding: str, page: int, options: OcrPdfOptions) -> OcrResult:
+def _page_receipt(raw: bytes, binding: str, page: int, options: OcrPdfOptions) -> tuple[OcrResult, LayoutResult | None]:
     try:
         if type(raw) is not bytes or len(raw) > 16 * 1024 * 1024:
             raise ValueError('checkpoint bytes')
         receipt = _PageReceipt.model_validate_json(raw)
         if (receipt.binding != binding or receipt.page != page
                 or receipt.result.width * receipt.result.height > options.max_pixels
-                or len(receipt.result.regions) > options.max_regions):
+                or len(receipt.result.regions) > options.max_regions
+                or (receipt.layout is not None and len(receipt.layout.regions) > options.max_regions)):
             raise ValueError('checkpoint binding or bounds')
-        return receipt.result
+        return receipt.result, receipt.layout
     except (ValueError, TypeError):
         raise InvalidInput('PDF OCR page checkpoint is invalid or does not match this extraction') from None
 
@@ -172,9 +193,19 @@ class OcrPdfParser:
     Processing is sequential to bound concurrent native raster memory. No models
     are downloaded; the caller explicitly supplies the recognition implementation.
     """
-    def __init__(self, engine: OcrEngine, *, options: OcrPdfOptions = OcrPdfOptions()):
+    def __init__(self, engine: OcrEngine, *, options: OcrPdfOptions = OcrPdfOptions(),
+                 layout: LayoutEngine | None = None):
         self.engine = engine
         self.options = options
+        #: Labels a page's regions from its image; without one the rules do.
+        self.layout = layout
+
+    @property
+    def layout_name(self) -> str | None:
+        if self.layout is None:
+            return None
+        name = getattr(self.layout, 'name', None)
+        return name if isinstance(name, str) and name else type(self.layout).__name__
 
     async def parse(self, data: bytes, limits: PdfLimits = PdfLimits()) -> ParsedPdf:
         try:
@@ -194,7 +225,8 @@ class OcrPdfParser:
                      checkpoints: ExtractionCheckpoints | None = None) -> ParsedPdf:
         deadline = time.monotonic() + limits.timeout_seconds
         parsed = await self.inspect(data, limits)
-        binding = _checkpoint_binding(data, parsed, self.options, limits) if checkpoints is not None else ""
+        binding = (_checkpoint_binding(data, parsed, self.options, limits, self.layout_name)
+                   if checkpoints is not None else "")
         if checkpoints is not None:
             saved_binding = checkpoints.get('ocr-binding')
             encoded_binding = binding.encode('ascii')
@@ -203,6 +235,7 @@ class OcrPdfParser:
             elif saved_binding != encoded_binding:
                 raise InvalidInput('PDF OCR checkpoints do not match this extraction')
         recognized: dict[int, OcrResult] = {}
+        layouts: dict[int, LayoutResult] = {}
         encoded = parsed.text.encode()
         text_bytes = len(encoded)
         for page in parsed.pages:
@@ -210,20 +243,24 @@ class OcrPdfParser:
                 key = f'ocr-page:{page.number}'
                 cached = checkpoints.get(key) if checkpoints is not None else None
                 if cached is None:
-                    result = await self._recognize(data, page.number, deadline)
+                    result, layout = await self._recognize(data, page.number, deadline)
                 else:
-                    result = _page_receipt(cached, binding, page.number, self.options)
+                    result, layout = _page_receipt(cached, binding, page.number, self.options)
                 _remaining(deadline)
                 text_bytes += sum(len(r.text.encode()) for r in result.regions) + max(0, len(result.regions) - 1) - (page.end - page.start)
                 if text_bytes > limits.max_text_bytes:
                     raise InvalidInput('PDF OCR text exceeds its byte limit')
                 if cached is None and checkpoints is not None:
-                    receipt = _PageReceipt(binding=binding, page=page.number, result=result).model_dump_json().encode()
-                    result = _page_receipt(receipt, binding, page.number, self.options)
+                    receipt = _PageReceipt(binding=binding, page=page.number, result=result,
+                                           layout=layout).model_dump_json().encode()
+                    result, layout = _page_receipt(receipt, binding, page.number, self.options)
                     _remaining(deadline)
                     checkpoints.put(key, receipt)
                 recognized[page.number] = result
-        output = assemble_ocr_pdf(parsed, recognized, limits, reading_order=self.options.reading_order)
+                if layout is not None:
+                    layouts[page.number] = layout
+        output = assemble_ocr_pdf(parsed, recognized, limits, reading_order=self.options.reading_order,
+                                  layouts=layouts)
         _remaining(deadline)
         return output
 
@@ -236,11 +273,12 @@ class OcrPdfParser:
         """Render and recognize one page, including a deadline for the provider."""
         budget = PdfLimits(timeout_seconds=timeout_seconds).timeout_seconds
         try:
-            return await asyncio.wait_for(self._recognize(data, page, time.monotonic() + budget), budget)
+            result, _ = await asyncio.wait_for(self._recognize(data, page, time.monotonic() + budget), budget)
+            return result
         except asyncio.TimeoutError as error:
             raise InvalidInput('PDF OCR page exceeded its wall time limit') from error
 
-    async def _recognize(self, data: bytes, page: int, deadline: float) -> OcrResult:
+    async def _recognize(self, data: bytes, page: int, deadline: float) -> tuple[OcrResult, LayoutResult | None]:
         if find_spec('pypdfium2') is None:
             raise InvalidInput('PDF OCR rendering requires scone-memory[pdf-ocr]')
         payload = json.dumps({'page': page, 'dpi': self.options.dpi, 'max_pixels': self.options.max_pixels})
@@ -265,4 +303,20 @@ class OcrPdfParser:
             page, result.engine, len(result.regions), (time.monotonic() - started) * 1000.)
         if (result.width, result.height) != dimensions or len(result.regions) > self.options.max_regions:
             raise InvalidInput('OCR result dimensions or region count do not match the rendered page')
-        return result
+        layout: LayoutResult | None = None
+        if self.layout is not None:
+            try:
+                seen = await self.layout.analyse(image, max_pixels=self.options.max_pixels,
+                                                 max_regions=self.options.max_regions,
+                                                 timeout_seconds=_remaining(deadline))
+            except TimeoutError as error:
+                raise InvalidInput('PDF layout engine timed out') from error
+            if not isinstance(seen, LayoutResult):
+                raise InvalidInput('layout engine returned invalid output')
+            try:
+                layout = LayoutResult.model_validate_json(seen.model_dump_json(warnings=False))
+            except (ValidationError, ValueError, TypeError) as error:
+                raise InvalidInput('layout engine returned invalid output') from error
+            if (layout.width, layout.height) != dimensions:
+                raise InvalidInput('layout result dimensions do not match the rendered page')
+        return result, layout
