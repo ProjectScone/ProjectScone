@@ -115,8 +115,8 @@ module the graph's other files name.
 | Text, Markdown and code files | Line locators | Source text only; no AST or semantic code graph |
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
-| HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
-| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
+| HTML | Visible text, table cells, spans and source-linked headers; declared headings, list items, captions and preformatted blocks | Bounded parser; no browser execution, stylesheets or remote resource fetching |
+| DOCX, and DOCM, DOTX, DOTM | Paragraphs with declared heading, list and caption roles, typed table cells/merges, declared header rows and referenced notes | Direct run properties; styles are followed only to name a paragraph's role; no rendered layout or macros |
 | XLSX, and XLSM, XLTX, XLTM | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
 | PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
@@ -356,6 +356,127 @@ retain the same header evidence. Use a new run and parser revision to re-extract
 older flattened workbooks. General worksheet header inference, merged layouts
 outside declared tables, number-format rendering, XLS/XLSB table structure and
 spreadsheet image/chart interpretation remain separate gaps.
+
+## Rebuild a document as Markdown
+
+```bash
+scone doc-markdown report.docx > report.md          # the receipt goes to stderr
+scone doc-markdown report.docx --json               # the whole record, spans and all
+curl -H "Authorization: Bearer $KEY" \
+  "http://127.0.0.1:7437/v1/episodes/42/document/markdown?max_bytes=200000"
+```
+
+```python
+from scone_memory.ingestion import BuiltinDocumentParser
+from scone_memory.ingestion.formats.markdown_assembly import assemble_markdown
+
+parsed = await BuiltinDocumentParser().parse(data, "report.docx")
+result = assemble_markdown(parsed)
+print(result.markdown)
+```
+
+`assemble_markdown` writes a parsed document as Markdown: headings at their
+level, paragraphs in reading order, lists as nested lists, captions beside what
+they caption, preformatted text as fenced code, and tables as pipe tables. It
+runs no model and adds no structure the parsed document does not carry, so the
+same parsed document always gives the same bytes. The command reads a file and
+opens no store; the route rebuilds a stored document from its retained manifest.
+
+### Declared blocks
+
+The readers record what the source declares, in segment metadata:
+
+| Key | Values | Set by |
+|---|---|---|
+| `block_role` | `heading`, `list_item`, `caption`, `code` | Word paragraphs; HTML `h1`-`h6`, `li`, `figcaption`, `pre` |
+| `heading_level` | `1`-`9` (Word outline levels reach 9) | Both |
+| `heading_basis` | `outline_level`, `style`, `style_id` | Word |
+| `list_level` | Nesting depth from `0` | Both |
+| `list_kind` | `bullet`, `ordered`; absent when the source does not say | Both |
+| `list_id` | Word `numId`; HTML ordinal of the outermost list | Both |
+| `list_item_id` | Ordinal of the `li` the text sits in | HTML |
+| `caption_target` | The table a `<caption>` belongs to | HTML |
+
+A Word paragraph is a heading because its own outline level, or the outline
+level or name (`heading 2`, `Title`) of the style it is based on, says so --
+never because of its font or length. Style IDs are localized (`Berschrift1`),
+so the style's name decides; only an ID the styles part does not define is read
+by its spelling, and `heading_basis=style_id` says so. Outline level 9 is body
+text. A list item has numbering attached, directly or through its style, that
+is not `numId 0`; its kind is read from the numbering part. The document's
+default paragraph style is not consulted. A styles or numbering part that
+cannot be read, or a `basedOn` chain longer than 32 styles, is named in the
+document's `structure_notes` (`styles_unreadable`, `numbering_unreadable`,
+`style_chain_cut`) and the text is read regardless.
+
+A document that declares none of this parses byte-identically to before, so
+its manifest and deduplication identity are unchanged. A document that does
+gets a new manifest digest; use a new durable run and parser revision to
+re-extract it.
+
+ODT, EPUB, PPTX, spreadsheets and PDF record no roles: their text becomes
+paragraphs (and declared tables stay tables). A PDF text layer declares no
+headings, and none are inferred from it; the record says
+`structure_declared: false`.
+
+### What the Markdown says and where it came from
+
+Text is escaped so it cannot read as structure: `# not a heading` becomes
+`\# not a heading`, and inline markup characters (`*`, `_` at a word edge,
+`[`, `<`, backticks, `|`) are escaped. A line break inside a block stays a line
+break; a blank line starts a new paragraph.
+
+A pipe table has one header row and no spans, and the writer does not pretend
+otherwise. A declared header row is the header. A table with no header cells
+uses column names its reader recorded (`table_columns`, for CSV and JSON), or
+else an empty header row -- its first row is never promoted. Further header rows
+are written as body rows. A cell spanning rows or columns is written in its
+first slot with the slots it covers left empty, and a quoted note before the
+table says how many cells spanned and how many header rows were demoted. A line
+break in a cell is written as `<br>` and counted. A table its reader could only
+read as text (`table_status=text_fallback`) keeps its lines as paragraphs after
+a note naming the reason.
+
+Referenced Word notes, comments and text boxes, which the reader queues after
+the body, are quoted with their role: `> footnote 2: ...`. A Word heading below
+level 6 is written at 6 and counted in `headings_clamped`; a list item nested
+more than one level below its predecessor is nested one level and counted in
+`list_levels_clamped`; a list item whose kind is unsaid is written as a bullet
+and counted in `list_kinds_unsaid`; role metadata no reader writes (a heading
+level `0`, an unknown role) is written as a paragraph and counted in
+`roles_unreadable`. An ordered list the document interrupts carries on
+counting; a paragraph inside an HTML list item stays inside it.
+
+`spans` maps the Markdown back to the source. Each span has its byte range
+(`markdown_start`, `markdown_end`), its 1-based `first_line` and `last_line`,
+and `sources`: segment locators with `start` and `end` in
+`extracted_text_utf8_bytes` -- the segments joined by a blank line, which is a
+stored document's episode text, so a span and a retrieved chunk can be compared
+directly. Every non-blank line is in exactly one span. Lines the writer made up
+(a table's delimiter row, a generated header row, a note) are `generated: true`
+and name the rows they describe.
+
+`max_bytes` (default and maximum 8,000,000) bounds the Markdown. No block is
+written past it; a table's note, header and delimiter row are written together
+or not at all, and its rows are cut between rows. `bound.cut` says whether it
+cut, `bound.cut_at` is the extracted-text byte the first unwritten block starts
+at, and `bound.segments_omitted` counts segments not wholly written. The command
+repeats this on stderr.
+
+Inline formatting (bold, links, code spans) is not kept by the readers, so it
+is not in the Markdown; images and charts are not emitted.
+
+Measured on this repository's `packages/memory/docs` (45 files): each file was
+rendered to HTML by an independent CommonMark renderer (markdown-it-py with
+tables), read by the HTML reader and rebuilt. Parsed back with the same
+renderer, the rebuilt Markdown holds 307 of 307 headings with the same level and
+text in order, 414 of 414 list items (61 nested) with the same text, 40 of 40
+tables with 269 of 269 rows and 776 of 776 cells equal, 154 of 154 code blocks
+byte-equal, and 1,514 of 1,514 paragraphs. The extracted text as stored today,
+read as Markdown, holds none of those tables or list items, and 95 "headings"
+that are all `#` comment lines from code blocks (none matches a source heading).
+No DOCX corpus is in the repository; Word reconstruction is covered by
+constructed fixtures only.
 
 ## Import a page by URL
 

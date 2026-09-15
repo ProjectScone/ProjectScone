@@ -18,7 +18,8 @@ from ..ingestion.document_media import DocumentMedia, MEDIA_DOCUMENT_EXTENSIONS
 from ..ingestion.document_ocr import DocumentOcr, PdfOcrSelection, ocr_choices
 from ..ingestion.document_video import DocumentVideo, video_choices
 from ..ingestion.formats.registry import BuiltinDocumentParser, DocumentParser
-from ..ingestion.formats.types import DocumentLimits
+from ..ingestion.formats.markdown_assembly import MAX_MARKDOWN_BYTES, assemble_markdown
+from ..ingestion.formats.types import DocumentLimits, ParsedDocument
 from ..memory.engine import MemoryEngine
 from .video_documents import mount_video_frame_routes
 from .video_catalogue import mount_video_catalogue_route
@@ -124,6 +125,22 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
         assert_current_space(request, space)
         return JSONResponse(jsonable_encoder({**asdict(result),
             'download_path': f'/v1/attachments/{result.original.attachment_id}'}))
+
+    @app.get('/v1/episodes/{episode_id}/document/markdown')
+    async def markdown(request: Request, episode_id: int = Path(ge=1, le=2**63 - 1),
+                       max_bytes: int = Query(default=MAX_MARKDOWN_BYTES, ge=1, le=MAX_MARKDOWN_BYTES),
+                       space: str = Depends(space_for)) -> JSONResponse:
+        """The stored document written as Markdown from its retained manifest. Each span
+        names the segments and the episode-text byte ranges it came from, and the record
+        says where ``max_bytes`` cut, if it did."""
+        result = await document_provenance(engine, space, episode_id)
+        parsed = ParsedDocument(format=result.format, parser=result.parser, segments=result.segments,
+                                metadata=result.metadata, video=result.video)
+        assembled = assemble_markdown(parsed, max_bytes=max_bytes)
+        assert_current_space(request, space)
+        return JSONResponse({'episode_id': episode_id, 'filename': result.filename,
+                             'original_sha256': result.original.attachment_id,
+                             'manifest_sha256': result.manifest.attachment_id, **assembled.record()})
 
 
     @app.get('/v1/episodes/{episode_id}/tables')
