@@ -322,11 +322,17 @@ carries its runs as regions when a table is among them (see
 [pdf-ingestion.md](pdf-ingestion.md)) -- (see [pdf-ocr.md](pdf-ocr.md#inspect-possible-tables-without-repeating-ocr)),
 reach `segment.table_cells` with the same record: row, column,
 `column_span` where a cell reaches across the grid's columns, and the
-cell's exact byte span of the page's text. No header or row span is
-inferred, so `is_header` is false and `headers` empty; the segment's
-`tables` and `tables_unreadable` metadata count the grids proposed and
-those left out because their cells did not read together. The cells
-come in the page's text order, each with its row and column.
+cell's exact byte span of the page's text. The first row filling every
+column is the header when none of its cells is a number (a bare year
+is a label) and a column below it is mostly numbers: its cells say
+`is_header`, the cells below carry `column` header references, and the
+segment says `header_basis: pdf_first_row` and counts `tables_headed`,
+so the [table query](#table-query) names the columns; a table of words
+alone, or one continued from an earlier page, gets none. No row span is
+inferred. The segment's `tables` and `tables_unreadable` metadata count
+the grids proposed and those left out because their cells did not read
+together. The cells come in the page's text order, each with its row
+and column.
 
 ### HTML table evidence
 
