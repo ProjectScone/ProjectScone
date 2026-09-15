@@ -879,6 +879,47 @@ SCONE_EMBEDDING_CACHE=~/.scone/embeddings.sqlite scone map src/ --graph
 # 312 file(s) read, 1 updated, 311 already here, 4 chunk embedding(s) reused, unchanged since last stored, …
 ```
 
+### More than one repository in a space
+
+A map names every file by its path below the root, so two repositories
+mapped into one space share every name they have in common (both have
+a `src/main.py`) and the graph folds them into one file. `scone map
+ROOT --repo NAME` (and `scone sync --repo NAME`) holds every file as
+`NAME/path` instead: the repositories keep their files apart, and the
+graph explorer shows each as a top directory. Name every repository in
+a shared space or none; a name is one path segment, refused otherwise
+(and `requirements` is refused, since files under a directory of that
+name are read as manifests), and a directory mapped again under a new
+name is read again under it. Without a name a map has no other
+repository to link to: its own package still resolves within it, and
+nothing the space holds of it -- possibly stale -- is read as another's.
+
+What a repository publishes is written in its manifest -- the package a
+`pyproject.toml` names (`libpkg`), a `package.json` (`@acme/ui`), a
+`Cargo.toml` (`acme-core`) or a `go.mod` (`example.com/svc`) -- and an
+import of it in another repository is the link between the two. Before
+reading, `map --graph` asks the space what its other repositories
+publish and which files they mapped, reads this tree's own manifests
+first, and follows such an import to the file by the language's own
+rule: `libpkg.util` under `src/libpkg`, `libpkg` or `lib/libpkg`;
+`@acme/ui/button` under the package's directory, `src`, `lib` or
+`dist`, and `@acme/ui` alone to its `index`; `acme_core::store` to
+`src/store.rs` or `src/store/mod.rs` and the crate alone to `lib.rs`; a
+Go import path to the directory of Go files below the module's path.
+The import then reaches the file, so a call through it reaches the
+function (`app/src/main.py:run calls lib/src/libpkg/util.py:tidy`). A
+package nobody here publishes, or a module whose file was never
+mapped, stays a name; nothing is guessed. The receipt counts the
+imports that reached another repository and names what the space
+publishes (`cross_repository_imports`, `published`); a map that changed
+nothing records nothing and counts 0.
+
+```bash
+scone map ~/code/lib --graph --repo lib
+scone map ~/code/app --graph --repo app
+# map: 3 file(s) read, 9 claim(s), 2 import(s) reach another repository's file
+```
+
 ### Inspecting source removal
 
 Servers with `episodes.forget: true` in `/v1/capabilities` expose the complete
@@ -979,7 +1020,10 @@ whose text extraction fails, or whose text layer is unreadable (mostly private-u
 code points, `(cid:N)` runs, replacement characters or control bytes). Without OCR
 such a page keeps its text, its segment carries `unreadable: true` and the
 document metadata lists it in `unreadable_pages`. `all_pages` recognizes every page, including
-those with embedded text. Reading order is `provider`, `columns_ltr` or
+those with embedded text. Every page's regions carry a `label` (title,
+heading, paragraph, list, table, footnote, header, footer, page number,
+…), inferred from the page or given by a layout engine; see
+[region labels](pdf-ocr.md#label-the-pages-regions). Reading order is `provider`, `columns_ltr` or
 `columns_rtl`; the latter two infer columns geometrically, not semantically.
 The browser Documents import queue exposes these choices per PDF when available.
 
@@ -1101,7 +1145,12 @@ declaration here; a language whose grammar names things another way
 file (PHP, Swift, Scala) keeps the brace reader. Without the extra
 nothing changes. `scone map` and `scone sync` read these suffixes as
 they read the Python and brace families, so a repository's Ruby, Lua,
-shell, Perl and fish files reach the graph by the same walk.
+shell, Perl and fish files reach the graph by the same walk. The same
+pack gives the brace family beyond TypeScript -- Go, Rust, Java, C#,
+Swift, C, C++, Scala, PHP -- its
+declarations and its bound calls from a syntax tree (see the code
+graph in retrieval-and-storage.md); without it those files keep the
+line reader's declarations and no calls.
 
 The same tree speaks to the graph: every definition is a
 `defines` claim held by what encloses it (`app/cart.rb:Shop.Cart defines

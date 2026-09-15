@@ -190,6 +190,50 @@ def test_recency_settings_come_from_the_environment_reach_the_engine_and_refuse_
     assert (blank.recency_weight, blank.recency_half_life_days) == (W_RECENCY, RECENCY_HALF_LIFE_DAYS), "an empty value is unset, as the neighbours treat it"
 
 
+def test_the_feedback_weight_comes_from_the_environment_is_off_by_default_and_refuses_bad_values(tmp_path):
+    import asyncio
+
+    import pytest
+
+    from scone_memory.core.errors import InvalidInput
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    base = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
+    assert Settings.from_env(base).feedback_weight == 0.0, "recorded feedback moves nothing unless asked"
+    assert Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": ""}).feedback_weight == 0.0
+    tuned = Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.004"})
+    assert tuned.feedback_weight == 0.004 and "feedback_weight" in ENGINE_SETTINGS
+    engine = asyncio.run(build_engine(tuned))
+    try:
+        assert engine.feedback_weight == 0.004
+    finally:
+        asyncio.run(engine.close())
+    from scone_memory import HashEmbedder
+
+    bench = asyncio.run(build_in_process_engine(tuned, HashEmbedder()))
+    try:
+        assert bench.feedback_weight == 0.004
+    finally:
+        asyncio.run(bench.close())
+    for value in ("-0.1", "two", "inf", "1.5"):
+        with pytest.raises(InvalidInput, match="SCONE_FEEDBACK_WEIGHT"):
+            Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": value})
+
+
+def test_a_feedback_weight_with_no_event_log_is_refused(tmp_path):
+    """The prior reads judgements from the event log: with none, the setting would move nothing and say so nowhere."""
+    import pytest
+
+    from scone_memory.core.errors import InvalidInput
+
+    base = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
+    with pytest.raises(InvalidInput, match="SCONE_FEEDBACK_WEIGHT.*SCONE_EVENTS=none"):
+        Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.0001", "SCONE_EVENTS": "none"})
+    assert Settings.from_env(base | {"SCONE_EVENTS": "none"}).events == "none", "off, it needs no log"
+    assert Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.0001", "SCONE_EVENTS": "memory"}).feedback_weight == 0.0001
+    assert Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.0001"}).events is None, "the default log is read"
+
+
 async def test_a_synonym_file_is_read_at_build_time_and_reaches_every_engine(tmp_path):
     from scone_memory import HashEmbedder
     from scone_memory.runtime.config import FILE_SETTINGS, build_in_process_engine, build_synonyms
@@ -294,3 +338,34 @@ async def test_a_token_chunk_target_is_a_number_that_reaches_every_engine():
 def test_a_token_chunk_target_that_cannot_work_is_refused_by_name(env, match):
     with pytest.raises(InvalidInput, match=match):
         Settings.from_env(env)
+
+
+async def test_a_semantic_merge_threshold_is_a_similarity_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_SEMANTIC_MERGE_THRESHOLD": " 0.6 "})
+    assert settings.semantic_merge_threshold == 0.6
+    assert Settings.from_env({}).semantic_merge_threshold is None
+    assert Settings.from_env({"SCONE_SEMANTIC_MERGE_THRESHOLD": " "}).semantic_merge_threshold is None, \
+        "an empty value is unset, as elsewhere"
+    assert "semantic_merge_threshold" in ENGINE_SETTINGS
+    engine = await build_engine(settings)
+    try:
+        assert engine.semantic_merge_threshold == 0.6
+    finally:
+        await engine.close()
+    in_process = await build_in_process_engine(settings, HashEmbedder())
+    assert in_process.semantic_merge_threshold == 0.6
+
+
+@pytest.mark.parametrize("raw, match", [
+    ("0", "SCONE_SEMANTIC_MERGE_THRESHOLD: semantic_merge_threshold must be a similarity above 0 and at most 1"),
+    ("-0.2", "SCONE_SEMANTIC_MERGE_THRESHOLD: semantic_merge_threshold must be a similarity"),
+    ("1.5", "SCONE_SEMANTIC_MERGE_THRESHOLD: semantic_merge_threshold must be a similarity"),
+    ("nan", "SCONE_SEMANTIC_MERGE_THRESHOLD: semantic_merge_threshold must be a similarity"),
+    ("often", "SCONE_SEMANTIC_MERGE_THRESHOLD must be a number, got 'often'"),
+])
+def test_a_semantic_merge_threshold_that_is_not_a_similarity_is_refused_by_name(raw, match):
+    with pytest.raises(InvalidInput, match=match):
+        Settings.from_env({"SCONE_SEMANTIC_MERGE_THRESHOLD": raw})
