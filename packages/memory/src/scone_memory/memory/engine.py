@@ -666,13 +666,31 @@ class MemoryEngine:
         record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key,
                         chunking=chunking, chunking_profile=chunking_profile,
                         semantic_merge_threshold=semantic_merge_threshold, forget_after=forget_after)
+        kept = await self._attachments_past_due(space, record, attachment_ids) if attachment_ids else []
         if replace:
             added = (await self.replace(space, record)).added
         else:
             [added] = await self.remember_many(space, [record], embedding_checkpoint=embedding_checkpoint)
+        for held, data in kept:
+            # Stored again if the overdue memory's forget released them; the
+            # same bytes still held are one attachment, so this changes nothing.
+            await self.blobs.put(space, data, held.media_type, held.filename)
         for attachment_id in dict.fromkeys(attachment_ids):
             await self.blobs.link(space, attachment_id, added.episode_id)
         return added
+
+    async def _attachments_past_due(self, space: str, record: Record,
+                                    attachment_ids: Sequence[str]) -> list[tuple[Attachment, bytes]]:
+        """The attachments a write is to link, read before it runs, when its
+        identity is held by a memory past its ``forget_after``. The write
+        forgets that memory first, and the ordinary forget releases what
+        nothing else carries -- bytes the caller stored for this very write
+        among them. Nothing is read for any other write."""
+        identity = ingestion_batch.validated_record(space, record, self.clock()).content_hash
+        existing = await self.documents.episode_by_hash(space, identity)
+        if existing is None or not forget_after.is_due(existing.metadata, parse_rfc3339(self.clock())):
+            return []
+        return [await self.blobs.get(space, attachment_id) for attachment_id in dict.fromkeys(attachment_ids)]
 
     async def replace(self, space: str, record: Record, *, map_code: bool = True,
                       resolve: "Resolve | None" = None) -> "Replaced":
