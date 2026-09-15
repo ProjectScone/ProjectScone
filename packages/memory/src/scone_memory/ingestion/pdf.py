@@ -8,7 +8,7 @@ from typing import Literal, Protocol
 
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, field_validator, model_serializer
 
 from ..core.errors import InvalidInput
 from ..ocr.types import OrderedOcrRegion
@@ -63,6 +63,15 @@ class PdfPage(BaseModel):
     ocr_engine: str | None = Field(default=None, min_length=1, max_length=96)
     reading_order: ReadingOrderReceipt | None = None
     running: tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...] = Field(default=(), max_length=4)
+    #: The titles of the PDF's own bookmarks in force on this page, outermost first.
+    section: tuple[str, ...] = Field(default=(), max_length=8)
+
+    @field_validator('section')
+    @classmethod
+    def bounded_titles(cls, section: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not title or len(title) > 256 for title in section):
+            raise ValueError('a PDF section title must be 1 to 256 characters')
+        return section
 
     @model_serializer(mode='wrap')
     def preserve_legacy(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
@@ -71,6 +80,8 @@ class PdfPage(BaseModel):
             value.pop('reading_order', None)
         if not self.running:
             value.pop('running', None)
+        if not self.section:
+            value.pop('section', None)
         return value
 
 
@@ -79,6 +90,15 @@ class ParsedPdf(BaseModel):
     text: str
     parser: str = Field(min_length=1, max_length=128)
     pages: tuple[PdfPage, ...] = Field(min_length=1, max_length=1000)
+    #: Whether the PDF's bookmarks were read whole, read to their bound, could not be read, or are absent.
+    outline: Literal['none', 'read', 'capped', 'unreadable'] = 'none'
+
+    @model_serializer(mode='wrap')
+    def omit_absent_outline(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.outline == 'none':
+            value.pop('outline', None)
+        return value
 
 
 class PdfParser(Protocol):
