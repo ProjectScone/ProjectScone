@@ -237,6 +237,7 @@ class MemoryEngine:
         chunk_tokens: int | None = None,
         chunk_overlap_tokens: int = 0,
         question_lane: bool = False,
+        semantic_merge_threshold: float | None = None,
     ) -> None:
         if vector_weight is None:
             # A hashed-token embedder ranks by word overlap, badly: a weak
@@ -307,6 +308,17 @@ class MemoryEngine:
         #: specification, so a space that already holds chunks cut another
         #: way must not silently start cutting differently.
         self.semantic_aware = semantic_aware
+        if semantic_merge_threshold is not None:
+            from ..ingestion.semantic_chunks import merge_refused
+
+            refusal = merge_refused(semantic_merge_threshold)
+            if refusal is not None:
+                raise InvalidInput(refusal)
+        #: The similarity at which a semantic cut's neighbouring chunks are
+        #: joined again, within the target (ingestion/semantic_chunks.py);
+        #: None keeps the first pass's cuts. Read by every semantic cut, the
+        #: engine's rule or a record's own ``chunking="semantic"``.
+        self.semantic_merge_threshold = semantic_merge_threshold
         #: Whether a chunk is embedded with the headings above it (for code,
         #: its file and declarations). Off unless asked for: it changes
         #: vectors, and a space's existing vectors were made without it.
@@ -621,7 +633,8 @@ class MemoryEngine:
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
                          self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context,
-                         self.embedding_budget, self.chunk_tokens, self.chunk_overlap_tokens)
+                         self.embedding_budget, self.chunk_tokens, self.chunk_overlap_tokens,
+                         self.semantic_merge_threshold)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -640,7 +653,8 @@ class MemoryEngine:
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
                         self.code_aware, self.code_graph, self.structure_aware,
                         self.semantic_aware, self.heading_context, self.embedding_budget,
-                        self.chunk_tokens, self.chunk_overlap_tokens) != configuration):
+                        self.chunk_tokens, self.chunk_overlap_tokens,
+                        self.semantic_merge_threshold) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -778,7 +792,8 @@ class MemoryEngine:
             self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint,
             embedding_cache=self.embedding_cache, code_aware=self.code_aware,
             structure_aware=self.structure_aware,
-            semantic_aware=self.semantic_aware, heading_context=self.heading_context,
+            semantic_aware=self.semantic_aware, semantic_merge_threshold=self.semantic_merge_threshold,
+            heading_context=self.heading_context,
             embedding_budget=cast(int, getattr(self.embedder, "max_input_tokens")) if self.embedding_budget else None,
             count_tokens=(getattr(self.embedder, "count_tokens", None)
                           if self.embedding_budget or self.chunk_tokens is not None else None),

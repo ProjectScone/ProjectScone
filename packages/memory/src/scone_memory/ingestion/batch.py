@@ -17,7 +17,7 @@ from ..core.models import Added, MAX_CONTENT_BYTES
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, MAX_METADATA_KEYS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
-from .semantic_chunks import semantic_spans
+from .semantic_chunks import semantic_cut
 from .structure_chunks import structured_spans
 from .chunking_profiles import profile_named, profiled_spans
 from .embedding_cache import EmbeddingCache, cache_key
@@ -153,6 +153,10 @@ class IngestionRuntime:
     #: `structure_aware`, and costs one extra embedding call per episode
     #: -- its sentences are embedded to find the boundaries.
     semantic_aware: bool = False
+    #: The similarity at which a semantic cut's neighbouring chunks are
+    #: joined again within the target (semantic_chunks.semantic_cut); None
+    #: keeps the first pass's cuts. Only the semantic cut reads it.
+    semantic_merge_threshold: float | None = None
     #: Whether each chunk is embedded with the headings it sits under (for
     #: code, its file and declarations). Changes vectors, never stored text.
     heading_context: bool = False
@@ -494,7 +498,9 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
         by_unit = unit_spans(content, named, runtime.chunk_target)
         return Cut(list(by_unit.spans), "unit", {key: value for key, value in by_unit.record().items() if key != "chunks"})
     if mode == "semantic":
-        return Cut(list(await semantic_spans(content, runtime.embedder, runtime.chunk_target)), "semantic")
+        meant = await semantic_cut(content, runtime.embedder, runtime.chunk_target,
+                                   merge_threshold=runtime.semantic_merge_threshold)
+        return Cut(list(meant.spans), "semantic", meant.record())
     if runtime.chunk_tokens is not None:
         from .embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION
         from .token_chunks import token_spans
