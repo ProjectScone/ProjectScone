@@ -148,7 +148,7 @@ class ProposedTriple:
     object_kind: str
     quote: str
 
-    def record(self) -> dict[str, object]:
+    def record(self) -> dict[str, str | int]:
         return {"fact_id": self.fact_id, "chunk_id": self.chunk_id, "episode_id": self.episode_id,
                 "subject": self.subject, "subject_kind": self.subject_kind, "predicate": self.predicate,
                 "object": self.object, "object_kind": self.object_kind, "quote": self.quote}
