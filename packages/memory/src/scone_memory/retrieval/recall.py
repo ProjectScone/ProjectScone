@@ -567,6 +567,7 @@ async def recall(
         latency["rerank"] = outcome.trace.duration_ms
         if outcome.failure is not None:
             degraded.append(f"rerank: {outcome.failure}")
+        degraded.extend(f"rerank: {note}" for note in outcome.notes)
         if outcome.trace.status == "applied":
             rerank_scores = outcome.scores
             ranked = list(outcome.ordered_ids) + [cid for cid in candidate_order if cid not in rerank_scores]

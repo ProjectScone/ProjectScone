@@ -413,6 +413,45 @@ class RecallItem(BaseModel):
         return value
 
 
+class ListwiseCall(BaseModel):
+    """One model call of a listwise pass: which window it was shown and what came of it."""
+
+    #: The window's half-open positions in the candidates sent, 0-based,
+    #: as the list stood when this call was made.
+    start: int
+    end: int
+    passages: int
+    #: Passages shown cut to the byte bound in this call.
+    clipped: int
+    #: ranked: every passage placed. partial: some placed, the rest kept
+    #: their order after them. unparseable: none placed, the window kept
+    #: its order. failed / timeout: the pass ended here and fused order stands.
+    outcome: Literal["ranked", "partial", "unparseable", "failed", "timeout"]
+    ranked: int
+    #: Passages whose place in the window changed.
+    moved: int
+    duration_ms: float
+    reason: Optional[str] = None
+
+
+class ListwiseReceipt(BaseModel):
+    """What a listwise pass asked the model, and what it moved."""
+
+    window: int
+    step: int
+    passage_bytes: int
+    timeout: float
+    calls: list[ListwiseCall] = Field(default_factory=list)
+    #: Calls started, including one the deadline or a failure interrupted.
+    model_calls: int = 0
+    #: Candidates whose final place differs from the fused order; zero on a fallback.
+    moved: int = 0
+    #: Candidates longer than the byte bound, shown cut in every window they were in.
+    clipped: int = 0
+    #: Why fused order was kept, when it was; None when the model's order was applied.
+    fallback: Optional[str] = None
+
+
 class RerankTrace(BaseModel):
     status: Literal["applied", "empty", "failed", "disabled"]
     ordering: Literal["rerank", "fusion"]
@@ -421,6 +460,16 @@ class RerankTrace(BaseModel):
     candidates_omitted: int
     payload_bytes: int
     duration_ms: float
+    #: The listwise pass's receipt, when the reranker was a listwise model; left out otherwise.
+    listwise: Optional[ListwiseReceipt] = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_listwise(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # A scorer's trace answers exactly as it did before listwise passes existed.
+        value: dict[str, object] = handler(self)
+        if self.listwise is None:
+            value.pop("listwise", None)
+        return value
 
 
 class QueryEntity(BaseModel):
