@@ -63,6 +63,14 @@ async def test_structure_may_be_named_alongside_the_profile(engine):
     assert added.structure["profile"] == "qa"
 
 
+async def test_a_keyed_replacement_is_cut_with_its_profile(engine):
+    await engine.remember("default", "Q: Old?\nA: Old.\n", dedup_key="faq", chunking_profile="qa")
+    added = await engine.remember("default", QA, dedup_key="faq", replace=True, chunking_profile="qa")
+    assert added.outcome == "updated" and added.structure is not None and added.structure["profile"] == "qa"
+    assert await texts(engine, added.episode_id) == by_profile(QA, "qa", engine.chunk_target)
+    assert (await engine.episode("default", added.episode_id)).metadata["chunking_profile"] == "qa"
+
+
 async def test_an_unknown_profile_is_refused_before_anything_is_stored(engine):
     with pytest.raises(InvalidInput, match="statute"):
         await engine.remember("default", STATUTE, chunking_profile="sonnet")

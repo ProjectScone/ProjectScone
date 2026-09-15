@@ -977,8 +977,9 @@ batch, which is answered as failed on its own.
 followed by the end of the line, punctuation or a capitalised title, so
 `Section 3 of this Act applies` is a sentence; a paper or resume section
 name must be the whole line, so `Experience shows that…` and `Results were
-mixed` are prose; a question without `Q:` must open a paragraph, so a
-rhetorical question inside an answer does not start a new pair; a reference
+mixed` are prose; a question without `Q:` must open a paragraph (after a blank
+line, a heading or a rule), so a rhetorical question inside an answer does
+not start a new pair; a reference
 entry is only read inside references. Each has a test.
 
 **Measured** with `benchmarks/chunking_profiles.py` on two synthetic

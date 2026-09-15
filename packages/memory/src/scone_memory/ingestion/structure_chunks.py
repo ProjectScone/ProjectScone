@@ -241,7 +241,8 @@ def units(content: str, limit: int = MAX_SECTIONS, *, reader: UnitReader | None 
                 found.append((byte, kind, stripped.strip(), depth))
         if len(found) >= limit:
             break
-        opens = not stripped.strip()
+        # A blank line, a heading and a rule or setext underline each end a paragraph.
+        opens = not stripped.strip() or byte in heads or bool(_UNDERLINE.match(stripped))
         byte += len(line.encode())
 
     ends = {start: tables[start] for start, _, _, _ in found if start in tables}

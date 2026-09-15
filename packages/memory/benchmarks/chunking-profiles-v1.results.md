@@ -23,7 +23,7 @@ Q&A-like: 13190 characters, profile qa, seed 20260914
   structure  chunks   27  at a genre boundary 10/27 (37%)  split from first child 15/24  fitting unit split 7/16  over 700: 1  mean 488
   profile    chunks   30  at a genre boundary 24/30 (80%)  split from first child 0/24  fitting unit split 0/16  over 700: 2  mean 439
   receipt: {'by_size': 6, 'over_target': 2, 'matched': {'question': 24, 'answer': 24}, 'began': {'heading': 1, 'question': 23}}
-docs: 45 documents, 679766 characters
+docs: 45 documents, 679808 characters
   plain structure: 1372 chunks
   statute  1360 chunks, rules matched {'subsection': 3, 'paragraph': 19}
   paper    1358 chunks, rules matched {'section': 1}
