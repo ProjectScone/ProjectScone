@@ -52,7 +52,8 @@ from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, SummaryExpander, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
-from ..retrieval.image_lane import ImageLane, remove_forgotten, writer_block
+from ..retrieval.image_lane import (ImageLane, records_writer, reembed_images as _reembed_images,
+                                   remove_forgotten, writer_block)
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
 from ..retrieval.synonyms import Synonyms
@@ -99,6 +100,7 @@ from ..core.models import (
     ExpiryReport,
     ForgetDueReport,
     ForgetReceipt,
+    ImageRebuildReport,
     ForgetStatus,
     IngestJob,
     SpaceReceipt,
@@ -238,6 +240,7 @@ class MemoryEngine:
         vocabulary_spaces: "Sequence[str] | None" = None,
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
+        profile_bucket_rules: "catalog.BucketRules | None" = None,
         table_context_embeddings: bool = False,
         embedding_cache: "EmbeddingCache | None" = None,
         synonyms: "Synonyms | None" = None,
@@ -269,6 +272,12 @@ class MemoryEngine:
         #: Its vectors, one per stored image, checked against its writer like the text vectors.
         self.image_vectors = (None if image_vectors is None else vector_identity.guard(
             image_vectors, lambda: cast(ImageEmbedder, image_embedder).id))
+        #: How the lane keeps other image embedders' vectors out: ``recorded``
+        #: when the index records its writer and refuses another (``image_block``);
+        #: ``tagged`` when it cannot, so the lane searches only the vectors tagged
+        #: with this embedder's id and ignores the rest; None without the lane.
+        self.image_writer_check: Literal["recorded", "tagged"] | None = (
+            None if self.image_vectors is None else "recorded" if records_writer(self.image_vectors) else "tagged")
         #: Why this engine's image embedder must not write to or compare with
         #: the image index, as the index recorded it when the engine opened; None otherwise.
         self.image_block: str | None = None
@@ -410,6 +419,8 @@ class MemoryEngine:
         self.abstention = abstention
         #: Which claims a profile is made of; by default, all of them.
         self.profile_policy = profile_policy or catalog.ProfilePolicy()
+        #: How a profile read in buckets places each claim as static or dynamic.
+        self.profile_bucket_rules = profile_bucket_rules or catalog.BucketRules()
         similarity_floor = abstention.floor if abstention is not None else similarity_floor
         self.candidate_limit = validate_candidate_limit(candidate_limit)
         validate_rerank_options(rerank_limit, rerank_max_bytes, rerank_timeout)
@@ -559,6 +570,21 @@ class MemoryEngine:
         self.vector_identity = vector_identity.VectorIdentity(
             "rebuilt", vector_identity.writer_of(self), vector_identity.writer_of(self))
         return report
+
+    async def reembed_images(self, space: str, *, limit: int = 100,
+                             before: Optional[int] = None) -> ImageRebuildReport:
+        """Embed the space's stored images again with this engine's image
+        embedder: at most ``limit`` file episodes a pass, newest first, walking
+        on from ``before``. On an index that records its writer, a rebuild
+        under a new image model refuses the lane until a pass completes with
+        no space holding another model's vectors, then records the new model.
+        See ``retrieval.image_lane.reembed_images``."""
+        try:
+            return await _reembed_images(self, space, limit=limit, before=before)
+        finally:
+            # What the pass left the record as, whether it finished or not.
+            if self.image_embedder is not None:
+                self.image_block = await writer_block(cast(VectorIndex, self.image_vectors), self.image_embedder.id)
 
     async def adopt_vector_identity(self) -> vector_identity.VectorIdentity:
         """Vouch that vectors stored before writers were recorded came from this
@@ -1410,6 +1436,30 @@ class MemoryEngine:
         return await self._emit(space, "conversation_turn", {"session_id": session_id, "turn_id": turn_id, "mode": mode,
                                                              "latency_ms": timings})
 
+    async def record_idle(self, space: str, *, session_id: str, count: int, action: str, silent_ms: float,
+                          turn_id: Optional[str] = None) -> Optional[Event]:
+        """Append a ``conversation_idle`` event: a voice conversation waited
+        ``silent_ms`` for a user who said nothing, the ``count``-th time in a
+        row, and then prompted them (``turn_id`` is the prompt's turn), only
+        noted it, or ended the conversation (``action``: prompt, noted or
+        end). Checked whether or not an event log is attached; None when none is."""
+        check_space(space)
+        for name, value in (("session_id", session_id), ("turn_id", turn_id)):
+            if (value is not None or name == "session_id") and (not isinstance(value, str) or not 1 <= len(value) <= 128):
+                raise InvalidInput(f"{name} must be a string of 1..=128 chars")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise InvalidInput("count must be a positive integer")
+        if action not in ("prompt", "noted", "end"):
+            raise InvalidInput("action must be 'prompt', 'noted' or 'end'")
+        if isinstance(silent_ms, bool) or not isinstance(silent_ms, (int, float)) or not math.isfinite(silent_ms) \
+                or silent_ms < 0:
+            raise InvalidInput("silent_ms must be a finite non-negative number")
+        payload: dict[str, object] = {"session_id": session_id, "count": count, "action": action,
+                                      "silent_ms": float(silent_ms)}
+        if turn_id is not None:
+            payload["turn_id"] = turn_id
+        return await self._emit(space, "conversation_idle", payload)
+
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its
         status. Validated so the evidence log cannot be polluted with
@@ -1790,8 +1840,11 @@ class MemoryEngine:
 
     # -- overviews --------------------------------------------------------
 
-    async def profile(self, space: str, limit: int = 10) -> Profile:
-        return await catalog.profile(self, space, limit, policy=self.profile_policy)
+    async def profile(self, space: str, limit: int = 10, *, buckets: "catalog.BucketBounds | None" = None) -> Profile:
+        """The space's profile; with ``buckets``, its claims in static and
+        dynamic buckets too, placed by ``profile_bucket_rules``."""
+        return await catalog.profile(self, space, limit, policy=self.profile_policy, buckets=buckets,
+                                     rules=self.profile_bucket_rules)
 
     async def tags(self, space: str) -> dict[str, int]:
         return await catalog.tags(self.documents, space)

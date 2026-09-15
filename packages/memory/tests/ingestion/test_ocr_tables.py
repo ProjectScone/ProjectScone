@@ -212,3 +212,72 @@ def test_a_row_of_fewer_cells_spans_the_grid_s_columns_and_a_narrow_one_is_not_w
     [table] = layout.tables
     assert table.rows == 4 and not layout.unassigned, "a narrow number inside a wide band sits in it"
     assert {(c.row, c.column, c.column_span) for c in table.cells if c.row == 3} == {(3, 0, 1), (3, 1, 1)}
+
+
+def statement(*, top=.2, rows=4, signs=(0,), wide=None):
+    """A statement's grid: wide labels, two value columns of right-aligned
+    numbers with a currency sign at each column's left edge on ``signs``
+    rows, and on the ``wide`` row a value reaching close to the next sign."""
+    made=[]
+    for row in range(rows):
+        y=top+row*.04
+        made.append(OcrRegion(text=f'Cost of revenue {row}',box=(.02,y,.38,y+.025)))
+        for column,(edge,right) in enumerate(((.5,.68),(.72,.9))):
+            if row in signs:
+                made.append(OcrRegion(text='$',box=(edge,y,edge+.01,y+.025)))
+            left=.6 if (row==wide and column==0) else right-.06
+            made.append(OcrRegion(text=f'{1000*(row+1)+column:,}' if not (row==wide and column==0) else '(12,345)',
+                                  box=(left,y,right+.02 if (row==wide and column==0) else right,y+.025)))
+    return made
+
+
+def test_a_currency_sign_apart_from_its_number_is_that_number_s_cell():
+    from scone_memory.ocr.tables import infer_tables
+    # Signs on the first and last rows, and a wide value on the third whose
+    # right edge sits two hundredths from the next column's sign: the sign
+    # is read with the number to its right, and the gutter before the cell
+    # runs to the number, so the wide value does not close the grid.
+    regions=statement(signs=(0,3),wide=2)
+    [table]=infer_tables(regions).tables
+    assert table.rows==4 and table.columns==3 and not infer_tables(regions).unassigned
+    signed=[c for c in table.cells if c.text.startswith('$')]
+    assert [(c.row,c.column,c.text) for c in signed]==[(0,1,'$ 1,000'),(0,2,'$ 1,001'),(3,1,'$ 4,000'),(3,2,'$ 4,001')]
+    assert all(len(c.regions)==2 and c.box[0]==regions[c.regions[0]].box[0] for c in signed), "the cell runs from the sign to the number"
+    # A sign before a word is a cell of its own.
+    worded=[*statement(rows=3,signs=()),OcrRegion(text='Prices in',box=(.02,.32,.2,.345)),
+            OcrRegion(text='$',box=(.5,.32,.51,.345)),OcrRegion(text='USD',box=(.72,.32,.78,.345))]
+    [table]=infer_tables(worded).tables
+    assert table.rows==4 and [c.text for c in table.cells if c.row==3]==['Prices in','$','USD']
+
+
+def test_a_statement_s_caption_and_years_above_the_grid_are_its_header_rows():
+    from scone_memory.ocr.tables import MAX_HEADER_ROWS, infer_tables
+    def line(text,left,right,row):
+        return OcrRegion(text=text,box=(left,.08+row*.04,right,.105+row*.04))
+    # A units line centred on the page, grazing the label column's band, a
+    # caption over the two value columns short of half of the second (a
+    # comma closing it, as the years follow), the years over a blank
+    # label column, then the grid with a section's name between its
+    # first rows.
+    regions=[line('(In millions)',.36,.48,0),line('Three Months Ended March 31,',.56,.8,1),
+             line('2021',.62,.66,2),line('2022',.84,.88,2),*statement(top=.2,rows=2,signs=(0,)),
+             OcrRegion(text='Costs',box=(.02,.28,.05,.305)),*statement(top=.32,rows=2,signs=())]
+    found=infer_tables(regions)
+    [table]=found.tables
+    rows={}
+    for cell in table.cells:
+        rows.setdefault(cell.row,[]).append((cell.column,cell.column_span,cell.text))
+    assert table.rows==7 and found.unassigned==(0,), "the units line is not a row"
+    assert rows[0]==[(1,2,'Three Months Ended March 31,')] and rows[1]==[(1,1,'2021'),(2,1,'2022')]
+    assert rows[4]==[(0,1,'Costs')], "a short word inside a wide column sits in it"
+    assert rows[2][1:]==[(1,1,'$ 1,000'),(2,1,'$ 1,001')] and len(rows[6])==3
+    # A sentence's comma is a sentence's: a line across the table from its
+    # first column closed by a comma is not its title.
+    prose=[line('The figures below are unaudited and in millions,',.02,.7,2),*statement(top=.2,rows=3)]
+    found=infer_tables(prose)
+    assert found.tables[0].rows==3 and found.unassigned==(0,)
+    # Rows above the grid are read up to a bound: of four title lines in a
+    # chain, the nearest three are its rows and the fourth is not.
+    titled=[*(line(f'Title line {n}',.02,.3,n) for n in range(4)),*statement(top=.24,rows=3)]
+    found=infer_tables(titled)
+    assert MAX_HEADER_ROWS==3 and found.tables[0].rows==6 and found.unassigned==(0,)

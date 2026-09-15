@@ -23,6 +23,7 @@ from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
 from . import fact_recall, fusion, supersession
 from .entity_lane import ENTITY_WEIGHT, entity_lane
 from .image_lane import IMAGE_SEARCHES, IMAGE_WEIGHT, ImageLane, search_images
+from ..core.vector_writers import VectorsNotComparable
 
 #: The context lane's share of a fused rank. Rank fusion is flat, so a lane
 #: that finds what the others cannot needs weight to be heard at all: on
@@ -536,6 +537,14 @@ async def recall(
                     degraded.append(f"image lane: removed {searched.removed} vectors of images already forgotten"
                                     + (f"; forgotten images still filled its window after {IMAGE_SEARCHES} searches, "
                                        "so it ranked fewer images than it looks for" if searched.short else ""))
+                if searched.ignored:
+                    # An index that cannot record its writer: the lane's own tag left these out.
+                    degraded.append(f"image lane: ignored {'at least ' if searched.ignored_at_least else ''}"
+                                    f"{searched.ignored} image vectors under this recall's filters that "
+                                    f"{runtime.image.embedder.id} did not tag (another image model's, or written "
+                                    "before image vectors were tagged); rebuild them with reembed_images()")
+            except VectorsNotComparable as e:
+                degraded.append(f"image lane: {type(e).__name__}: {e}; rebuild them with reembed_images()")
             except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
                 degraded.append(f"image lane: {type(e).__name__}: {e}")
 

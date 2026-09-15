@@ -122,3 +122,123 @@ async def test_a_profile_that_cannot_be_read_does_not_fail_the_turn(engine, monk
 async def test_a_bad_byte_bound_is_refused(engine):
     with pytest.raises(ValueError, match="max_profile_bytes"):
         TextConversation(engine, "alpha", "bad", lambda: Model(), standing_profile=ProfilePolicy(), max_profile_bytes=10)
+
+
+async def dated(engine):
+    """A settled claim from years ago and one from today, by the test clock."""
+    diet = await engine.assert_fact("alpha", "user", "diet", "vegetarian", valid_from="2020-01-01T00:00:00Z")
+    city = await engine.assert_fact("alpha", "user", "lives_in", "Lisbon", valid_from="2019-01-01T00:00:00Z")
+    trip = await engine.assert_fact("alpha", "user", "travelling_to", "Kyoto")
+    return diet, city, trip
+
+
+@pytest.mark.parametrize("include, static, dynamic", [("static", True, False), ("dynamic", False, True),
+                                                      ("both", True, True)])
+async def test_a_conversation_chooses_which_buckets_stand(engine, include, static, dynamic):
+    from scone_memory.memory.catalog import BucketBounds
+
+    diet, city, trip = await dated(engine)
+    model = Model()
+    conversation = TextConversation(engine, "alpha", f"buckets-{include}", lambda: model,
+                                    standing_profile=ProfilePolicy(), profile_buckets=BucketBounds(include=include))
+    result = await conversation.reply("What should I make for dinner tonight?")
+    block = standing_block(model.requests[-1])
+    assert block["schema_version"] == 2 and ("static" in block, "dynamic" in block) == (static, dynamic)
+    assert "claims" not in block
+    context = result["memory_context"]
+    expected = ([diet.fact_id, city.fact_id] if static else []) + ([trip.fact_id] if dynamic else [])
+    assert sorted(context["profile_fact_ids"]) == sorted(expected) and context["profile_status"] == "prepared"
+    if static:
+        assert {claim["fact_id"] for claim in block["static"]} == {diet.fact_id, city.fact_id}
+        assert {claim["rule"] for claim in block["static"]} == {"tenure"}
+        assert context["profile_buckets"]["static"]["rules"] == {str(diet.fact_id): "tenure", str(city.fact_id): "tenure"}
+    if dynamic:
+        assert [claim["fact_id"] for claim in block["dynamic"]] == [trip.fact_id]
+        assert context["profile_buckets"]["dynamic"]["fact_ids"] == [trip.fact_id]
+    # The dynamic bucket is ordered by weight, and a claim stated often can
+    # lead one stated once more lately: the instruction must not say otherwise.
+    instruction = next(m["content"] for m in model.requests[-1]
+                       if str(m.get("content", "")).startswith("Scone standing")).split("\n")[0]
+    assert "most recently stated first" not in instruction
+    assert "the most often and most lately stated first" in instruction
+    assert ("static" in context["profile_buckets"], "dynamic" in context["profile_buckets"]) == (static, dynamic)
+    assert context["profile_bytes"] == len(model.requests[-1][
+        next(i for i, m in enumerate(model.requests[-1]) if str(m.get("content", "")).startswith("Scone standing"))
+    ]["content"].encode())
+    await conversation.close()
+
+
+async def test_each_standing_bucket_is_bounded_on_its_own_and_says_so(engine):
+    from scone_memory.memory.catalog import BucketBounds
+
+    await dated(engine)
+    model = Model()
+    conversation = TextConversation(engine, "alpha", "bucket-bounds", lambda: model, standing_profile=ProfilePolicy(),
+                                    profile_buckets=BucketBounds(static_limit=1))
+    result = await conversation.reply("dinner?")
+    block, context = standing_block(model.requests[-1]), result["memory_context"]
+    assert len(block["static"]) == 1 and len(block["dynamic"]) == 1
+    assert block["coverage"]["static"] == {"shown": 1, "omitted": 1, "cut": "count"}
+    assert block["coverage"]["dynamic"] == {"shown": 1, "omitted": 0, "cut": None}
+    assert context["profile_buckets"]["static"]["cut"] == "count" and context["profile_buckets"]["dynamic"]["cut"] is None
+    assert context["profile_truncated"] is True and context["profile_omitted_count"] == 1
+    assert context["profile_buckets"]["candidates_truncated"] is False and "reasons" not in block["coverage"]
+    await conversation.close()
+
+
+async def test_standing_buckets_say_what_the_profile_read_left_out(engine, monkeypatch):
+    from scone_memory.memory import catalog
+    from scone_memory.memory.catalog import BucketBounds
+
+    await dated(engine)
+    monkeypatch.setattr(catalog, "MAX_PROFILE_FACTS", 1)
+    model = Model()
+    conversation = TextConversation(engine, "alpha", "bucket-reasons", lambda: model, standing_profile=ProfilePolicy(),
+                                    profile_buckets=BucketBounds())
+    result = await conversation.reply("dinner?")
+    block = standing_block(model.requests[-1])
+    assert "fact_limit" in block["coverage"]["reasons"]
+    assert result["memory_context"]["profile_buckets"]["candidates_truncated"] is False
+    await conversation.close()
+
+
+async def test_standing_buckets_with_nothing_to_show_add_nothing(engine):
+    from scone_memory.memory.catalog import BucketBounds
+
+    await engine.assert_fact("alpha", "user", "travelling_to", "Kyoto")
+    model = Model()
+    conversation = TextConversation(engine, "alpha", "bucket-empty", lambda: model, standing_profile=ProfilePolicy(),
+                                    profile_buckets=BucketBounds(include="static"))
+    result = await conversation.reply("dinner?")
+    assert standing_block(model.requests[-1]) is None
+    context = result["memory_context"]
+    assert context["profile_status"] == "empty" and context["profile_fact_ids"] == []
+    assert context["profile_truncated"] is False
+    await conversation.close()
+
+
+async def test_standing_buckets_follow_the_engine_rules(engine):
+    from scone_memory.memory.catalog import BucketBounds, BucketRules
+
+    diet, _, trip = await dated(engine)
+    engine.profile_bucket_rules = BucketRules.of(dynamic_predicates=["diet"])
+    model = Model()
+    conversation = TextConversation(engine, "alpha", "bucket-rules", lambda: model, standing_profile=ProfilePolicy(),
+                                    profile_buckets=BucketBounds(include="dynamic"))
+    result = await conversation.reply("dinner?")
+    assert result["memory_context"]["profile_buckets"]["dynamic"]["rules"][str(diet.fact_id)] == "override"
+    await conversation.close()
+
+
+@pytest.mark.parametrize("options, message", [
+    ({}, "standing_profile"),
+    ({"standing_profile": ProfilePolicy(), "max_profile_bytes": 2000}, "max_profile_bytes"),
+    ({"standing_profile": ProfilePolicy(), "profile_limit": 5}, "profile_limit"),
+    ({"standing_profile": ProfilePolicy(), "profile_buckets": "both"}, "BucketBounds"),
+])
+async def test_standing_buckets_refuse_what_they_would_ignore(engine, options, message):
+    from scone_memory.memory.catalog import BucketBounds
+
+    options = {"profile_buckets": BucketBounds()} | options
+    with pytest.raises(ValueError, match=message):
+        TextConversation(engine, "alpha", "bad-buckets", lambda: Model(), **options)

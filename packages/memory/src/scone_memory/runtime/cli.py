@@ -257,6 +257,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-embed every stored chunk with this embedder and record it as the writer")
     action.add_argument("--adopt", action="store_true",
                         help="vouch that vectors stored before writers were recorded came from this embedder")
+    p = sub.add_parser("reembed-images", help="embed the space's stored images again with the image lane's embedder, "
+                                              "newest first (bounded); an engine without the lane refuses")
+    p.add_argument("--limit", type=int, default=100, help="file episodes one pass reads (1 to 1000, default 100)")
+    p.add_argument("--before", type=int, metavar="EPISODE_ID", help="walk on from a previous pass's resume point")
     p = sub.add_parser("forget-due", help="forget what each memory's own --forget-after says is due, "
                                           "most overdue first (bounded)")
     p.add_argument("--limit", type=int, default=100, help="episodes one pass forgets (1 to 1000, default 100)")
@@ -301,7 +305,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="counts and which stores are in use")
     sub.add_parser("tags", help="tag counts")
-    sub.add_parser("profile", help="identity facts plus recent activity")
+    p = sub.add_parser("profile", help="identity facts plus recent activity")
+    p.add_argument("--buckets", choices=("static", "dynamic", "both"),
+                   help="also place the claims in static and dynamic buckets (see SCONE_PROFILE_* rules)")
+    for bucket in ("static", "dynamic"):
+        p.add_argument(f"--{bucket}-limit", type=int, help=f"most claims the {bucket} bucket shows (default 10)")
+        p.add_argument(f"--{bucket}-max-bytes", type=int,
+                       help=f"most bytes of claims the {bucket} bucket shows (default 2000)")
     p = sub.add_parser("lessons", help="what people said about passages in feedback, weighed by age")
     p.add_argument("--window-days", type=int, default=90, help="read feedback from this many days back (default 90)")
     p.add_argument("--half-life-days", type=float, default=30, help="a judgement's weight halves every this many days")
@@ -2514,6 +2524,32 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 print(f"  vector lane off: {vector_state['blocked']}", file=out)
         return 0
 
+    if args.command == "reembed-images":
+        rebuilt = await engine.reembed_images(space, limit=args.limit, before=args.before)
+        if args.json:
+            emit(rebuilt.model_dump())
+            return 0
+        print(f"re-embedded {rebuilt.reembedded} image(s) of {rebuilt.scanned} file episode(s) with {rebuilt.embedder}; "
+              f"{len(rebuilt.forgotten)} forgotten meanwhile, {len(rebuilt.failed)} failed", file=out)
+        if rebuilt.failed:
+            print(f"  failed: {', '.join(map(str, rebuilt.failed))} (first: {rebuilt.error})", file=out)
+        if not rebuilt.scan_complete:
+            print(f"  stopped at --limit {rebuilt.limit}: run again with --before {rebuilt.resume_before}", file=out)
+        elif rebuilt.orphans_removed is None:
+            print("  walk complete; the image index cannot list its vectors, so vectors of forgotten images "
+                  "were not looked for", file=out)
+        else:
+            print(f"  walk complete; removed {rebuilt.orphans_removed} vector(s) of forgotten images", file=out)
+        print("  image index: " + {
+            "recorded": f"records {rebuilt.embedder} as its writer; the image lane is on",
+            "rebuilding": "rebuild in progress; the image lane is off until a pass completes with no space pending",
+            "refused": "records another image embedder as its writer; the image lane is refused",
+            "tagged": "cannot record a writer; the image lane ignores vectors another image embedder tagged",
+        }[rebuilt.writer], file=out)
+        if rebuilt.spaces_pending:
+            print(f"  spaces still holding another image embedder's vectors: {', '.join(rebuilt.spaces_pending)}", file=out)
+        return 0
+
     if args.command == "forget-due":
         swept = await engine.forget_due(space, args.now, limit=args.limit, dry_run=args.dry_run,
                                         with_claims=args.with_claims, before=args.before)
@@ -2645,15 +2681,34 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0
 
     if args.command == "profile":
-        profile = await engine.profile(space)
+        from ..memory.profile_buckets import requested
+
+        bounds = requested(args.buckets, static_limit=args.static_limit, dynamic_limit=args.dynamic_limit,
+                           static_max_bytes=args.static_max_bytes, dynamic_max_bytes=args.dynamic_max_bytes)
+        profile = await engine.profile(space, buckets=bounds)
+        placed = profile.buckets
         if args.json:
-            emit({"static_facts": [f.model_dump() for f in profile.static_facts], "dynamic": profile.dynamic,
-                  "recent": [asdict(r) for r in profile.recent]})
+            body: dict[str, object] = {"static_facts": [f.model_dump() for f in profile.static_facts],
+                                       "dynamic": profile.dynamic, "recent": [asdict(r) for r in profile.recent]}
+            if placed is not None:
+                body["buckets"] = {"static": [f.model_dump() for f in placed.static],
+                                   "dynamic": [f.model_dump() for f in placed.dynamic], "coverage": placed.coverage}
+            emit(body)
         else:
             for f in profile.static_facts:
                 print(fact_line(f), file=out)
             for line in profile.dynamic:
                 print(f"- {line}", file=out)
+            if placed is None:
+                return 0
+            for bucket in ("static", "dynamic"):
+                if bucket not in placed.coverage:
+                    continue
+                report = placed.coverage[bucket]
+                cut = f"; cut by {report['cut']}" if report["cut"] else ""
+                print(f"{bucket} ({report['shown']} shown, {report['omitted']} omitted{cut})", file=out)
+                for f in getattr(placed, bucket):
+                    print(f"  {fact_line(f)}  rule {placed.placements[f.fact_id].rule}", file=out)
         return 0
 
     if args.command == "derive":
