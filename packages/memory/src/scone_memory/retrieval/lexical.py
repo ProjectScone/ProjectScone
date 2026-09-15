@@ -45,6 +45,9 @@ _UNSPACED = (
     "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003134f"
 )
 _UNSPACED_CHAR = re.compile(f"[{_UNSPACED}]")
+#: A character of a script written without spaces between words, for any
+#: reader that must treat such text as the tokenizer does.
+UNSPACED_CHAR = _UNSPACED_CHAR
 _SEGMENT = re.compile(f"[{_UNSPACED}]+|[^{_UNSPACED}]+")
 
 STOPWORDS = frozenset(

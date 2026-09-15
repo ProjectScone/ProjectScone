@@ -14,6 +14,8 @@ class OcrRegion(BaseModel):
     box: tuple[float, float, float, float]
     score: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     block: int = Field(default=0, ge=0)
+    #: The paragraph within ``block`` the engine read this in; 0 when it reports none.
+    paragraph: int = Field(default=0, ge=0)
     line: int = Field(default=0, ge=0)
 
     @field_validator('box')
@@ -23,6 +25,17 @@ class OcrRegion(BaseModel):
                 or box[0] >= box[2] or box[1] >= box[3]):
             raise ValueError('OCR box must be a nonempty normalized rectangle')
         return box
+
+    @model_serializer(mode='wrap')
+    def omit_unreported_paragraph(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return _without_unreported_paragraph(self, handler(self))
+
+
+def _without_unreported_paragraph(region: OcrRegion, value: dict[str, object]) -> dict[str, object]:
+    # Regions stored before paragraphs were read, and engines that report none, serialize as they did.
+    if region.paragraph == 0:
+        value.pop('paragraph', None)
+    return value
 
 
 class OcrResult(BaseModel):
@@ -50,7 +63,7 @@ class OrderedOcrRegion(OcrRegion):
         if self.provider_index is None:
             value.pop('provider_index', None)
             value.pop('reading_column', None)
-        return value
+        return _without_unreported_paragraph(self, value)
 
 
 class OcrEngine(Protocol):

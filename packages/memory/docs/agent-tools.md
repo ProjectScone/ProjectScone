@@ -14,11 +14,11 @@ For explicit native callback suspension and restart, see
 
 For model tool calls, `scone_memory.integrations.tools.ToolBox` binds an async
 engine to one host-selected space. Its `openai()` and `anthropic()` methods
-render the same fifteen contracts: `search_memory`, `add_memory`, `read_profile`,
+render the same sixteen contracts: `search_memory`, `add_memory`, `read_profile`,
 `trace_memory`, the eight entity-graph reads `graph_context`,
 `explain_entity`, `connect_entities`, `graph_schema`, `graph_match`,
 `graph_overview`, `graph_changes` and `find_duplicates`, the graph's own
-`graph_health` and `graph_affected`, and the computed `temporal_answer`. Hosts can
+`graph_health`, `graph_cycles` and `graph_affected`, and the computed `temporal_answer`. Hosts can
 allowlist a subset. The host executes returned
 tool calls with `await box.run(name, arguments)`; installing an adapter does
 not automatically enable a tool loop in HTTP Conversations or the MCP server.
@@ -47,7 +47,7 @@ not certified. Source text remains untrusted data for the receiving model.
 The graph reads are the ones the MCP server offers as `memory_graph_context`,
 `memory_entity`, `memory_connections`, `memory_graph_schema`,
 `memory_graph_match`, `memory_graph_overview`, `memory_graph_changes`,
-`memory_entity_duplicates`, `memory_graph_health` and
+`memory_entity_duplicates`, `memory_graph_health`, `memory_graph_cycles` and
 `memory_graph_affected`, beside the computed `memory_temporal_answer`:
 
 - `list_path`, `read_path` and `search_paths` walk the space's tree:
@@ -115,6 +115,12 @@ The graph reads are the ones the MCP server offers as `memory_graph_context`,
 - `find_duplicates` suggests pairs of entities that may be one thing under
   two names, each saying why and citing the neighbours they share. It is
   the `/v1/entities/duplicates` JSON. It merges nothing.
+- `graph_cycles` finds dependency cycles in the code graph: the files that
+  cannot load without each other, each group with one shortest loop and the
+  facts behind every hop, and apart from them the loops held open only by
+  imports that run when called or never (`imports_when_called`,
+  `imports_for_types`, which the Python reader records). Counts with
+  examples; it changes nothing.
 - `graph_health` counts what in the graph wants attention: claims resting
   on nothing, kinds that disagree or are missing, entities nothing links
   to, predicates used once, and names that may be one thing. It is the

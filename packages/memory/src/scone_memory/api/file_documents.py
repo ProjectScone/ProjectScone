@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict
-from typing import AsyncContextManager
+from typing import AsyncContextManager, Literal
 
 from fastapi import Depends, FastAPI, Path, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -36,6 +36,7 @@ class _FileBody(BaseModel):
     filename: str | None = Field(default=None, min_length=1, max_length=1024)
     pdf_ocr: PdfOcrSelection | None = None
     video_ocr: bool = False
+    chunking: Literal['length', 'code', 'structure', 'semantic', 'unit'] | None = None
 
 
 def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
@@ -85,7 +86,7 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
             filename = extraction_filename(original, body.filename)
             manifest = await prepare_document(raw, filename, parser=parser, limits=DocumentLimits())
             assert_current_space(request, space)
-            saved = await store_document(engine, space, original, manifest)
+            saved = await store_document(engine, space, original, manifest, chunking=body.chunking)
         assert_current_space(request, space)
         return JSONResponse(jsonable_encoder({**asdict(saved),
             **({'video_ocr': True} if body.video_ocr else {}),
