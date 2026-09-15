@@ -134,7 +134,7 @@ many landed. Only `.md`, `.markdown` and `.mdx` are read this way.
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
-| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
+| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties, and heading levels through styles; no rendered layout or macros |
 | XLSX, and XLSM, XLTX, XLTM | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
 | PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
@@ -153,6 +153,21 @@ type on its main part, and are read alike, under their own extension
 read; a document that carried them says so in its metadata (`macros:
 present, not read`), so a search over a folder of macro-enabled files can
 tell which ones held code.
+
+A paragraph a document marks as a heading carries `heading_level` in its
+segment's metadata, as a decimal string, with its text unchanged. For DOCX the
+level is 1 to 9 and comes from the paragraph's own outline level, else from its
+style's (followed through the styles it is based on) or from a built-in style
+named `heading N`, whatever the style's id is in the document's language. For
+ODT it is 1 to 10, from `text:h` and its outline level (1 when none is given).
+For HTML it is 1 to 6, from `h1` to `h6`. A DOCX without a readable styles part
+still reads, with levels only from paragraphs that carry their own outline
+level. A style is followed through at most 16 styles it is based on. A paragraph
+whose style's chain runs longer, or round in a circle, carries
+`heading_level_unresolved: style_chain` instead of a level. Headings inside
+text boxes keep their level; headings inside table cells become part of their
+row's text and carry none. Structure chunking cuts at these headings, and the heading path embeds
+each chunk under them (see retrieval-and-storage.md).
 
 OpenDocument extraction uses current content: `text:tracked-changes` revision
 history and `office:change-info` metadata are omitted. Current text, including

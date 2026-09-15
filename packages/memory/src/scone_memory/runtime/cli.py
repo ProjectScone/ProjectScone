@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--key", dest="dedup_key", help="identity across writes: the same key again is a duplicate, not a second record")
     p.add_argument("--replace", action="store_true", help="with --key: changed content replaces the record the key names")
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
-    p.add_argument("--chunking", choices=("length", "code", "structure", "semantic"),
+    p.add_argument("--chunking", choices=("length", "code", "structure", "semantic", "unit"),
                    help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
