@@ -424,7 +424,9 @@ class MemoryContext:
                         if followup is not None and followup.query is not None:
                             second = await self._memory.recall(
                                 self._space, followup.query, limit=min(20, self._limit * 4), **self._scope.kwargs())
-                            result = fused(result, second, limit=min(20, self._limit * 4))
+                            result, facts_dropped = fused(result, second, limit=min(20, self._limit * 4))
+                            followup = replace(followup, facts_dropped=facts_dropped)
+                            receipt["followup"] = followup.record()  # again: fusion's cut is known only now
                     else:
                         adaptive = await self._adaptive_retriever.retrieve(self._space, plan.query,
                             scope=self._scope, exclude_session_id=self._session_id)

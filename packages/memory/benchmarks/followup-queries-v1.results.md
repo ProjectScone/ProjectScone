@@ -41,8 +41,11 @@ and is covered by tests, not measured here.
 | all (26) | chat | 26 | 26 | 20 | 26 |
 
 Six second turns were gained with carry: atlas-status, dana-teacher,
-tomas-car-age, priya-subject, mei-when and victor-manager. None was lost. A carried query was searched for 18 of the
+tomas-car-age, priya-subject, mei-when and victor-manager. None was lost. A carried query was searched for 17 of the
 26 second turns; all three standalone controls were left unchanged.
+Every first turn asked as the second turn after another pair's first
+turn is left alone too (26 of 26; before the review fix below, 2 had an
+unrelated name carried in and a changed top 5).
 
 **Cost.** A carried query is one more recall. Preparing the 26 second
 turns five times each on the context surface took a median of 2.28 ms
@@ -59,14 +62,27 @@ gave 13/13 with either list first; the question's list first was chosen,
 so its best passage keeps the lead. Held-out was measured only with the
 chosen rule.
 
-**What carry missed.** Five follow-ups had no query carried:
+**What carry missed.** Six follow-ups had no query carried:
 "What's the escalation path?" and "And when is the half-term break?" have
 two telling words and no referring word, so they read as standalone (both
-held-out; the rule was not changed after seeing them); "And Lab B?"
-repeats the only name the first turn had; "Is it encrypted?" and "What
-about the team tier?" follow first turns whose subjects are lower-case
-("ridge", "the cafe tier"), which carry does not read as names. Their
-second turns were found anyway by the question's own words.
+held-out; the rule was not changed after seeing them); "And Lab B?" and
+"Is it open on Sundays?" name something of their own ("Lab B",
+"Sundays"), so their referring word or shortness does not count; "Is it
+encrypted?" and "What about the team tier?" follow first turns whose
+subjects are lower-case ("ridge", "the cafe tier"), which carry does not
+read as names. Their second turns were found anyway by the question's
+own words.
+
+**Review fix (same day).** A review found that a question naming its
+own subject was changed by a referring word ("Is there a meeting with
+Bob Smith on Friday?" carried the earlier turn's name, because of
+"there"), which the three standalone controls, holding no referring
+word, could not show. Such a question now leans only through "since
+when", "what about", "how about", or a closing "too" or "as well". The
+table above was re-measured after that change and is unchanged; the
+carried count went from 18 to 17 (greenleaf-sunday, held-out, no longer
+carried and still found). The timings above were not re-measured: the
+change adds no recall.
 
 ## Limits
 

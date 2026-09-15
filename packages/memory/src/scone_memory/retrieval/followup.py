@@ -14,15 +14,20 @@ it comes back.
 Here there are two ways, both off unless asked for:
 
 ``carry`` needs no model. A latest user turn *leans on the conversation*
-when it refers back (it, they, that, there, "since when", "what about"
-...), is three words or fewer, or names nothing and has fewer than two
-telling words of its own. Then the named or rare terms of the most
-recent earlier user turn that has any are carried forward verbatim --
-never the assistant's words, which the person did not say -- and the
-second query is those terms followed by the question. A standalone
-question, a first turn, a turn whose earlier turns name nothing new, and
-a carried query over the query bound are searched as asked, and the
-record says which.
+when it holds "since when", "what about" or "how about", or ends in
+"too" or "as well". A turn that names nothing also leans when it refers
+back (it, they, that, there ...), is three words or fewer, or has fewer
+than two telling words of its own. A turn that names something is taken
+to be about what it names: "there" in "Is there a meeting with Bob Smith
+on Friday?" and "its" in "When did Kestrel Bank open its Leeds branch?"
+point into the question, not back. Then the named or rare terms of the
+most recent earlier user turn that has any are carried forward verbatim
+-- never the assistant's words, which the person did not say -- and the
+second query is those terms followed by the question. A term the
+question already names, as whole words ("Ann" is not named by "Annex"),
+is not carried again. A standalone question, a first turn, a turn whose
+earlier turns name nothing new, and a carried query over the query bound
+are searched as asked, and the record says which.
 
 ``rewrite`` asks a model, as :mod:`.query_transforms` does, to restate
 the follow-up as a standalone question from a bounded history. The
@@ -40,15 +45,23 @@ the second query holds the question's own words, so the question's
 matches rank in both lists, collect credit twice, and push down the
 passage only the carried terms found -- on the development pairs of
 ``benchmarks/followup-pairs-v1.json`` it moved no second turn at weights
-1, 2 or 4, where interleaving moved five of thirteen.
+1, 2 or 4, where interleaving moved five of thirteen. Facts are
+interleaved the same way and cut to as many as the longer of the two
+recalls gave, so a carried query never doubles the facts put in front of
+a model (where facts come before passages, they would push out the
+passage the question found); ``facts_dropped`` counts the cut.
 
 Named or rare terms are read from the text as written: a run of
 capitalised words that are not common words (asking words, pronouns,
-stopwords, openers such as "Tell" -- so a sentence may open with a name
-but not with "Where"), a quoted phrase, and a word shaped like an
+stopwords, openers such as "Tell", and verbs, adverbs and time words that
+open a sentence, such as "Explain", "Actually" and "Yesterday" -- so a
+sentence may open with a name but not with "Where"), a quoted phrase,
+and a word shaped like an
 identifier (a digit, a symbol inside it as in node.js or a@b.org, or a
 capital after its first letter as in iPhone). "Rare" is a shape, not a
-count over the corpus: this module reads no store.
+count over the corpus: this module reads no store. Shape cannot tell
+"Globex hired Carol" from "Explain what Carol does", so an opening word
+missing from the list is still read as a name.
 """
 
 from __future__ import annotations
@@ -89,10 +102,16 @@ _ASKING = frozenset("""what who whom whose which where why how when do does did 
     have has had can could will would shall should may might must""".split())
 _REFERRING = frozenset("""it its itself they them their theirs themselves he him his himself she her hers herself
     that this those these there then""".split())
-_REFERRING_PHRASE = re.compile(r"\b(?:since when|what about|how about)\b")
+#: Phrases that lean on the conversation even in a question that names things.
+_REFERRING_PHRASE = re.compile(r"\b(?:since when|what about|how about)\b|\b(?:too|as well)(?=\W*$)")
 _OPENERS = frozenset("""and also so now ok okay yes no please tell show give list find hi hey hello thanks thank
     not any all some about after before since again more other else just really i i'm i've i'd i'll let let's""".split())
 _COMMON = STOPWORDS | _ASKING | _REFERRING | _OPENERS
+#: Words that open a sentence capitalised and are not names: verbs of asking,
+#: discourse adverbs, and days relative to now.
+_OPENING_WORDS = frozenset("""explain remind summarize summarise describe compare check recall remember define clarify
+    confirm search look actually basically honestly anyway maybe perhaps yesterday today tomorrow tonight""".split())
+_NOT_NAMES = _COMMON | _OPENING_WORDS
 
 _OPENING = "\"'([{\u2018\u201c\u00ab"
 _CLOSING = ".,;:!?\"')]}\u2019\u201d\u00bb"
@@ -129,6 +148,8 @@ class Followup:
     terms_found: int = 0
     #: Earlier user turns not read because the lookback bound was reached.
     turns_unread: int = 0
+    #: Facts fusion left out to hold no more than the longer recall gave.
+    facts_dropped: int = 0
     model_calls: int = 0
     #: Why a model's rewrite was not used, when a fallback was taken.
     fallback: Optional[str] = None
@@ -142,7 +163,8 @@ class Followup:
         return {"mode": self.mode, "method": self.method, "applied": self.applied, "reason": self.reason,
                 "query": self.query, "carried": list(self.carried), "from_message": self.from_message,
                 "cues": list(self.cues), "terms_found": self.terms_found, "cut": self.cut,
-                "turns_unread": self.turns_unread, "model_calls": self.model_calls, "fallback": self.fallback,
+                "turns_unread": self.turns_unread, "facts_dropped": self.facts_dropped,
+                "model_calls": self.model_calls, "fallback": self.fallback,
                 "history_omitted": self.history_omitted}
 
 
@@ -199,7 +221,7 @@ def named_terms(text: str) -> list[str]:
         if any(start <= word.start < end for start, end in quoted):
             flush()
             continue
-        if word.text[0].isupper() and word.text.casefold() not in _COMMON:
+        if word.text[0].isupper() and word.text.casefold() not in _NOT_NAMES:
             if word.opened:
                 flush()
             run.append(word)
@@ -219,21 +241,32 @@ def named_terms(text: str) -> list[str]:
     return terms
 
 
-def _cues(question: str) -> tuple[str, ...]:
-    """What makes ``question`` lean on the conversation; empty when it stands alone."""
+def _cues(question: str, named: Sequence[str]) -> tuple[str, ...]:
+    """What makes ``question`` lean on the conversation; empty when it stands alone.
+
+    ``named`` is what the question names: a question that names something
+    leans only through a referring phrase."""
     folded = " ".join(question.casefold().split())
     cues = [match.group() for match in _REFERRING_PHRASE.finditer(folded)]
-    for word in _words(question):
+    if named:
+        return tuple(cues)
+    words = _words(question)
+    for word in words:
         folded_word = word.text.casefold()
         if folded_word in _REFERRING and folded_word not in cues:
             cues.append(folded_word)
-    if len(_words(question)) <= SHORT_WORDS:
+    if len(words) <= SHORT_WORDS:
         cues.append("short")
-    if not named_terms(question):
-        telling = {token for token in tokenize(question) if len(token) >= TELLING_LETTERS and token not in _COMMON}
-        if len(telling) < 2:
-            cues.append("names nothing")
+    telling = {token for token in tokenize(question) if len(token) >= TELLING_LETTERS and token not in _COMMON}
+    if len(telling) < 2:
+        cues.append("names nothing")
     return tuple(cues)
+
+
+def _names(question: str, term: str) -> bool:
+    """Whether ``question`` holds ``term`` as whole words, whatever the case and spacing."""
+    pattern = r"\s+".join(re.escape(part) for part in term.casefold().split())
+    return re.search(rf"(?<!\w){pattern}(?!\w)", question.casefold()) is not None
 
 
 def _user_turns(messages: Sequence[Mapping[str, object]]) -> list[int]:
@@ -260,9 +293,13 @@ def carry(messages: Sequence[Mapping[str, object]], *, question: Optional[str] =
     base = asked if question is None else question
     if not earlier:
         return Followup("carry", "none", False, "first turn: there is no earlier user turn to carry from")
-    cues = _cues(asked)
+    named = named_terms(asked)
+    cues = _cues(asked, named)
+    if not cues and named:
+        return Followup("carry", "none", False, f"standalone: the question names {', '.join(named)}; "
+                        "a referring word in it is read as pointing there")
     if not cues:
-        return Followup("carry", "none", False, "standalone: the question names its own subject and refers back to nothing")
+        return Followup("carry", "none", False, "standalone: the question refers back to nothing and has telling words of its own")
     examined = earlier[::-1][:lookback]
     source, terms = None, []
     for index in examined:
@@ -276,7 +313,7 @@ def carry(messages: Sequence[Mapping[str, object]], *, question: Optional[str] =
         if unread:
             reason += f"; {unread} earlier turn(s) not read past the lookback bound of {lookback}"
         return Followup("carry", "none", False, reason, cues=cues, turns_unread=unread)
-    new = [term for term in terms if term.casefold() not in asked.casefold()]
+    new = [term for term in terms if not _names(asked, term)]
     if not new:
         return Followup("carry", "none", False, f"nothing to carry: the question already names what message {source} named",
                         from_message=source, cues=cues)
@@ -367,20 +404,24 @@ def _interleaved(first: Sequence[_T], second: Sequence[_T], key: Callable[[_T], 
     return taken
 
 
-def fused(original: RecallResult, second: RecallResult, *, limit: int) -> RecallResult:
-    """The question's recall and the follow-up's, fused by rank: interleaved,
-    the question's first, each passage once, at most ``limit`` passages.
+def fused(original: RecallResult, second: RecallResult, *, limit: int) -> tuple[RecallResult, int]:
+    """The question's recall and the follow-up's, fused by rank, and the facts left out.
 
-    Each passage keeps the fields of the recall that ranked it first. The
-    evidence event stays the question's. Evidence is weak only when both
-    recalls said so, and unknown when neither said it was strong."""
+    Passages and facts are interleaved, the question's first, each once:
+    at most ``limit`` passages, and no more facts than the longer of the
+    two recalls gave. Each passage keeps the fields of the recall that
+    ranked it first. The evidence event stays the question's. Evidence is
+    weak only when both recalls said so, and unknown when neither said it
+    was strong."""
     confidences = {original.low_confidence, second.low_confidence}
     low = False if False in confidences else True if confidences == {True} else None
     similarities = [value for value in (original.top_similarity, second.top_similarity) if value is not None]
+    facts = _interleaved(original.facts, second.facts, lambda fact: fact.fact_id)
+    kept_facts = facts[:max(len(original.facts), len(second.facts))]
     return original.model_copy(update={
         "items": _interleaved(original.items, second.items, lambda item: item.chunk_id)[:limit],
-        "facts": _interleaved(original.facts, second.facts, lambda fact: fact.fact_id),
+        "facts": kept_facts,
         "low_confidence": low,
         "top_similarity": max(similarities) if similarities else None,
         "degraded": sorted(set(original.degraded) | set(second.degraded)),
-    })
+    }), len(facts) - len(kept_facts)
