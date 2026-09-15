@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--key", dest="dedup_key", help="identity across writes: the same key again is a duplicate, not a second record")
     p.add_argument("--replace", action="store_true", help="with --key: changed content replaces the record the key names")
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
-    p.add_argument("--chunking", choices=("length", "code", "structure", "semantic"),
+    p.add_argument("--chunking", choices=("length", "code", "structure", "semantic", "unit"),
                    help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
@@ -126,14 +126,24 @@ def build_parser() -> argparse.ArgumentParser:
                         "a lane not named is not run")
     p.add_argument("--graph-boost", action="store_true",
                    help="add the entity lane: passages naming what the question is about, or one relation away")
-    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
-                   help="fuse the lanes by rank (default) or by each lane's scores scaled to its own range")
+    p.add_argument("--fusion", choices=("rank", "score", "distribution"), default="rank",
+                   help="fuse the lanes by rank (default), by each lane's scores scaled to its own range (score), or by each lane's mean and spread (distribution)")
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
-                        "and say which chunks went into each")
-    p.add_argument("--window", type=int, metavar="BYTES",
-                   help="return each passage with this many bytes of its episode either side; "
-                        "serves the single precise hit that --merge cannot")
+                        "and say which chunks went into each and what share of it they cover")
+    p.add_argument("--merge-min-share", type=float, metavar="SHARE",
+                   help="leave a merge as fragments when retrieved chunks cover less than this share (0 to 1) of it")
+    p.add_argument("--window", type=int, metavar="COUNT",
+                   help="return each passage with this many bytes of its episode either side "
+                        "(or sentences, with --window-unit sentences); serves the single precise "
+                        "hit that --merge cannot")
+    p.add_argument("--window-unit", choices=["bytes", "sentences"], default="bytes",
+                   help="what --window counts: bytes, or whole sentences with both edges on a sentence boundary")
+    p.add_argument("--compress", type=float, metavar="SHARE",
+                   help="cut what a sentence window added back to at most this share (0 to 1) of its sentences, "
+                        "those naming the most of the question; the sentences retrieved are never cut (unmeasured)")
+    p.add_argument("--compress-scorer", choices=["terms", "embedding"], default="terms",
+                   help="how --compress scores a sentence: the question's words it names, or cosine under the embedder")
     p.add_argument("--withhold", metavar="KINDS",
                    help="withhold matches of these kinds from the answer, comma separated "
                         "(email,phone,ip,card,secret); a net of patterns, never a guarantee")
@@ -299,8 +309,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them "
                         "before scoring, to measure what that changes")
-    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
-                   help="fuse recall's lanes by rank (default) or by score, to measure what that changes")
+    p.add_argument("--fusion", choices=("rank", "score", "distribution"), default="rank",
+                   help="fuse recall's lanes by rank (default), score or distribution, to measure what that changes")
     p.add_argument("--window", type=int, default=0, metavar="BYTES",
                    help="widen every returned passage by this many bytes either side before "
                         "scoring, to measure what that changes")
@@ -308,11 +318,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also ask each item's store another item's question whose evidence is absent: no-evidence queries for the abstention sweep (experiment 9)")
     p.add_argument("--out", help="write the full report (with per-item results) to this JSON file")
     p = sub.add_parser("graph", help="the entity graph: report, path, context, entity, timeline, walk, schema, match, "
-                                     "overview, changes, duplicates, export")
+                                     "overview, changes, duplicates, merge, unmerge, merges, export")
     graph = p.add_subparsers(dest="graph_command", required=True)
     g = graph.add_parser("report", help="communities, central entities, surprising links and questions")
     g.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
     g.add_argument("--resolution", type=float, default=1.0, help="how fine the communities are (default 1)")
+    g.add_argument("--exclude-hubs", type=float, default=None, metavar="PERCENTILE",
+                   help="hold entities with more links than this degree percentile (50 to 100) out of the "
+                        "community partition and the central ranking, and list them apart")
     g.add_argument("--usage", action="store_true", help="also say what recent recalls returned, and what they never reach")
     g = graph.add_parser("path", help="how two entities connect, each hop with its facts")
     g.add_argument("source")
@@ -375,11 +388,23 @@ def build_parser() -> argparse.ArgumentParser:
     g = graph.add_parser("health", help="what in the graph wants attention, counted with examples")
     g.add_argument("--limit", type=int, default=None, help="examples shown for each concern")
     g.add_argument("--max-bytes", type=int, default=None)
+    g = graph.add_parser("cycles", help="files that cannot load without each other, each with one shortest loop; "
+                                        "and the loops held apart only by imports that run when called or never")
+    g.add_argument("--limit", type=int, default=None, help="groups shown of each kind (1 to 100; default 20)")
+    g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
 
     g = graph.add_parser("duplicates", help="entities that may be one thing under two names, and why (nothing merged)")
     g.add_argument("--limit", type=int, default=50, help="pairs to suggest (1 to 500)")
     g.add_argument("--min-score", type=float, default=0.5, help="suggest only pairs at least this likely (0 to 1)")
     g.add_argument("--max-bytes", type=int, default=8000, help="byte budget for the answer (512 to 64000)")
+    g = graph.add_parser("merge", help="record that one name is the entity another names (a review decision)")
+    g.add_argument("alias", help="the name to merge away")
+    g.add_argument("into", help="the name of the entity it is")
+    g.add_argument("--reason", required=True, help="why the two are one; kept on the event")
+    g = graph.add_parser("unmerge", help="close the merge in force for a name: the names part from now")
+    g.add_argument("alias")
+    g.add_argument("--reason", required=True)
+    graph.add_parser("merges", help="the merges the current graph applies, and any it refused")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
                                                                "mermaid", "svg", "canvas", "html", "explorer"])
@@ -397,6 +422,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file, e.g. bench-data/temporal-40.json")
     p.add_argument("--limit", type=int, help="only the first N questions")
 
+    p = sub.add_parser("bench-beir", help="measure retrieval on a BEIR dataset directory: graded nDCG, recall, "
+                                           "precision and reciprocal rank, on its own in-process memory")
+    p.add_argument("directory", help="a BEIR dataset: corpus.jsonl, queries.jsonl, qrels/<split>.tsv")
+    p.add_argument("--split", default="test", help="the qrels file to score against (default test)")
+    p.add_argument("--k", default="1,3,10", help="the cut-offs, comma separated (default 1,3,10)")
+    p.add_argument("--queries", type=int, help="run this many judged queries, chosen by --seed")
+    p.add_argument("--seed", type=int, default=0, help="which queries --queries chooses")
+    p.add_argument("--max-documents", type=int,
+                   help="store at most this many documents, every judged one kept; the report says it was cut")
     p = sub.add_parser("bench-parts",
                        help="measure what splitting multi-part questions changes, paired (no model called)")
     p.add_argument("dataset", help="a LongMemEval-shaped JSON file")
@@ -417,6 +451,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
     p.add_argument("--whole", action="store_true",
                    help="show each passage whole instead of its first 200 characters")
+
+    p = sub.add_parser("attribute", help="say which stored chunk each sentence of an answer came from, without a model")
+    p.add_argument("--answer", required=True, help="the answer's text")
+    p.add_argument("--chunk", type=int, action="append", required=True, metavar="ID",
+                   help="a chunk the answer was composed from (repeat for each)")
 
     p = sub.add_parser("sync", help="bring a space into step with a directory: added, changed and gone")
     p.add_argument("directory")
@@ -668,6 +707,22 @@ async def parts_command(args: argparse.Namespace, settings: Settings, out) -> in
         raise InvalidInput(f"--k must be from 1 to 100, not {args.k}")
     scored = await run_parts_bench(args.dataset, limit=args.limit, k=args.k)
     print(json.dumps(scored.record()) if args.json else scored.text(), file=out)
+    return 0
+
+
+async def beir_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """Score retrieval on a BEIR directory. Its own in-process memory, so the
+    configured store is neither read nor written."""
+    from ..bench.beir import load_beir, run_beir, sampled
+
+    try:
+        ks = [int(part) for part in args.k.split(",") if part.strip()]
+    except ValueError:
+        raise InvalidInput(f"--k is whole numbers separated by commas, not {args.k!r}") from None
+    data = load_beir(args.directory, split=args.split)
+    report = await run_beir(sampled(data, queries=args.queries, seed=args.seed, max_documents=args.max_documents),
+                            ks=ks)
+    print(json.dumps(report.record()) if args.json else report.text(), file=out)
     return 0
 
 
@@ -1355,6 +1410,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
     # NaN fails the comparison, so it is refused too.
     if command == "report" and not 0 < args.resolution <= 10:
         raise InvalidInput("--resolution must be a number above 0 and at most 10")
+    if command == "report" and args.exclude_hubs is not None and not 50 <= args.exclude_hubs <= 100:
+        raise InvalidInput("--exclude-hubs must be a percentile from 50 to 100")
     named = {"path": [args.source, args.target] if command == "path" else [],
              "context": args.names if command == "context" else [],
              "entity": [args.name] if command == "entity" else [],
@@ -1435,6 +1492,19 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
         print(_ledger_json(found_health.record(space, status="current", as_of=when))
               if getattr(args, "json", False) else found_health.text, file=out)
         return 0
+    if command == "cycles":
+        from ..entities.cycles import DEFAULT_LIMIT as CYCLES_LIMIT, MAX_BYTES as CYCLES_BYTES, CyclesError, graph_cycles
+
+        when = engine.clock()
+        try:
+            found_cycles = await graph_cycles(
+                engine, space, limit=args.limit if args.limit is not None else CYCLES_LIMIT, as_of=when,
+                max_bytes=args.max_bytes if args.max_bytes is not None else CYCLES_BYTES)
+        except CyclesError as refused:
+            raise InvalidInput(str(refused)) from None
+        print(_ledger_json(found_cycles.record(space, status="current", as_of=when))
+              if getattr(args, "json", False) else found_cycles.text, file=out)
+        return 0
 
     if command == "meanings":
         meanings = engine.relation_meanings
@@ -1491,6 +1561,31 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
         if result.by_depth:
             print("reached: " + ", ".join(f"{count} at {depth} hop(s)" for depth, count in sorted(result.by_depth.items())), file=out)
         return 0
+    if command in ("merge", "unmerge"):
+        import getpass
+
+        from ..core.validation import entity_key
+
+        actor = f"cli:{getpass.getuser()}"
+        if command == "merge":
+            decision = await engine.merge_entities(space, args.alias, args.into, reason=args.reason, actor=actor)
+            done = f"merged: {decision.subject} into {entity_key(decision.object)} (fact {decision.fact_id})"
+        else:
+            decision = await engine.unmerge_entities(space, args.alias, reason=args.reason, actor=actor)
+            done = f"unmerged: {decision.subject} (fact {decision.fact_id} closed {decision.valid_until})"
+        print(json.dumps(decision.model_dump()) if getattr(args, "json", False) else done, file=out)
+        return 0
+    if command == "merges":
+        when = engine.clock()
+        projection, _ = await load_projection(engine, space, mode="current", as_of=when)
+        merges = [{"fact_id": item.fact_id, "alias_key": item.alias_key, "into_key": item.into_key,
+                   "outcome": item.outcome} for item in projection.merges]
+        if getattr(args, "json", False):
+            print(json.dumps({"space": space, "as_of": when, "merges": merges}), file=out)
+        else:
+            print("\n".join(f"{item['alias_key']} -> {item['into_key']} (fact {item['fact_id']}, {item['outcome']})"
+                            for item in merges) or f"no merges in force in {space}", file=out)
+        return 0
     if command == "affected":
         from ..entities.affected import affected
 
@@ -1546,7 +1641,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
               file=out)
         return 0
     if command == "report":
-        report = await report_record(engine, space, as_of=when, resolution=args.resolution, usage=args.usage)
+        report = await report_record(engine, space, as_of=when, resolution=args.resolution,
+                                     exclude_hubs=args.exclude_hubs, usage=args.usage)
         print(render_markdown(report) if args.markdown else _ledger_json(report), file=out)
         return 0
     projection, coverage = await load_projection(engine, space, mode="current", as_of=when)
@@ -1716,6 +1812,19 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
     if args.command == "recall":
         policy: tuple[str, ...] = ()
+        if args.merge_min_share is not None and not args.merge:
+            raise InvalidInput("--merge-min-share is a floor under a merge; ask for --merge with it")
+        if args.compress is not None:
+            # Checked before the search. --merge and --parts both answer
+            # from the episode again, which would put back what was cut.
+            if args.window_unit != "sentences":
+                raise InvalidInput("--compress cuts what a window of sentences added around a hit; "
+                                   "ask for --window-unit sentences with it")
+            if args.merge:
+                raise InvalidInput("--compress cannot be combined with --merge: a merged passage is reported under "
+                                   "one chunk, so compress would not keep the others it holds")
+            if args.parts:
+                raise InvalidInput("--compress cannot be combined with --parts, which answers without it")
         if args.withhold:
             from ..retrieval.withhold import chosen_kinds
 
@@ -1726,14 +1835,15 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             policy = chosen_kinds(tuple(k.strip() for k in args.withhold.split(",") if k.strip()))
             # Everything refused here re-reads the episode from the store
             # *after* withholding and prints source verbatim, which hands
-            # back what was just withheld: --merge and --code-context both
-            # quote the raw episode, and --parts answers without passing
-            # through withholding at all. The HTTP route refuses the same
-            # class of combination; the CLI refusing a different set would
-            # be the same hole wearing different clothes.
+            # back what was just withheld: --code-context quotes the raw
+            # episode, and --parts answers without passing through
+            # withholding at all. --merge was refused here too while it
+            # merged after withholding; it now merges before, so what it
+            # reads is scanned. The HTTP route refuses the same class of
+            # combination; the CLI refusing a different set would be the
+            # same hole wearing different clothes.
             clashes = [name for name, asked_for in (
-                ("--merge", args.merge), ("--code-context", args.code_context),
-                ("--parts", args.parts)) if asked_for]
+                ("--code-context", args.code_context), ("--parts", args.parts)) if asked_for]
             if clashes:
                 raise InvalidInput(
                     f"--withhold cannot be combined with {', '.join(clashes)}: each of those "
@@ -1779,12 +1889,30 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         )
         kept = None
         opened = None
-        if args.window:
+        shortened = None
+        retrieved = list(result.items)
+        if args.window or args.window_unit == "sentences":
             from ..retrieval.window import widen
 
             opened = await widen(engine, space, result.items,
-                                 before=args.window, after=args.window)
+                                 before=args.window or 0, after=args.window or 0, unit=args.window_unit)
             result = result.model_copy(update={"items": list(opened.items)})
+        joined = None
+        if args.merge:
+            from ..retrieval.merging import merge_neighbours
+
+            # Before withholding, so withholding scans the text a merge reads
+            # between the fragments it joins; merging after it handed that
+            # text back unscanned, which is why --withhold refused --merge.
+            joined = await merge_neighbours(engine, space, result.items, min_share=args.merge_min_share or 0.0,
+                                            hits=retrieved)
+            result = result.model_copy(update={"items": list(joined.items)})
+        if args.compress is not None:
+            from ..retrieval.compress import compress
+
+            shortened = await compress(result.items, args.query, hits=retrieved, keep=args.compress,
+                                       scorer=args.compress_scorer, embedder=engine.embedder)
+            result = result.model_copy(update={"items": list(shortened.items)})
         if policy:
             from ..retrieval.withhold import withhold
 
@@ -1796,12 +1924,6 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 "items": list(kept.items),
                 "facts": list(kept.facts[:len(result.facts)]),
                 "history": list(kept.facts[len(result.facts):])})
-        joined = None
-        if args.merge:
-            from ..retrieval.merging import merge_neighbours
-
-            joined = await merge_neighbours(engine, space, result.items)
-            result = result.model_copy(update={"items": list(joined.items)})
         inside = None
         if args.code_context:
             from ..retrieval.code_context import code_context
@@ -1826,6 +1948,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 said["highlights"] = [marks.model_dump() for marks in highlights(result.items, args.query)]
             emit(said | ({"merged": _staged(joined.record())} if joined else {})
                       | ({"widened": _staged(opened.record())} if opened else {})
+                      | ({"compressed": shortened.record()} if shortened else {})
                       | ({"withheld": _staged(kept.record())} if kept else {})
                       | ({"code_context": _staged(inside.record())} if inside else {})
                       | ({"inferred": inferred} if inferred is not None else {}))
@@ -1839,6 +1962,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(kept.why, file=out)
         if opened is not None:
             print(opened.why, file=out)
+        if shortened is not None:
+            print(f"compressed {shortened.compressed} passage(s): {shortened.sentences_dropped} sentences left out, "
+                  f"{shortened.bytes_before} bytes to {shortened.bytes_after}; the rule is unmeasured", file=out)
+            if shortened.why:
+                print(shortened.why, file=out)
         if inside is not None:
             print(inside.why, file=out)
             for chunk, context in inside.by_chunk.items():
@@ -1853,7 +1981,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(joined.why, file=out)
             for chunk, absorbed in joined.from_chunks.items():
                 print(f"joined {len(absorbed)} chunk(s) into #{chunk}: "
-                      f"{', '.join(str(c) for c in absorbed)}", file=out)
+                      f"{', '.join(str(c) for c in absorbed)} ({joined.shares[chunk]:.0%} of it retrieved)", file=out)
         for f in result.facts:
             print(f"fact  {f.subject} {f.predicate} {f.object}  (since {f.valid_from[:10]})", file=out)
         for f in result.history:
@@ -2016,6 +2144,26 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         emit(link.model_dump()) if args.json else print(link_line(link), file=out)
         return 0
 
+    if args.command == "attribute":
+        from ..retrieval.attribution import OVERLAP_SHARE, QUOTE_WORDS, attribute_to_chunks
+
+        made, missing, empty = await attribute_to_chunks(engine, space, args.answer, args.chunk)
+        if getattr(args, "json", False):
+            print(json.dumps({**made.record(), "chunks_missing": list(missing), "chunks_empty": list(empty)},
+                             ensure_ascii=False), file=out)
+            return 0
+        for sentence in made.sentences:
+            where = f" {sentence.passage}" if sentence.passage else ""
+            numbers = f" (numbers not in it: {', '.join(sentence.numbers_missing)})" if sentence.numbers_missing else ""
+            print(f"{sentence.status}{where}: {sentence.text}{numbers}", file=out)
+        if missing:
+            print(f"not in this space: chunk {', '.join(map(str, missing))}", file=out)
+        if empty:
+            print(f"blank in this space: chunk {', '.join(map(str, empty))}", file=out)
+        print(f"quoted means {QUOTE_WORDS}+ words in a row shared; overlapping means {OVERLAP_SHARE:.0%} of its "
+              "words in one passage; both rules are unmeasured, and this is not a check that the answer is true",
+              file=out)
+        return 0
     if args.command == "answer":
         from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
@@ -2281,11 +2429,11 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         serve(settings)  # same SQLite default as the other commands
         return 0
     if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "bench-route",
-                        "bench-parts", "bench-questions", "calibrate", "tune"):
+                        "bench-parts", "bench-questions", "bench-beir", "calibrate", "tune"):
         command = {"bench": bench_command, "bench-conflicts": conflicts_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
                    "bench-questions": bench_questions_command,
-                   "bench-route": route_command, "bench-parts": parts_command,
+                   "bench-route": route_command, "bench-parts": parts_command, "bench-beir": beir_command,
                    "calibrate": calibrate_command, "tune": tune_command}[args.command]
         try:
             return asyncio.run(command(args, settings, out or sys.stdout))
