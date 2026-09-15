@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import base64
 import json
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Union
 
 from ..audio import Resampler, pcm
+from ..audio.dtmf import ToneDetector
 from ..realtime.audio import AudioChunk
 from ..realtime.keypad import keypad_key
 from .dialects import Dialect
@@ -42,8 +44,16 @@ class Dtmf:
     tone_ms: Optional[float] = None
 
 
-#: Which digits a stream reports: none, or those in the carrier's dtmf messages.
-DIGITS = ("off", "events")
+#: Which digits a stream reports: none, those in the carrier's dtmf
+#: messages, those heard as tones in the caller's audio, or both.
+DIGITS = ("off", "events", "inband", "both")
+#: With both, a key reported one way and then heard the other way within
+#: this much of the call's audio is the same press, reported once.
+DUPLICATE_WINDOW_MS = 1000.0
+#: With both, reported digits still waiting to be heard the other way. A
+#: flood of carrier digits with no audio between them is not a reason to
+#: grow without bound; past it the oldest is forgotten and counted.
+MAX_UNPAIRED = 64
 
 
 def _first(source: Mapping[str, Any], keys) -> Optional[str]:
@@ -66,8 +76,14 @@ class MediaStream:
         self.digits = digits
         #: Dtmf messages whose digit was not a key on a keypad.
         self.unreadable_digits = 0
+        #: Keys heard both ways and reported once (``both`` only).
+        self.duplicates = 0
+        #: Reported digits forgotten before the other way could pair them, past MAX_UNPAIRED.
+        self.unpaired_forgotten = 0
         #: Samples of the caller's audio decoded so far, at the line's rate.
         self._heard = 0
+        self._tones = ToneDetector(dialect.rate) if digits in ("inband", "both") else None
+        self._unpaired: deque[Dtmf] = deque()
         #: The rate the rest of the pipeline runs at. None means the line's.
         self.rate = rate or dialect.rate
         self.stream_id: Optional[str] = None
@@ -95,20 +111,47 @@ class MediaStream:
                 return []
             audio = self._decode(base64.b64decode(payload))
             self._heard += len(audio) // 2
+            heard = [] if self._tones is None else [
+                Dtmf(tone.key, "inband", tone.offset_ms, tone.tone_ms) for tone in self._tones.feed(audio)]
             if self._inbound is not None:
                 audio = self._inbound.feed(audio)
-            return [AudioChunk(pcm=audio, sample_rate=self.rate, channels=1)] if audio else []
+            frames: list[object] = [AudioChunk(pcm=audio, sample_rate=self.rate, channels=1)] if audio else []
+            return frames + [digit for digit in heard if self._first_hearing(digit)]
         if event == dialect.dtmf_event:
-            if self.digits == "off":
+            if self.digits not in ("events", "both"):
                 return []
-            digit = keypad_key(_first(body.get(dialect.dtmf_event) or {}, dialect.digit_keys))
-            if digit is None:
+            key = keypad_key(_first(body.get(dialect.dtmf_event) or {}, dialect.digit_keys))
+            if key is None:
                 self.unreadable_digits += 1
                 return []
-            return [Dtmf(digit=digit, offset_ms=self._heard * 1000 / dialect.rate)]
+            digit = Dtmf(digit=key, offset_ms=self._heard * 1000 / dialect.rate)
+            return [digit] if self._first_hearing(digit) else []
         if event == dialect.stop_event:
             return [CallEnded(stream_id=self.stream_id or _first(body, [dialect.stream_key]) or "")]
         return []
+
+    def _first_hearing(self, digit: Dtmf) -> bool:
+        """Whether this digit is a press not already reported the other way.
+
+        Pairs it with the oldest digit reported by the other way, for the
+        same key, within DUPLICATE_WINDOW_MS; a paired digit is used up, so
+        a key pressed twice and heard both ways is still two digits."""
+        if self.digits != "both":
+            return True
+        at = digit.offset_ms or 0.0
+        while self._unpaired and at - (self._unpaired[0].offset_ms or 0.0) > DUPLICATE_WINDOW_MS:
+            self._unpaired.popleft()
+        for earlier in self._unpaired:
+            if (earlier.digit == digit.digit and earlier.source != digit.source
+                    and abs(at - (earlier.offset_ms or 0.0)) <= DUPLICATE_WINDOW_MS):
+                self._unpaired.remove(earlier)
+                self.duplicates += 1
+                return False
+        if len(self._unpaired) >= MAX_UNPAIRED:
+            self._unpaired.popleft()
+            self.unpaired_forgotten += 1
+        self._unpaired.append(digit)
+        return True
 
     def outbound(self, audio: AudioChunk) -> str:
         """Our audio in this carrier's envelope, at the line's rate."""
