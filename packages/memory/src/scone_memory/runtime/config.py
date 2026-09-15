@@ -85,9 +85,10 @@
     SCONE_SEMANTIC_TURN 1 | 0      served voice sessions judge each final transcript: one that stops
                                    mid-clause ("book a table for") is held 1.5 s more for the rest
                                    of it, instead of being answered at the recognizer's pause; speech
-                                   (or noise) starting while it is held extends the wait to 10 s
-                                   after its first transcript (default 0; no model; `scone serve`
-                                   voice personas only)
+                                   starting while it is held extends the wait to 10 s after its
+                                   first transcript, and a transcript with no words (a cough) runs
+                                   the 1.5 s hold again (default 0; no model; `scone serve` voice
+                                   personas only)
 
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)

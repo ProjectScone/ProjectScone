@@ -269,6 +269,11 @@ class VoiceSession:
                             for end in self._turns.heard(event.text, event.speaker, judgement, heard):
                                 await self._begin(end, heard, transport, model, tts)
                             held.set()
+                        elif event.final:
+                            # Speech ended with no words (a cough, a door): a held
+                            # clause waits its hold again from here, not the turn's bound.
+                            self._turns.speech_stopped(now=time.perf_counter())
+                            held.set()  # that deadline may come before the one being waited on
             async with control:
                 now = time.perf_counter()
                 for end in self._turns.drain(now):

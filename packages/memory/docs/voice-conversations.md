@@ -100,10 +100,13 @@ sentences, so they never hold a turn, and unpunctuated text is only held on a
 positive cue. A question word first is not such a cue (`what I really need is`),
 and `when`, `why` and a bare `how` cannot take a trailing preposition as their
 object, so `how do I get from` is held. While a turn is held, speech starting
-again (from the recognizer or the activity detector, including a noise onset
-that never becomes words) keeps it open until `turn_max_duration` after its first
-final transcript, not `turn_hold`; the next final
-transcript joins it and the joined text is judged again. A held turn is never
+again (from the recognizer or the activity detector) keeps it open until
+`turn_max_duration` after its first final transcript, not `turn_hold`; the next
+final transcript joins it and the joined text is judged again. Speech that ends
+without words (a cough the recognizer transcribes as an empty final `Transcript`)
+runs `turn_hold` again from that transcript, capped by `turn_max_duration`. A
+noise onset that never produces a final transcript at all waits the full
+`turn_max_duration` and is released as `max_duration`. A held turn is never
 recorded or answered until it is released, and new speech still interrupts any
 reply that is playing.
 

@@ -174,9 +174,32 @@ def test_speech_that_never_becomes_a_transcript_is_released_at_the_turn_bound():
     assert end.receipt.reason == "max_duration"
 
 
-def test_speech_started_with_nothing_held_changes_nothing():
+def test_speech_that_ends_without_words_resumes_the_hold_from_its_end():
+    turns = hold()
+    turns.heard("I need a flight to", "user", Judgement(INCOMPLETE, "trailing 'to'"), now=1.0)
+    turns.speech_started(now=1.4)
+    assert turns.deadline == 11.0
+    turns.speech_stopped(now=2.0)
+    assert turns.deadline == 3.5, "a cough is not the rest of the sentence: the hold runs again from its end"
+    assert turns.expire(now=3.4) == []
+    [end] = turns.expire(now=3.5)
+    assert end.receipt.reason == "semantic_incomplete_timeout" and end.receipt.held_ms == 2500.0
+
+
+def test_speech_ending_near_the_turn_bound_resumes_the_hold_only_up_to_it():
+    turns = hold(hold=1.5, max_duration=2.0)
+    turns.heard("I need a", "user", Judgement(INCOMPLETE, "trailing 'a'"), now=0.0)
+    turns.speech_started(now=0.5)
+    turns.speech_stopped(now=1.0)
+    assert turns.deadline == 2.0, "the hold would run to 2.5; the turn's bound is 2.0"
+    [end] = turns.expire(now=2.0)
+    assert end.receipt.reason == "max_duration"
+
+
+def test_speech_starting_or_stopping_with_nothing_held_changes_nothing():
     turns = hold()
     turns.speech_started(now=1.0)
+    turns.speech_stopped(now=1.5)
     assert not turns.pending and turns.deadline is None
 
 
