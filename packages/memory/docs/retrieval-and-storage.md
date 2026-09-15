@@ -471,7 +471,8 @@ served. Chunks come back in the document's order, each scored as the summary
 was, with no lanes of its own, and each carries `via_summary`: the summary's
 episode and chunk, its level and index, the episode it summarizes, the mode,
 and `cited`, the character spans of the chunk's stored text where the quotes
-it rests on sit. Spans rather than the quotes themselves, so an answer holds
+it rests on sit. Its `first_line`, `last_line` and `declaration` are worked
+out from the document as a direct hit's are. Spans rather than the quotes themselves, so an answer holds
 no second copy of a passage's text for withholding to miss; after a window
 widens the passage they index the chunk's stored text, not the widened passage. A cited
 chunk already in the answer is not repeated.
@@ -483,13 +484,22 @@ What it refuses, and says so in `expanded`:
   is counted in `missing`; one that does not hold the quote in `unquoted`;
   a node that is not stored below the citing level, was written from other
   content, or whose account cannot be read, in `unresolved`. None is served.
+  A node is found by the source key its build stored it under, one read,
+  not by listing the document's summaries, which walks every episode in the
+  space.
+- The phrases the recall was given hold for what a summary brings: a cited
+  chunk lacking a `require` phrase or holding an `exclude` one is not served
+  and is counted in `dropped_required` or `dropped_excluded`, and a summary
+  that lost any stands beside what was left, even under `replace`.
 - A summary whose document is forgotten is refused as `source_gone` and
   nothing of the document is served: forgetting a document leaves its
   summaries, and what they cite is deleted text. A document whose content
   hash no longer matches `summary_content_hash` is refused as
   `content_changed` (a stored document is never rewritten, so this is a
   note written by hand or carried from another store). A document that
-  could not be read is `unread`, which is not a finding that it is gone;
+  could not be read is `unread`, and one whose id was never stored here (a
+  note carried from another store) is `source_unknown`; neither is a
+  finding that it is gone;
   metadata that does not say what a note summarizes is `malformed`; an
   account that cannot be read is `detail_unreadable`; citations that reach
   no chunk are `nothing_cited`. A refused summary stands as it was.
@@ -497,9 +507,10 @@ What it refuses, and says so in `expanded`:
   across the answer. When it cuts, `capped` counts the cited chunks left
   out and `cut` names the summaries, and a cut summary is kept followed by
   what fit, even under `replace`, since part of what it cites does not stand
-  for all of it. Citation accounts read per call are bounded too
-  (`MAX_READS`, 200; a failed read counts), and a summary past that budget
-  stands as it was and is counted in `not_read`.
+  for all of it; a summary the cap left no room for at all stands as it was
+  and is not counted in `expanded`. Citation accounts and node lookups read
+  per call are bounded too (`MAX_READS`, 200; a failed read counts), and a
+  summary past that budget stands as it was and is counted in `not_read`.
 
 The answer can hold more than `limit` items, and `returned_bytes` counts
 what is returned. Expansion runs inside recall before `lessons`, so the
@@ -510,8 +521,14 @@ two cited chunks, which the summary does not rest on, under one chunk's
 `via_summary`) and, on the command line, with `--parts`, which answers
 without recall's expansion. The narrowing a caller set (kind, tags, source prefix,
 dates) chose what was searched; it is not applied again to what a returned
-summary cites. The recall event records what the lanes returned, so feedback
-on a chunk a summary brought is refused as not returned by that recall.
+summary cites, since a summary is a note and what it cites is the document's
+own text. The phrases are applied, because they are a promise about the text
+returned. The recall event is written after expansion: it lists the items
+returned, each chunk a summary brought marked with that summary's episode
+in `via_summary`, with `returned_bytes` and the `expanded` record, so
+feedback on a brought chunk is accepted and feedback on a replaced summary
+is refused as not returned. Whether the phrases left the answer short is
+still judged on what the lanes returned.
 
 Measured on a scripted fixture, not a quality claim
 (`benchmarks/summary_expansion.py`, 14 September 2026): four documents of

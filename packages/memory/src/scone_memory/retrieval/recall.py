@@ -14,7 +14,7 @@ from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING
 
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
-from ..core.models import DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
+from ..core.models import Chunk, DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
@@ -34,6 +34,7 @@ from .episode_scope import episode_fits
 from .filters import Filter, parse_filter
 from .phrases import Phrases, checked_phrases
 if TYPE_CHECKING:
+    from .summary_expand import Expanded
     from .synonyms import Synonyms
     from ..entities.project import EntityProjection
 from .reranking import (Reranker, RerankCandidate, candidate_is_retained,
@@ -95,6 +96,23 @@ class RecallRuntime:
     lexical_stems: bool = False
     #: The vector lane's voice in rank fusion, against the text lane's 1.0.
     vector_weight: float = 1.0
+
+
+#: Given the items recall would return and its required and excluded phrases,
+#: the answer with each stored summary expanded (``summary_expand``).
+SummaryExpander = Callable[[Sequence[RecallItem], Sequence[str], Sequence[str]], Awaitable["Expanded"]]
+
+
+def placed_in_file(episode: Episode, chunk: Chunk) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """Where in its file a chunk sits -- its first and last line, and the
+    declaration holding it when the source is code -- worked out from the
+    episode rather than stored: the same span always answers the same way,
+    and a chunk written before any of this can still answer."""
+    language = code_language(episode.source)
+    held = (declaration_at(episode.content, chunk.start, chunk.end, language=language, offsets="bytes")
+            if language is not None else None)
+    lines = line_span(episode.content, chunk.start, chunk.end, "bytes")
+    return (lines[0] if lines else None, lines[1] if lines else None, held.name if held is not None else None)
 
 
 def _ms(since: float) -> float:
@@ -214,6 +232,7 @@ async def recall(
     require: Sequence[str] = (),
     exclude: Sequence[str] = (),
     diversity: Optional[float] = None,
+    summaries: Optional[SummaryExpander] = None,
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -598,13 +617,7 @@ async def recall(
     for item in items:
         chunk = chunks[item.chunk_id]
         episode = episodes.get(chunk.episode_id)
-        # Where in the file this came from, worked out from the episode
-        # rather than stored: the same span always answers the same way,
-        # and a chunk written before any of this can still answer.
-        language = code_language(episode.source) if episode else None
-        held = (declaration_at(episode.content, chunk.start, chunk.end, language=language, offsets="bytes")
-                if episode is not None and language is not None else None)
-        lines = line_span(episode.content, chunk.start, chunk.end, "bytes") if episode is not None else None
+        first_line, last_line, declaration = placed_in_file(episode, chunk) if episode is not None else (None, None, None)
         result_items.append(
             RecallItem(
                 chunk_id=chunk.chunk_id,
@@ -620,9 +633,9 @@ async def recall(
                 metadata=dict(episode.metadata) if episode else {},
                 start=chunk.start,
                 end=chunk.end,
-                first_line=lines[0] if lines else None,
-                last_line=lines[1] if lines else None,
-                declaration=held.name if held is not None else None,
+                first_line=first_line,
+                last_line=last_line,
+                declaration=declaration,
             )
         )
     fact_scope = scope if narrowing or clean_tags or clean_where else None
@@ -635,6 +648,14 @@ async def recall(
         # worded differently.
         result_items = await supersession.demote_superseded(
             runtime.documents, space, result_items, boundary or now, degraded=degraded)
+    retrieved = len(result_items)
+    expanded: "Expanded | None" = None
+    if summaries is not None:
+        # Before the event is written, so it lists what is returned and a
+        # chunk a summary brought can be judged; checked against the same
+        # phrases the lanes' passages were.
+        expanded = await summaries(result_items, required, excluded)
+        result_items = list(expanded.items)
     previous = await fact_recall.history_for(runtime.documents, space, facts, boundary or now, scope=fact_scope) if history else []
     counts = await runtime.documents.counts(space)
     narrowing_report: Optional[Narrowing] = None
@@ -666,7 +687,8 @@ async def recall(
         fusion=cast(Literal["rank", "score", "distribution"], fusion_mode),
         lanes=answered,
         diversity=diversity_trace,
-        phrases=_finished(phrase_trace, len(result_items), limit,
+        # What the lanes returned: a summary's chunks do not fill a place the phrases emptied.
+        phrases=_finished(phrase_trace, retrieved, limit,
                           window_full=len(vector_lane) >= vector_depth or len(text_lane) >= depth),
         entities=query_entities,
         top_similarity=top_similarity,
@@ -674,6 +696,7 @@ async def recall(
         returned_bytes=sum(len(i.text.encode()) for i in result_items),
         space_bytes=counts.bytes,
         expansion=expansion.record() if expansion is not None else None,
+        expanded=expanded.record() if expanded is not None else None,
         prefixes=({"added": list(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
     )
     latency["total"] = _ms(started)
@@ -690,7 +713,8 @@ async def recall(
         "items": [
             {"chunk_id": i.chunk_id, "episode_id": i.episode_id, "score": i.score,
              "similarity": i.similarity, "lanes": i.lanes,
-             **({"rerank_score": i.rerank_score} if i.rerank_score is not None else {})}
+             **({"rerank_score": i.rerank_score} if i.rerank_score is not None else {}),
+             **({"via_summary": i.via_summary["episode_id"]} if i.via_summary is not None else {})}
             for i in result_items
         ],
         "items_coverage": "returned",
@@ -704,6 +728,7 @@ async def recall(
         "space_bytes": result.space_bytes,
         **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
         **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
+        **({"expanded": result.expanded} if result.expanded is not None else {}),
     })
     if event is not None:
         result.event_id = event.event_id
