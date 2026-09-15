@@ -53,11 +53,18 @@ pass is off unless a threshold is given: a cosine threshold does assume
 an embedder's scale, and one that suits hashed tokens will not suit a
 neural model. Because the first pass packs sentences up to the target,
 the only chunks that can fit together are ones a valley ended -- this
-undoes cuts, it never adds one.
+undoes cuts, it never adds one. A sentence longer than the target is the
+exception the first pass cannot rule out, and it is ruled out here: its
+pieces were cut by the bound, the sentence's vector describes text that
+lies in other chunks, and joining a piece would make a chunk the first
+pass never makes -- part of one sentence with another. No boundary that
+touches such a sentence is reopened or even compared.
 
 Similarity is compared between the mean of each side's sentence vectors,
 which the first pass already has, so the second pass costs no embedding
-call and gives the same answer every time. The reference embeds every
+call and gives the same answer every time. A text of one sentence has no
+boundary but the bound's, so it is not embedded at all, with a threshold
+or without. The reference embeds every
 joined text again, and also reaches one or two chunks past a dissimilar
 neighbour to merge across it; neither is done here -- merging across a
 chunk would pull in a chunk that failed the very test.
@@ -68,7 +75,9 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
+from typing import NamedTuple
 
+from ..core.errors import InvalidInput
 from ..core.ports import Embedder
 from .chunker import DEFAULT_TARGET, MIN_CHUNK, Span, chunk_spans
 from .vectors import validated_vectors
@@ -131,16 +140,36 @@ def merge_refused(threshold: object) -> str | None:
     return None
 
 
+def held_threshold(text: str) -> float:
+    """A merge threshold as an episode's metadata keeps it: text, since
+    metadata is text. Refused as the caller's input, whether it arrives
+    with a record or is read back for a recovery, when it is not a number
+    ``merge_refused`` accepts."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise InvalidInput(f"semantic_merge_threshold must be a number, got {text!r}") from None
+    reason = merge_refused(value)
+    if reason is not None:
+        raise InvalidInput(reason)
+    return value
+
+
 @dataclass(frozen=True)
 class SemanticCut:
     """A semantic cut, and what its second pass did.
 
-    ``groups`` is how many chunks the first pass made. Each place two of
-    them were not joined is counted once: ``stopped_by_similarity`` when
+    ``groups`` is how many chunks the first pass made -- exactly the
+    chunks ``semantic_spans`` returns. Each place two of them were not
+    joined is counted once, so ``merges + stopped_by_similarity +
+    stopped_by_size`` is ``groups - 1``: ``stopped_by_similarity`` when
     they were less alike than the threshold, ``stopped_by_size`` when they
     were alike enough and would not fit the target together -- the count
     that says the bound bit. Two chunks that fail both are counted as
-    unalike, since that alone kept them apart.
+    unalike, since that alone kept them apart. A boundary beside or inside
+    a sentence longer than the target is the bound's by definition and is
+    counted under ``stopped_by_size`` without being compared: the bound
+    cut that sentence, and its vector is not the vector of either piece.
     """
 
     spans: list[Boundary]
@@ -196,7 +225,8 @@ async def semantic_cut(
 
     Merged chunks are bounded by ``target`` exactly as the first pass
     packs sentences, so a merge never makes a chunk the first pass could
-    not have made for its length. Still one embedding call.
+    not have made for its length. The same embedding call as the first
+    pass, and none for a text of one sentence.
     """
     if target <= 0:
         raise ValueError("target must be positive")
@@ -207,12 +237,11 @@ async def semantic_cut(
     sentences = sentence_spans(content)
     if not sentences:
         return SemanticCut([], merge_threshold)
-    if len(sentences) == 1 and merge_threshold is None:
-        # Nothing to compare, so no embedding call. With a second pass the
-        # sentence is embedded after all: pieces of one sentence cut by
-        # size are the bound biting, and the receipt has to be able to say so.
-        only = sentences[0]
-        return SemanticCut(_bounded(content, _by_size(content, only.start, only.end, target), target))
+    if len(sentences) == 1:
+        # Nothing to compare, so no embedding call, with a second pass or
+        # without: every boundary is inside the one sentence, which makes
+        # each of them the bound's, and `_merged` compares no vector for those.
+        return _cut(_assemble(content, sentences, set(), target), [], merge_threshold, target)
     asked = [content[s.start : s.end].strip() for s in sentences]
     # Snapshot before the await, not after. Read afterwards, `embedder.dim`
     # is whatever it became, so a response is validated against the width
@@ -229,43 +258,61 @@ async def semantic_cut(
         raise ValueError('embedding identity changed while chunking')
     similar = _block_similarity(vectors, block)
     groups = _assemble(content, sentences, _valleys(similar, sensitivity), target)
-    if merge_threshold is None:
-        return SemanticCut(_bounded(content, [span for span, _, _ in groups], target))
-    spans, (merges, unalike, too_long) = _merged(groups, vectors, merge_threshold, target)
-    return SemanticCut(_bounded(content, spans, target), merge_threshold, len(groups), merges, unalike, too_long)
+    return _cut(groups, vectors, merge_threshold, target)
+
+
+def _cut(groups: list[_Group], vectors: list[list[float]], threshold: float | None, target: int) -> SemanticCut:
+    """The first pass's chunks as they are, or merged under ``threshold``."""
+    if threshold is None:
+        return SemanticCut([group.span for group in groups])
+    spans, (merges, unalike, too_long) = _merged(groups, vectors, threshold, target)
+    return SemanticCut(spans, threshold, len(groups), merges, unalike, too_long)
+
+
+class _Group(NamedTuple):
+    """A first-pass chunk and the first and last sentence it holds.
+    ``by_size`` marks a piece of a sentence longer than the target: every
+    piece of it holds that one sentence, and none has a vector of its own."""
+
+    span: Boundary
+    first: int
+    last: int
+    by_size: bool
 
 
 def _merged(
-    groups: list[tuple[Boundary, int, int]], vectors: list[list[float]], threshold: float, target: int
+    groups: list[_Group], vectors: list[list[float]], threshold: float, target: int
 ) -> tuple[list[Boundary], tuple[int, int, int]]:
     """Each chunk joined to the one before it while the two are at least
     ``threshold`` alike and fit ``target`` together.
 
-    A group is a span and the first and last sentence it holds; pieces of
-    one sentence cut by size hold the same one. A joined chunk is compared
-    by the mean of *all* its sentences, not by the chunk it started as nor
-    the one it last took in, so a run of merges cannot drift from where it
-    began one small step at a time. It keeps whether its own end is a
-    change of subject: that is the end it now has.
+    A joined chunk is compared by the mean of *all* its sentences, not by
+    the chunk it started as nor the one it last took in, so a run of merges
+    cannot drift from where it began one small step at a time. It keeps
+    whether its own end is a change of subject: that is the end it now has.
+
+    A boundary where either side is ``by_size`` is never reopened and no
+    vector is read for it: the bound made it (see ``SemanticCut``).
 
     Returns the spans and (merges, stopped by similarity, stopped by size).
     ``groups`` is never empty: a text with a sentence has a chunk.
     """
     joined: list[Boundary] = []
     merges = unalike = too_long = 0
-    span, first, last = groups[0]
-    for following, start, end in groups[1:]:
-        alike = _cosine(_centre(vectors[first : last + 1]), _centre(vectors[start : end + 1])) >= threshold
-        if alike and following.end - span.start <= target:
+    span, first, last, by_size = groups[0]
+    for following, start, end, piece in groups[1:]:
+        if by_size or piece:
+            too_long += 1
+        elif _cosine(_centre(vectors[first : last + 1]), _centre(vectors[start : end + 1])) < threshold:
+            unalike += 1
+        elif following.end - span.start > target:
+            too_long += 1
+        else:
             span, last = Boundary(span.start, following.end, following.subject_changed), end
             merges += 1
             continue
-        if alike:
-            too_long += 1
-        else:
-            unalike += 1
         joined.append(span)
-        span, first, last = following, start, end
+        span, first, last, by_size = following, start, end, piece
     joined.append(span)
     return joined, (merges, unalike, too_long)
 
@@ -283,6 +330,12 @@ def _bounded(text: str, spans: list[Boundary], target: int) -> list[Boundary]:
 
     A bound that the code enforces is worth more than one the prose
     claims, and this module has now got that wrong twice.
+
+    Applied to a long sentence's pieces as they are cut, not to the
+    finished chunks: only ``chunk_spans`` inside ``_by_size`` can reach
+    past the ceiling (a packed chunk and a merge are both held to the
+    target), and a piece given back here is a chunk the second pass has to
+    count like any other.
     """
     ceiling = widest(target)
     settled: list[Boundary] = []
@@ -438,12 +491,10 @@ def _valleys(similar: list[float], sensitivity: float) -> set[int]:
     }
 
 
-def _assemble(
-    text: str, sentences: list[Span], cuts: set[int], target: int
-) -> list[tuple[Boundary, int, int]]:
+def _assemble(text: str, sentences: list[Span], cuts: set[int], target: int) -> list[_Group]:
     """Sentences gathered into chunks, ended by a cut or by the target,
     each with the first and last sentence it holds."""
-    spans: list[tuple[Boundary, int, int]] = []
+    spans: list[_Group] = []
     index, count = 0, len(sentences)
     while index < count:
         start = sentences[index].start
@@ -456,9 +507,9 @@ def _assemble(
             last += 1
         end = sentences[last].end
         if last == index and end - start > target:
-            spans.extend((piece, index, index) for piece in _by_size(text, start, end, target))
+            spans.extend(_Group(piece, index, index, True) for piece in _by_size(text, start, end, target))
         else:
-            spans.append((Boundary(start, end, last in cuts and last + 1 < count), index, last))
+            spans.append(_Group(Boundary(start, end, last in cuts and last + 1 < count), index, last, False))
         index = last + 1
     return spans
 
@@ -482,7 +533,7 @@ def _by_size(text: str, start: int, end: int, target: int) -> list[Boundary]:
     inner = chunk_spans(text[start:end], target)
     if not inner:
         return [Boundary(start, end, False)]
-    return [Boundary(start + span.start, start + span.end, False) for span in inner]
+    return _bounded(text, [Boundary(start + span.start, start + span.end, False) for span in inner], target)
 
 
 def _centre(vectors: list[list[float]]) -> list[float]:

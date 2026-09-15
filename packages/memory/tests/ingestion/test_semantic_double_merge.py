@@ -141,7 +141,9 @@ def _unit(degrees):
 
 
 def _groups(count):
-    return [(Boundary(10 * index, 10 * index + 10, False), index, index) for index in range(count)]
+    from scone_memory.ingestion.semantic_chunks import _Group
+
+    return [_Group(Boundary(10 * index, 10 * index + 10, False), index, index, False) for index in range(count)]
 
 
 @pytest.mark.parametrize("angles, merged", [
@@ -177,9 +179,10 @@ async def test_a_merge_that_lands_exactly_on_the_target_is_allowed():
 
 
 async def test_the_merged_chunk_keeps_whether_its_own_end_was_a_change_of_subject():
-    from scone_memory.ingestion.semantic_chunks import _merged
+    from scone_memory.ingestion.semantic_chunks import _Group, _merged
 
-    groups = [(Boundary(0, 10, True), 0, 0), (Boundary(10, 20, True), 1, 1), (Boundary(20, 30, False), 2, 2)]
+    groups = [_Group(Boundary(0, 10, True), 0, 0, False), _Group(Boundary(10, 20, True), 1, 1, False),
+              _Group(Boundary(20, 30, False), 2, 2, False)]
     spans, _ = _merged(groups, [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], 0.5, 100)
     assert spans == [Boundary(0, 20, True), Boundary(20, 30, False)]
 
@@ -318,3 +321,235 @@ async def test_over_http_a_semantic_record_on_a_merging_engine_carries_the_count
         assert answer.json()["chunking"] == "semantic" and answer.json()["chunks"] == 1
         assert answer.json()["structure"] == {"merge_threshold": 0.5, "groups": 2, "merges": 1,
                                               "stopped_by_similarity": 0, "stopped_by_size": 0}
+
+
+# -- A sentence longer than the target is the bound's, never the merge's --
+
+_BREAD_HEAD = ("Sourdough starter flour water salt proofing basket oven crust crumb " * 2).strip() + "\n\n"
+#: A short sentence, then one sentence longer than the target that the
+#: first pass cuts by size at its blank line. As a whole the long sentence
+#: scores 0.499 against the first; the 137-character piece that would be
+#: joined scores 0.474.
+BREAD = ("Sourdough starter needs flour. " + _BREAD_HEAD
+         + " ".join(["sourdough starter flour water salt proofing basket oven crust crumb loaf"] * 12))
+#: The same shape, with the long sentence running on into rockets: the
+#: piece that would be joined scores 0.365 against the first sentence, the
+#: whole sentence 0.064.
+ROCKET = ("Sourdough needs flour. " + _BREAD_HEAD
+          + " ".join(["rocket engine thrust nozzle propellant oxidiser chamber pressure turbopump"] * 12))
+
+
+def reconciles(cut):
+    """Every boundary between the first pass's chunks is accounted for once."""
+    return (cut.merges + cut.stopped_by_similarity + cut.stopped_by_size == max(cut.groups - 1, 0)
+            and len(cut.spans) == cut.groups - cut.merges)
+
+
+@pytest.mark.parametrize("text, threshold", [(BREAD, 0.45), (ROCKET, 0.3)], ids=["whole-alike", "piece-alike"])
+async def test_a_piece_of_a_sentence_cut_by_size_is_never_joined_nor_judged(text, threshold):
+    """A piece has no vector of its own -- the sentence's describes text in
+    other chunks -- and joining it would make a chunk the first pass never
+    makes, part of one sentence with another. The cut is the bound's."""
+    first = await semantic_spans(text, HashEmbedder(), target=700)
+    assert len(first) == 4 and not any(span.subject_changed for span in first), "the fixture lost its shape"
+    cut = await semantic_cut(text, HashEmbedder(), target=700, merge_threshold=threshold)
+    assert cut.spans == first
+    assert cut.record() == {"merge_threshold": threshold, "groups": 4, "merges": 0,
+                            "stopped_by_similarity": 0, "stopped_by_size": 3}
+    assert reconciles(cut)
+
+
+@pytest.mark.parametrize("pieces", [(False, True), (True, False)], ids=["piece-after", "piece-before"])
+async def test_a_boundary_touching_a_piece_counts_as_the_bound_whatever_the_vectors_say(pieces):
+    from scone_memory.ingestion.semantic_chunks import _Group, _merged
+
+    groups = [_Group(Boundary(0, 10, False), 0, 0, pieces[0]), _Group(Boundary(10, 20, False), 1, 1, pieces[1])]
+    spans, counts = _merged(groups, [[1.0, 0.0], [1.0, 0.0]], 0.5, 100)
+    assert [(s.start, s.end) for s in spans] == [(0, 10), (10, 20)] and counts == (0, 0, 1)
+
+
+async def test_one_sentence_asks_the_embedder_nothing_under_a_threshold_either():
+    """Every boundary of a one-sentence text is inside that sentence, so
+    the bound made all of them and no vector is needed to say so."""
+    embedder = _Counting()
+    text = "the harbour crane lifted crates " * 60
+    long = await semantic_cut(text, embedder, target=300, merge_threshold=0.5)
+    short = await semantic_cut("Hello there.", embedder, target=300, merge_threshold=0.5)
+    assert embedder.calls == 0
+    assert long.spans == await semantic_spans(text, HashEmbedder(), target=300) and reconciles(long)
+    assert short.record() == {"merge_threshold": 0.5, "groups": 1, "merges": 0,
+                              "stopped_by_similarity": 0, "stopped_by_size": 0}
+
+
+class _Refusing(_Counting):
+    """A provider that refuses any input over 1,000 characters."""
+
+    async def embed(self, texts):
+        if any(len(text) > 1000 for text in texts):
+            raise ValueError("input over 1000 characters")
+        return await super().embed(texts)
+
+
+async def test_a_threshold_does_not_get_a_record_refused_that_stored_without_one():
+    one = " ".join(["rocket engine thrust nozzle propellant oxidiser chamber pressure turbopump"] * 40)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), _Refusing(), chunk_target=700,
+                                semantic_merge_threshold=0.5).open()
+    try:
+        added = await engine.remember("default", one, source="notes.txt", chunking="semantic")
+        assert added.chunks == 5
+        assert added.structure == {"merge_threshold": 0.5, "groups": 5, "merges": 0,
+                                   "stopped_by_similarity": 0, "stopped_by_size": 4}
+    finally:
+        await engine.close()
+
+
+async def test_pieces_of_a_sentence_with_a_zero_vector_are_still_kept_apart_by_the_bound():
+    """Stopword-only text embeds to zeros and a cosine with zeros is 0.0,
+    which would read as 'unalike' for pieces that are one sentence."""
+    stop = ("the of and to in a is that it was " * 120).strip()
+    assert not any((await HashEmbedder().embed([stop]))[0]), "the fixture must embed to zeros"
+    text = stop + ". Cats purr loudly."
+    cut = await semantic_cut(text, HashEmbedder(), target=300, merge_threshold=0.5)
+    assert cut.spans == await semantic_spans(text, HashEmbedder(), target=300)
+    assert cut.groups > 2 and (cut.merges, cut.stopped_by_similarity) == (0, 0) and reconciles(cut)
+
+
+#: One sentence whose size cut reaches across 2,000 spaces to a short tail,
+#: which the ceiling then gives back as a chunk of its own.
+WIDE = "Harbour crane lifted crates " + "harbour crane lifted crates " * 29 + " " * 2000 + "done"
+
+
+@pytest.mark.parametrize("text", [WIDE, "Cats purr loudly. " + WIDE], ids=["one-sentence", "after-a-sentence"])
+async def test_groups_are_the_chunks_the_first_pass_stores_and_every_boundary_is_counted(text):
+    from scone_memory.ingestion.semantic_chunks import widest
+
+    first = await semantic_spans(text, HashEmbedder(), target=700)
+    cut = await semantic_cut(text, HashEmbedder(), target=700, merge_threshold=0.5)
+    assert cut.spans == first and all(span.end - span.start <= widest(700) for span in first), first
+    assert cut.groups == len(first) and reconciles(cut), cut.record()
+
+
+# -- A record names its own threshold, as it names its chunking --------
+
+@pytest.fixture
+async def plain():
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=2000).open()
+    yield memory
+    await memory.close()
+
+
+async def test_a_record_names_its_own_threshold_on_an_engine_without_one(plain):
+    added = await plain.remember("default", FIRES, source="notes.txt", semantic_merge_threshold=0.5)
+    assert added.chunking == "semantic" and added.chunks == 1
+    assert added.structure == {"merge_threshold": 0.5, "groups": 2, "merges": 1,
+                               "stopped_by_similarity": 0, "stopped_by_size": 0}
+    metadata = (await plain.episode("default", added.episode_id)).metadata
+    assert metadata["chunking"] == "semantic" and metadata["semantic_merge_threshold"] == "0.5"
+    assert await stored_texts(plain, added.episode_id) == [FIRES]
+
+
+async def test_a_record_threshold_wins_over_the_engines(merging):
+    added = await merging.remember("default", FIRES, source="notes.txt", chunking="semantic",
+                                   semantic_merge_threshold=0.9)
+    assert added.chunks == 2 and added.structure is not None and added.structure["merge_threshold"] == 0.9
+    assert (added.structure["merges"], added.structure["stopped_by_similarity"]) == (0, 1)
+
+
+@pytest.mark.parametrize("chunking", ["length", "structure", "unit", "code"])
+async def test_a_record_threshold_with_another_chunking_is_refused(plain, chunking):
+    with pytest.raises(InvalidInput, match="semantic_merge_threshold"):
+        await plain.remember("default", FIRES, source="notes.py", chunking=chunking, semantic_merge_threshold=0.5)
+    assert (await plain.status("default")).episodes == 0
+
+
+@pytest.mark.parametrize("threshold", [0, 1.5, True, "0.5", float("nan")], ids=["zero", "above-one", "bool", "text", "nan"])
+async def test_a_record_threshold_that_is_not_a_similarity_is_refused_before_anything_is_stored(plain, threshold):
+    from scone_memory.ingestion.records import Record
+
+    with pytest.raises(InvalidInput, match="semantic_merge_threshold"):
+        await plain.remember_many("default", [Record.from_dict({"content": FIRES, "semantic_merge_threshold": threshold})])
+    assert (await plain.status("default")).episodes == 0
+
+
+async def test_a_record_threshold_that_is_not_a_similarity_is_refused_even_for_a_duplicate(plain):
+    """A duplicate is never cut, so only validation can refuse it."""
+    await plain.remember("default", FIRES)
+    with pytest.raises(InvalidInput, match="semantic_merge_threshold"):
+        await plain.remember("default", FIRES, semantic_merge_threshold=1.5)
+
+
+async def test_a_threshold_held_in_metadata_alone_is_honoured_and_one_that_disagrees_is_refused(plain):
+    """An archive import carries metadata, not the field."""
+    with pytest.raises(InvalidInput, match="semantic_merge_threshold"):
+        await plain.remember("default", FIRES, metadata={"semantic_merge_threshold": "0.9"}, semantic_merge_threshold=0.5)
+    for held in ("most", "1.5"):
+        with pytest.raises(InvalidInput, match="semantic_merge_threshold"):
+            await plain.remember("default", FIRES, metadata={"semantic_merge_threshold": held})
+    assert (await plain.status("default")).episodes == 0
+    added = await plain.remember("default", FIRES, metadata={"semantic_merge_threshold": "0.5"})
+    assert added.chunking == "semantic" and added.chunks == 1 and added.structure["merge_threshold"] == 0.5
+
+
+async def test_the_keys_a_threshold_adds_count_toward_the_metadata_cap(plain):
+    with pytest.raises(InvalidInput, match="semantic_merge_threshold"):
+        await plain.remember("default", FIRES, metadata={f"k{n}": "v" for n in range(15)}, semantic_merge_threshold=0.5)
+    assert (await plain.status("default")).episodes == 0
+
+
+async def test_recovery_cuts_with_the_records_own_threshold(plain):
+    from scone_memory.ingestion.batch import validated_record
+    from scone_memory.ingestion.records import Record
+
+    new = validated_record("default", Record(FIRES, source="notes.txt", semantic_merge_threshold=0.5), plain.clock())
+    await plain.documents.mark_inflight("default", new.content_hash)
+    episode = await plain.documents.insert_episode(new)
+    report = await plain.recover()
+    assert (report.completed, report.rechunked) == (1, 1), report
+    assert await stored_texts(plain, episode.episode_id) == [FIRES]
+
+
+async def test_over_http_a_record_and_each_record_of_a_batch_names_its_threshold(plain):
+    from httpx import ASGITransport, AsyncClient
+
+    from scone_memory.api import create_app
+
+    async with AsyncClient(transport=ASGITransport(app=create_app(plain, {"k": "default"})),
+                           base_url="http://fixture") as client:
+        auth = {"authorization": "Bearer k"}
+        one = await client.post("/v1/episodes", json={"content": FIRES, "semantic_merge_threshold": 0.5}, headers=auth)
+        assert one.status_code == 200, one.text
+        assert one.json()["chunks"] == 1 and one.json()["structure"]["merge_threshold"] == 0.5
+        for bad in (True, 0, "half"):
+            refused = await client.post("/v1/episodes", json={"content": AGAIN, "semantic_merge_threshold": bad},
+                                        headers=auth)
+            assert refused.status_code == 422 and "semantic_merge_threshold" in refused.text, (bad, refused.text)
+        batch = await client.post("/v1/episodes/batch", json={"records": [
+            {"content": "Again. " + FIRES, "semantic_merge_threshold": 0.5}, {"content": AGAIN}]}, headers=auth)
+        assert batch.status_code == 200, batch.text
+        [held] = [episode for episode in await plain.episodes("default", {"semantic_merge_threshold": "0.5"})
+                  if episode.content.startswith("Again. ")]
+        assert len(await stored_texts(plain, held.episode_id)) == 1
+    assert (await plain.status("default")).episodes == 3
+
+
+async def test_from_the_command_line_and_not_for_a_jsonl_batch(plain, tmp_path):
+    import io
+    import json
+
+    from scone_memory.runtime.cli import build_parser, run
+
+    path = tmp_path / "notes.txt"
+    path.write_text(FIRES)
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--json", "remember", str(path), "--semantic-merge-threshold", "0.5"]),
+                     plain, io.StringIO(""), out)
+    assert code == 0, out.getvalue()
+    first = json.loads(out.getvalue().splitlines()[0])
+    receipt = first[0] if isinstance(first, list) else first
+    assert receipt["chunks"] == 1 and receipt["structure"]["merge_threshold"] == 0.5
+    lines = tmp_path / "records.jsonl"
+    lines.write_text(json.dumps({"content": AGAIN}) + "\n")
+    with pytest.raises(InvalidInput, match="per record"):
+        await run(build_parser().parse_args(["--json", "remember", str(lines), "--jsonl", "--semantic-merge-threshold", "0.5"]),
+                  plain, io.StringIO(""), io.StringIO())
+    assert (await plain.status("default")).episodes == 1
