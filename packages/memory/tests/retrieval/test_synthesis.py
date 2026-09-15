@@ -248,11 +248,11 @@ async def test_the_record_says_what_was_left_out_and_never_claims_accuracy():
     result = await synthesize_passages(model, QUESTION, [P1], limits=SynthesisLimits(max_sentences=1))
     record = result.record()
     assert record["verified_accuracy"] is False and record["status"] == "synthesized"
-    assert record["notes"] == {"kept": 1, "dropped_unquoted": 1, "dropped_unknown": 0, "dropped_malformed": 0}
+    assert record["notes"] == {"kept": 1, "carried": 0, "dropped_unquoted": 1, "dropped_unknown": 0, "dropped_malformed": 0}
     assert record["passages"] == {"given": 1, "read": 1, "unread": 0, "oversize": 0, "cited": 1}
     assert record["sentences"][0] == {"text": N1[0], "citations": [{"passage": "chunk:1", "quote": N1[2], "start": 6, "end": 31}]}
     assert record["rounds"][0] == {"round": 1, "passages": 1, "bytes": len(P1.text.encode()), "answer_bytes": 0,
-                                   "notes_returned": 2, "notes_kept": 1, "status": "noted"}
+                                   "notes_returned": 2, "notes_kept": 1, "notes_carried": 0, "status": "noted"}
     assert record["refine_dropped_carried"] == 0
     assert record["model_calls"] == 1 and record["folded"] is False and record["truncated"] is False
 

@@ -423,9 +423,12 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
         # A syntax tree settles what a line cannot. It is an optional
         # extra, so this changes nothing at all where it is not
         # installed.
+        from .code_grammar import grammar_claims
         from .code_syntax import syntax_claims
 
-        parsed = syntax_claims(content, path)
+        # TypeScript and JavaScript through their own grammar; the other
+        # brace languages through the grammar pack, when it is installed.
+        parsed = syntax_claims(content, path) or grammar_claims(content, path)
         if not parsed:
             return line_read
         # Where the grammar speaks, it **decides**, and only about what it

@@ -1101,7 +1101,12 @@ declaration here; a language whose grammar names things another way
 file (PHP, Swift, Scala) keeps the brace reader. Without the extra
 nothing changes. `scone map` and `scone sync` read these suffixes as
 they read the Python and brace families, so a repository's Ruby, Lua,
-shell, Perl and fish files reach the graph by the same walk.
+shell, Perl and fish files reach the graph by the same walk. The same
+pack gives the brace family beyond TypeScript -- Go, Rust, Java, C#,
+Swift, C, C++, Scala, PHP -- its
+declarations and its bound calls from a syntax tree (see the code
+graph in retrieval-and-storage.md); without it those files keep the
+line reader's declarations and no calls.
 
 The same tree speaks to the graph: every definition is a
 `defines` claim held by what encloses it (`app/cart.rb:Shop.Cart defines
