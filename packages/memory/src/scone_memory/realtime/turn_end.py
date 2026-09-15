@@ -28,7 +28,8 @@ reason is one of ``REASONS``: ``silence`` (no evidence, or no detector),
 out), ``max_duration`` (the whole turn's bound), ``max_bytes`` (a held
 turn would outgrow the transcript limit), ``speaker_changed``,
 ``input_ended`` and ``session_ended`` (the session stopped with a turn
-held: its words are recorded and nothing is answered).
+held: its words are recorded and nothing is answered), and ``keypad`` (keys
+from the phone joined the turn and finished it; see ``realtime.keypad``).
 
 The detector is a seam (``EndOfTurnDetector``): the lexical rules here
 need no model, and ``ChatEndOfTurn`` puts any chat model behind the same
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
 COMPLETE, INCOMPLETE, UNSURE = "complete", "incomplete", "unsure"
 VERDICTS = (COMPLETE, INCOMPLETE, UNSURE)
 REASONS = ("silence", "semantic_complete", "semantic_incomplete_timeout", "max_duration", "max_bytes",
-           "speaker_changed", "input_ended", "session_ended")
+           "speaker_changed", "input_ended", "session_ended", "keypad")
 
 #: Seconds an open clause may hold a turn past the recognizer's own pause.
 HOLD_S = 1.5
@@ -271,6 +272,22 @@ class TurnHold:
             released.append(self._release("max_duration", now))
         else:
             self._arm(now)
+        return released
+
+    def keyed(self, text: str, now: float, reason: str = "keypad") -> list[TurnEnd]:
+        """Keys from the phone: they join the held turn, whoever it was
+        spoken by, and finish it. With nothing held they are a turn of their
+        own, by ``user``. Keys that would outgrow the held turn release it
+        first, as a transcript would."""
+        released: list[TurnEnd] = []
+        speaker = self._speaker if self.pending else "user"
+        if self.pending and not self._joins(text, speaker):
+            released.append(self._release("max_bytes", now))
+        if not self.pending:
+            self._first, self._speaker = now, "user"
+        self._fragments.append(text)
+        self._last, self._judgement = now, Judgement(COMPLETE, "keypad")
+        released.append(self._release(reason, now))
         return released
 
     def _arm(self, now: float) -> None:

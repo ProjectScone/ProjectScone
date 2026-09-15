@@ -23,6 +23,7 @@ from .derive import Deriver
 from .distill import DistillError, Distiller
 from ..memory.engine import MemoryEngine
 from ..core.errors import SconeError
+from ..memory.scheduled_forget import MAX_PASS, NO_INVENTORY, can_sweep
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,14 @@ class PassReport:
     rejected_reasons: dict[str, int] = field(default_factory=dict)
     #: Episodes the retention policy forgot in this pass.
     expired: int = 0
+    #: Episodes forgotten in this pass because their own ``forget_after``
+    #: had come; whether more were due than one pass takes; whether the walk
+    #: stopped at its bound before the oldest episode (the next pass walks
+    #: on from there); and why the pass did not sweep at all, when it did not.
+    forgotten_due: int = 0
+    forget_due_limited: bool = False
+    forget_due_scan_cut: bool = False
+    forget_due_skipped: Optional[str] = None
     #: The derivation pass, when the worker has a deriver: groups sent to
     #: the model, inferences proposed, restated, and rejected by the gate.
     derived_sent: int = 0
@@ -87,6 +96,8 @@ class ConsolidationWorker:
         self.passes = 0
         self.last: dict[str, PassReport] = {}
         self._task: Optional[asyncio.Task] = None
+        #: Where each space's next sweep walks from: None is the newest episode.
+        self._sweep_before: dict[str, Optional[int]] = {}
         self._stop = asyncio.Event()
 
     async def run_once(self, space: str) -> PassReport:
@@ -112,7 +123,8 @@ class ConsolidationWorker:
             raise
         finally:
             counts = {name: getattr(report, name, 0) for name in (
-                "episodes", "proposed", "accepted", "parked", "rejected", "expired",
+                "episodes", "proposed", "accepted", "parked", "rejected", "expired", "forgotten_due",
+                "forget_due_limited", "forget_due_scan_cut",
             )}
             logger.log(logging.INFO if outcome == "completed" else logging.WARNING,
                        "consolidation.finished", extra={
@@ -125,6 +137,7 @@ class ConsolidationWorker:
     async def _run_once(self, space: str) -> PassReport:
         started = self.clock()
         report = PassReport(space)
+        sweep_error = await self._sweep(space, report)
         try:
             outcomes = await self.distiller.distill_pending(space, limit=self.batch) if self.distiller is not None else []
         except DistillError as e:
@@ -168,11 +181,40 @@ class ConsolidationWorker:
                 report.error = f"{type(e).__name__}: {e}"
             except Exception as e:  # noqa: BLE001 - same rule as extraction: record, never die
                 report.error = type(e).__name__
+        if sweep_error is not None and report.error is None:
+            # Said last, so a failed sweep stops neither retention nor derivation.
+            report.error = sweep_error
         report.latency_ms = round((self.clock() - started) * 1000, 3)
         self.last[space] = report
         self.passes += 1
         await self.engine._emit(space, "distill", report.as_payload())
         return report
+
+    async def _sweep(self, space: str, report: PassReport) -> Optional[str]:
+        """Forget what is due, first in the pass and whatever consolidation
+        then does: it needs no policy and no model, and nothing later in the
+        pass should read what is due to go. Returns the sweep's error, if any.
+
+        Each pass walks one window of at most ``scheduled_forget.MAX_SCANNED``
+        episodes. A window whose due episodes were all taken hands the next
+        pass the place its walk stopped, and a walk that reached the oldest
+        starts the next from the newest, so every episode is reached in turn.
+        A window with more due than one pass takes is walked again."""
+        if not can_sweep(self.engine.documents):
+            report.forget_due_skipped = NO_INVENTORY
+            return None
+        try:
+            swept = await self.engine.forget_due(space, limit=max(1, min(self.batch, MAX_PASS)),
+                                                 before=self._sweep_before.get(space))
+        except SconeError as e:
+            return f"{type(e).__name__}: {e}"
+        except Exception as e:  # noqa: BLE001 - a worker must not die on a transport hiccup
+            return type(e).__name__
+        report.forgotten_due = len(swept.forgotten)
+        report.forget_due_limited, report.forget_due_scan_cut = swept.limited, not swept.scan_complete
+        if not swept.limited:
+            self._sweep_before[space] = swept.resume_before
+        return None
 
     async def run_all(self) -> list[PassReport]:
         return [await self.run_once(space) for space in self.spaces]

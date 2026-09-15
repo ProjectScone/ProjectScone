@@ -70,6 +70,8 @@ class Pool:
             await register_vector_async(conn)
 
         self.pool = AsyncConnectionPool(url, min_size=min_size, max_size=max_size, open=False, configure=configure, kwargs={"autocommit": True})
+        #: The database as configured, so two handles on it can be told apart from two databases.
+        self.url = url
         self.opened = False
         #: Stores sharing this pool. The pool closes when the last one does.
         self.users = 0
@@ -700,6 +702,11 @@ class PostgresVectorIndex:
         self.pool = pool or Pool(url)
         self.pool.users += 1
         self.dim: Optional[int] = None
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self.pool.url, self.schema)
 
     async def ensure(self, dim: int) -> None:
         await self.pool.open()

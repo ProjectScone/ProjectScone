@@ -24,20 +24,22 @@ from collections.abc import Callable
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, StrictInt, Field
+from pydantic import BaseModel, ConfigDict, StrictFloat, StrictInt, Field
 
 from contextlib import asynccontextmanager
 
 from ..observability import metrics
-from ..core.validation import MAX_QUERY
+from ..core.validation import MAX_LIMIT, MAX_QUERY
 from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
                                   MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT, MAX_LIMIT as TEMPORAL_MAX_LIMIT,
                                   MIN_BYTES as TEMPORAL_MIN_BYTES, temporal_answer)
 from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
+from ..retrieval.recall import LANES
 from ..retrieval.receipts import staged
 from ..retrieval.summary_expand import MAX_CHUNKS as SUMMARY_EXPANSION_MAX_CHUNKS
+from ..retrieval import summary_traverse
 from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
 from . import chat_imports, file_documents, pdf_documents
@@ -123,12 +125,19 @@ class EpisodeBody(BaseModel):
     #: The genre whose boundaries structure chunking cuts at; an unknown
     #: name is refused by the engine, which owns the list.
     chunking_profile: Optional[str] = Field(default=None, max_length=64)
+    #: The similarity at which this record's semantic chunks are joined
+    #: again; implies semantic chunking. A number, never a bool or text,
+    #: and the engine refuses one that is not a similarity.
+    semantic_merge_threshold: Optional[StrictFloat] = None
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
     replace: bool = False
     kind: str = "note"
     metadata: dict[str, str] = Field(default_factory=dict)
+    #: When this memory is to be forgotten: an RFC 3339 time, a date, or a
+    #: duration from the server's clock such as 30d. Refused when past.
+    forget_after: Optional[str] = Field(default=None, max_length=64)
 
 
 class SourceQuery(BaseModel):
@@ -232,6 +241,21 @@ class ForgetMatchingBody(BaseModel):
     apply: bool = False
     selection: Optional[str] = None
     with_claims: Literal["keep", "exclude"] = "keep"
+
+
+class ForgetDueBody(BaseModel):
+    """Unknown fields are refused: a sweep told something it silently
+    ignores is a sweep that did not do what was asked."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Judge what is due at this time; earlier than the server's clock, never later.
+    now: Optional[str] = Field(default=None, max_length=64)
+    limit: int = 100
+    dry_run: bool = False
+    with_claims: Literal["keep", "exclude"] = "keep"
+    #: Walk on from a previous pass's ``resume_before``.
+    before: Optional[int] = None
 
 
 class BatchBody(BaseModel):
@@ -504,12 +528,15 @@ def create_app(
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
             "episodes.forget": supports_retirement(engine.documents),
+            # A write's schedule, recall withholding what is due, and the sweep route that forgets it.
+            "episodes.forget_after": supports_retirement(engine.documents)
+                                     and callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.export_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
-            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "graph.stats": True, "graph.hubs": True, "recall.graph_boost": True, "recall.lessons": True, "recall.expand_summaries": True, "graph.knowledge_paging": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "graph.stats": True, "graph.hubs": True, "recall.graph_boost": True, "recall.lessons": True, "recall.expand_summaries": True, "recall.tree": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
             # The route is served; without a configured model it refuses.
             "chat.openai_compatible": True,
@@ -649,6 +676,8 @@ def create_app(
             replace=body.replace,
             chunking=body.chunking,
             chunking_profile=body.chunking_profile,
+            semantic_merge_threshold=body.semantic_merge_threshold,
+            forget_after=body.forget_after,
         )
         return added.model_dump()
 
@@ -674,7 +703,8 @@ def create_app(
                         "job": job_json(replayed), "replayed": True}
         records = [
             Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
-                   chunking=r.chunking, chunking_profile=r.chunking_profile)
+                   chunking=r.chunking, chunking_profile=r.chunking_profile,
+                   semantic_merge_threshold=r.semantic_merge_threshold, forget_after=r.forget_after)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
@@ -759,7 +789,9 @@ def create_app(
                               and not any(ord(c) < 32 or ord(c) == 127 for c in e.metadata['document_filename'])
                               else {}),
                            **status_of(e.episode_id)}
-                          for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
+                          for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before,
+                # Sources past their forget_after, left out; the key appears only when some were.
+                **({"past_forget_after": page.past_forget_after} if page.past_forget_after else {})}
 
     @app.get("/v1/episodes/by-key")
     async def get_episode_by_key(dedup_key: str = Query(min_length=1, max_length=256),
@@ -832,6 +864,16 @@ def create_app(
                                               apply=body.apply, selection=body.selection, with_claims=body.with_claims)
         return report.model_dump()
 
+    @app.post("/v1/episodes/forget-due")
+    async def forget_due_route(body: ForgetDueBody, space: str = Depends(space_for)) -> dict:
+        """Forget what each memory's own ``forget_after`` says is due, through
+        the ordinary forget: most overdue first, bounded per call. The report
+        names each episode, its scheduled time and its receipt, and says when
+        the limit or the walk bit (``limited``, ``scan_complete``)."""
+        report = await engine.forget_due(space, body.now, limit=body.limit, dry_run=body.dry_run,
+                                         with_claims=body.with_claims, before=body.before)
+        return report.model_dump()
+
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, with_claims: Literal["keep", "exclude"] = "keep",
                              space: str = Depends(space_for)) -> dict:
@@ -900,6 +942,36 @@ def create_app(
         return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
                                       max_item_chars=0 if whole else DEFAULT_ITEM_CHARS,
                                       synthesis=synthesis, synthesis_mode=synthesis_mode)).record(space)
+
+    @app.get("/v1/recall/tree")
+    async def get_recall_tree(
+        q: str = Query(min_length=1, max_length=MAX_QUERY),
+        limit: int = Query(default=summary_traverse.DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+        branching: int = Query(default=summary_traverse.DEFAULT_BRANCHING, ge=1, le=summary_traverse.MAX_BRANCHING,
+                               description="Summaries kept at each step, across the documents."),
+        max_depth: int = Query(default=summary_traverse.MAX_DEPTH, ge=1, le=summary_traverse.MAX_DEPTH,
+                               description="Steps down the trees; nodes still unscored are counted."),
+        text: bool = Query(default=False, description="Score each step's candidates by BM25 too, fused by rank."),
+        episode_id: Optional[list[int]] = Query(default=None, description="The documents to descend; every document "
+                                                                          "with a stored tree when unset."),
+        kind: Optional[str] = None,
+        source_prefix: Optional[str] = None,
+        tags: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        space: str = Depends(space_for),
+    ) -> dict:
+        """The chunks a descent of the stored summary trees reaches: from each
+        document's top summaries, the best ``branching`` at every step, down
+        to chunks, each saying in ``via_tree`` the path of summaries that led
+        there. Scored by the vectors already stored, with no model; a summary
+        written from other content and a forgotten document's chunks are
+        never returned. The answer says what it refused, what the limit and
+        the depth cut, and how many embedding calls it made."""
+        traversal = await engine.tree_recall(space, q, limit=limit, branching=branching, max_depth=max_depth, text=text,
+                                             episode_ids=episode_id, kind=kind, source_prefix=source_prefix,
+                                             tags=[t for t in (tags or "").split(",") if t.strip()], since=since, until=until)
+        return traversal.record() | {"space": space}
 
     @app.get("/v1/recall/parts")
     async def get_recall_parts(
@@ -1157,7 +1229,7 @@ def create_app(
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
             lessons=lessons, expand_summaries=expand_summaries, expand_max_chunks=expand_max_chunks,
-            **({"lanes": [lane.strip() for lane in lanes.split(",") if lane.strip()]} if lanes is not None else {}),
+            lanes=[lane.strip() for lane in lanes.split(",") if lane.strip()] if lanes is not None else LANES,
             require=require, exclude=exclude, diversity=diversity,
         )
         opened = None
@@ -1241,6 +1313,11 @@ def create_app(
             response["lessons_read"] = result.lessons_read
         if result.expanded is not None:
             response["expanded"] = result.expanded
+        if result.past_forget_after is not None:
+            response["past_forget_after"] = result.past_forget_after
+        if result.feedback_prior is not None:
+            # A re-ranked answer carries what moved it, and where the prior's bounds bit.
+            response["feedback_prior"] = result.feedback_prior
         if joined is not None:
             response["merged"] = staged(joined.record())
         if cut is not None:

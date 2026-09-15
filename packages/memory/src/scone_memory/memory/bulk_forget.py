@@ -49,7 +49,8 @@ async def _select(engine: "MemoryEngine", space: str, *, source_prefix: Optional
     matched: list[Episode] = []
     before: Optional[int] = None
     while True:
-        page = await engine.source_page(space, before=before, limit=_PAGE, kind=kind, conditions=conditions)
+        # Overdue sources included: forget reaches them, so a filter's forget does.
+        page = await engine._source_page(space, before=before, limit=_PAGE, kind=kind, conditions=conditions, now=None)
         for episode in page.episodes:
             if source_prefix is not None and not (episode.source or "").startswith(source_prefix):
                 continue

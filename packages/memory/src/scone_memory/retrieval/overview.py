@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from ..core import forget_after
 from ..core.errors import InvalidInput
+from ..core.timeutil import parse_rfc3339
 from ..core.models import Episode, RecallItem
 from ..core.ports import DocumentStore, EpisodeInventory, TextFilter
 
@@ -18,12 +20,15 @@ class OverviewResult:
     ``has_more`` means unvisited rows remain or the scan budget was reached;
     a continuation may find no eligible evidence. The cursor is the last
     examined source ID, so a continuation also progresses past rejected rows.
+    ``past_forget_after`` counts sources the filters chose that were left out
+    because their ``forget_after`` had come.
     """
 
     items: list[RecallItem]
     considered: int
     has_more: bool
     next_before: int | None
+    past_forget_after: int = 0
 
 
 def _integer(value: int, name: str, maximum: int) -> None:
@@ -79,9 +84,12 @@ async def overview(
     documents: DocumentStore, space: str, *, limit: int = 20, before: int | None = None,
     where: Mapping[str, str] | None = None, kind: str | None = None,
     source_prefix: str | None = None, since: str | None = None, until: str | None = None,
-    exclude_session_id: str | None = None, max_records: int = 200,
+    exclude_session_id: str | None = None, max_records: int = 200, now: str,
 ) -> OverviewResult:
     """Walk at most ``max_records`` recent sources within the supplied space.
+
+    A source past its ``forget_after`` at ``now`` is left out and counted,
+    swept or not: an overview feeds a model as recall does.
 
     One full retained chunk represents each eligible episode, in descending
     insertion ID order. This reads no embeddings, facts, model, or event log.
@@ -96,14 +104,19 @@ async def overview(
     filters = _filters(space, where, kind, source_prefix, since, until, exclude_session_id)
     if not isinstance(documents, EpisodeInventory) or not callable(documents.page_episodes):
         raise InvalidInput("this document store does not implement source inventory")
+    moment = parse_rfc3339(now)
     items: list[RecallItem] = []
-    cursor, considered = before, 0
+    cursor, considered, overdue = before, 0, 0
     seen: set[int] = set()
+
+    def result(has_more: bool, next_before: int | None) -> OverviewResult:
+        return OverviewResult(items, considered, has_more, next_before, overdue)
+
     while considered < max_records:
         requested = min(100, max_records - considered)
         batch = await documents.page_episodes(space, cursor, requested, kind)
         if not batch:
-            return OverviewResult(items, considered, False, None)
+            return result(False, None)
         for index, episode in enumerate(batch[:requested]):
             considered += 1
             if episode.episode_id in seen:
@@ -113,6 +126,9 @@ async def overview(
             cursor = episode.episode_id
             seen.add(cursor)
             if _matches(episode, space, filters, exclude_session_id):
+                if forget_after.is_due(episode.metadata, moment):
+                    overdue += 1
+                    continue
                 chunks = await documents.chunks_of(space, episode.episode_id)
                 chunk = next((chunk for chunk in chunks if chunk.space == space
                               and chunk.episode_id == episode.episode_id and chunk.text.strip()), None)
@@ -124,7 +140,7 @@ async def overview(
                     ))
             if len(items) == limit:
                 more = index + 1 < len(batch) or len(batch) >= requested
-                return OverviewResult(items, considered, more, cursor if more else None)
+                return result(more, cursor if more else None)
         if len(batch) < requested:
-            return OverviewResult(items, considered, False, None)
-    return OverviewResult(items, considered, True, cursor)
+            return result(False, None)
+    return result(True, cursor)

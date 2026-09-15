@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler
 
 from ..core.errors import InvalidInput
 from ..ocr.layout import ReadingMode
-from ..ocr.types import OcrEngine
+from ..ocr.types import LayoutEngine, OcrEngine
 from .extraction_checkpoint import ExtractionCheckpoints, checkpoint_dispatch_allowed
 from .formats.registry import BuiltinDocumentParser, extension
 from .formats.types import DocumentLimits, ParsedDocument
@@ -45,6 +45,9 @@ class DocumentOcr:
     languages: tuple[str, ...] = ()
     #: How the host reads one of those languages.
     engine_for: Callable[[str], OcrEngine] | None = field(default=None, repr=False)
+    #: A layout engine that labels a page's regions; without one the labels
+    #: are inferred from the page's geometry and text.
+    layout: LayoutEngine | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         OcrPdfOptions(dpi=self.dpi)
@@ -52,6 +55,8 @@ class DocumentOcr:
             raise ValueError('document OCR requires a recognizer')
         if self.languages and self.engine_for is None:
             raise ValueError('document OCR that offers languages must say how to read them')
+        if self.layout is not None and not callable(getattr(self.layout, 'analyse', None)):
+            raise ValueError('a document layout engine must analyse a page image')
 
     def available(self) -> bool:
         return find_spec('pypdf') is not None and find_spec('pypdfium2') is not None
@@ -66,7 +71,8 @@ class DocumentOcr:
             raise InvalidInput('document OCR requires the installed pdf-ocr extra')
         engine = self.engine if choice.language is None or self.engine_for is None else self.engine_for(choice.language)
         options = OcrPdfOptions(mode=choice.mode, reading_order=choice.reading_order, dpi=self.dpi)
-        return SelectedDocumentOcr(BuiltinDocumentParser(pdf_parser=OcrPdfParser(engine, options=options)),
+        return SelectedDocumentOcr(BuiltinDocumentParser(pdf_parser=OcrPdfParser(engine, options=options,
+                                                                                  layout=self.layout)),
                                    choice, self.dpi)
 
 
@@ -98,4 +104,6 @@ def ocr_choices(config: DocumentOcr | None) -> dict[str, object]:
     return {'available': config is not None and config.available(),
             'modes': ['missing_text', 'all_pages'],
             'reading_orders': ['provider', 'columns_ltr', 'columns_rtl'],
+            # What labels a scanned page's regions: an engine the host runs, or the rules.
+            'layout': 'engine' if config is not None and config.layout is not None else 'inferred',
             **({'languages': list(config.languages)} if config is not None and config.languages else {})}

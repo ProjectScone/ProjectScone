@@ -105,6 +105,11 @@ class LangChainVectorIndex:
         self.store = store
         return self
 
+    @property
+    def location(self) -> tuple[object, ...] | None:
+        """Where the rows live: the bridged store itself, or None before one is bound."""
+        return None if self.store is None else (id(self.store),)
+
     async def ensure(self, dim: int) -> None:
         if self.store is None:
             raise ValueError("LangChainVectorIndex needs a store: pass one or call bind(store)")

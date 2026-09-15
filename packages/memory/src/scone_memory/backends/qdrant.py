@@ -56,7 +56,15 @@ class QdrantVectorIndex:
         else:
             self.client = AsyncQdrantClient(url=url, api_key=api_key)
         self.collection = collection
+        #: The server as configured, or the client itself: an injected one chose the server,
+        #: and each in-memory client is a store of its own.
+        self._endpoint: object = url if client is None and url != ":memory:" else id(self.client)
         self.dim: Optional[int] = None
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self._endpoint, self.collection)
 
     async def ensure(self, dim: int) -> None:
         """Check dimensions and finish any interrupted payload-index setup.

@@ -20,7 +20,7 @@ def test_column_major_provider_order_becomes_linked_row_major_candidate():
     observed=grid()
     observed=observed[::3]+observed[1::3]+observed[2::3]
     found=infer_tables(observed)
-    assert found.strategy=='aligned-rows-v1'
+    assert found.strategy=='aligned-rows-v2'
     assert found.region_count==12 and found.unassigned==()
     assert len(found.tables)==1
     table=found.tables[0]
@@ -30,13 +30,30 @@ def test_column_major_provider_order_becomes_linked_row_major_candidate():
     assert all(cell.box==observed[cell.regions[0]].box for cell in table.cells)
 
 
-def test_title_and_footer_remain_explicitly_unassigned():
+def test_a_title_across_the_table_is_its_first_row_and_a_footer_stays_unassigned():
     from scone_memory.ocr.tables import infer_tables
     observed=[OcrRegion(text='Report',box=(.1,.02,.8,.07)),*grid(),
               OcrRegion(text='Footnote',box=(.1,.8,.8,.85))]
     found=infer_tables(observed)
-    assert len(found.tables)==1 and found.unassigned==(0,13)
+    assert len(found.tables)==1 and found.unassigned==(13,), "the title just above the grid spans its columns"
+    [table]=found.tables
+    title=[cell for cell in table.cells if cell.row==0]
+    assert len(title)==1 and title[0].text=='Report' and title[0].column_span==table.columns
     assert 'unassigned_regions' in found.notes
+    # A sentence above the grid is prose, not its title; a row at its foot
+    # opening with a footnote's mark is its note, not its last row, even
+    # when its cells fit the columns.
+    prose=[OcrRegion(text='Sales rose in the year.',box=(.1,.02,.8,.07)),*grid(),
+           OcrRegion(text='* Café',box=(.1,.4,.2,.425)),OcrRegion(text='means coffee here.',box=(.4,.4,.7,.425))]
+    found=infer_tables(prose)
+    [table]=found.tables
+    assert table.rows==4 and found.unassigned==(0,13,14)
+    # Paragraph lines below the grid, each as wide as the table and at
+    # line spacing, are not rows of it, however many follow.
+    below=[*grid(),*(OcrRegion(text=f'Prose line {n} runs on.',box=(.1,.4+n*.04,.85,.425+n*.04)) for n in range(3))]
+    found=infer_tables(below)
+    [table]=found.tables
+    assert table.rows==4 and found.unassigned==(12,13,14)
 
 
 def test_separated_grids_remain_separate_candidates():
@@ -105,3 +122,47 @@ def test_joined_cell_separators_count_toward_text_budget(separator_budget):
     result = infer_tables(regions)
     assert len(result.tables) == 1
     assert sum(len(cell.text.encode()) for cell in result.tables[0].cells) == 2_000_000
+
+
+def test_a_row_of_fewer_cells_spans_the_grid_s_columns_and_a_narrow_one_is_not_widened():
+    from scone_memory.ocr.tables import infer_tables
+    from scone_memory.ocr.types import OcrRegion
+
+    def cell(text, row, left, right):
+        top = 0.1 + row * 0.05
+        return OcrRegion(text=text, box=(left, top, right, top + 0.03))
+    regions = [cell("Quarterly figures", 0, 0.1, 0.75),  # a title over three columns
+               cell("Item", 1, 0.1, 0.25), cell("Q1", 1, 0.4, 0.5), cell("Q2", 1, 0.65, 0.75),
+               cell("Widgets", 2, 0.1, 0.28), cell("10", 2, 0.4, 0.48), cell("12", 2, 0.65, 0.73),
+               cell("Gadgets", 3, 0.1, 0.28), cell("7", 3, 0.4, 0.45), cell("9", 3, 0.65, 0.7),
+               cell("Total", 4, 0.1, 0.22), cell("38", 4, 0.4, 0.75)]  # a total across the two number columns
+    layout = infer_tables(regions)
+    assert layout.strategy == 'aligned-rows-v2' and len(layout.tables) == 1
+    [table] = layout.tables
+    assert table.rows == 5 and table.columns == 3
+    spans = {(c.row, c.column): c.column_span for c in table.cells}
+    assert spans[(0, 0)] == 3 and spans[(4, 1)] == 2 and spans[(4, 0)] == 1 and spans[(2, 1)] == 1
+    assert {c.text for c in table.cells if c.row == 0} == {"Quarterly figures"}
+    assert 'column_span' not in [c for c in table.cells if c.row == 2][0].model_dump(), "a cell of one column serializes as before"
+    assert not layout.unassigned, "every region sits in a cell"
+    narrow = [cell("Item", 1, 0.1, 0.25), cell("Q1", 1, 0.4, 0.5), cell("Q2", 1, 0.65, 0.75),
+              cell("Widgets", 2, 0.1, 0.28), cell("10", 2, 0.4, 0.48), cell("12", 2, 0.65, 0.73),
+              cell("Gadgets", 3, 0.1, 0.28), cell("7", 3, 0.4, 0.45), cell("9", 3, 0.65, 0.7),
+              cell("note", 4, 0.3, 0.36)]  # a word in a gutter, in no column band: not a row of the table
+    layout = infer_tables(narrow)
+    [table] = layout.tables
+    assert table.rows == 3 and layout.unassigned, "a cell over no column is not read as spanning"
+    grazing = [cell("Quarterly figures for the year", 0, 0.1, 0.42),  # a title over two thirds of the narrow Q1 band
+               cell("Item", 1, 0.1, 0.25), cell("Q1", 1, 0.4, 0.43), cell("Q2", 1, 0.65, 0.75),
+               cell("Widgets", 2, 0.1, 0.28), cell("10", 2, 0.4, 0.43), cell("12", 2, 0.65, 0.73),
+               cell("Gadgets", 3, 0.1, 0.28), cell("7", 3, 0.4, 0.43), cell("9", 3, 0.65, 0.7)]
+    [table] = infer_tables(grazing).tables
+    assert {(c.row, c.column_span) for c in table.cells if c.row == 0} == {(0, 1)}, "a wide cell grazing a narrow band does not claim it"
+    narrow_total = [cell("Item", 1, 0.1, 0.25), cell("Net worth (USD)", 1, 0.36, 0.58), cell("Q2", 1, 0.65, 0.75),
+                    cell("Widgets", 2, 0.1, 0.28), cell("10", 2, 0.4, 0.44), cell("12", 2, 0.65, 0.73),
+                    cell("Gadgets", 3, 0.1, 0.28), cell("7", 3, 0.4, 0.43), cell("9", 3, 0.65, 0.7),
+                    cell("Total", 4, 0.1, 0.22), cell("57", 4, 0.4, 0.44)]  # a number a fifth as wide as its column's band
+    layout = infer_tables(narrow_total)
+    [table] = layout.tables
+    assert table.rows == 4 and not layout.unassigned, "a narrow number inside a wide band sits in it"
+    assert {(c.row, c.column, c.column_span) for c in table.cells if c.row == 3} == {(3, 0, 1), (3, 1, 1)}

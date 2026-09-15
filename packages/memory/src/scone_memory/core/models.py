@@ -285,6 +285,12 @@ class ForgetReceipt(BaseModel):
     claims_kept_other_support: list[int] = Field(default_factory=list)
     claims_kept_not_in_ledger: list[int] = Field(default_factory=list)
     claims_already_excluded: list[int] = Field(default_factory=list)
+    #: What happens to the image lane's vector (``retrieval.image_lane``):
+    #: ``none`` when the episode carries no image from ``ingest_image``;
+    #: ``removed`` when this engine has the lane and deletes it; ``not_reached``
+    #: when it has not, so an image index it cannot see may keep the image's
+    #: vector until an engine with the lane opens on it or meets it in a recall.
+    image_vector: Literal["none", "removed", "not_reached"] = "none"
 
 
 class BulkForgetReport(BaseModel):
@@ -365,6 +371,47 @@ class ExpiryReport(BaseModel):
     dry_run: bool = False
 
 
+class ScheduledForget(BaseModel):
+    """One episode a sweep found due: when it was to be forgotten, why it was
+    taken, and what became of it -- ``forgotten`` with the forget's receipt,
+    ``would_forget`` in a dry run, or ``skipped`` with the reason when it was
+    already gone by the time its forget ran."""
+
+    episode_id: int
+    forget_after: str
+    reason: str
+    outcome: Literal["forgotten", "would_forget", "skipped"]
+    receipt: Optional[ForgetReceipt] = None
+
+
+class ForgetDueReport(BaseModel):
+    """One pass of forgetting what is due (``memory.scheduled_forget``).
+
+    ``due`` counts the episodes the walk found past their ``forget_after`` at
+    ``now``; ``items`` are the ones this pass took, most overdue first, and
+    ``limited`` says more were due than ``limit`` lets one pass take.
+    ``scan_complete`` false means the walk stopped at its bound before the
+    oldest episode, so ``due`` is not the whole space: pass
+    ``resume_before`` as ``before`` to walk on. ``unreadable`` names episodes
+    whose stored ``forget_after`` cannot be read as a time; they are neither
+    forgotten nor withheld."""
+
+    space: str
+    now: str
+    limit: int
+    dry_run: bool = False
+    with_claims: Literal["keep", "exclude"] = "keep"
+    scanned: int = 0
+    scan_complete: bool = True
+    resume_before: Optional[int] = None
+    due: int = 0
+    limited: bool = False
+    items: list[ScheduledForget] = Field(default_factory=list)
+    forgotten: list[int] = Field(default_factory=list)
+    remaining: int = 0
+    unreadable: list[int] = Field(default_factory=list)
+
+
 class RecallItem(BaseModel):
     chunk_id: int
     episode_id: int
@@ -410,16 +457,23 @@ class RecallItem(BaseModel):
     #: second copy of the text to miss).
     #: Left out otherwise.
     via_summary: Optional[dict[str, object]] = None
+    #: When a descent of the stored summary trees reached this chunk
+    #: (``summary_traverse``): the document, and the path of summaries kept
+    #: on the way down, top first, each with its level, index and score.
+    #: Left out otherwise.
+    via_tree: Optional[dict[str, object]] = None
 
     @model_serializer(mode="wrap")
     def omit_unasked_lessons(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        # Recall not asked for lessons, or for summaries expanded, answers
-        # exactly as it did before they existed.
+        # Recall not asked for lessons, for summaries expanded, or for a
+        # descent, answers exactly as it did before they existed.
         value: dict[str, object] = handler(self)
         if self.lessons is None:
             value.pop("lessons", None)
         if self.via_summary is None:
             value.pop("via_summary", None)
+        if self.via_tree is None:
+            value.pop("via_tree", None)
         return value
 
 
@@ -512,6 +566,11 @@ class Narrowing(BaseModel):
     vector_returned: int
     postfiltered_out: int
     window_exhausted: bool
+    #: The image lane (``retrieval.image_lane``), ``off`` unless the recall ran
+    #: it. Its index answers for itself whether it narrows by conditions.
+    image_lane: Literal["in_store", "postfiltered", "off"] = "off"
+    image_window: int = 0
+    image_returned: int = 0
 
 
 class PhraseTrace(BaseModel):
@@ -604,14 +663,26 @@ class RecallResult(BaseModel):
     #: With ``expand_summaries``: what was expanded, refused and cut
     #: (``summary_expand.Expanded.record``). None otherwise.
     expanded: Optional[dict[str, object]] = None
+    #: Passages left out because their memory is past its ``forget_after``,
+    #: swept or not: how many (of the candidates read to fill the answer),
+    #: which episodes, and the time they were judged at. None when nothing was.
+    past_forget_after: Optional[dict[str, object]] = None
+    #: With a feedback weight set: what recorded feedback added in fusion, what the read took,
+    #: and whether its bounds bit (see retrieval/feedback_prior.py). Left out otherwise.
+    feedback_prior: Optional[dict[str, object]] = None
 
     @model_serializer(mode="wrap")
     def omit_unasked_lessons_read(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # A recall that asked for neither answers exactly as it did before they existed.
         value: dict[str, object] = handler(self)
         if self.lessons_read is None:
             value.pop("lessons_read", None)
         if self.expanded is None:
             value.pop("expanded", None)
+        if self.past_forget_after is None:
+            value.pop("past_forget_after", None)
+        if self.feedback_prior is None:
+            value.pop("feedback_prior", None)
         return value
 
     @property
@@ -649,14 +720,30 @@ class Added(BaseModel):
     #: in tokens (``chunk_tokens``) carries its own counts here too, with
     #: ``measure: "tokens"``: sentences cut inside because one alone was
     #: over the target, cuts inside a word, chunks that overlap the one
-    #: before and chunks the count measured over. None on a receipt that
-    #: stored nothing.
+    #: before and chunks the count measured over. A semantic cut under a
+    #: ``semantic_merge_threshold`` (the record's own, or the engine's)
+    #: carries what its second pass did: ``merge_threshold``, ``groups``
+    #: (chunks the first pass made), ``merges``, and each join that did not
+    #: happen counted once, as ``stopped_by_similarity`` or
+    #: ``stopped_by_size`` (alike enough and too long together, or beside a
+    #: sentence the size bound cut: the bound bit), so the three sum to
+    #: ``groups - 1``. None on a receipt that stored nothing.
     chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     structure: Optional[dict[str, object]] = None
     #: With heading context on: how many chunks were embedded with a line
     #: of context in front, how many bytes that added, and how many lines
     #: were cut to the bound. None when the setting is off.
     embedding_context: Optional[dict[str, object]] = None
+    #: When the stored episode is to be forgotten, as the store holds it
+    #: (``core.forget_after``); None when it is not scheduled. For a
+    #: duplicate this is the schedule of the episode already there, which
+    #: the write did not change.
+    forget_after: Optional[str] = None
+    #: The memory past its ``forget_after`` that held this record's identity
+    #: and was forgotten, through the ordinary forget, so this write could be
+    #: stored afresh: which episode, when it was due, why, and the forget's
+    #: receipt. None when the write forgot nothing.
+    forgot_overdue: Optional[ScheduledForget] = None
 
 
 class Status(BaseModel):

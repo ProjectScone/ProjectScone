@@ -42,13 +42,17 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
     from ..entities.vocabulary_store import VocabularyStore
+    from ..core.models import Chunk
+    from ..retrieval.feedback_prior import PriorTerms
     from ..retrieval.lessons import Lessons
     from ..ingestion.chunk_questions import QuestionLaneReport
     from ..providers.llm import ChatModel
+    from ..retrieval.summary_traverse import Traversal
 from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, SummaryExpander, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
+from ..retrieval.image_lane import ImageLane, remove_forgotten, writer_block
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
 from ..retrieval.synonyms import Synonyms
@@ -57,7 +61,7 @@ from ..retrieval.synonyms import Synonyms
 HASHED_VECTOR_WEIGHT = 0.01
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
-from ..core import extracted
+from ..core import extracted, forget_after
 from ..core.validation import (
     entity_key as entity_key,
     many_valued_predicates,
@@ -78,7 +82,7 @@ from ..core.validation import (
     normalise_term as normalise_term,
     normalise_time as normalise_time,
 )
-from ..core.errors import Conflict, InvalidInput, NotFound
+from ..core.errors import Conflict, Gone, InvalidInput, NotFound
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
     Added,
@@ -92,6 +96,7 @@ from ..core.models import (
     FactLink,
     DoctorReport,
     ExpiryReport,
+    ForgetDueReport,
     ForgetReceipt,
     ForgetStatus,
     IngestJob,
@@ -109,6 +114,7 @@ from ..core.ports import (
     DuplicateEvent,
     Embedder,
     EmbeddingCheckpoint,
+    ImageEmbedder,
     Event,
     EventLog,
     NewEpisode,
@@ -211,6 +217,9 @@ class MemoryEngine:
         #: break near-ties only; zero weight turns the term off.
         recency_weight: float = fusion.W_RECENCY,
         recency_half_life_days: float = fusion.RECENCY_HALF_LIFE_DAYS,
+        #: How much recorded feedback moves a candidate in fusion (see
+        #: retrieval/feedback_prior.py). Zero, the default, reads no feedback.
+        feedback_weight: float = 0.0,
         demote_restated: bool = True,
         demote_superseded: bool = True,
         blobs: Optional[BlobStore] = None,
@@ -238,7 +247,34 @@ class MemoryEngine:
         chunk_tokens: int | None = None,
         chunk_overlap_tokens: int = 0,
         question_lane: bool = False,
+        semantic_merge_threshold: float | None = None,
+        #: The image lane: an embedder putting images and text queries into
+        #: one space, and a vector index of its own for its vectors. Both or
+        #: neither; without them a recall asking for the lane is told so.
+        image_embedder: "ImageEmbedder | None" = None,
+        image_vectors: VectorIndex | None = None,
     ) -> None:
+        if image_embedder is not None and image_vectors is None:
+            raise InvalidInput("the image lane keeps its vectors in an index of its own; image_vectors is missing")
+        if image_vectors is not None and image_embedder is None:
+            raise InvalidInput("the image lane embeds images and queries with one model; image_embedder is missing")
+        if image_embedder is not None and not isinstance(image_embedder, ImageEmbedder):
+            raise InvalidInput("image_embedder must have an id, a dim, embed_images and embed_texts")
+        if _same_index(vectors, image_vectors):
+            raise InvalidInput("image_vectors must be an index of its own, not the text vectors' index: "
+                               "one index holds one embedder's vectors at one width")
+        #: The image lane's embedder, or None when the engine has no image lane.
+        self.image_embedder = image_embedder
+        #: Its vectors, one per stored image, checked against its writer like the text vectors.
+        self.image_vectors = (None if image_vectors is None else vector_identity.guard(
+            image_vectors, lambda: cast(ImageEmbedder, image_embedder).id))
+        #: Why this engine's image embedder must not write to or compare with
+        #: the image index, as the index recorded it when the engine opened; None otherwise.
+        self.image_block: str | None = None
+        #: Image vectors of forgotten images removed when the engine opened
+        #: (left by forgets through an engine without the lane); None without
+        #: the lane or when the image index cannot list what it holds.
+        self.image_vectors_removed: int | None = None
         if vector_weight is None:
             # A hashed-token embedder ranks by word overlap, badly: a weak
             # echo of the text lane. Measured on LongMemEval-S (the frozen
@@ -317,6 +353,17 @@ class MemoryEngine:
         #: specification, so a space that already holds chunks cut another
         #: way must not silently start cutting differently.
         self.semantic_aware = semantic_aware
+        if semantic_merge_threshold is not None:
+            from ..ingestion.semantic_chunks import merge_refused
+
+            refusal = merge_refused(semantic_merge_threshold)
+            if refusal is not None:
+                raise InvalidInput(refusal)
+        #: The similarity at which a semantic cut's neighbouring chunks are
+        #: joined again, within the target (ingestion/semantic_chunks.py);
+        #: None keeps the first pass's cuts. Read by every semantic cut, the
+        #: engine's rule or a record's own ``chunking="semantic"``.
+        self.semantic_merge_threshold = semantic_merge_threshold
         #: Whether a chunk is embedded with the headings above it (for code,
         #: its file and declarations). Off unless asked for: it changes
         #: vectors, and a space's existing vectors were made without it.
@@ -432,16 +479,24 @@ class MemoryEngine:
         fusion.validate_recency(recency_weight, recency_half_life_days)
         self.recency_weight = float(recency_weight)
         self.recency_half_life_days = float(recency_half_life_days)
+        from ..retrieval.feedback_prior import validate_feedback_weight
+
+        validate_feedback_weight(feedback_weight)
+        self.feedback_weight = float(feedback_weight)
 
     async def _emit(self, space: str, kind: str, payload: dict, dedup_key: Optional[str] = None) -> Optional[Event]:
         if self.events is None:
             return None
         return await self.events.append(NewEvent(ts=self.clock(), space=space, kind=kind, payload=payload, dedup_key=dedup_key))
 
+    @staticmethod
+    def _query_hash(query: str) -> str:
+        return hashlib.sha256(query.encode()).hexdigest()[:16]
+
     def _query_for_evidence(self, query: str) -> dict:
         if self.record_queries:
             return {"query": query, "query_hashed": False}
-        return {"query": hashlib.sha256(query.encode()).hexdigest()[:16], "query_hashed": True}
+        return {"query": self._query_hash(query), "query_hashed": True}
 
     async def open(self) -> "MemoryEngine":
         from . import space_cleanup
@@ -452,6 +507,8 @@ class MemoryEngine:
         if pending:
             raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
         await self.vectors.ensure(self.embedder.dim)
+        if self.image_vectors is not None:
+            await self.image_vectors.ensure(cast(ImageEmbedder, self.image_embedder).dim)
         if self.vocabulary is not None:
             # Read on this thread, which owns the store's connection, and
             # held for the life of the engine. A vocabulary saved later
@@ -468,6 +525,9 @@ class MemoryEngine:
             raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
         if report.retirements_pending:
             raise InvalidInput("source cleanup remains; call recover() again before opening the engine")
+        if self.image_vectors is not None:
+            self.image_block = await writer_block(self.image_vectors, cast(ImageEmbedder, self.image_embedder).id)
+            self.image_vectors_removed = await remove_forgotten(self.documents, self.image_vectors)
         return self
 
     @property
@@ -523,7 +583,7 @@ class MemoryEngine:
         self._closed = True
         await self.entities.aclose()
         first: Optional[BaseException] = None
-        for store in (self.documents, self.vectors, self.events, self.blobs, self.embedding_cache):
+        for store in (self.documents, self.vectors, self.image_vectors, self.events, self.blobs, self.embedding_cache):
             closer = getattr(store, "close", None)
             if store is None or not callable(closer):
                 continue
@@ -584,18 +644,28 @@ class MemoryEngine:
         *, embedding_checkpoint: EmbeddingCheckpoint | None = None,
         chunking: Optional[str] = None,
         chunking_profile: Optional[str] = None,
+        semantic_merge_threshold: Optional[float] = None,
+        forget_after: Optional[str] = None,
     ) -> Added:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
         ``replace``) instead of a duplicate. ``chunking`` names how this
         record is cut (length, code, structure, semantic); None keeps the
         engine's rule. ``chunking_profile`` names a genre (statute, paper,
-        manual, qa, resume) whose boundaries structure chunking cuts at."""
+        manual, qa, resume) whose boundaries structure chunking cuts at.
+        ``semantic_merge_threshold`` joins this record's semantic chunks
+        again at that similarity, over the engine's own threshold.
+
+        ``forget_after`` schedules the memory to be forgotten: an RFC 3339
+        time, a date, or a duration from this engine's clock such as ``30d``
+        (``core.forget_after``). A time already past is refused. From that
+        time recall does not return it, and ``forget_due`` forgets it."""
         await self._living(space)
         if replace and embedding_checkpoint is not None:
             raise InvalidInput('embedding checkpoints apply to append ingestion, not replacement')
         record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key,
-                        chunking=chunking, chunking_profile=chunking_profile)
+                        chunking=chunking, chunking_profile=chunking_profile,
+                        semantic_merge_threshold=semantic_merge_threshold, forget_after=forget_after)
         if replace:
             added = (await self.replace(space, record)).added
         else:
@@ -631,14 +701,20 @@ class MemoryEngine:
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
                          self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context,
-                         self.embedding_budget, self.chunk_tokens, self.chunk_overlap_tokens)
+                         self.embedding_budget, self.chunk_tokens, self.chunk_overlap_tokens,
+                         self.semantic_merge_threshold)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
             prior_tombstone = await self.documents.tombstone_by_hash(space, digest)
             existing = await self.documents.episode_by_hash(space, digest)
-            if existing is not None and existing.content == new.content:
-                added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
+            # An overdue memory is as good as gone: the same content again is
+            # stored afresh, the overdue one forgotten below as any replaced one.
+            if (existing is not None and existing.content == new.content
+                    and not forget_after.is_due(existing.metadata, parse_rfc3339(self.clock()))):
+                # The schedule the stored episode holds, which this write did not change.
+                added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate",
+                              forget_after=existing.metadata.get(forget_after.KEY))
                 return Replaced(added=added, outcome="duplicate", replaced=None)
             pending = await ingestion_batch.chunk_record(runtime, new)
             vectors, reused = await ingestion_batch.embed_pending_counted(runtime, space, [pending])
@@ -650,7 +726,8 @@ class MemoryEngine:
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
                         self.code_aware, self.code_graph, self.structure_aware,
                         self.semantic_aware, self.heading_context, self.embedding_budget,
-                        self.chunk_tokens, self.chunk_overlap_tokens) != configuration):
+                        self.chunk_tokens, self.chunk_overlap_tokens,
+                        self.semantic_merge_threshold) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -788,7 +865,8 @@ class MemoryEngine:
             self._embed_text, self._emit, embedding_checkpoint=embedding_checkpoint,
             embedding_cache=self.embedding_cache, code_aware=self.code_aware,
             structure_aware=self.structure_aware,
-            semantic_aware=self.semantic_aware, heading_context=self.heading_context,
+            semantic_aware=self.semantic_aware, semantic_merge_threshold=self.semantic_merge_threshold,
+            heading_context=self.heading_context,
             embedding_budget=cast(int, getattr(self.embedder, "max_input_tokens")) if self.embedding_budget else None,
             count_tokens=(getattr(self.embedder, "count_tokens", None)
                           if self.embedding_budget or self.chunk_tokens is not None else None),
@@ -796,6 +874,7 @@ class MemoryEngine:
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
             context_lane=self.context_lane,
             document_outline=partial(document_outline, blobs=self.blobs),
+            forget_overdue=self.forget,
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
@@ -868,7 +947,7 @@ class MemoryEngine:
         return retention.RetentionRuntime(
             self.documents, self.vectors, self.blobs, self.events, self.clock, self._emit,
             self._episode_or_gone, self.impact, self.forget, self._living,
-            self.space_deleted, self._space_receipt, self.exclude,
+            self.space_deleted, self._space_receipt, self.exclude, image_vectors=self.image_vectors,
         )
 
     async def _episode_or_gone(self, space: str, episode_id: int) -> Episode:
@@ -914,6 +993,20 @@ class MemoryEngine:
 
         return await forget_matching(self, space, source_prefix=source_prefix, tags=tags, conditions=conditions,
                                      kind=kind, limit=limit, apply=apply, selection=selection, with_claims=with_claims)
+
+    async def forget_due(self, space: str, now: Optional[str] = None, *, limit: int = 100, dry_run: bool = False,
+                         with_claims: Literal["keep", "exclude"] = "keep",
+                         before: Optional[int] = None) -> "ForgetDueReport":
+        """Forget the episodes whose ``forget_after`` has come, through the
+        ordinary ``forget``: most overdue first, at most ``limit`` in a pass,
+        from a walk of at most ``scheduled_forget.MAX_SCANNED`` episodes. The
+        report says what went and why, and when either bound bit. ``now``
+        may be earlier than this engine's clock, never later. See
+        ``memory.scheduled_forget``."""
+        from .scheduled_forget import forget_due
+
+        return await forget_due(self, space, now=now, limit=limit, dry_run=dry_run, with_claims=with_claims,
+                                before=before)
 
     async def forget_status(self, space: str, episode_id: int) -> ForgetStatus:
         """Observe retained, pending or completed source removal without writes."""
@@ -1070,17 +1163,27 @@ class MemoryEngine:
             self.entities.forget(space)
 
     async def episode(self, space: str, episode_id: int) -> Episode:
+        """The episode and its attachments. One past its ``forget_after``
+        reads as Gone, swept or not; ``impact`` and ``forget`` still reach it."""
         check_space(space)
-        found = await self._episode_or_gone(space, episode_id)
+        found = self._not_overdue(await self._episode_or_gone(space, episode_id))
         carried = await self.blobs.for_episode(space, episode_id)
         return found.model_copy(update={"attachments": tuple(carried)}) if carried else found
 
+    def _not_overdue(self, episode: Episode) -> Episode:
+        """The episode, or Gone when its scheduled time has come."""
+        if forget_after.is_due(episode.metadata, parse_rfc3339(self.clock())):
+            due = episode.metadata[forget_after.KEY]
+            raise Gone(f"episode {episode.episode_id} was due to be forgotten at {due}", due)
+        return episode
+
     async def episode_by_key(self, space: str, dedup_key: str) -> Episode:
         """Read a keyed source and its attachment metadata. Unknown keys raise
-        NotFound; a key with only a deletion record raises Gone. A changing
+        NotFound; a key with only a deletion record, or whose source is past
+        its ``forget_after``, raises Gone. A changing
         key is retried at most three times before Conflict. The result does
         not reserve the key for a subsequent write or include prior versions."""
-        return await source_keys.episode_by_key(self.documents, self.blobs, space, dedup_key)
+        return self._not_overdue(await source_keys.episode_by_key(self.documents, self.blobs, space, dedup_key))
 
     # -- recall -----------------------------------------------------------
 
@@ -1109,8 +1212,14 @@ class MemoryEngine:
         lessons: bool = False,
         expand_summaries: Optional[str] = None,
         expand_max_chunks: Optional[int] = None,
+        image_lane: bool = False,
     ) -> RecallResult:
-        """``lessons`` puts beside each returned passage what people said about it
+        """``image_lane`` adds the image lane: stored images nearest the query
+        in the image embedder's space, fused by rank (``retrieval.image_lane``).
+        Off unless asked for; an engine without an image embedder answers from
+        the other lanes and ``degraded`` says so.
+
+        ``lessons`` puts beside each returned passage what people said about it
         (``engine.lessons``), leaving the order as it was.
 
         ``expand_summaries`` (``follow`` or ``replace``) puts after each stored
@@ -1197,6 +1306,9 @@ class MemoryEngine:
             lexical_stems=self.lexical_stems,
             lexical_exact_forms=self.lexical_exact_forms,
             vector_weight=self.vector_weight,
+            feedback_prior=self._feedback_prior if self.feedback_weight > 0 else None,
+            image=None if self.image_vectors is None else ImageLane(cast(ImageEmbedder, self.image_embedder),
+                                                                   self.image_vectors),
         )
         if type(lessons) is not bool:
             raise InvalidInput("lessons must be a boolean")
@@ -1224,7 +1336,8 @@ class MemoryEngine:
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
                             entity_notes=notes, lanes=lanes,
-                            require=require, exclude=exclude, diversity=diversity, summaries=summaries)
+                            require=require, exclude=exclude, diversity=diversity, summaries=summaries,
+                            image_lane=image_lane)
         if lessons:
             from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons, read_summary
 
@@ -1234,6 +1347,23 @@ class MemoryEngine:
             result.items = [item.model_copy(update={"lessons": found.lessons[item.chunk_id].record()})
                             if item.chunk_id in found.lessons else item for item in result.items]
         return result
+
+    async def tree_recall(self, space: str, query: str, *, limit: Optional[int] = None, branching: Optional[int] = None,
+                          max_depth: Optional[int] = None, text: bool = False, episode_ids: Optional[Sequence[int]] = None,
+                          kind: Optional[str] = None, source_prefix: Optional[str] = None, tags: Sequence[str] = (),
+                          since: Optional[str] = None, until: Optional[str] = None) -> "Traversal":
+        """The chunks a descent of the stored summary trees in scope reaches:
+        from each document's top summaries, the ``branching`` best at every
+        step, down to chunks, each saying in ``via_tree`` the path that led
+        there. No model is called. Unset bounds take the module's defaults;
+        see ``summary_traverse``."""
+        from ..retrieval.summary_traverse import DEFAULT_BRANCHING, DEFAULT_LIMIT, MAX_DEPTH, traverse_summaries
+
+        return await traverse_summaries(self, space, query, limit=DEFAULT_LIMIT if limit is None else limit,
+                                        branching=DEFAULT_BRANCHING if branching is None else branching,
+                                        max_depth=MAX_DEPTH if max_depth is None else max_depth, text=text,
+                                        episode_ids=episode_ids, kind=kind, source_prefix=source_prefix, tags=tags,
+                                        since=since, until=until)
 
     async def record_turn(self, space: str, *, session_id: str, turn_id: str, mode: str,
                           latency_ms: Mapping[str, float]) -> Optional[Event]:
@@ -1385,6 +1515,11 @@ class MemoryEngine:
                                   min_corroboration=min_corroboration,
                                   max_events=MAX_FEEDBACK_EVENTS if max_events is None else max_events)
 
+    async def _feedback_prior(self, space: str, candidates: Mapping[int, "Chunk"], now: str) -> "PriorTerms":
+        from ..retrieval.feedback_prior import read_prior
+
+        return await read_prior(self.events, self.documents, space, candidates, now=now, weight=self.feedback_weight)
+
     async def feedback(
         self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None
     ) -> Event:
@@ -1403,8 +1538,22 @@ class MemoryEngine:
             raise InvalidInput(f"chunk {chunk_id} was not returned by recall {recall_event_id}")
         if note is not None and len(note) > 500:
             raise InvalidInput("note must be at most 500 chars")
+        from ..retrieval.feedback_prior import fingerprint, question
+
+        # What the passage said when it was judged, so a ranking prior can tell
+        # when the id now names other text. A passage already gone gets none.
+        # And which question it was judged for, so asking again is not corroboration.
+        # A query kept in the clear is hashed as a hashed recall's is, so the same words are one question either way.
+        asked = recall.payload.get("query")
+        if recall.payload.get("query_hashed") is False:
+            asked = self._query_hash(str(asked))
+        marked: dict[str, object] = {"question": question(asked)}
+        for chunk in await self.documents.get_chunks(space, [chunk_id]):
+            episode = await self.documents.get_episode(space, chunk.episode_id)
+            if episode is not None:
+                marked["fingerprint"] = fingerprint(episode.content, chunk.text)
         return await self._emit(space, "feedback", {
-            "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note,
+            "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note, **marked,
         })  # type: ignore[return-value]
 
     async def _fact_fits_scope(self, space: str, fact: Fact, scope: TextFilter | None) -> bool:
@@ -1649,13 +1798,14 @@ class MemoryEngine:
         source_prefix: str | None = None, since: str | None = None, until: str | None = None,
         exclude_session_id: str | None = None, max_records: int = 200,
     ) -> OverviewResult:
-        """Return bounded recent source evidence; coverage and continuation are explicit."""
+        """Return bounded recent source evidence; coverage and continuation are
+        explicit. A source past its ``forget_after`` is left out and counted."""
         from ..retrieval.overview import overview
 
         return await overview(
             self.documents, space, limit=limit, before=before, where=where, kind=kind,
             source_prefix=source_prefix, since=since, until=until,
-            exclude_session_id=exclude_session_id, max_records=max_records,
+            exclude_session_id=exclude_session_id, max_records=max_records, now=self.clock(),
         )
 
     async def source_page(self, space: str, *, before: Optional[int] = None,
@@ -1673,16 +1823,27 @@ class MemoryEngine:
         matches nothing would otherwise read a whole space to prove it, and
         reaching that bound is reported as more to come rather than as the
         end.
+
+        A source past its ``forget_after`` is left out, swept or not, and
+        counted in ``past_forget_after``; the page is still filled around it.
         """
+        moment = self.clock()
+        return await self._source_page(space, before=before, limit=limit, kind=kind, conditions=conditions, now=moment)
+
+    async def _source_page(self, space: str, *, before: Optional[int], limit: int, kind: Optional[str],
+                           conditions: Mapping[str, object] | None, now: Optional[str]) -> SourcePage:
+        """``source_page``, and with ``now`` None the overdue sources too: what
+        forgetting by filter selects from, since ``forget`` still reaches them."""
         return await catalog.source_page(self.documents, space, before=before, limit=limit, kind=kind,
-            conditions=conditions, walk_page=SOURCE_WALK_PAGE, walk_reads=SOURCE_WALK_READS)
+            conditions=conditions, walk_page=SOURCE_WALK_PAGE, walk_reads=SOURCE_WALK_READS, now=now)
 
     async def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         """The episodes whose metadata matches every ``where`` pair, oldest
         first by (created_at, episode_id); with ``limit``, the newest N of
         them in that same order. This is a walk over the space's episodes,
-        fine for a session's turns, not a query language."""
-        return await catalog.episodes(self.documents, space, where, limit)
+        fine for a session's turns, not a query language. An episode past its
+        ``forget_after`` is left out, swept or not."""
+        return await catalog.episodes(self.documents, space, where, limit, now=self.clock())
 
     async def scopes(self, space: str) -> dict[str, dict[str, int]]:
         """Episode counts per metadata key and value: which users, agents
@@ -1749,6 +1910,16 @@ class MemoryEngine:
 
 
 # -- validation helpers -----------------------------------------------------
+
+
+def _same_index(vectors: object, image_vectors: object) -> bool:
+    """Whether two indexes write the same rows: the same object, or two handles
+    whose ``location`` is equal. An index that names no location (the in-memory
+    one, a custom one) is recognised only as the same object."""
+    if vectors is image_vectors:
+        return True
+    left = getattr(vectors, "location", None)
+    return left is not None and left == getattr(image_vectors, "location", None)
 
 
 def _ms(since: float) -> float:

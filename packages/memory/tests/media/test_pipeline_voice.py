@@ -19,6 +19,7 @@ from scone_memory.pipeline.voice import (CallerStage, ModelStage, RecognizerStag
                                          SynthesizerStage)
 from scone_memory.realtime.audio import AudioChunk, SpeechStarted, Transcript
 from scone_memory.realtime.events import ReplyCompleted, TextDelta
+from scone_memory.realtime.keypad import Keypress
 
 SOUND = AudioChunk(pcm=b"\x00\x01" * 80, sample_rate=16000)
 
@@ -206,6 +207,33 @@ async def test_a_line_that_dies_ends_the_call_and_says_why():
     far.breaks(OSError("the carrier went away"))
     with pytest.raises(OSError, match="carrier went away"):
         await asyncio.wait_for(pipeline.wait(), 2)
+    await pipeline.stop()
+
+
+async def test_a_key_pressed_on_the_phone_goes_down_the_line_and_the_call_goes_on():
+    """A transport with its keypad on yields keys among the audio. A key
+    is not audio, and taking it for bad audio ended the call at the
+    caller's first key. It goes down the line as a frame of its own."""
+
+    class Watch:
+        def __init__(self):
+            self.seen: list[tuple[str, object, str]] = []
+
+        async def observed(self, delivery):
+            self.seen.append((delivery.stage, delivery.frame, delivery.outcome))
+
+    far, ear, watch = FarEnd(), Ear([]), Watch()
+    pipeline = Pipeline([CallerStage(far), RecognizerStage(ear), ModelStage(Mind([])), SynthesizerStage(Mouth())],
+                        observer=watch)
+    await pipeline.start()
+    await far.says()
+    await far.says(Keypress("5", "inband", offset_ms=120.0, tone_ms=45.0))
+    await far.says()
+    await until(lambda: len(ear.heard) == 2, "the audio after the key to be heard")
+
+    assert pipeline.error is None and not pipeline.ended.is_set() and pipeline.failures == 0
+    assert ("RecognizerStage", Keypress("5", "inband", offset_ms=120.0, tone_ms=45.0), "handled") in watch.seen, \
+        "the key reached the next stage as itself"
     await pipeline.stop()
 
 

@@ -69,11 +69,14 @@ async def _finish(runtime: RetentionRuntime, store: SpaceDeletionStore, pending:
     space = pending.space
     await runtime.blobs.release_space(space)
     await runtime.documents.delete_space(space, pending.requested_at)
-    sweep = getattr(runtime.vectors, 'delete_space', None)
-    if callable(sweep):
-        await sweep(space)
-    else:
-        await runtime.vectors.delete(sorted(set(pending.chunk_ids) | set(pending.retired_chunk_ids)))
+    for index in (runtime.vectors, runtime.image_vectors):
+        if index is None:
+            continue
+        sweep = getattr(index, 'delete_space', None)
+        if callable(sweep):
+            await sweep(space)
+        else:
+            await index.delete(sorted(set(pending.chunk_ids) | set(pending.retired_chunk_ids)))
     if runtime.events is not None:
         await runtime.events.purge(space)
     await store.clear_space_deletion(space)
