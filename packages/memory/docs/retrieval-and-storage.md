@@ -1105,7 +1105,12 @@ in 1,389 files, and the grammar's declarations agreeing with the line
 reader's on 31,733 of the line reader's 41,819, most of the rest being
 closures and calls the line reader had read as declarations.
 
-A relative import is followed only to a file the map actually read.
+A relative import is followed only to a file the map actually read;
+an absolute import of a package that a manifest in the space publishes
+(`import libpkg.util`, `from "@acme/ui/button"`, `use acme_core::store`,
+a Go import path) is followed to that repository's file when the file
+was mapped, which is how two repositories named with `map --repo` link
+(see file-ingestion.md, "More than one repository in a space").
 Resolution belongs to the walk, because that is what knows which files
 exist; a file on its own cannot tell where its package root is, so on its
 own it says nothing about `from .code import x` rather than guessing. What it read
