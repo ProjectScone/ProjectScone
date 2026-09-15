@@ -573,7 +573,10 @@ def _pptx(bundle: SafeArchive, output: _Output) -> None:
     if _local(root.tag) != 'presentation':
         raise InvalidInput('PPTX is missing its presentation')
     relations = _relationships(bundle, source)
-    for number, slide in enumerate(_elements(root, 'sldId'), 1):
+    # Only the presentation's own list names its slides. A deck's sections name them again,
+    # deeper in the file, by numeric id alone.
+    listed = _child(root, 'sldIdLst')
+    for number, slide in enumerate(() if listed is None else listed, 1):
         output.check()
         # A slide has both an unqualified numeric id and a namespaced relationship id.
         identifier = next((value for key, value in slide.attrib.items() if key.endswith('}id')), '')
