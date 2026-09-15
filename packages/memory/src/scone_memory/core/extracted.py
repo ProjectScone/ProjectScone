@@ -21,5 +21,5 @@ from __future__ import annotations
 #: What a source file says about itself, and what a manifest declares.
 MANY_VALUED: frozenset[str] = frozenset({
     "defines", "imports", "calls", "inherits", "mixes_in", "notes", "flags", "cites",
-    "depends_on", "develops_with", "references",
+    "depends_on", "develops_with", "references", "runs_with", "requires_env", "connects_to",
 })

@@ -26,7 +26,7 @@ _AS_OBJECT: dict[str, EntityKind] = {
     **{predicate: "person" for predicate in """knows met married_to reports_to managed_by mentored_by
         friend_of sibling_of parent_of child_of colleague_of""".split()},
     **{predicate: "project" for predicate in "works_on contributes_to leads maintains".split()},
-    **{predicate: "product" for predicate in "uses built_with depends_on runs_on".split()},
+    **{predicate: "product" for predicate in "uses built_with depends_on runs_on runs_with connects_to".split()},
     **{predicate: "event" for predicate in "attended attends hosts organised organized spoke_at".split()},
 }
 

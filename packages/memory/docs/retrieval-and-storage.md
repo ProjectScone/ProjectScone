@@ -1218,6 +1218,77 @@ requests` lists the projects whose manifests declare it, through
 `depends_on`, beside the files that import it, and a test dependency's
 blast radius runs through `develops_with`.
 
+### What a project hands its agents
+
+An MCP configuration is a manifest of a different kind: where a project
+writes down the tool servers its agents talk to. Until now none was
+read, so the graph knew a project's packages and imports and nothing
+about the servers, what they run on, or which variables must be set
+before one starts. `.mcp.json` (Claude Code), `claude_desktop_config.json`
+(Claude Desktop), `mcp.json` (Cursor, Windsurf, VS Code under
+`.vscode/`), `mcp_servers.json`, `mcp_config.json`,
+`cline_mcp_settings.json`, `.gemini/settings.json` and Codex's
+`.codex/config.toml` are read wherever they sit, by `scone map --graph`,
+by `sync`, and by a remembered file with one of those names as its
+source. The `map` and `sync` walks pass dot-named entries by, as they
+always have, with these files and the four tool directories that hold
+one (`.vscode`, `.cursor`, `.gemini`, `.codex`) as the stated exception;
+from those directories only the configuration is read, so
+`.vscode/settings.json` stays unread as before. A configuration makes
+claims like a manifest's:
+
+```
+app/.mcp.json             defines       app/.mcp.json:git       "git"
+app/.mcp.json:git         runs_with     uvx                     uvx
+app/.mcp.json:git         depends_on    mcp-server-git          mcp_server_git
+app/.mcp.json:git         requires_env  $GIT_TOKEN              "GIT_TOKEN"
+app/.mcp.json:remote      connects_to   https://mcp.example.com https://mcp.example.com
+```
+
+- `defines`: the file defines each server it configures, named by the
+  file and the server's key, so two files that both configure a
+  `filesystem` stay two things. A server is no declaration a call could
+  reach: like a manifest's project name, it is left out of call
+  resolution.
+- `runs_with`: the executable a local server starts with, by its base
+  name (`npx`, `uvx`, `docker`, `node`), so "everything that runs
+  through docker" is one question. A command that is itself a reference
+  (`${TOOL_HOME}/bin/server`) names no executable.
+- `depends_on`: the package the server runs, when the executable says
+  which index it comes from -- the first positional argument of `npx`,
+  `bunx` or `pnpx` is an npm package (`--package` names it instead), of
+  `uvx` or `pipx` a PyPI distribution (`--from` and `--with` name
+  distributions too) -- spelled as its index spells it, the same object
+  a `package.json` or `pyproject.toml` names, so a server and a manifest
+  that name one package meet at one entity. A path, a URL, a VCS spec
+  and a reference are not packages. A docker image is left out: the
+  `run` line's flags cannot be told from the image without knowing every
+  flag, and a guess would name the wrong thing.
+- `requires_env`: the environment variables a server needs, by name and
+  never by value: the keys of its `env` map; a `${NAME}`,
+  `${NAME:-default}` or `${env:NAME}` reference in its command,
+  arguments, URL, headers or env values; a `-e NAME` or `--env NAME` a
+  docker run passes through from the host (`-e NAME=value` sets a value
+  and needs nothing); and Codex's `bearer_token_env_var` and
+  `env_http_headers`. The object is `$NAME`, as a shell writes it. A
+  reference in lower or mixed case (`${workspaceFolder}`,
+  `${input:token}`) is a tool's own variable, not the environment's,
+  unless it says `env:`. One variable a server names twice is one claim.
+- `connects_to`: the origin (scheme, host and port, lowercased) of a
+  remote server's URL, when the host is written out rather than
+  referenced.
+
+A value is never quoted. What an `env` map holds is what a configuration
+keeps secret, an argument or header may carry one, and a URL's query
+can; so every claim quotes the token that grounds it -- the server's key,
+the command, the package as written, the variable's name, the URL's
+origin -- and its byte span covers that token alone. The three new
+predicates are many-valued, code-shaped, followed by `graph affected`
+(a change to the variable or the executable reaches the servers that
+rest on it) and name entities the graph may only know by name, as
+`imports` does; the object of `runs_with` and `connects_to` is a product,
+as `depends_on`'s is.
+
 ### Schemas as things code rests on
 
 A code graph that knows a project's files and packages still stopped at
@@ -1755,6 +1826,13 @@ came back 0 with every file on disk, `checked_for_missing` was `true`
 because `0 == 0`, and the receipt said every memory the marker held was
 gone from disk and offered to forget it. The guard above refused the
 deletion, which is the only reason it was not data loss.
+
+The rule has one stated exception. An MCP configuration lives in a
+dot-name by every tool's convention (`.mcp.json`, `.vscode/mcp.json`,
+`.cursor/mcp.json`, `.gemini/settings.json`, `.codex/config.toml`), so
+those files and those four directories are walked, and from the
+directories only the configuration is read; see *What a project hands
+its agents* above.
 
 ### The marker is a name, not a path
 
