@@ -20,6 +20,7 @@ from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
 from . import fact_recall, fusion, supersession
 from .entity_lane import ENTITY_WEIGHT, entity_lane
+from .image_lane import IMAGE_WEIGHT, ImageLane, search_images
 
 #: The context lane's share of a fused rank. Rank fusion is flat, so a lane
 #: that finds what the others cannot needs weight to be heard at all: on
@@ -95,6 +96,8 @@ class RecallRuntime:
     lexical_stems: bool = False
     #: The vector lane's voice in rank fusion, against the text lane's 1.0.
     vector_weight: float = 1.0
+    #: The image lane's embedder and its index of its own; None without the lane.
+    image: ImageLane | None = None
 
 
 def _ms(since: float) -> float:
@@ -214,6 +217,7 @@ async def recall(
     require: Sequence[str] = (),
     exclude: Sequence[str] = (),
     diversity: Optional[float] = None,
+    image_lane: bool = False,
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -239,6 +243,8 @@ async def recall(
     signals, not confidence. A failed reranker retains baseline ordering;
     ``rerank=False`` explicitly disables the configured adapter."""
     check_space(space)
+    if type(image_lane) is not bool:
+        raise InvalidInput("image_lane must be a boolean")
     if fusion_mode not in fusion.FUSIONS:
         raise InvalidInput(f"fusion must be one of {', '.join(fusion.FUSIONS)}, not {fusion_mode!r}")
     query = query.strip()
@@ -311,7 +317,8 @@ async def recall(
                      else {"matched": len(expansion.matched), "added": len(expansion.added), "capped": expansion.capped}),
         "context_lane": runtime.context_lane,
         "prefixes": ({"added": len(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
-        "fusion_weights": {"vector": runtime.vector_weight, "text": 1.0},
+        "fusion_weights": {"vector": runtime.vector_weight, "text": 1.0, **({"image": IMAGE_WEIGHT} if image_lane else {})},
+        "image_lane": image_lane,
         "similarity_floor": runtime.similarity_floor,
         "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
                    "conditions": dict(conditions) if conditions is not None else None,
@@ -437,6 +444,22 @@ async def recall(
         if candidate_limit is not None or active_reranker is not None:
             entity_hits = entity_hits[:depth]
 
+    # The image lane, only when asked for: stored images nearest the query in
+    # the image embedder's space, from an index the text embedder never
+    # writes, under the vector lane's filters and depth.
+    image_hits: list[tuple[int, float]] = []
+    if image_lane:
+        if runtime.image is None:
+            degraded.append("image lane: this engine has no image embedder and image index")
+        else:
+            try:
+                t0 = time.perf_counter()
+                image_hits = await search_images(runtime.image, space, query, vector_depth, boundary, clean_tags,
+                                                 clean_where, narrow_by)
+                latency["image"] = _ms(t0)
+            except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
+                degraded.append(f"image lane: {type(e).__name__}: {e}")
+
     # An index that ranks without a cosine (a bridged store with an
     # unknown score) reports NaN: its order counts for fusion, but no
     # similarity is shown and no confidence is judged from it.
@@ -459,6 +482,10 @@ async def recall(
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
         lane_hits.append(entity_hits)
         weights.append(ENTITY_WEIGHT)
+    if image_lane:
+        ranks["image"] = {cid: i + 1 for i, (cid, _) in enumerate(image_hits)}
+        lane_hits.append(image_hits)
+        weights.append(IMAGE_WEIGHT)
     if runtime.context_lane:
         ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
         lane_hits.append(context_hits)
@@ -694,7 +721,8 @@ async def recall(
             for i in result_items
         ],
         "items_coverage": "returned",
-        "lane_candidates": {"vector": len(vector_lane), "text": len(text_lane)},
+        "lane_candidates": {"vector": len(vector_lane), "text": len(text_lane),
+                            **({"image": len(image_hits)} if image_lane else {})},
         "top_similarity": top_similarity,
         "low_confidence": low_confidence,
         "facts": len(facts),

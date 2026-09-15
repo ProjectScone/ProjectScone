@@ -33,6 +33,7 @@ from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Record
 from ..core.errors import InvalidInput, NotFound, SconeError
 from ..retrieval.filters import read_conditions
+from ..retrieval.recall import LANES
 from ..ingestion.chunker import DEFAULT_TARGET as DEFAULT_CHUNK_TARGET
 
 CLI_DEFAULTS = {"SCONE_DOCUMENTS": "sqlite", "SCONE_VECTORS": "sqlite"}
@@ -1925,7 +1926,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
             lessons=args.lessons,
-            **({"lanes": [lane.strip() for lane in args.lanes.split(",") if lane.strip()]} if args.lanes else {}),
+            lanes=[lane.strip() for lane in args.lanes.split(",") if lane.strip()] if args.lanes else LANES,
             require=args.require, exclude=args.exclude, diversity=args.diversity,
         )
         kept = None
