@@ -714,6 +714,164 @@ five interleaved repeats was 3.3–4.0 ms per recall in every arm, inside the
 spread on a machine at load average about 60, so no latency claim is made.
 Not measured: summaries a real model wrote, and real documents.
 
+### Descending the summary trees
+
+```bash
+scone tree-recall "what does the mill survey say about the river" --branching 2
+scone --json tree-recall "what does the mill survey say about the river" --episode 42 --text --limit 5
+```
+
+Expansion starts from a summary the lanes happened to find. The leading
+framework's tree index goes the other way: it starts at the root summaries,
+keeps the children most like the question, and descends to the leaves.
+`tree_recall` is that descent over the trees `summarize` stores (engine
+`tree_recall(space, query, ...)`, HTTP `GET /v1/recall/tree`, CLI
+`tree-recall`; module `retrieval/summary_traverse.py`). No model is called.
+
+- **Where it starts.** The documents named (`episode_ids`, HTTP
+  `episode_id`, CLI `--episode`, repeatable), or every document with a stored
+  tree, kept only when `kind`, `source_prefix`, `since`, `until` and `tags`
+  fit the document itself. Each starts at the highest level of summaries
+  written from its present content. The trees are found by one walk over the
+  space's episodes, the same walk `GET /v1/episodes/{id}/summaries` makes, and
+  its size is reported in `walked`; a keyed pointer to each tree's top, which
+  would remove that walk, is not written by the builder yet. The space is
+  counted again after the listing, and episodes it did not return — a store
+  that caps what it lists (Elasticsearch lists at most 10,000), or episodes
+  stored meanwhile — are counted in `unlisted`, since a tree among them was
+  not found. With no documents named, a tree whose document the listing did
+  not return — a document forgotten, or replaced, leaves its summaries
+  behind — cannot be fitted to the filters and is not read: it is counted in
+  `unlisted_trees`, so trees left behind by every update cost a call a count,
+  not a read and a refusal each. More than
+  `MAX_DOCUMENTS` (100) documents with trees in scope is refused, not cut to
+  some of them, and so is a step with more than `MAX_CANDIDATES` (1,000)
+  candidates to score — a stored tree keeps a step to `branching` times its
+  `fan_in`, so only a wide unjoined top or a forged account reaches it.
+- **How it descends.** At every step all candidates are scored against the
+  question: by the cosine of the question's embedding with the vectors
+  already stored for the candidate's chunks (a summary stored as several
+  chunks scores as its best one) and, with `text`, by BM25 over that step's
+  candidates too, fused by rank with equal cosines sharing a rank. The
+  `branching` best (default 2, at most 10) are kept *across all documents*,
+  as the reference's retriever pools the children of every node it kept
+  before choosing, not `branching` per parent. A kept summary's children are
+  what its account says it was written from — the nodes of the level below
+  and chunks — so a group the model left empty is not guessed at from spans.
+  The chunks a first-level summary names are leaves. A chunk a higher summary
+  names is a remainder the builder carried up beside its nodes unsummarized
+  (a level of `fan_in` × n + 1 items), so it is a candidate at the next step
+  with those nodes and a leaf only if that step keeps it; each step records
+  the summaries kept in `chosen` and the chunks kept in `chunks`.
+  `max_depth` (default and most 5, a stored tree's most levels) bounds the
+  steps.
+- **What comes back.** The chunks reached, branch first: in the order of the
+  ranks down their paths, so every chunk under the summary kept first at a
+  step comes before any chunk under the next, whether its tree ends at that
+  step or goes further down (documents of different lengths give trees of
+  different heights), and within a branch in their own ranking; the first
+  `limit` (default 10, at most 50). Branch first, because a chunk's own words
+  are the signal a broad question defeats: ranked by those alone, the chunks
+  of a lower branch can displace the section the descent chose. The fixture
+  below has trees of one height only and does not measure that choice; the
+  tests pin the order on trees of one and two heights. Each
+  item carries `via_tree`: the document, and the path of summaries kept on the
+  way down, top first, each with its episode, level, index, `rank` among those
+  kept at its step and `similarity` (and `text_rank` with `text`); a chunk
+  carried up and kept at a step has its own `rank` there too.
+  `similarity` is the chunk's own cosine; `score` is its place in the order,
+  `1 / (1 + place)`, since no one number ranks it. The route answers with the
+  items and the whole record, not recall's shape: it is not a recall event,
+  so feedback cannot name its chunks, and it does not withhold.
+- **What it never returns.** A summary whose `summary_content_hash` does not
+  match its document's content is not a candidate at any step and is counted
+  in `stale`; a document whose every summary is stale is refused as
+  `content_changed`. A chunk named below a summary that is not one of the
+  document's is `missing`; a node named that is not stored from this content
+  and with this `fan_in`, is not below the node naming it, or is not a name
+  at all, and an account that cannot be read or does not list names, are
+  `unresolved`; none is followed. A document named and forgotten is refused
+  as `source_gone` (its summaries outlive it), one never stored as
+  `source_unknown`, one unreadable as `unread`, and one the listing left out
+  as `unlisted`. The walk awaits reads and a document or a summary can be
+  forgotten during any of them (building a tree again forgets the old
+  nodes), so the chunks about to be returned, and the chunks of every summary
+  on their paths, are read again in one read after the last one, with nothing
+  awaited between that read and the answer: a document whose chunks moved is
+  read again for its reason and serves none of its chunks, one with a summary
+  on a path gone or changed is refused as `tree_changed`, and the next chunks
+  in order are read again in their place; a store that cannot answer that
+  read confirms nothing, and every document with a chunk reached is refused
+  as `unread`. A document refused at that read is not in `documents`, and
+  its chunks are not in `leaves`.
+- **The bounds say when they cut.** `cut_by_limit` counts chunks reached and
+  not returned, `cut_by_depth` the candidates (summaries, and chunks carried
+  up beside them) reached and never scored because the depth ran out (the
+  chunks under them were not reached), and `uncovered` the
+  chunks of a descended document under no summary a descent starts from — a
+  group the model wrote nothing about, a remainder left beside an unjoined
+  top — since no descent can reach them. `untreed` names documents asked for
+  that have no tree, `out_of_scope` counts those the filters left out, and
+  `why` says all of it in words.
+- **What it costs.** One embedding call per question. A step whose
+  candidates do not all have a stored vector — an index without
+  `vectors_of`, a vector missing, or vectors another embedder wrote
+  (`vector_block`) — is embedded in one call, so every score at a step is on
+  one scale; `embed_calls`, `embedded_texts` and `vectors` (steps read from the
+  index, steps embedded) say what was spent. The in-memory and SQLite
+  indexes hand vectors back; the others embed.
+
+Measured on a scripted fixture, not a quality claim
+(`benchmarks/summary_traversal.py`, 15 September 2026, `--repeats 3 --cite
+2`): four documents of four sections of five paragraphs, one chunk each
+(twenty chunks a document), trees of `fan_in` 5 built by `FakeChat` replies
+the script writes — a node per section with a sentence for each of the first
+two paragraphs naming the theme and the document, and a root with a sentence
+per section — and `HashEmbedder`. Sixteen questions ask what a document says
+about one section's theme, the theme word in that section's first paragraph
+only; the five chunks of the section are gold. Every arm asks for ten chunks
+and is scored on the first ten items; embedder calls are counted by a wrapper
+around the embedder, not by the report.
+
+| arm | recall_at(10) | embedder calls / question | texts embedded / question |
+|---|---:|---:|---:|
+| flat recall, no trees stored | 0.150 | 1 | 1 |
+| flat recall, trees stored | 0.175 | 1 | 1 |
+| `expand_summaries=follow` | 0.225 | 1 | 1 |
+| `expand_summaries=replace` | 0.400 | 1 | 1 |
+| `tree_recall`, branching 1 (five chunks returned) | 0.938 | 1 | 1 |
+| `tree_recall`, branching 2 | 0.938 | 1 | 1 |
+| `tree_recall`, branching 3 | 0.938 | 1 | 1 |
+| `tree_recall`, branching 2, `text` | 1.000 | 1 | 1 |
+| `tree_recall`, branching 2, index without stored vectors | 0.938 | 4 | 23 |
+| LlamaIndex `TreeSelectLeafEmbeddingRetriever`, `child_branch_factor` 1 | 0.188 | 14 | 14 |
+| the same, `child_branch_factor` 2 | 0.188 | 23 | 23 |
+| the same, `child_branch_factor` 10 | 0.288 | 67 | 67 |
+
+The LlamaIndex arms run the installed reference retriever, unmodified, over
+the same trees — the same chunk and summary texts and parent-to-child links,
+read from the stored trees into its `IndexGraph` — embedding through the
+comparative runner's adapter around the same `HashEmbedder`. It returns only
+the leaves it selects (at most `child_branch_factor`), ranks those leaves by
+their own similarity, and embeds every node it scores on every question.
+Flat recall is held to two chunks of one document (`PER_EPISODE_CAP`), so it
+can reach at most 0.4 of a five-chunk section here; with the trees stored,
+5.19 of its ten places held summaries. Expansion follows citations, so with
+two of five paragraphs cited its ceiling is the script's; with every
+paragraph cited (`--cite 5`) `follow` and `replace` reach 0.838, flat recall
+0.163, and every traversal arm is unchanged (it follows `written_from`, not
+citations). The one question every vector-only traversal arm misses (the
+weather log's rainfall) is lost at the second step: the hashed words of the
+snow and instruments sections' summaries overlap the question's more; with
+`text` BM25 picks the rainfall section. Median latency per question over three
+interleaved repeats was 0.72–1.63 ms for the Scone arms at a load average near
+35, too close and too loaded for a latency claim among them; the LlamaIndex
+arms' 67–350 ms include the adapter's thread and event loop per embedding
+call, so no latency comparison with them is made either. Not measured:
+summaries a real model wrote, a real embedder, real documents, and narrow
+questions, where a chunk's own words are the right signal and branch-first
+order may cost what it gains here.
+
 ### Checking the rule instead of asserting it
 
 A routing rule written down is only better than one a model invents if
