@@ -123,9 +123,10 @@ def test_turn_and_reply_are_kept_as_conversation_episodes(host):
     stored = {episode["metadata"]["role"]: episode for episode in read["episodes"]}
     assert stored["user"]["content"] == QUESTION
     assert stored["assistant"]["content"] == "It rotates on the 14th."
+    assert scone["session_id"] == "openai:" + scone["session"] == "openai:" + response.headers["x-scone-session"]
     for role, episode in stored.items():
         assert episode["kind"] == "conversation"
-        assert episode["source"] == scone["session_id"] == response.headers["x-scone-session"]
+        assert episode["source"] == scone["session_id"]
         assert episode["metadata"]["session_id"] == scone["session_id"]
         assert episode["metadata"]["turn_id"] == scone["turn_id"]
         assert episode["metadata"]["integration"] == "scone-openai-proxy"
@@ -147,19 +148,89 @@ def test_a_named_session_does_not_recall_its_own_turns_but_another_session_does(
     host.ask([user("My locker number is 4417 on the third floor.")], headers=session)
     again = host.ask([user("My locker number is 4417 on the third floor."), {"role": "assistant", "content": "Noted."},
                       user("Which floor is my locker on?")], headers=session)
-    assert again.json()["scone"]["session_id"] == "support-chat-7"
+    assert again.json()["scone"]["session"] == "support-chat-7" == again.headers["x-scone-session"]
+    assert again.json()["scone"]["session_id"] == "openai:support-chat-7"
     assert "4417" not in host.chat.calls[1][0]
+    assert again.json()["scone"]["recall"]["session_turns"]["admitted_turn_ids"] == []
     elsewhere = host.ask([user("Which floor is my locker on?")], headers={"x-scone-session": "support-chat-8"})
     assert "4417" in host.chat.calls[2][0]
     assert elsewhere.json()["scone"]["recall"]["status"] == "prepared"
+
+
+def test_a_named_session_recalls_its_own_turns_the_request_does_not_resend(host):
+    session = {"x-scone-session": "user-42"}
+    first = host.ask([user("My locker number is 4417 on the third floor.")], headers=session).json()["scone"]
+    trimmed = host.ask([user("Which floor is my locker on?")], headers=session).json()["scone"]
+    assert "4417" in host.chat.calls[1][0]
+    assert trimmed["recall"]["status"] == "prepared"
+    assert trimmed["recall"]["session_turns"]["status"] == "probed"
+    assert trimmed["recall"]["session_turns"]["admitted_turn_ids"] == [first["turn_id"]]
+    assert first["capture"]["episode_ids"][0] in [item["episode_id"] for item in trimmed["recall"]["items"]]
+
+
+def test_a_session_passage_without_a_turn_is_not_admitted_as_a_turn(host):
+    host.remember("My locker is on the third floor, wing B.", kind="conversation",
+                  metadata={"session_id": "openai:user-42"})
+    turns = host.ask([user("Which floor is my locker on?")],
+                     headers={"x-scone-session": "user-42"}).json()["scone"]["recall"]["session_turns"]
+    assert turns["probed"] == 1 and turns["admitted_turn_ids"] == []
+
+
+def test_the_session_probe_limit_cuts_and_says_it_cut(host, monkeypatch):
+    session = {"x-scone-session": "user-42"}
+    host.ask([user("My locker number is 4417 on the third floor.")], headers=session)
+    turns = host.ask([user("Which floor is my locker on?")], headers=session).json()["scone"]["recall"]["session_turns"]
+    assert turns["probe_limit"] == openai_proxy.SESSION_PROBE_LIMIT and turns["limit_reached"] is False
+    monkeypatch.setattr(openai_proxy, "SESSION_PROBE_LIMIT", 1)
+    turns = host.ask([user("Which floor is my locker on?")], headers=session).json()["scone"]["recall"]["session_turns"]
+    assert turns["probe_limit"] == 1 and turns["probed"] == 1 and turns["limit_reached"] is True
+
+
+def test_a_failed_session_probe_admits_nothing_and_says_so(host, monkeypatch):
+    session = {"x-scone-session": "user-42"}
+    host.ask([user("My locker number is 4417 on the third floor.")], headers=session)
+    recall = host.engine.recall
+
+    async def refuse_scoped(space, query, **kwargs):
+        if kwargs.get("where"):
+            raise RuntimeError("scoped recall is down")
+        return await recall(space, query, **kwargs)
+    monkeypatch.setattr(host.engine, "recall", refuse_scoped)
+    response = host.ask([user("Which floor is my locker on?")], headers=session)
+    assert response.status_code == 200
+    turns = response.json()["scone"]["recall"]["session_turns"]
+    assert turns["status"] == "failed" and turns["error_type"] == "RuntimeError" and turns["admitted_turn_ids"] == []
+    assert "4417" not in host.chat.calls[1][0]
 
 
 def test_requests_without_a_session_are_each_their_own_session(host):
     first = host.ask([user("My locker number is 4417 on the third floor.")])
     second = host.ask([user("Which floor is my locker on?")])
     assert first.json()["scone"]["session_id"] != second.json()["scone"]["session_id"]
-    assert first.headers["x-scone-session"].startswith("openai-")
+    assert first.json()["scone"]["session_id"] == "openai:" + first.headers["x-scone-session"]
     assert "4417" in host.chat.calls[1][0]
+    assert second.json()["scone"]["recall"]["session_turns"]["status"] == "skipped"
+
+
+def test_a_session_name_shares_no_identity_with_a_document_source_or_a_native_conversation(host):
+    episode = host.remember(PASSAGE, source="ops-handbook")
+    response = host.ask([user(QUESTION)], headers={"x-scone-session": "ops-handbook"})
+    scone = response.json()["scone"]
+    assert PASSAGE in host.chat.calls[0][0]
+    assert [item["episode_id"] for item in scone["recall"]["items"]] == [episode]
+    assert [each["episode_id"] for each in host.episodes() if each["source"] == "ops-handbook"] == [episode]
+    native_like = "0123456789abcdef0123456789abcdef"  # the shape of a native conversation id
+    kept = host.ask([user(QUESTION)], headers={"x-scone-session": native_like}).json()["scone"]
+    read = host.client.get("/v1/episodes", params={"ids": ",".join(map(str, kept["capture"]["episode_ids"]))},
+                           headers=auth()).json()["episodes"]
+    assert {(each["source"], each["metadata"]["session_id"]) for each in read} == {(f"openai:{native_like}",) * 2}
+
+
+def test_the_longest_session_name_is_accepted_and_one_longer_is_refused(host):
+    longest = "s" * openai_proxy.MAX_SESSION_CHARS
+    assert len("openai:" + longest) == 128
+    assert host.ask([user(QUESTION)], headers={"x-scone-session": longest}).status_code == 200
+    assert "x-scone-session" in refused(host.ask([user(QUESTION)], headers={"x-scone-session": longest + "s"}))
 
 
 def test_earlier_turns_are_flattened_into_the_user_prompt_and_system_messages_join(host):
@@ -216,15 +287,44 @@ def test_the_answer_is_returned_when_capture_fails(host, monkeypatch):
     response = host.ask([user(QUESTION)])
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "It rotates on the 14th."
-    assert response.json()["scone"]["capture"] == {"status": "failed", "episode_ids": [], "error_type": "RuntimeError"}
+    assert response.json()["scone"]["capture"] == {
+        "status": "failed", "episode_ids": [], "error_type": "RuntimeError",
+        "user": {"status": "failed", "episode_id": None, "error_type": "RuntimeError"},
+        "assistant": {"status": "not_attempted", "episode_id": None, "error_type": None}}
     assert response.headers["x-scone-capture-status"] == "failed"
 
 
-def test_a_failing_model_is_502_and_nothing_is_kept(host):
-    host.holder["chat"].replies[:] = [ChatError("chat server returned 500")]
+def test_a_blank_reply_keeps_the_user_turn_and_says_the_reply_was_blank(host):
+    host.holder["chat"].replies[:] = [" \n"]
+    response = host.ask([user("Remember my badge is B-77 please.")])
+    assert response.status_code == 200
+    capture = response.json()["scone"]["capture"]
+    assert capture["status"] == "partial" and capture["error_type"] is None
+    assert capture["assistant"] == {"status": "blank", "episode_id": None, "error_type": None}
+    assert capture["user"]["status"] == "captured" and capture["episode_ids"] == [capture["user"]["episode_id"]]
+    assert [each["preview"] for each in host.episodes()] == ["Remember my badge is B-77 please."]
+
+
+def test_a_reply_the_store_refuses_still_keeps_the_user_turn(host, monkeypatch):
+    remember_many = host.engine.remember_many
+
+    async def refuse_replies(space, records, **kwargs):
+        if records[0].metadata["role"] == "assistant":
+            raise RuntimeError("store refused the reply")
+        return await remember_many(space, records, **kwargs)
+    monkeypatch.setattr(host.engine, "remember_many", refuse_replies)
+    capture = host.ask([user(QUESTION)]).json()["scone"]["capture"]
+    assert capture["status"] == "partial" and capture["error_type"] == "RuntimeError"
+    assert capture["user"]["status"] == "captured" and capture["episode_ids"] == [capture["user"]["episode_id"]]
+    assert capture["assistant"] == {"status": "failed", "episode_id": None, "error_type": "RuntimeError"}
+    assert [each["preview"] for each in host.episodes()] == [QUESTION]
+
+
+def test_a_failing_model_is_502_says_nothing_of_the_provider_and_nothing_is_kept(host):
+    host.holder["chat"].replies[:] = [ChatError('chat server returned 401: {"error": "Incorrect API key sk-proj-ab**yz"}')]
     response = host.ask([user(QUESTION)])
     assert response.status_code == 502
-    assert "chat server returned 500" in response.json()["error"]
+    assert response.json() == {"error": "the configured chat model did not return a reply"}
     assert host.episodes() == []
 
 
@@ -306,7 +406,7 @@ def test_content_this_version_cannot_carry_is_refused(host, message, needle):
 def test_malformed_json_and_a_bad_session_header_are_refused(host):
     assert "JSON" in refused(host.client.post(ROUTE, content=b"{not json", headers=auth()))
     assert "x-scone-session" in refused(host.ask([user(QUESTION)], headers={"x-scone-session": "bad session!"}))
-    assert "x-scone-session" in refused(host.ask([user(QUESTION)], headers={"x-scone-session": "s" * 129}))
+    assert "x-scone-session" in refused(host.ask([user(QUESTION)], headers={"x-scone-session": "s" * 122}))
     assert host.chat.calls == []
 
 
@@ -344,7 +444,10 @@ def test_a_key_withdrawn_while_the_model_answers_keeps_nothing(host):
     assert host.episodes() == []
 
 
-async def test_capture_waits_its_turn_in_the_ingest_lane_and_says_when_it_was_busy():
+async def test_capture_does_not_take_the_ingest_lane_so_a_full_lane_loses_no_turn():
+    """The reply has gone out before the turn is kept, so a lane that
+    refused would leave the client nothing to retry; native conversation
+    turns do not take the lane either."""
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     release, holding = asyncio.Event(), asyncio.Event()
     remember = engine.remember
@@ -363,4 +466,5 @@ async def test_capture_waits_its_turn_in_the_ingest_lane_and_says_when_it_was_bu
         release.set()
         assert (await write).status_code == 200
     assert response.status_code == 200
-    assert response.json()["scone"]["capture"] == {"status": "failed", "episode_ids": [], "error_type": "IngestBusy"}
+    capture = response.json()["scone"]["capture"]
+    assert capture["status"] == "captured" and len(capture["episode_ids"]) == 2

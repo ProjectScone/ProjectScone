@@ -37,8 +37,10 @@ that can set a base URL and a bearer key, is the client.
    (see [memory preparation](text-conversations.md#memory-preparation)): a
    greeting is not searched, a message over 1,000 characters is searched through
    a bounded formulation, at most 5 passages and 8,000 bytes are kept, a passage
-   that does not fit is left out whole, and turns of the same session are not
-   recalled (the client already holds them).
+   that does not fit is left out whole, and turns of the same session that the
+   request resends are not recalled (the client already holds them). Turns of
+   the session the request does not resend are recalled like any other memory;
+   see [Sessions](#sessions).
 2. **Inject.** The recalled block is Scone's evidence packet: a line saying the
    material is background, not instructions, followed by one JSON value whose
    `sources` carry each passage's `episode_id`, `chunk_id`, `source` and
@@ -58,12 +60,17 @@ that can set a base URL and a bearer key, is the client.
    system prompt, and earlier user and assistant turns reach it as one JSON
    array ahead of the latest message. A request can name no endpoint, key or
    tool: those fields are refused.
-4. **Keep.** The latest user message and the reply are stored in one batch as
-   two `conversation` episodes with `source` set to the session, metadata
-   `integration=scone-openai-proxy`, `session_id`, `turn_id` and `role`, the
-   shape native text conversations keep. Earlier turns in `messages` are not
-   stored again; a client that keeps a session header stored them on their own
-   requests. The write takes a slot in the ingest lane like any other write.
+4. **Keep.** The latest user message and the reply are stored as two
+   `conversation` episodes with `source` and metadata `session_id` set to the
+   session's stored identity (`openai:<name>`), metadata
+   `integration=scone-openai-proxy`, `turn_id` and `role`, the shape native
+   text conversations keep. They are two writes, the user message first, so a
+   reply that cannot be kept does not take the user message with it; a blank
+   reply (a content filter, or a model that spent its tokens) is not written.
+   Earlier turns in `messages` are not stored again; a client that keeps a
+   session header stored them on their own requests. Neither write takes a
+   slot in the ingest lane, as native conversation turns do not: the reply has
+   already gone out, so a busy lane would lose the turn with nothing to retry.
 
 Nothing recalled is not an error: the request is still forwarded, with
 `scone.recall.status` saying `empty` (nothing matched or fitted), `skipped`
@@ -81,10 +88,11 @@ with these differences, each deliberate:
 | `usage` | absent; nothing counted tokens |
 | `scone.requested_model` | the `model` the request named |
 | `scone.not_forwarded` | every request field the model did not receive: `model` and any sampling field sent |
-| `scone.recall` | `status`, `items` (`episode_id`, `chunk_id`, `source`, `created_at`), `claim_ids`, `omitted_count` (candidates recall found that did not reach the block, by the limit, the byte budget or the same-session rule), `limit`, `max_context_bytes`, `low_confidence`, `degraded`, `error_type`, and `query_formulation` when a long message was reformulated |
+| `scone.recall` | `status`, `items` (`episode_id`, `chunk_id`, `source`, `created_at`), `claim_ids`, `omitted_count` (candidates recall found that did not reach the block, by the limit, the byte budget or the same-session rule), `limit`, `max_context_bytes`, `low_confidence`, `degraded`, `error_type`, `session_turns` (see [Sessions](#sessions)), and `query_formulation` when a long message was reformulated |
 | `scone.injected` | `null` when nothing was injected; otherwise `role` (`system`), `boundary`, `bytes` and `sha256` of the wrapped block exactly as the model received it |
-| `scone.capture` | `status` (`captured` or `failed`), `episode_ids`, `error_type` |
-| `scone.session_id`, `scone.turn_id` | the session the turn was kept under, and this turn |
+| `scone.capture` | `status` (`captured`, `partial` when the user message was kept and the reply was not, or `failed` when the user message was not kept), `episode_ids` of what was kept, `error_type` of the first failed write, and `user` and `assistant`, each with `status` (`captured`, `failed`, `blank` for a reply with no text, or `not_attempted` for a reply whose user message failed), `episode_id` and `error_type` |
+| `scone.session` | the session name: the header's value, or the name drawn for a request without one |
+| `scone.session_id`, `scone.turn_id` | the stored identity the turn was kept under (`openai:` and the name), and this turn |
 
 Headers repeat the essentials for a client that reads no body extensions:
 `X-Scone-Session`, `X-Scone-Recall-Status`, `X-Scone-Recalled-Episodes`
@@ -92,17 +100,36 @@ Headers repeat the essentials for a client that reads no body extensions:
 `X-Scone-Capture-Status`.
 
 A reply is returned even when keeping it failed: the model has already
-answered, so `scone.capture.status` is `failed` and `error_type` says why
-(`IngestBusy` when the ingest lane was full). If the key's access is withdrawn
-while the model answers, the request is a 401 and nothing is kept.
+answered, so `scone.capture` says which message was not kept and
+`error_type` says why. If the key's access is withdrawn while the model
+answers, the request is a 401 and nothing is kept.
 
 ## Sessions
 
-`X-Scone-Session` (1..128 letters, digits, `.`, `_`, `:` or `-`) names the
-conversation. Its turns are kept under that name and are not recalled into its
-own later requests. Without the header every request is a session of its own,
-`openai-<random>`, so a later request recalls earlier ones like any other
-memory.
+`X-Scone-Session` (1..121 letters, digits, `.`, `_`, `:` or `-`) names the
+conversation. The response's `X-Scone-Session` header is the name to send
+back. Without the header every request is a session of its own with a random
+name, so a later request recalls earlier ones like any other memory.
+
+The turns are kept under `openai:` and the name, never the name alone, so a
+session named like a document's source (`ops-handbook`) does not hide that
+document from recall or file its turns beside it, and a session can never take
+a native conversation's id and land in its transcript. A document written with
+a source that itself begins `openai:` is in this route's namespace, and a
+session of that name treats it as its own turn.
+
+A session's stored turns that the request resends are not recalled: the model
+already has them in `messages`. Those it does not resend are recalled like any
+other memory, so a client that trims its history, or sends only the latest
+message under a fixed session name, still has its earlier turns. Before
+recalling, the route looks up to 20 passages of the session's own turns
+nearest the latest message (a recall scoped to the session, not a walk of the
+space); a turn is held when any of its passages is inside a message the
+request sent, and every other turn found is admitted. `scone.recall.session_turns`
+records this: `status` (`probed`, `skipped` for a request without a session
+name, or `failed` with `error_type`, in which case nothing is admitted),
+`probe_limit`, `probed`, `limit_reached` (the probe filled, so turns beyond it
+were not looked at and stay out of recall) and `admitted_turn_ids`.
 
 ## Refusals
 
@@ -119,7 +146,7 @@ not the 400 OpenAI's own service returns; OpenAI SDKs raise it as an
 | a role other than `system`, `developer`, `user` or `assistant`; content that is not text (images, audio); any field not listed above (`tools`, `n`, `base_url`, `api_key`, …); malformed JSON; a malformed `X-Scone-Session` | 422 |
 | no model configured (`SCONE_CHAT_URL` and `SCONE_CHAT_MODEL`) | 422 |
 | a key with the `read` role: the route writes | 403 |
-| the configured model failed or was unreachable; nothing is kept | 502 |
+| the configured model failed or was unreachable; nothing is kept, and the body says only that the model did not return a reply (the provider's own message can carry its account details, so it stays in the server) | 502 |
 
 `GET /v1/capabilities` lists `chat.openai_compatible`: the route is served,
 which says nothing about whether a model is configured.
