@@ -11,6 +11,11 @@ plain structure chunking and a declared genre profile cut a statute-like and a
 Q&A-like fixture: chunks starting at a boundary, headings split from their first
 clause, and the cost in chunks.
 
+The [hot-path run](hot-paths-v1.results.md) measures ingestion throughput and
+recall latency on the built-in in-memory and SQLite stores with
+[`hot_paths.py`](hot_paths.py), before and after a set of behaviour-preserving
+optimisations, and shows all 400 recalls returned identical results.
+
 The [knowledge lifecycle run](knowledge-lifecycle-v1.results.md) exercises a real
 CLI server over HTTP with PDF/image ingestion, Qdrant, persistent source evidence,
 two restarts and deletion. It records the initial SIGTERM cleanup failure and
