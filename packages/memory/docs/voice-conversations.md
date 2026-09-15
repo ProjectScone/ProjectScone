@@ -183,7 +183,8 @@ counts them in `session.keypad_ignored` and does nothing else.
 from scone_memory.realtime.keypad import KeypadPolicy
 
 session = VoiceSession(memory, "authorized-space", "call-1", ...,
-                       keypad=KeypadPolicy("collect", terminator="#", timeout=3, max_digits=32))
+                       keypad=KeypadPolicy("collect", terminator="#", timeout=3, max_digits=32,
+                                           speech_wait=5))
 ```
 
 | Mode | What a key does |
@@ -194,11 +195,31 @@ session = VoiceSession(memory, "authorized-space", "call-1", ...,
 `template` (default `[keypad] {keys}`) is the text the turn is given. The first key
 of an entry stops a reply that is playing, as speech starting does. While keys are
 being collected a held spoken clause waits for them (as it does while the caller
-speaks), so "my card number is um" and `4111#` are one turn. A final transcript
-with words gives the keys collected so far to the turn first (ended by `speech`),
-then is its own turn. Keys held when input ends are answered (`input_ended`); keys
-held when the session stops are stored and not answered (`session_ended`). Keys
-that would take a held turn past 32 000 bytes release it first (`max_bytes`).
+speaks), so "my card number is um" and `4111#` are one turn. Keys held when input
+ends are answered (`input_ended`); keys held when the session stops are stored and
+not answered (`session_ended`). Keys that would take a held turn past 32 000 bytes
+release it first (`max_bytes`).
+
+Keys and words are put in the order the caller made them, not the order they
+reached the session. A key arrives at once; the words arrive only when the
+recognizer has heard the caller stop and transcribed them. So the session marks
+when speech began (the recognizer's `SpeechStarted`, a partial transcript, or the
+session's own activity detector) and, when the words come:
+
+* keys being collected that were pressed before that speech began are given to the
+  turn first (ended by `speech`), and the words are their own turn;
+* an entry finished after that speech began waits for its words, and is given to
+  the turn after them: it joins them when a detector holds them as an open clause,
+  and is the next turn otherwise. Keys still being collected carry on, and hold the
+  clause open until they end.
+
+An entry waits at most `speech_wait` seconds (default 5, at most 60) for the words.
+When that bound cuts, the entry is given on its own and those words are no longer
+waited for; speech that ends with no words, input ending and the session stopping
+also let it go. A recognizer that gives no sign that speech began gives the session
+nothing to order by, and keys go to the turn as they arrive. `Keypress.offset_ms`
+cannot order keys against words: a transcript does not say where in the audio it was
+spoken.
 
 A user turn that keys finished has `metadata["turn_end"] = "keypad"` and says how
 and when each key came; `session.last_keypad_receipt` keeps the whole entry,
@@ -211,9 +232,14 @@ audio offsets and tone lengths included:
 | `keypad_sources` | one letter per key: `e` from the transport's event, `i` heard in the audio |
 | `keypad_started_ms` | the first key, in milliseconds from the start of the conversation |
 | `keypad_at_ms` | each key from the first, comma-separated: `0,812,1604` |
+| `keypad_waited` | only for an entry that waited for words spoken before it: `words` (given after them), `no_words` (speech, input or the session ended without them) or `timeout` (`speech_wait` cut the wait) |
 
 `timeout` is at most 60 seconds and `max_digits` at most 32, so the longest entry
 still fits one metadata value (256 characters).
+
+A voice pipeline (`pipeline.voice`) does not act on keys: `CallerStage` feeds each
+`Keypress` down the line as a frame of its own, where a stage that takes keys can
+read it, and the call goes on.
 
 #### Carrier calls
 
@@ -230,7 +256,9 @@ keys to the session when `keypad` is on:
 A carrier digit that is not a keypad key (`"12"`, `"x"`, an empty value) is not
 passed on and is counted in `transport.stream.unreadable_digits`. With `both`, a
 key reported one way is paired with the same key heard the other way within
-`DUPLICATE_WINDOW_MS` (1000 ms) of the call's audio; a paired hearing is used up,
+`DUPLICATE_WINDOW_MS` (1000 ms) of the call's audio, counted from where a key's
+tones were last heard, so a key held down and reported by the carrier when it is
+let go is still one key; a paired hearing is used up,
 so a key pressed twice is still two keys, and `transport.stream.duplicates` counts
 the second hearings. At most `MAX_UNPAIRED` (64) reported keys wait to be paired;
 past that the oldest is forgotten and counted in `unpaired_forgotten`.

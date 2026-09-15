@@ -156,6 +156,12 @@ class ToneDetector:
         self._reported = False
         self._misses = 0
 
+    @property
+    def sounding(self) -> Optional[str]:
+        """The key reported and still being heard, or None: a key held down
+        is one digit, and this says it has not yet been let go."""
+        return self._key if self._reported else None
+
     def feed(self, data: bytes) -> list[Tone]:
         if len(data) % 2:
             raise ValueError("PCM must be whole 16-bit samples")

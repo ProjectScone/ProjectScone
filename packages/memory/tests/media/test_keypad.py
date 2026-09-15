@@ -101,10 +101,103 @@ def test_an_entry_records_how_and_when_each_key_came_in_metadata_a_record_can_ho
     ({"mode": "collect", "max_digits": 0}, "max_digits"), ({"mode": "collect", "max_digits": 33}, "max_digits"),
     ({"mode": "collect", "max_digits": 4.0}, "max_digits"), ({"mode": "collect", "terminator": "##"}, "terminator"),
     ({"mode": "collect", "template": "keys"}, "template"), ({"mode": "collect", "template": "{keys} {other}"}, "template"),
+    ({"mode": "collect", "speech_wait": 0}, "speech_wait"), ({"mode": "collect", "speech_wait": 61}, "speech_wait"),
+    ({"mode": "collect", "speech_wait": float("inf")}, "speech_wait"), ({"mode": "collect", "speech_wait": True}, "speech_wait"),
 ])
 def test_a_policy_is_checked_when_it_is_made(options, match):
     with pytest.raises(ValueError, match=match):
         KeypadPolicy(**options)
+
+
+def test_keys_pressed_after_the_caller_began_speaking_wait_for_those_words():
+    """A recognizer gives the words only after the caller stops and it has
+    waited to be sure; keys come at once. Keys pressed after speech began
+    are held back until its words are given, then given after them."""
+    collector = KeypadCollector(KeypadPolicy("collect", timeout=3.0, speech_wait=2.0))
+    collector.speech(1.0)
+    assert press(collector, "41#", at=1.5, step=0.1) == [], "finished, and waiting for the words"
+    assert not collector.pending and collector.deadline == pytest.approx(1.7 + 2.0)
+    first, after = collector.words(2.5)
+    assert first == []
+    [entry] = after
+    assert (entry.keys, entry.ended_by, entry.waited) == ("41#", "terminator", "words")
+    assert entry.metadata(origin=0.0)["keypad_waited"] == "words"
+    assert collector.deadline is None
+    [next_entry] = collector.press(Keypress("#"), 3.0)
+    assert next_entry.waited is None and "keypad_waited" not in next_entry.metadata(origin=0.0), \
+        "those words were given: the next key waits for nothing"
+
+
+def test_keys_pressed_before_the_caller_began_speaking_are_given_before_the_words():
+    collector = KeypadCollector(KeypadPolicy("collect"))
+    press(collector, "77", at=1.0)
+    [first], after = collector.words(3.0)
+    assert (first.keys, first.ended_by, first.waited, after) == ("77", "speech", None, []), \
+        "with no sign of when speech began, keys are given as they arrived"
+
+    press(collector, "88", at=3.5)
+    collector.speech(4.0)
+    collector.speech(4.4)  # still the same speech: it began at 4.0
+    [first], after = collector.words(5.0)
+    assert (first.keys, first.ended_by, after) == ("88", "speech", [])
+
+    collector.speech(6.0)
+    press(collector, "9", at=6.0)
+    assert collector.words(7.0) == ([], []), "a key pressed as speech began came after it"
+    assert collector.pending
+
+
+def test_speech_begins_once_until_its_words_come():
+    """A partial transcript says the caller is still speaking; it does not
+    make the speech begin again after keys pressed during it."""
+    collector = KeypadCollector(KeypadPolicy("collect"))
+    collector.speech(0.0)
+    press(collector, "1", at=0.2)
+    collector.speech(0.5)
+    assert collector.press(Keypress("#"), 0.6) == [], "pressed after the speech began: waits for its words"
+
+
+def test_keys_still_being_collected_after_the_words_carry_on():
+    collector = KeypadCollector(KeypadPolicy("collect", timeout=3.0))
+    collector.speech(1.0)
+    press(collector, "41", at=1.2, step=0.1)
+    assert collector.words(2.0) == ([], [])
+    assert collector.pending and collector.deadline == pytest.approx(4.3)
+    [entry] = collector.expire(4.3)
+    assert (entry.keys, entry.ended_by, entry.waited) == ("41", "timeout", None)
+
+
+def test_keys_wait_for_words_no_longer_than_speech_wait_and_say_so():
+    collector = KeypadCollector(KeypadPolicy("append", speech_wait=0.5))
+    collector.speech(0.0)
+    assert collector.press(Keypress("5"), 0.2) == []
+    assert collector.press(Keypress("6"), 0.4) == []
+    assert collector.deadline == pytest.approx(0.7), "from the first key held back"
+    assert collector.expire(0.699) == []
+    five, six = collector.expire(0.7)
+    assert [(e.keys, e.ended_by, e.waited) for e in (five, six)] == [("5", "key", "timeout"), ("6", "key", "timeout")]
+    [seven] = collector.press(Keypress("7"), 0.8)
+    assert seven.waited is None, "the words are given up on: the next key is not held for them"
+    assert collector.words(0.9) == ([], []), "and words that come late find nothing waiting"
+
+
+def test_speech_that_ends_without_words_lets_the_keys_go():
+    collector = KeypadCollector(KeypadPolicy("append"))
+    collector.speech(0.0)
+    assert collector.press(Keypress("5"), 0.0) == [], "pressed as the speech began"
+    [entry] = collector.no_words(0.3)
+    assert (entry.keys, entry.waited) == ("5", "no_words")
+    assert collector.no_words(0.4) == [] and collector.press(Keypress("6"), 0.5)[0].waited is None
+
+
+def test_draining_gives_keys_waiting_for_words_before_keys_being_collected():
+    collector = KeypadCollector(KeypadPolicy("collect"))
+    collector.speech(0.0)
+    assert press(collector, "1#2", at=0.1, step=0.1) == []
+    waiting, collecting = collector.drain(1.0, "session_ended")
+    assert (waiting.keys, waiting.ended_by, waiting.waited) == ("1#", "terminator", "no_words")
+    assert (collecting.keys, collecting.ended_by, collecting.waited) == ("2", "session_ended", None)
+    assert collector.drain(1.0, "session_ended") == [] and collector.deadline is None
 
 
 def test_keys_join_a_held_spoken_turn_and_release_it():
