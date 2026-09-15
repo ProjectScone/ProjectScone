@@ -117,7 +117,7 @@ async def semantic_spans(
     """
     if target <= 0:
         raise ValueError("target must be positive")
-    sentences = _sentences(content)
+    sentences = sentence_spans(content)
     if not sentences:
         return []
     if len(sentences) == 1:
@@ -189,7 +189,7 @@ def _unreach(text: str, span: Boundary, ceiling: int) -> list[Boundary]:
     return _unreach(text, left, ceiling) + _unreach(text, right, ceiling)
 
 
-def _sentences(text: str) -> list[Span]:
+def sentence_spans(text: str) -> list[Span]:
     """Sentence spans, each running to the start of the next so that the
     separating whitespace belongs to something and nothing is lost."""
     spans: list[Span] = []

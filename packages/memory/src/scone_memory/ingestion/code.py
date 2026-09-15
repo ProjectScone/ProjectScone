@@ -243,24 +243,17 @@ def _as_chars(content: str, start: int, end: int,
     return (start, end) if end <= len(content) else None
 
 
+#: One line ending: a carriage return with a newline after it is one ending,
+#: so that alternative is tried first.
+_LINE_ENDING = re.compile(r"\r\n|\r|\n")
+
+
 def _line_starts(content: str) -> list[int]:
     """Where every line begins. Line endings are counted as Python's own
     parser counts them: a lone carriage return ends a line, and so does a
     carriage return with a newline after it, which is one ending and not
     two. Offsets stay offsets into the source exactly as it arrived."""
-    starts = [0]
-    index, length = 0, len(content)
-    while index < length:
-        ch = content[index]
-        if ch == "\r":
-            index += 2 if index + 1 < length and content[index + 1] == "\n" else 1
-            starts.append(index)
-        elif ch == "\n":
-            index += 1
-            starts.append(index)
-        else:
-            index += 1
-    return starts
+    return [0, *map(re.Match.end, _LINE_ENDING.finditer(content))]
 
 
 def _lines(content: str, starts: list[int]) -> list[str]:
@@ -285,6 +278,13 @@ def _with_comments(content: str, starts: list[int], line: int) -> int:
     return line
 
 
+#: The nodes a definition can be inside. A definition is a statement, and a
+#: statement stands only in a body: a module's, another statement's, an
+#: exception handler's or a match case's. Expressions never hold one, and
+#: they are most of a tree, so the walk does not go into them.
+_HOLDS_STATEMENTS = (ast.stmt, ast.excepthandler, ast.match_case)
+
+
 def _python(content: str) -> tuple[Declaration, ...]:
     try:
         tree = ast.parse(content)
@@ -300,7 +300,8 @@ def _python(content: str) -> tuple[Declaration, ...]:
         node, prefix, in_class, depth = work.pop()
         for child in ast.iter_child_nodes(node):
             if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                work.append((child, prefix, in_class, depth))
+                if isinstance(child, _HOLDS_STATEMENTS):
+                    work.append((child, prefix, in_class, depth))
                 continue
             if depth >= MAX_DEPTH:
                 continue

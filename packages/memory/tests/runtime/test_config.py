@@ -294,7 +294,7 @@ async def test_the_vector_weight_is_a_number_that_reaches_every_engine():
 
     settings = Settings.from_env({"SCONE_VECTOR_WEIGHT": "0.5"})
     assert settings.vector_weight == 0.5 and Settings.from_env({}).vector_weight is None and "vector_weight" in ENGINE_SETTINGS
-    assert (await build_in_process_engine(Settings.from_env({}), HashEmbedder())).vector_weight == 0.25, "unset follows the embedder"
+    assert (await build_in_process_engine(Settings.from_env({}), HashEmbedder())).vector_weight == 0.01, "unset follows the embedder"
     engine = await build_engine(settings)
     try:
         assert engine.vector_weight == 0.5
@@ -304,3 +304,37 @@ async def test_the_vector_weight_is_a_number_that_reaches_every_engine():
     for bad in ("0", "5", "many", "nan"):
         with pytest.raises(InvalidInput, match="SCONE_VECTOR_WEIGHT"):
             Settings.from_env({"SCONE_VECTOR_WEIGHT": bad})
+
+
+async def test_a_token_chunk_target_is_a_number_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_CHUNK_TOKENS": " 512 ", "SCONE_CHUNK_OVERLAP_TOKENS": "32"})
+    assert (settings.chunk_tokens, settings.chunk_overlap_tokens) == (512, 32)
+    assert (Settings.from_env({}).chunk_tokens, Settings.from_env({}).chunk_overlap_tokens) == (None, 0)
+    unset = Settings.from_env({"SCONE_CHUNK_TOKENS": "", "SCONE_CHUNK_OVERLAP_TOKENS": " "})
+    assert (unset.chunk_tokens, unset.chunk_overlap_tokens) == (None, 0), "an empty value is unset, as elsewhere"
+    assert {"chunk_tokens", "chunk_overlap_tokens"} <= set(ENGINE_SETTINGS)
+    engine = await build_engine(settings)
+    try:
+        assert (engine.chunk_tokens, engine.chunk_overlap_tokens) == (512, 32)
+    finally:
+        await engine.close()
+    in_process = await build_in_process_engine(settings, HashEmbedder())
+    assert (in_process.chunk_tokens, in_process.chunk_overlap_tokens) == (512, 32)
+
+
+@pytest.mark.parametrize("env, match", [
+    ({"SCONE_CHUNK_TOKENS": "0"}, "SCONE_CHUNK_TOKENS/SCONE_CHUNK_OVERLAP_TOKENS: chunk_tokens must be"),
+    ({"SCONE_CHUNK_TOKENS": "8"}, "SCONE_CHUNK_TOKENS/SCONE_CHUNK_OVERLAP_TOKENS: chunk_tokens must be"),
+    ({"SCONE_CHUNK_TOKENS": "many"}, "SCONE_CHUNK_TOKENS must be a whole number of tokens, got 'many'"),
+    ({"SCONE_CHUNK_TOKENS": "512.5"}, "SCONE_CHUNK_TOKENS must be a whole number"),
+    ({"SCONE_CHUNK_TOKENS": "64", "SCONE_CHUNK_OVERLAP_TOKENS": "64"}, "chunk_overlap_tokens must be"),
+    ({"SCONE_CHUNK_TOKENS": "64", "SCONE_CHUNK_OVERLAP_TOKENS": "-1"}, "chunk_overlap_tokens must be"),
+    ({"SCONE_CHUNK_TOKENS": "64", "SCONE_CHUNK_OVERLAP_TOKENS": "some"}, "SCONE_CHUNK_OVERLAP_TOKENS must be a whole number"),
+    ({"SCONE_CHUNK_OVERLAP_TOKENS": "16"}, "SCONE_CHUNK_OVERLAP_TOKENS needs SCONE_CHUNK_TOKENS"),
+])
+def test_a_token_chunk_target_that_cannot_work_is_refused_by_name(env, match):
+    with pytest.raises(InvalidInput, match=match):
+        Settings.from_env(env)

@@ -37,6 +37,7 @@ from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..retrieval.receipts import staged
+from ..retrieval.summary_expand import MAX_CHUNKS as SUMMARY_EXPANSION_MAX_CHUNKS
 from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
 from . import chat_imports, file_documents, pdf_documents
@@ -508,7 +509,7 @@ def create_app(
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.export_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
-            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "graph.stats": True, "graph.hubs": True, "recall.graph_boost": True, "recall.lessons": True, "graph.knowledge_paging": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "graph.stats": True, "graph.hubs": True, "recall.graph_boost": True, "recall.lessons": True, "recall.expand_summaries": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
             # The route is served; without a configured model it refuses.
             "chat.openai_compatible": True,
@@ -1064,6 +1065,14 @@ def create_app(
                                                         "was set by hand; the answer says what was read and applied."),
         lessons: bool = Query(default=False, description="Put beside each passage what people said about it in "
                                                           "feedback. The order is not changed."),
+        expand_summaries: Optional[Literal["replace", "follow"]] = Query(
+            default=None,
+            description="Follow each stored summary among the passages with the chunks its citations rest on, or "
+                        "replace it with them: only those, never a forgotten document's, each saying which summary "
+                        "it came through. The answer can hold more than limit; expanded says what was added, "
+                        "refused and cut."),
+        expand_max_chunks: Optional[int] = Query(default=None, ge=1, le=SUMMARY_EXPANSION_MAX_CHUNKS,
+                                                 description="The most chunks expand_summaries adds (20 unless set)."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
@@ -1123,6 +1132,13 @@ def create_app(
             # their lessons would vanish, or a judged-useless neighbour would ride under a good one.
             raise InvalidInput("lessons cannot be combined with merge: a merged passage joins chunks judged "
                                "separately, and one lesson cannot stand for them; ask for one or the other")
+        if expand_summaries is not None and (merge or window or window_unit == "sentences"):
+            # A merge reads the text between the fragments it joins and reports it under one chunk's
+            # fields, and a window rewrites a passage's text and start, so either would return a cited
+            # chunk holding text it does not rest on, with via_summary's spans indexing text not returned.
+            raise InvalidInput("expand_summaries cannot be combined with merge or a window: a merged or widened "
+                               "passage holds text the summary does not rest on, and the spans in via_summary "
+                               "would no longer index the text returned; ask for one or the other")
         if merge and compress is not None:
             # A merged passage is reported under its best chunk, so the
             # other retrieved chunks inside it would not be pinned, and
@@ -1140,7 +1156,7 @@ def create_app(
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
-            lessons=lessons,
+            lessons=lessons, expand_summaries=expand_summaries, expand_max_chunks=expand_max_chunks,
             **({"lanes": [lane.strip() for lane in lanes.split(",") if lane.strip()]} if lanes is not None else {}),
             require=require, exclude=exclude, diversity=diversity,
         )
@@ -1223,6 +1239,8 @@ def create_app(
             response["widened"] = staged(opened.record())
         if result.lessons_read is not None:
             response["lessons_read"] = result.lessons_read
+        if result.expanded is not None:
+            response["expanded"] = result.expanded
         if result.feedback_prior is not None:
             # A re-ranked answer carries what moved it, and where the prior's bounds bit.
             response["feedback_prior"] = result.feedback_prior
@@ -1679,6 +1697,8 @@ def item_json(item: RecallItem) -> dict:
         result["rerank_score"] = item.rerank_score
     if item.lessons is not None:
         result["lessons"] = item.lessons
+    if item.via_summary is not None:
+        result["via_summary"] = item.via_summary
     return result
 
 

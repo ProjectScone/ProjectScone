@@ -142,7 +142,11 @@ def fold_diacritics(token: str) -> str:
 
 class Bm25:
     """Okapi BM25 over a mutable set of documents keyed by int id; terms are
-    kept with their diacritics folded, matching the SQLite text lane."""
+    kept with their diacritics folded, matching the SQLite text lane.
+
+    A document holding no query term and no member of a query family scores
+    nothing and is never returned, so each term keeps the documents that
+    hold it and a search scores only those."""
 
     def __init__(self, k1: float = 1.2, b: float = 0.75) -> None:
         self.k1 = k1
@@ -150,6 +154,8 @@ class Bm25:
         self._docs: dict[int, Counter[str]] = {}
         self._lengths: dict[int, int] = {}
         self._df: Counter[str] = Counter()
+        #: The documents holding each term; a term no document holds is not kept.
+        self._postings: dict[str, set[int]] = {}
 
     def __len__(self) -> int:
         return len(self._docs)
@@ -162,6 +168,8 @@ class Bm25:
         self._docs[doc_id] = counts
         self._lengths[doc_id] = len(tokens)
         self._df.update(counts.keys())
+        for term in counts:
+            self._postings.setdefault(term, set()).add(doc_id)
 
     def remove(self, doc_id: int) -> None:
         counts = self._docs.pop(doc_id, None)
@@ -172,6 +180,10 @@ class Bm25:
             self._df[term] -= 1
             if self._df[term] <= 0:
                 del self._df[term]
+            holders = self._postings[term]
+            holders.discard(doc_id)
+            if not holders:
+                del self._postings[term]
 
     def search(
         self, query: str, limit: int, allowed: Iterable[int] | None = None, prefixes: Iterable[str] = ()
@@ -180,8 +192,8 @@ class Bm25:
         vocabulary term that starts with it as one term, so a word's family
         ("bill" for billing, billed, bills) is one signal, not several."""
         terms = [fold_diacritics(token) for token in tokenize(query)]
-        families = [(fold_diacritics(prefix), [term for term in self._df if term.startswith(fold_diacritics(prefix))])
-                    for prefix in prefixes]
+        folded = [fold_diacritics(prefix) for prefix in prefixes]
+        families = [(prefix, [term for term in self._df if term.startswith(prefix)]) for prefix in folded]
         families = [(prefix, members) for prefix, members in families if members]
         # A query word its own family covers is scored once, through the
         # family: "billing" asked with the prefix "bill" is one signal, not
@@ -193,15 +205,30 @@ class Bm25:
         n = len(self._docs)
         avg_len = sum(self._lengths.values()) / n
         family_df = {prefix: min(n, sum(self._df[member] for member in members)) for prefix, members in families}
-        candidates = self._docs.keys() if allowed is None else [d for d in allowed if d in self._docs]
+        # Each family's count in every document holding a member, read from
+        # the postings: whole numbers, so the same in any order of adding.
+        family_tf: list[tuple[str, dict[int, int]]] = []
+        matching: set[int] = set()
+        for prefix, members in families:
+            tfs: dict[int, int] = {}
+            for member in members:
+                for doc_id in self._postings[member]:
+                    tfs[doc_id] = tfs.get(doc_id, 0) + self._docs[doc_id][member]
+            family_tf.append((prefix, tfs))
+            matching.update(tfs)
+        for term in terms:
+            matching.update(self._postings.get(term, ()))
+        # Every other document scores zero. The order candidates are scored
+        # in is settled by the sort below, by score and then by id.
+        candidates = matching if allowed is None else [d for d in allowed if d in matching]
         scored: list[tuple[int, float]] = []
         for doc_id in candidates:
             counts = self._docs[doc_id]
             length = self._lengths[doc_id]
             score = 0.0
             weighed: list[tuple[int, int]] = [(counts[term], self._df[term]) for term in terms if counts.get(term)]
-            for prefix, members in families:
-                tf = sum(counts.get(member, 0) for member in members)
+            for prefix, tfs in family_tf:
+                tf = tfs.get(doc_id, 0)
                 if tf:
                     weighed.append((tf, family_df[prefix]))
             for tf, df in weighed:

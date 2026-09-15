@@ -403,13 +403,23 @@ class RecallItem(BaseModel):
     #: holds it ("Engine.forget"), when the source is code and one holds
     #: all of it.
     declaration: Optional[str] = None
+    #: When recall expanded a summary to the chunks it cites and this chunk
+    #: is one of them: the summary's episode and chunk, its level and index,
+    #: the document it summarizes, the mode, and the character spans of this
+    #: chunk's stored text its quotes sit at (offsets, so withholding has no
+    #: second copy of the text to miss).
+    #: Left out otherwise.
+    via_summary: Optional[dict[str, object]] = None
 
     @model_serializer(mode="wrap")
     def omit_unasked_lessons(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        # Recall not asked for lessons answers exactly as it did before they existed.
+        # Recall not asked for lessons, or for summaries expanded, answers
+        # exactly as it did before they existed.
         value: dict[str, object] = handler(self)
         if self.lessons is None:
             value.pop("lessons", None)
+        if self.via_summary is None:
+            value.pop("via_summary", None)
         return value
 
 
@@ -587,6 +597,9 @@ class RecallResult(BaseModel):
     prefixes: Optional[dict[str, object]] = None
     #: With ``lessons``: what the lessons beside the items were read from, and whether the read was cut.
     lessons_read: Optional[dict[str, object]] = None
+    #: With ``expand_summaries``: what was expanded, refused and cut
+    #: (``summary_expand.Expanded.record``). None otherwise.
+    expanded: Optional[dict[str, object]] = None
     #: With a feedback weight set: what recorded feedback added in fusion, what the read took,
     #: and whether its bounds bit (see retrieval/feedback_prior.py). Left out otherwise.
     feedback_prior: Optional[dict[str, object]] = None
@@ -597,6 +610,8 @@ class RecallResult(BaseModel):
         value: dict[str, object] = handler(self)
         if self.lessons_read is None:
             value.pop("lessons_read", None)
+        if self.expanded is None:
+            value.pop("expanded", None)
         if self.feedback_prior is None:
             value.pop("feedback_prior", None)
         return value
@@ -632,8 +647,12 @@ class Added(BaseModel):
     #: ``code`` for a code source unless the record said otherwise -- and,
     #: when it was cut at its structure, the chunker's own counts: what
     #: landed on a boundary, what was split by size, whether a unit ran
-    #: over the target and whether the unit bound bit. None on a receipt
-    #: that stored nothing.
+    #: over the target and whether the unit bound bit. A length cut measured
+    #: in tokens (``chunk_tokens``) carries its own counts here too, with
+    #: ``measure: "tokens"``: sentences cut inside because one alone was
+    #: over the target, cuts inside a word, chunks that overlap the one
+    #: before and chunks the count measured over. None on a receipt that
+    #: stored nothing.
     chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     structure: Optional[dict[str, object]] = None
     #: With heading context on: how many chunks were embedded with a line
