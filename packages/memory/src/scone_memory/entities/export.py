@@ -35,28 +35,30 @@ items, fixed zip timestamps. Text is escaped for its format, never trusted.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 import csv
 import io
 import json
 import re
-from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence, get_args
 import unicodedata
 from urllib.parse import quote
 import xml.etree.ElementTree as ElementTree
 import zipfile
 
 from .markdown import literal
+from .kinds import EntityKind
 from .project import Entity, EntityProjection, Support, backing_of, merged_periods
 
 if TYPE_CHECKING:
-    from .layout import Drawing
+    from .layout import Box, Drawing
+    from .usage import Usage
 
 ExportFormat = Literal["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid", "svg",
-                       "canvas", "html", "explorer"]
+                       "canvas", "html", "explorer", "communities", "tree"]
 EXPORT_FORMATS: tuple[ExportFormat, ...] = ("json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
-                                            "mermaid", "svg", "canvas", "html", "explorer")
+                                            "mermaid", "svg", "canvas", "html", "explorer", "communities", "tree")
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -434,11 +436,12 @@ def _note_names(entities: tuple[Entity, ...]) -> dict[str, str]:
     return _file_names([(entity.entity_id, entity.label) for entity in entities], fallback="entity")
 
 
-def _file_names(items: list[tuple[str, str]], *, fallback: str) -> dict[str, str]:
+def _file_names(items: list[tuple[str, str]], *, fallback: str, taken: set[str] | None = None) -> dict[str, str]:
     """Safe, distinct file names for (id, label) pairs, as ``_note_names``
-    describes; ``index`` is always kept free."""
+    describes; ``index`` is always kept free, and so is every folded name in
+    ``taken``."""
     names: dict[str, str] = {}
-    taken = {"index"}  # the vault's own index note
+    taken = {"index", *(taken or ())}  # the vault's own index note
     for ident, label in sorted(items):
         base = " ".join(_UNSAFE.sub("-", label).split()).strip(". ")[:100]
         base = base or fallback
@@ -456,8 +459,54 @@ def _file_names(items: list[tuple[str, str]], *, fallback: str) -> dict[str, str
     return names
 
 
-def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+def _community_links(projection: EntityProjection, community_of: Mapping[str, str], *,
+                     external: frozenset[str]) -> Counter[tuple[str, str]]:
+    """Links between each pair of communities, as the analysis counts a
+    community's links: pairs of entities one or more relations join, never
+    through an entity the graph only names (``external``), which is attached
+    to a community for reading and is not a tie between two."""
+    joined: Counter[tuple[str, str]] = Counter()
+    for pair in {tuple(sorted((relation.subject_id, relation.object_id))) for relation in projection.relations
+                 if relation.subject_id != relation.object_id
+                 and relation.subject_id not in external and relation.object_id not in external}:
+        ends = sorted({community_of.get(pair[0], ""), community_of.get(pair[1], "")} - {""})
+        if len(ends) == 2:
+            joined[(ends[0], ends[1])] += 1
+    return joined
+
+
+def _community_tag(rank: int, label: str) -> str:
+    """An Obsidian tag for the community of this rank: the rank first, so no
+    tag is only digits and no two share one, then the words of its first name."""
+    words = re.findall(r"[^\W_]+", label.split(" · ")[0].casefold())
+    slug = "-".join(words)[:40].strip("-")
+    return f"community/c{rank}" + (f"-{slug}" if slug else "")
+
+
+def obsidian_files(projection: EntityProjection, about: Mapping[str, object], *, root: str = "") -> dict[str, str]:
+    """The notes of the Obsidian export, path -> text: one note per entity
+    under ``entities/``, a hub note per community the analysis found under
+    ``communities/``, ``index.md`` and ``graph.canvas``. A community's tag
+    is on its hub and on each member's note. Every note opens with
+    ``scone_note: 1`` in its frontmatter, so a later write into a vault can
+    tell these notes from a person's own; the index carries the projection
+    digest as well.
+    ``root`` is the vault-relative folder the files will sit in, which
+    the canvas needs to name its cards' notes. Without one the files are
+    the vault's top, and ``.obsidian/graph.json`` colours each community by
+    its tag in the drawings' colours; under a folder that file would be read
+    by nothing, and the vault's own ``.obsidian/`` is not this export's to
+    write, so it is left out."""
+    from .analysis import cached_analysis
+
     names = _note_names(projection.entities)
+    analysis = cached_analysis(projection)
+    ranked = sorted(analysis.communities, key=lambda community: (-len(community.members), community.community_id))
+    community_of = {member: community.community_id for community in ranked for member in community.members}
+    tag_of = {community.community_id: _community_tag(rank, community.label)
+              for rank, community in enumerate(ranked, start=1)}
+    hub_names = _file_names([(community.community_id, community.label) for community in ranked],
+                            fallback="community", taken={_folded(name) for name in names.values()})
     outgoing: dict[str, list[str]] = defaultdict(list)
     incoming: dict[str, list[str]] = defaultdict(list)
     values: dict[str, list[str]] = defaultdict(list)
@@ -476,21 +525,67 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
         values[attribute.entity_id].append(
             f"- {literal(attribute.predicate)}: {literal(attribute.value)} ({cited(attribute.fact_ids)})")
     files: dict[str, str] = {}
+    # A note carries a signature that says whose it is and nothing that
+    # changes when the rest of the graph does, beyond its community's tag
+    # and hub; the projection digest is the index's.
+    signature = "scone_note: 1"
     for entity in projection.entities:
+        home = community_of.get(entity.entity_id)
         body = ["---", f"id: {entity.entity_id}", f"key: {json.dumps(entity.key, ensure_ascii=False)}",
-                f"kind: {entity.kind or 'unknown'}", "---", "", f"# {literal(entity.label)}", ""]
+                f"kind: {entity.kind or 'unknown'}",
+                *([f"tags: {json.dumps([tag_of[home]])}"] if home else []), signature, "---", "",
+                f"# {literal(entity.label)}", "",
+                *([f"Community: [[communities/{hub_names[home]}]]", ""] if home else [])]
         for title, lines in (("Relations", outgoing[entity.entity_id]), ("Referenced by", incoming[entity.entity_id]),
                              ("Values", values[entity.entity_id])):
             if lines:
                 body += [f"## {title}", "", *sorted(lines), ""]
         files[f"entities/{names[entity.entity_id]}.md"] = "\n".join(body)
-    files["index.md"] = "\n".join([f"# Knowledge graph: {literal(projection.space)}", "",
+    linked = _community_links(projection, community_of, external=analysis.external)
+    for community in ranked:
+        members = sorted(community.members, key=lambda member: (member not in community.top_entities,
+                                                                 community.top_entities.index(member)
+                                                                 if member in community.top_entities else 0,
+                                                                 names[member]))
+        neighbours = sorted(((pair[1] if pair[0] == community.community_id else pair[0], count)
+                             for pair, count in linked.items() if community.community_id in pair),
+                            key=lambda item: (-item[1], hub_names[item[0]]))
+        cohesion = f"; cohesion {community.cohesion}" if community.cohesion is not None else ""
+        hub = ["---", f"id: {community.community_id}", f"tags: {json.dumps([tag_of[community.community_id]])}",
+               f"members: {len(community.members)}", signature, "---", "", f"# {literal(community.label)}", "",
+               f"{_many(len(community.members), 'entity', 'entities')}; {_many(community.internal_links, 'link')} "
+               f"inside and {community.boundary_links} to other communities{cohesion}. A link is a pair of entities "
+               "one or more relations join.", "", "## Members", "", *(f"- [[{names[member]}]]" for member in members), ""]
+        if community.kinds:
+            hub += ["## Kinds", "", *(f"- {literal(kind)}: {count}" for kind, count in community.kinds), ""]
+        if community.predicates:
+            hub += ["## Most used predicates", "",
+                    *(f"- {literal(predicate)}: {count}" for predicate, count in community.predicates), ""]
+        if neighbours:
+            hub += ["## Linked communities", "",
+                    *(f"- [[communities/{hub_names[other]}]] ({_many(count, 'link')})" for other, count in neighbours), ""]
+        files[f"communities/{hub_names[community.community_id]}.md"] = "\n".join(hub)
+    files["index.md"] = "\n".join(["---", signature, f"scone_projection: {projection.digest}", "---", "",
+                                   f"# Knowledge graph: {literal(projection.space)}", "",
                                    f"Projection `{projection.digest[:12]}`, {len(projection.entities)} entities.",
-                                   *_about_lines(about), "",
+                                   *_about_lines(about), "", "## Communities", "",
+                                   *([f"- [[communities/{hub_names[community.community_id]}]]" for community in ranked]
+                                     or ["No entity has a relation to another, so there is no community."]), "",
+                                   "## Entities", "",
                                    *sorted(f"- [[{name}]]" for name in names.values())]) + "\n"
+    if ranked and not root:
+        # Obsidian's graph view: one colour group per community, querying the tag its notes carry.
+        files[".obsidian/graph.json"] = json.dumps({"colorGroups": [
+            {"query": f"tag:#{tag_of[community.community_id]}",
+             "color": {"a": 1, "rgb": int(_PALETTE[index % (len(_PALETTE) - 1)].lstrip("#"), 16)}}
+            for index, community in enumerate(ranked)]}, indent=1) + "\n"
     # The same graph drawn as a canvas of the vault's own notes.
-    files["graph.canvas"] = _canvas_text(projection, about, lambda entity_id: f"entities/{names[entity_id]}.md")
-    return Export(_zip(files), "application/zip", "graph-obsidian.zip")
+    files["graph.canvas"] = _canvas_text(projection, about, lambda entity_id: f"{root}entities/{names[entity_id]}.md")
+    return files
+
+
+def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    return Export(_zip(obsidian_files(projection, about)), "application/zip", "graph-obsidian.zip")
 
 
 #: Lines listed per section of a wiki article; the rest are counted.
@@ -713,9 +808,14 @@ def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Expor
     """The most connected entities, up to ``_MERMAID_NODES``, and the best
     supported relations between them, up to ``_MERMAID_EDGES`` and the text
     budget, each edge naming its predicate and facts. Node ids are the
-    chart's own (n1, n2, ...), so no stored text is ever syntax. The first
-    line says what view it draws, what the read left out and what the
-    chart left out."""
+    chart's own (n1, n2, ...), so no stored text is ever syntax. Entities of
+    one community drawn together sit in a subgraph named for it (c1, c2,
+    ...); an entity drawn without another of its community sits outside
+    any. Each entity is styled by its kind, a class named for the kind,
+    and one of unknown kind is left plain. The first line says what view it
+    draws, what the read left out and what the chart left out."""
+    from .analysis import cached_analysis
+
     degree = _degrees(projection)
     ranked = sorted(projection.entities, key=lambda entity: (-degree[entity.entity_id], entity.label, entity.entity_id))
     shown = {entity.entity_id: f"n{index}" for index, entity in enumerate(ranked[:_MERMAID_NODES], start=1)}
@@ -723,10 +823,14 @@ def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Expor
                       if relation.subject_id in shown and relation.object_id in shown),
                      key=lambda relation: (-len(relation.fact_ids), int(shown[relation.subject_id][1:]),
                                            relation.predicate, int(shown[relation.object_id][1:])))
-    nodes = [f'  {shown[entity.entity_id]}["{_mermaid_text(entity.label)}"]' for entity in ranked[:_MERMAID_NODES]]
+    nodes = {entity.entity_id: f'["{_mermaid_text(entity.label)}"]' for entity in ranked[:_MERMAID_NODES]}
     edges = [f'  {shown[relation.subject_id]} {_mermaid_arrow(relation.support)}|"{_mermaid_text(relation.predicate, 60)} '
              f'{_mermaid_cite(relation.fact_ids)}"| {shown[relation.object_id]}' for relation in between]
     edges = edges[:_MERMAID_EDGES]
+    community_of: dict[str, tuple[str, str]] = {}
+    for community in cached_analysis(projection).communities:
+        for member in community.members:
+            community_of[member] = (community.community_id, community.label)
     coverage = about.get("coverage")
     reasons = coverage.get("reasons") if isinstance(coverage, Mapping) else None
 
@@ -741,16 +845,42 @@ def _mermaid(projection: EntityProjection, about: Mapping[str, object]) -> Expor
         return f"%% Knowledge graph {_mermaid_text(projection.space)}: " + "; ".join(
             _mermaid_text(note, 300) for note in notes)
 
+    def chart(drawn_nodes: int, drawn_edges: int) -> str:
+        kept = ranked[:drawn_nodes]
+        together: dict[str, list[Entity]] = {}
+        for entity in kept:
+            if entity.entity_id in community_of:
+                together.setdefault(community_of[entity.entity_id][0], []).append(entity)
+        # Largest first, as the drawings pack their boxes.
+        grouped = sorted((members for members in together.values() if len(members) > 1),
+                         key=lambda members: (-len(members), community_of[members[0].entity_id][0]))
+        inside = {entity.entity_id for members in grouped for entity in members}
+        lines = [header_for(drawn_nodes, drawn_edges), "flowchart LR"]
+        for number, members in enumerate(grouped, start=1):
+            lines.append(f'  subgraph c{number}["{_mermaid_text(community_of[members[0].entity_id][1])}"]')
+            lines.extend(f"    {shown[entity.entity_id]}{nodes[entity.entity_id]}" for entity in members)
+            lines.append("  end")
+        lines.extend(f"  {shown[entity.entity_id]}{nodes[entity.entity_id]}" for entity in kept
+                     if entity.entity_id not in inside)
+        lines.extend(edges[:drawn_edges])
+        for kind, colour in _MERMAID_KINDS.items():
+            styled = [shown[entity.entity_id] for entity in kept if entity.kind == kind]
+            if styled:
+                lines.append(f"  classDef {kind} fill:#ffffff,stroke:{colour},stroke-width:3px,color:#1d1d1f")
+                lines.append(f"  class {','.join(styled)} {kind}")
+        return "\n".join(lines)
+
     # Mermaid counts its limit in the browser's UTF-16 units, where an emoji
     # is two: the whole chart is measured that way, edges giving way first.
-    sizes = [_utf16(line) + 1 for line in nodes + edges]
-    body = sum(sizes) + _utf16("flowchart LR") + 1
-    while nodes and _utf16(header_for(len(nodes), len(edges))) + body > _MERMAID_TEXT:
-        body -= sizes.pop()
-        (edges if edges else nodes).pop()
-    header = header_for(len(nodes), len(edges))
-    return Export("\n".join([header, "flowchart LR", *nodes, *edges]).encode() + b"\n", "text/vnd.mermaid",
-                  "graph.mmd")
+    drawn_nodes, drawn_edges = len(nodes), len(edges)
+    text = chart(drawn_nodes, drawn_edges)
+    while drawn_nodes and _utf16(text) + 1 > _MERMAID_TEXT:
+        if drawn_edges:
+            drawn_edges -= 1
+        else:
+            drawn_nodes -= 1
+        text = chart(drawn_nodes, drawn_edges)
+    return Export(text.encode() + b"\n", "text/vnd.mermaid", "graph.mmd")
 
 
 #: What the drawings show at most: the most connected entities, and the
@@ -760,6 +890,17 @@ _SVG_LABEL = 32
 #: Okabe and Ito's colours, told apart with any colour vision; the last,
 #: grey, is for entities in no community.
 _PALETTE = ("#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#999999")
+
+
+#: A style per entity kind: a border in the drawings' colours, so a chart
+#: coloured by kind can be told apart in any colour vision. In the drawings
+#: those colours are communities; in the Mermaid chart they are kinds.
+_MERMAID_KINDS: dict[str, str] = dict(zip(get_args(EntityKind), _PALETTE))
+
+
+def _community_colour(box: "Box") -> str:
+    """A community's colour; the last is kept for entities with no relation to another."""
+    return _PALETTE[-1] if box.colour < 0 else _PALETTE[box.colour % (len(_PALETTE) - 1)]
 
 
 def _xml_text(value: object, limit: int | None = None) -> str:
@@ -802,7 +943,9 @@ def _drawing_notes(projection: EntityProjection, about: Mapping[str, object], le
             *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
             *([f"read limited by {', '.join(map(str, reasons))}"] if isinstance(reasons, list) and reasons else []),
             (f"{_many(left_out[0], 'entity', 'entities')} and {_many(left_out[1], 'relation')} left out of the drawing"
-             if any(left_out) else "every entity and relation read is drawn"), "values are not drawn"]
+             if any(left_out) else "every entity and relation read is drawn"),
+            *(["the communities format draws the graph by community"] if left_out[0] else []),
+            *_usage_note(about), "values are not drawn"]
 
 
 def _svg(projection: EntityProjection, about: Mapping[str, object]) -> Export:
@@ -860,15 +1003,16 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
     colour_of: dict[str, str] = {}
     boxes = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "communities"})
     for box in drawing.groups:
-        colour = _PALETTE[-1] if box.colour < 0 else _PALETTE[box.colour % (len(_PALETTE) - 1)]
-        colour_of[box.group_id] = colour
-        ElementTree.SubElement(boxes, f"{{{ns}}}rect", {
+        colour = colour_of[box.group_id] = _community_colour(box)
+        # The box and its title both name the community, so a page can hide them together.
+        ElementTree.SubElement(boxes, f"{{{ns}}}rect", {"data-group": box.group_id,
             "x": number(box.x + margin), "y": number(box.y + margin), "width": number(box.width),
             "height": number(box.height), "rx": "14", "fill": colour, "fill-opacity": "0.07", "stroke": colour,
             "stroke-opacity": "0.45"})
         # A title is cut to about what its box holds, then fitted to it.
         title = _xml_text(box.label, max(8, min(60, int((box.width - 24) / 6.6))))
-        _fitted(boxes, f"{{{ns}}}text", {"x": number(box.x + margin + 12), "y": number(box.y + margin + 20),
+        _fitted(boxes, f"{{{ns}}}text", {"data-group": box.group_id,
+                                         "x": number(box.x + margin + 12), "y": number(box.y + margin + 20),
                                          "font-weight": "600", "fill": "#333333"},
                 title, min(_text_width(title) * 1.08, box.width - 24))
     at = {node.entity_id: node for node in drawing.nodes}
@@ -880,6 +1024,9 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
         # the communities themselves stay legible.
         across = {"stroke-opacity": "0.35", "stroke-dasharray": "5 4"} if source.group_id != target.group_id \
             else {"stroke-opacity": "0.6"}
+        # The communities at each end, so hiding either hides the relation.
+        across.update({"data-relation": relation.relation_id, "data-from-group": source.group_id,
+                       "data-to-group": target.group_id})
         origin, standing, grounding = backing_of(relation.support)
         across.update({"data-origin": origin, "data-status": standing, "data-grounding": grounding})
         if origin == "inferred":
@@ -907,26 +1054,156 @@ def _svg_root(projection: EntityProjection, about: Mapping[str, object]) -> tupl
             dx, dy = target.x - source.x, target.y - source.y
             length = max((dx * dx + dy * dy) ** 0.5, 1e-9)
             ux, uy = dx / length, dy / length
-            element = ElementTree.SubElement(arrows, f"{{{ns}}}line", {"data-relation": relation.relation_id,
+            element = ElementTree.SubElement(arrows, f"{{{ns}}}line", {
                 "x1": number(source.x + margin + ux * source.radius), "y1": number(source.y + margin + uy * source.radius),
                 "x2": number(target.x + margin - ux * (target.radius + 1)),
                 "y2": number(target.y + margin - uy * (target.radius + 1)),
                 "stroke-width": weight, "marker-end": "url(#arrow)", **across})
         ElementTree.SubElement(element, f"{{{ns}}}title").text = title
+    recalled = _recalled(projection, about)
+    recalls_read = usage.recalls_read if (usage := _usage_of(about)) is not None else 0
     circles = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "entities"})
     for node in drawing.nodes:
-        group = ElementTree.SubElement(circles, f"{{{ns}}}g", {"data-entity": node.entity_id})
+        group = ElementTree.SubElement(circles, f"{{{ns}}}g", {"data-entity": node.entity_id,
+                                                              "data-group": node.group_id})
         circle = ElementTree.SubElement(group, f"{{{ns}}}circle", {
             "cx": number(node.x + margin), "cy": number(node.y + margin), "r": number(node.radius),
             "fill": colour_of[node.group_id], "stroke": "#ffffff", "stroke-width": "1.5"})
         ElementTree.SubElement(circle, f"{{{ns}}}title").text = (
-            f"{_xml_text(node.label)} ({_xml_text(node.kind or 'unknown kind')}) {node.entity_id}")
+            f"{_xml_text(node.label)} ({_xml_text(node.kind or 'unknown kind')}) {node.entity_id}"
+            + (f"; returned by {recalled[node.entity_id]} of the {_many(recalls_read, 'recall')} read"
+               if recalled is not None else ""))
+        if recalled is not None:
+            group.set("data-recalled", str(recalled[node.entity_id]))
         # A white halo keeps a name legible where an arrow runs under it.
         _fitted(group, f"{{{ns}}}text", {
             "x": number(node.x + margin), "y": number(node.y + margin + node.radius + 12), "text-anchor": "middle",
             "fill": "#222222", "stroke": "#ffffff", "stroke-width": "3", "paint-order": "stroke",
             "stroke-linejoin": "round"}, names[node.entity_id], widths[node.entity_id])
     return root, drawing, notes
+
+
+#: Communities the map draws at most, largest first, and links between them, strongest first.
+_MAP_COMMUNITIES, _MAP_LINKS = 80, 400
+_MAP_RADII = (16.0, 64.0)
+_MAP_LABEL_WIDTH = 180.0
+
+
+def _communities_map(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """The graph by community, for when it is too large to draw entity by
+    entity: a circle per community, its area by its members, and a line
+    between two communities weighted by the links that join them. A link is
+    a pair of entities one or more relations join, as the analysis counts
+    them. Entities with no relation to another share a grey circle. The
+    description says what view it draws, how much of the graph the analysis
+    read, and what the map left out."""
+    import math
+
+    from .analysis import cached_analysis
+    from .layout import UNLINKED
+
+    analysis = cached_analysis(projection)
+    ranked = sorted(analysis.communities, key=lambda community: (-len(community.members), community.community_id))
+    kept, left = ranked[:_MAP_COMMUNITIES], ranked[_MAP_COMMUNITIES:]
+    community_of = {member: community.community_id for community in kept for member in community.members}
+    label_of = {community.community_id: community.label for community in kept}
+    joined = _community_links(projection, community_of, external=analysis.external)
+    strongest = sorted(joined.items(), key=lambda item: (-item[1], item[0]))
+    links, links_left = strongest[:_MAP_LINKS], strongest[_MAP_LINKS:]
+
+    # (id, label, members, title, colour), largest first; the unlinked last.
+    circles = [(community.community_id, community.label, len(community.members),
+                f"{community.label}: {_many(len(community.members), 'entity', 'entities')}, "
+                f"{_many(community.internal_links, 'link')} inside, {community.boundary_links} to other communities",
+                _PALETTE[index % (len(_PALETTE) - 1)]) for index, community in enumerate(kept)]
+    isolated = analysis.coverage.isolated_entities
+    if isolated:
+        circles.append((UNLINKED, "no relation", isolated, f"no relation: {_many(isolated, 'entity', 'entities')}",
+                        _PALETTE[-1]))
+    largest = max((members for _, _, members, _, _ in circles), default=1)
+    smallest_r, largest_r = _MAP_RADII
+    names = {group_id: _xml_text(label, _SVG_LABEL) for group_id, label, _, _, _ in circles}
+    # Circles sit on one ring, largest first, each given arc in proportion to
+    # its size, so a line between two is a chord across the middle and never
+    # runs through a third. Names are written outward, clear of the chords.
+    sized = [(group_id, smallest_r + (largest_r - smallest_r) * math.sqrt(members / largest))
+             for group_id, _, members, _, _ in circles]
+    gap = 22.0
+    arcs = [2 * radius + gap for _, radius in sized]
+    ring = sum(arcs) / (2 * math.pi) if len(sized) > 1 else 0.0
+    reach = ring + largest_r + 8 + _MAP_LABEL_WIDTH
+    centre_x, centre_y = reach + 16, reach + 16
+    placed: dict[str, tuple[float, float, float, float]] = {}
+    turned = 0.0
+    for (group_id, radius), arc in zip(sized, arcs):
+        angle = -math.pi / 2 + 2 * math.pi * (turned + arc / 2) / sum(arcs) if ring else -math.pi / 2
+        placed[group_id] = (centre_x + ring * math.cos(angle), centre_y + ring * math.sin(angle), radius, angle)
+        turned += arc
+    total_width, total_height = 2 * centre_x, 2 * centre_y
+
+    coverage = analysis.coverage
+    reasons = about.get("coverage")
+    read_reasons = reasons.get("reasons") if isinstance(reasons, Mapping) else None
+    notes = [f"projection {projection.digest[:12]} at revision {projection.revision}",
+             *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
+             *([f"read limited by {', '.join(map(str, read_reasons))}"] if isinstance(read_reasons, list) and read_reasons
+               else []),
+             (f"communities found among {coverage.entities_analysed} of the {coverage.entities_total} entities with a "
+              f"relation to another" if coverage.truncated else "communities of every entity with a relation to another"),
+             (f"{_many(len(left), 'community', 'communities')} "
+              f"({_many(sum(len(community.members) for community in left), 'entity', 'entities')}) left out of the map"
+              if left else "every community is drawn"),
+             *([f"{_many(sum(count for _, count in links_left), 'link')} between "
+                f"{_many(len(links_left), 'pair')} of communities left out of the map"] if links_left else []),
+             "a link is a pair of entities one or more relations join"]
+
+    def number(value: float) -> str:
+        return f"{value:.1f}"
+
+    ns = "http://www.w3.org/2000/svg"
+    ElementTree.register_namespace("", ns)
+    root = ElementTree.Element(f"{{{ns}}}svg", {
+        "viewBox": f"0 0 {number(total_width)} {number(total_height)}", "width": number(total_width),
+        "height": number(total_height), "role": "img",
+        "font-family": "system-ui, -apple-system, 'Segoe UI', sans-serif", "font-size": "11"})
+    ElementTree.SubElement(root, f"{{{ns}}}title").text = f"Communities of {_xml_text(projection.space)}"
+    ElementTree.SubElement(root, f"{{{ns}}}desc").text = "; ".join(_xml_text(note) for note in notes)
+    ElementTree.SubElement(root, f"{{{ns}}}rect", {"width": "100%", "height": "100%", "fill": "#ffffff"})
+    lines = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "links", "stroke": "#6b6b6b"})
+    for (first, second), count in links:
+        (ax, ay, ar, _), (bx, by, br, _) = placed[first], placed[second]
+        dx, dy = bx - ax, by - ay
+        length = max(math.hypot(dx, dy), 1e-9)
+        ux, uy = dx / length, dy / length
+        a, b = sorted((first, second), key=lambda group_id: (label_of[group_id], group_id))
+        line = ElementTree.SubElement(lines, f"{{{ns}}}line", {
+            "data-from-group": first, "data-to-group": second,
+            "x1": number(ax + ux * ar), "y1": number(ay + uy * ar), "x2": number(bx - ux * br), "y2": number(by - uy * br),
+            "stroke-width": number(1.0 + min(6.0, math.log2(count))), "stroke-opacity": "0.45"})
+        ElementTree.SubElement(line, f"{{{ns}}}title").text = (
+            f"{_many(count, 'link')} between {_xml_text(label_of[a])} and {_xml_text(label_of[b])}")
+    groups = ElementTree.SubElement(root, f"{{{ns}}}g", {"class": "communities"})
+    for group_id, label, members, title, colour in circles:
+        cx, cy, radius, angle = placed[group_id]
+        group = ElementTree.SubElement(groups, f"{{{ns}}}g", {"data-group": group_id})
+        circle = ElementTree.SubElement(group, f"{{{ns}}}circle", {
+            "cx": number(cx), "cy": number(cy), "r": number(radius), "fill": colour, "fill-opacity": "0.8",
+            "stroke": "#ffffff", "stroke-width": "2"})
+        ElementTree.SubElement(circle, f"{{{ns}}}title").text = _xml_text(title)
+        # The name starts just outside the circle, on the side facing away from the ring's centre.
+        across, down = math.cos(angle), math.sin(angle)
+        anchor = "start" if across > 0.3 else "end" if across < -0.3 else "middle"
+        at_x = cx + (radius + 8) * across
+        at_y = cy + (radius + 8) * down + (10 if down > 0.3 else -14 if down < -0.3 else -2)
+        halo = {"text-anchor": anchor, "fill": "#222222", "stroke": "#ffffff", "stroke-width": "3",
+                "paint-order": "stroke", "stroke-linejoin": "round"}
+        _fitted(group, f"{{{ns}}}text", {"x": number(at_x), "y": number(at_y), "font-weight": "600", **halo},
+                names[group_id], min(_text_width(names[group_id]), _MAP_LABEL_WIDTH))
+        count_text = _many(members, "entity", "entities")
+        _fitted(group, f"{{{ns}}}text", {"x": number(at_x), "y": number(at_y + 13), **halo, "fill": "#5b5b5b"},
+                count_text, _text_width(count_text))
+    body = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True).replace(b"\r", b"&#13;")
+    return Export(body + b"\n", "image/svg+xml", "graph-communities.svg")
 
 
 _HTML_STYLE = """
@@ -938,24 +1215,44 @@ header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; p
   border-bottom: 1px solid #dcdcd8; background: #ffffff; }
 header h1 { margin: 0; font-size: 16px; }
 header p { margin: 0; color: #5b5b5b; font-size: 12px; flex: 1 1 320px; }
-input { font: inherit; padding: 6px 10px; border: 1px solid #c6c6c2; border-radius: 6px; min-width: 220px; }
+.find { position: relative; }
+input[type=search] { font: inherit; padding: 6px 10px; border: 1px solid #c6c6c2; border-radius: 6px; min-width: 220px; }
+#matches { position: absolute; z-index: 2; top: 100%; left: 0; right: 0; margin: 4px 0 0; padding: 4px;
+  list-style: none; background: #ffffff; border: 1px solid #c6c6c2; border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); max-height: 50vh; overflow: auto; }
+#matches:empty { display: none; }
+#matches button { display: block; width: 100%; text-align: left; font: inherit; color: inherit; background: none;
+  border: 0; border-radius: 4px; padding: 4px 8px; cursor: pointer; overflow-wrap: anywhere; }
+#matches button:hover, #matches button:focus { background: #ecebe6; outline: none; }
+#matches li.muted { padding: 4px 8px; font-size: 12px; }
 main { display: grid; grid-template-columns: 1fr minmax(260px, 340px); min-height: 0; }
 #drawing { min-width: 0; min-height: 0; overflow: hidden; background: #ffffff; }
 #drawing svg { width: 100%; height: 100%; cursor: grab; touch-action: none; }
-aside { border-left: 1px solid #dcdcd8; padding: 16px; overflow: auto; background: #fbfbfa; }
+aside { border-left: 1px solid #dcdcd8; overflow: auto; background: #fbfbfa; display: flex; flex-direction: column; }
+aside > * { padding: 16px; }
 aside h2 { margin: 0 0 4px; font-size: 16px; overflow-wrap: anywhere; }
 aside ul { padding-left: 18px; }
 aside li { margin: 4px 0; overflow-wrap: anywhere; }
 aside button { font: inherit; color: #0b57d0; background: none; border: 0; padding: 0; cursor: pointer;
   text-decoration: underline; }
+#legend { border-bottom: 1px solid #dcdcd8; }
+#legend h2 { font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #5b5b5b; }
+#legend ul { list-style: none; padding: 0; margin: 6px 0 0; }
+#legend label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+#legend .all { font-size: 12px; color: #5b5b5b; }
+.swatch { flex: none; width: 12px; height: 12px; border-radius: 50%; }
+.community-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.count { flex: none; white-space: nowrap; font-size: 12px; }
 .muted { color: #5b5b5b; }
 g[data-entity] { cursor: pointer; }
 g[data-entity]:focus { outline: none; }
 g[data-entity]:focus circle, g.chosen circle { stroke: #1d1d1f; stroke-width: 3; }
 g.dim { opacity: 0.15; }
+g.unreached { opacity: 0.2; }
+.gone { display: none; }
 @media (max-width: 720px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
   aside { border-left: 0; border-top: 1px solid #dcdcd8; max-height: 40vh; } }
-"""
+""" + "".join(f".swatch.c{index} {{ background: {colour}; }}\n" for index, colour in enumerate(_PALETTE))
 
 # The page's own code. Every stored name reaches the page through the
 # data block and is written with textContent, never parsed as markup.
@@ -965,7 +1262,12 @@ _HTML_CODE = """
   var data = JSON.parse(document.getElementById("graph-data").textContent);
   var svg = document.querySelector("#drawing svg");
   var panel = document.getElementById("details");
-  var nodes = {}, links = {}, shapes = {};
+  var search = document.getElementById("search");
+  var matches = document.getElementById("matches");
+  var everyCommunity = document.getElementById("legend-all");
+  var toggles = Array.prototype.slice.call(document.querySelectorAll("#legend li input[data-group]"));
+  var nodes = {}, links = {}, shapes = {}, hidden = {}, chosen = null;
+  var prompt = panel.firstElementChild;
   data.nodes.forEach(function (node) { nodes[node.id] = node; links[node.id] = []; });
   data.edges.forEach(function (edge) {
     links[edge.source].push(edge);
@@ -980,21 +1282,106 @@ _HTML_CODE = """
   function cited(ids) { return (ids.length === 1 ? "fact " : "facts ") + ids.join(", "); }
   function show(id) {
     var node = nodes[id];
+    chosen = id;
     Object.keys(shapes).forEach(function (key) { shapes[key].classList.toggle("chosen", key === id); });
-    panel.replaceChildren(element("h2", node.label), element("p", (node.kind || "unknown kind") + " \u00b7 " + id, "muted"));
+    panel.replaceChildren(element("h2", node.label), element("p", (node.kind || "unknown kind") + " \\u00b7 " + id, "muted"));
+    if (node.recalled !== undefined) {
+      var read = data.usage.recalls_read;
+      panel.appendChild(element("p", "Returned by " + node.recalled + " of the " + read + (read === 1 ? " recall" : " recalls")
+        + " read.", "muted"));
+    }
     var list = document.createElement("ul");
     links[id].forEach(function (edge) {
       var outgoing = edge.source === id, other = nodes[outgoing ? edge.target : edge.source];
       var item = document.createElement("li");
-      item.appendChild(element("span", outgoing ? edge.predicate + " \u2192 " : "\u2190 " + edge.predicate + " "));
+      item.appendChild(element("span", outgoing ? edge.predicate + " \\u2192 " : "\\u2190 " + edge.predicate + " "));
       var go = element("button", other.label);
       go.type = "button";
-      go.addEventListener("click", function () { show(other.id); shapes[other.id].focus(); });
+      go.addEventListener("click", function () { choose(other.id); });
       item.appendChild(go);
-      item.appendChild(element("span", " (" + cited(edge.fact_ids) + ")", "muted"));
+      var note = " (" + cited(edge.fact_ids) + ")";
+      if (hidden[other.group]) { note += ", its community is hidden"; }
+      item.appendChild(element("span", note, "muted"));
       list.appendChild(item);
     });
     panel.appendChild(list.childElementCount ? list : element("p", "No relation of it is drawn.", "muted"));
+  }
+  // Hiding a community hides its box, its entities and every relation
+  // with an end in it; the legend's first box says whether all are shown.
+  function applyHidden() {
+    svg.querySelectorAll("[data-group]").forEach(function (mark) {
+      mark.classList.toggle("gone", hidden[mark.getAttribute("data-group")] === true);
+    });
+    svg.querySelectorAll("[data-from-group]").forEach(function (mark) {
+      mark.classList.toggle("gone", hidden[mark.getAttribute("data-from-group")] === true
+        || hidden[mark.getAttribute("data-to-group")] === true);
+    });
+    var off = 0;
+    toggles.forEach(function (toggle) {
+      toggle.checked = hidden[toggle.getAttribute("data-group")] !== true;
+      if (!toggle.checked) { off += 1; }
+    });
+    everyCommunity.checked = off === 0;
+    everyCommunity.indeterminate = off > 0 && off < toggles.length;
+    if (chosen !== null && hidden[nodes[chosen].group]) {
+      shapes[chosen].classList.remove("chosen");
+      chosen = null;
+      panel.replaceChildren(prompt);
+    }
+  }
+  toggles.forEach(function (toggle) {
+    toggle.addEventListener("change", function () {
+      if (toggle.checked) { delete hidden[toggle.getAttribute("data-group")]; }
+      else { hidden[toggle.getAttribute("data-group")] = true; }
+      applyHidden();
+    });
+  });
+  everyCommunity.addEventListener("change", function () {
+    toggles.forEach(function (toggle) {
+      if (everyCommunity.checked) { delete hidden[toggle.getAttribute("data-group")]; }
+      else { hidden[toggle.getAttribute("data-group")] = true; }
+    });
+    applyHidden();
+  });
+  // Entities no recall read returned fade, so what recall reaches stands out.
+  var dimUnreached = document.getElementById("usage-dim");
+  if (dimUnreached) {
+    dimUnreached.addEventListener("change", function () {
+      svg.querySelectorAll("g[data-recalled]").forEach(function (shape) {
+        shape.classList.toggle("unreached", dimUnreached.checked && shape.getAttribute("data-recalled") === "0");
+      });
+    });
+  }
+  var view = svg.viewBox.baseVal, start = null, moved = false, gliding = 0;
+  var still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // Moves the view, at its current zoom, so the entity sits in its middle.
+  function centre(id) {
+    var circle = shapes[id].querySelector("circle");
+    var toX = parseFloat(circle.getAttribute("cx")) - view.width / 2;
+    var toY = parseFloat(circle.getAttribute("cy")) - view.height / 2;
+    var fromX = view.x, fromY = view.y, began = null, run = ++gliding;
+    if (still) { view.x = toX; view.y = toY; return; }
+    function step(now) {
+      if (run !== gliding) { return; }
+      if (began === null) { began = now; }
+      var t = Math.min(1, (now - began) / 240), eased = 1 - Math.pow(1 - t, 3);
+      view.x = fromX + (toX - fromX) * eased;
+      view.y = fromY + (toY - fromY) * eased;
+      if (t < 1) { window.requestAnimationFrame(step); }
+    }
+    window.requestAnimationFrame(step);
+  }
+  // Choosing reveals the entity's community if it was hidden, moves the
+  // view to it and lists its relations.
+  function choose(id) {
+    if (hidden[nodes[id].group]) {
+      delete hidden[nodes[id].group];
+      applyHidden();
+    }
+    matches.replaceChildren();
+    centre(id);
+    show(id);
+    shapes[id].focus({ preventScroll: true });
   }
   svg.querySelectorAll("g[data-entity]").forEach(function (shape) {
     var id = shape.getAttribute("data-entity");
@@ -1007,11 +1394,46 @@ _HTML_CODE = """
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(id); }
     });
   });
-  document.getElementById("search").addEventListener("input", function (event) {
-    var wanted = event.target.value.trim().toLocaleLowerCase();
+  var byName = data.nodes.slice().sort(function (a, b) { return a.label.localeCompare(b.label); });
+  var MATCHES_SHOWN = 8;
+  // Names that begin with what was typed come first, then names containing it.
+  function found(wanted) {
+    var starting = [], containing = [];
+    byName.forEach(function (node) {
+      var at = node.label.toLocaleLowerCase().indexOf(wanted);
+      if (at === 0) { starting.push(node); } else if (at > 0) { containing.push(node); }
+    });
+    return starting.concat(containing);
+  }
+  search.addEventListener("input", function () {
+    var wanted = search.value.trim().toLocaleLowerCase();
     Object.keys(shapes).forEach(function (key) {
       shapes[key].classList.toggle("dim", wanted !== "" && nodes[key].label.toLocaleLowerCase().indexOf(wanted) < 0);
     });
+    if (wanted === "") { matches.replaceChildren(); return; }
+    var hits = found(wanted), items = [];
+    hits.slice(0, MATCHES_SHOWN).forEach(function (node) {
+      var item = document.createElement("li");
+      var go = element("button", hidden[node.group] ? node.label + " (community hidden)" : node.label);
+      go.type = "button";
+      go.addEventListener("click", function () { choose(node.id); });
+      item.appendChild(go);
+      items.push(item);
+    });
+    if (hits.length === 0) { items.push(element("li", "No drawn entity has that in its name.", "muted")); }
+    if (hits.length > MATCHES_SHOWN) {
+      items.push(element("li", (hits.length - MATCHES_SHOWN) + " more; keep typing to narrow", "muted"));
+    }
+    matches.replaceChildren.apply(matches, items);
+  });
+  search.addEventListener("keydown", function (event) {
+    var wanted = search.value.trim().toLocaleLowerCase();
+    if (event.key === "Enter" && wanted !== "") {
+      var hits = found(wanted);
+      if (hits.length) { event.preventDefault(); choose(hits[0].id); }
+    } else if (event.key === "Escape") {
+      matches.replaceChildren();
+    }
   });
   // Screen points become drawing points through the drawing's own screen
   // transform, letterboxing included; a drag keeps the transform it began
@@ -1022,9 +1444,9 @@ _HTML_CODE = """
     point.y = event.clientY;
     return point.matrixTransform(inverse);
   }
-  var view = svg.viewBox.baseVal, start = null, moved = false;
   svg.addEventListener("wheel", function (event) {
     event.preventDefault();
+    gliding += 1;
     var scale = event.deltaY > 0 ? 1.15 : 1 / 1.15, at = drawn(event, svg.getScreenCTM().inverse());
     view.x = at.x - (at.x - view.x) * scale;
     view.y = at.y - (at.y - view.y) * scale;
@@ -1033,6 +1455,7 @@ _HTML_CODE = """
   }, { passive: false });
   svg.addEventListener("pointerdown", function (event) {
     var inverse = svg.getScreenCTM().inverse();
+    gliding += 1;
     start = { x: event.clientX, y: event.clientY, inverse: inverse, at: drawn(event, inverse), left: view.x, top: view.y };
     moved = false;
   });
@@ -1050,8 +1473,9 @@ _HTML_CODE = """
 
 def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     """The drawing as one interactive page that fetches nothing: search by
-    name, a panel listing a chosen entity's relations with their facts,
-    and zoom and pan. Its data is a JSON block every name reaches the page
+    name that lists matches and moves the view to the one chosen, a legend
+    of the drawn communities that shows or hides each, a panel listing a
+    chosen entity's relations with their facts, and zoom and pan. Its data is a JSON block every name reaches the page
     through, written as text and never parsed as markup, and its content
     security policy lets only its own style and code run."""
     import base64
@@ -1060,8 +1484,12 @@ def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
 
     root, drawing, notes = _svg_root(projection, about)
     said = "; ".join(notes)
+    recalled = _recalled(projection, about)
+    usage = _usage_of(about)
     data = {"about": said,
-            "nodes": [{"id": node.entity_id, "label": node.label, "kind": node.kind, "group": node.group_id}
+            **({"usage": usage.record()} if usage is not None else {}),
+            "nodes": [{"id": node.entity_id, "label": node.label, "kind": node.kind, "group": node.group_id,
+                       **({"recalled": recalled[node.entity_id]} if recalled is not None else {})}
                       for node in drawing.nodes],
             "edges": [{"id": relation.relation_id, "source": relation.subject_id, "target": relation.object_id,
                        "predicate": relation.predicate, "fact_ids": list(relation.fact_ids),
@@ -1076,6 +1504,18 @@ def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
     policy = f"default-src 'none'; img-src data:; script-src {pinned(_HTML_CODE)}; style-src {pinned(_HTML_STYLE)}"
     title = f"Knowledge graph {projection.space}"
     drawn = ElementTree.tostring(root, encoding="unicode").replace("\r", "&#13;")
+    members: dict[str, int] = {}
+    for node in drawing.nodes:
+        members[node.group_id] = members.get(node.group_id, 0) + 1
+    # A count of what is drawn of a community, never its size: the drawing
+    # may leave entities out, and the header says how many.
+    legend = "".join(
+        f'<li data-group="{markup.escape(box.group_id)}"><label>'
+        f'<input type="checkbox" id="community-{index}" data-group="{markup.escape(box.group_id)}" checked>'
+        f'<span class="swatch c{_PALETTE.index(_community_colour(box))}" aria-hidden="true"></span> '
+        f'<span class="community-name">{markup.escape(box.label)}</span> '
+        f'<span class="muted count">{members.get(box.group_id, 0)} drawn</span></label></li>'
+        for index, box in enumerate(drawing.groups))
     page = "\n".join([
         "<!DOCTYPE html>", '<html lang="en">', "<head>", '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -1084,10 +1524,16 @@ def _html(projection: EntityProjection, about: Mapping[str, object]) -> Export:
         '<link rel="icon" href="data:,">',
         f"<title>{markup.escape(title)}</title>", f"<style>{_HTML_STYLE}</style>", "</head>", "<body>",
         f"<header><h1>{markup.escape(title)}</h1><p>{markup.escape(said)}</p>",
-        '<input id="search" type="search" placeholder="Find an entity" aria-label="Find an entity"></header>',
-        f'<main><div id="drawing">{drawn}</div>',
-        '<aside id="details" aria-live="polite"><p class="muted">Choose an entity to see its relations and the '
-        "facts behind them.</p></aside></main>",
+        '<div class="find"><input id="search" type="search" placeholder="Find an entity" aria-label="Find an entity">',
+        '<ul id="matches" aria-label="Matching entities"></ul></div></header>',
+        f'<main><div id="drawing">{drawn}</div>', "<aside>",
+        '<nav id="legend" aria-label="Communities"><h2>Communities</h2>',
+        '<label class="all"><input type="checkbox" id="legend-all" checked> Show every community</label>',
+        *(['<label class="all"><input type="checkbox" id="usage-dim"> Dim what no recall returned</label>']
+          if recalled is not None else []),
+        f"<ul>{legend}</ul></nav>",
+        '<section id="details" aria-live="polite"><p class="muted">Choose an entity to see its relations and the '
+        "facts behind them.</p></section>", "</aside></main>",
         f'<script id="graph-data" type="application/json">{block}</script>',
         f'<script id="graph-code">{_HTML_CODE}</script>', "</body>", "</html>", ""])
     return Export(page.encode("utf-8", "backslashreplace"), "text/html", "graph.html")
@@ -1142,9 +1588,23 @@ def _canvas(projection: EntityProjection, about: Mapping[str, object]) -> Export
     return Export(_encoded(_canvas_text(projection, about)), "application/json", "graph.canvas")
 
 
+def _code_tree(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    """The graph's code as the tree of directories, files and declarations, as one page."""
+    from .code_tree import code_tree, tree_page
+
+    coverage = about.get("coverage")
+    reasons = coverage.get("reasons") if isinstance(coverage, Mapping) else None
+    notes = (f"projection {projection.digest[:12]} at revision {projection.revision}",
+             *([f"{about.get('status', 'current')} facts as of {about['as_of']}"] if "as_of" in about else []),
+             *([f"read limited by {', '.join(map(str, reasons))}"] if isinstance(reasons, list) and reasons else []))
+    page = tree_page(code_tree(projection), projection.space, notes=notes, projection=projection.digest)
+    return Export(page.encode("utf-8", "backslashreplace"), "text/html", "code-tree.html")
+
+
 _WRITERS: dict[str, Callable[[EntityProjection, Mapping[str, object]], Export]] = {
     "json": _node_link, "graphml": _graphml, "gexf": _gexf, "cypher": _cypher, "csv": _csv, "jsonld": _json_ld,
     "obsidian": _obsidian, "wiki": _wiki, "mermaid": _mermaid, "svg": _svg, "canvas": _canvas, "html": _html,
+    "communities": _communities_map, "tree": _code_tree,
 }
 
 
@@ -1160,5 +1620,48 @@ _WRITERS["explorer"] = _explorer
 
 
 def export_graph(projection: EntityProjection, format: ExportFormat, *,
-                 about: Mapping[str, object] | None = None) -> Export:
-    return _WRITERS[format](projection, about or {})
+                 about: Mapping[str, object] | None = None, usage: "Usage | None" = None) -> Export:
+    """``usage``, the recalls ``recall_usage`` read, puts on the SVG and the
+    page how many of them returned each drawn entity; other formats ignore it."""
+    # Only the two formats that draw the counts receive them: a format that
+    # serialises ``about`` would trip on them, and one that writes the notes
+    # would state the window without drawing a count.
+    drawn = usage is not None and format in _USAGE_FORMATS
+    return _WRITERS[format](projection, {**(about or {}), **({"usage": usage} if drawn else {})})
+
+
+#: The formats that draw recall use.
+_USAGE_FORMATS = frozenset({"svg", "html"})
+
+
+def _usage_of(about: Mapping[str, object]) -> "Usage | None":
+    from .usage import Usage
+
+    usage = about.get("usage")
+    return usage if isinstance(usage, Usage) else None
+
+
+def _recalled(projection: EntityProjection, about: Mapping[str, object]) -> dict[str, int] | None:
+    """Per entity, the recalls read that returned one of its facts; None when that is unknown."""
+    from .usage import recalled_by_entity
+
+    usage = _usage_of(about)
+    if usage is None or not usage.available or not usage.recalls_read:
+        return None
+    counted = recalled_by_entity(usage, {role.fact_id: role for role in projection.roles})
+    return {entity.entity_id: counted[entity.entity_id] for entity in projection.entities}
+
+
+def _usage_note(about: Mapping[str, object]) -> list[str]:
+    """Which recalls the counts come from, in words that claim only that window."""
+    usage = _usage_of(about)
+    if usage is None:
+        return []
+    if not usage.available:
+        return ["recall use unknown: the engine keeps no events"]
+    since = f" since {usage.since}" if usage.since else ""
+    if not usage.recalls_read:
+        return [f"recall use unknown: the event log keeps no recalls{since}"]
+    oldest = f", the oldest from {usage.oldest}" if usage.oldest else ""
+    cut = " (older ones unread)" if usage.truncated else ""
+    return [f"recall use over the {_many(usage.recalls_read, 'recall')} the event log keeps{since}{oldest}{cut}"]

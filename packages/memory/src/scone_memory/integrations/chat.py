@@ -14,11 +14,14 @@ with what it was given is not something the caller can observe.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional, Sequence
 
+from ..core.errors import InvalidInput
 from ..core.models import Added
 from ..memory.engine import MemoryEngine
+from ..providers.llm import ChatModel
+from ..retrieval.followup import MODES, REWRITE_TIMEOUT_S, fused, plan_followup
 from ..retrieval.query_formulation import formulate_query
 
 #: What the injected message says before the recalled lines.
@@ -41,6 +44,9 @@ class ContextReceipt:
     fact_ids: tuple[int, ...]
     characters: int
     injected: bool
+    #: With follow-up queries on: what the last question was searched
+    #: with beside itself, carried from which turn, or why nothing was.
+    followup: Optional[dict[str, object]] = None
 
 
 def last_question(messages: Sequence[Mapping[str, Any]]) -> str:
@@ -85,11 +91,22 @@ async def recall_context(
     where: Optional[Mapping[str, str]] = None,
     floor: float = 0.0,
     role: str = "system",
+    followup: str = "off",
+    followup_model: Optional[ChatModel] = None,
+    followup_timeout: float = REWRITE_TIMEOUT_S,
 ) -> tuple[list[dict], ContextReceipt]:
     """The messages to send, with memory in front of them, and the receipt.
 
     The caller's list is never edited: a new list comes back, so a retry
-    does not stack another copy of the memory on top of the last one."""
+    does not stack another copy of the memory on top of the last one.
+
+    ``followup`` ("carry" or "rewrite" with ``followup_model``) also
+    searches a follow-up turn with what the conversation named, fused by
+    rank with the question; see :mod:`scone_memory.retrieval.followup`."""
+    if followup not in MODES:
+        raise InvalidInput(f"followup must be one of {', '.join(MODES)}, not {followup!r}")
+    if followup == "rewrite" and followup_model is None:
+        raise InvalidInput("followup='rewrite' needs a followup_model")
     outgoing = [dict(m) for m in messages]
     query = last_question(messages)
     if not query:
@@ -98,7 +115,15 @@ async def recall_context(
     # and the receipt's query shows exactly what was searched.
     query = formulate_query(query).text
 
-    found = await engine.recall(space, query, limit=limit, tags=tuple(tags), where=dict(where or {}))
+    options: dict[str, Any] = dict(limit=limit, tags=tuple(tags), where=dict(where or {}))
+    found = await engine.recall(space, query, **options)
+    planned = None
+    if followup != "off":
+        planned = await plan_followup(messages, followup, model=followup_model, question=query, timeout_s=followup_timeout)
+        if planned.query is not None:
+            found, facts_dropped = fused(found, await engine.recall(space, planned.query, **options), limit=limit)
+            planned = replace(planned, facts_dropped=facts_dropped)
+    record = planned.record() if planned is not None else None
     texts, episodes, facts = _lines(found, floor)
     # The budget is the whole injected message, header included: a caller
     # sizing a prompt cares what the message costs, not what its body costs.
@@ -110,14 +135,14 @@ async def recall_context(
         spent += len(line) + 1
         used += 1
     if not kept:
-        return outgoing, ContextReceipt(query, (), (), 0, False)
+        return outgoing, ContextReceipt(query, (), (), 0, False, record)
 
     supplied_facts = tuple(facts[:used])
     supplied_episodes = tuple(episodes[:max(0, used - len(facts))])
     block = {"role": role, "content": HEADER + "\n" + "\n".join(kept)}
     return _place(outgoing, block), ContextReceipt(
         query=query, episode_ids=supplied_episodes, fact_ids=supplied_facts,
-        characters=len(block["content"]), injected=True,
+        characters=len(block["content"]), injected=True, followup=record,
     )
 
 

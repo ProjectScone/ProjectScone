@@ -348,3 +348,40 @@ def test_a_brace_language_gets_no_call_graph_without_a_parser():
               "}\n")
     found = code_claims(source, "web/shelf.ts", language="braces")
     assert not [claim for claim in found if claim.predicate == "calls"], found
+
+
+def test_a_python_import_says_when_it_runs():
+    from scone_memory.ingestion.code_graph import code_claims
+
+    source = ("import json\nfrom typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from pkg.types import Shape\n"
+              "class Box:\n    import csv\n    def dump(self):\n        import yaml\n        return yaml\n"
+              "def load():\n    from pkg import loader\n    return loader\n")
+    claims = [(c.predicate, c.object) for c in code_claims(source, "pkg/box.py", language="python") if "import" in c.predicate]
+    assert ("imports", "json") in claims and ("imports", "typing") in claims and ("imports", "csv") in claims, "a class body runs at load"
+    assert ("imports_for_types", "pkg.types") in claims, "a TYPE_CHECKING block never runs"
+    assert ("imports_when_called", "yaml") in claims and ("imports_when_called", "pkg") in claims, "a function body runs when called"
+    assert not [c for c in claims if c[0] == "imports" and c[1] in ("yaml", "pkg", "pkg.types")]
+    backport = ("import typing\nif typing.TYPE_CHECKING:\n    from typing import Literal\nelif False:\n    import never\nelse:\n"
+                "    from typing_extensions import Literal\n    from extras import Support\n"
+                "def f():\n    if typing.TYPE_CHECKING:\n        from later import T\n    else:\n        import later\n")
+    timed = [(c.predicate, c.object) for c in code_claims(backport, "pkg/compat.py", language="python") if "import" in c.predicate]
+    assert ("imports_for_types", "typing") in timed and ("imports_for_types", "never") not in timed, "the guard's own imports never run"
+    assert ("imports", "never") in timed and ("imports", "typing_extensions") in timed and ("imports", "extras") in timed, \
+        "the elif and else of a TYPE_CHECKING guard are branches that run when the module does"
+    assert ("imports_for_types", "later") in timed and ("imports_when_called", "later") in timed, "inside a function the else runs when called"
+    assert not [c for c in timed if c == ("imports", "later")]
+
+
+def test_a_typescript_type_only_import_never_runs_however_it_is_wrapped():
+    from scone_memory.ingestion.code_graph import code_claims
+
+    source = ('import type { Shape } from "./shape";\nimport { draw } from "./draw";\n'
+              'export type { Colour } from "./colour";\nimport { type Size, grow } from "./size";\n'
+              'import type {\n  Big,\n  Small,\n} from "./sizes";\nexport type Alias = {\n  a: string;\n};\n'
+              'import {\n  run,\n} from "./run";\nimport type Default from "./default";\n')
+    claims = {(c.predicate, c.object) for c in code_claims(source, "web/app.ts", language="braces") if "import" in c.predicate}
+    assert {module for predicate, module in claims if predicate == "imports_for_types"} == \
+        {"web/shape.ts", "web/colour.ts", "web/sizes.ts", "web/default.ts"}, \
+        "an import or re-export of types alone compiles away, on one line or wrapped over several"
+    assert {module for predicate, module in claims if predicate == "imports"} == {"web/draw.ts", "web/size.ts", "web/run.ts"}, \
+        "a statement that also brings in a value runs; a wrapped value import after a type alias is not caught by it"

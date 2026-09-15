@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from ...core.errors import InvalidInput
 from ...ocr.process import python_worker, run_bounded
-from ...ocr.types import OcrEngine
+from ...ocr.types import OcrEngine, OcrResult
 from ..extraction_checkpoint import ExtractionCheckpoints
 from .registry import extension
 from .types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument, validate_document
@@ -79,6 +79,39 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
+def _laid_out(result: OcrResult) -> bool:
+    """Whether the engine said where its regions sit: a block, paragraph or line other than the first."""
+    return any(region.block or region.paragraph or region.line for region in result.regions)
+
+
+def _paragraphs(result: OcrResult) -> list[tuple[str, list[DocumentTextRegion]]]:
+    """The regions as the paragraphs they were read in, in the engine's order: words on a line
+    joined by a space, lines by a line break, each word a region spanning its own bytes."""
+    paragraphs: list[tuple[str, list[DocumentTextRegion]]] = []
+    parts: list[str] = []
+    regions: list[DocumentTextRegion] = []
+    previous: tuple[int, int, int] | None = None
+    offset = 0
+    for region in result.regions:
+        if not region.text.strip():
+            continue
+        key = (region.block, region.paragraph, region.line)
+        if previous is not None and previous[:2] != key[:2]:
+            paragraphs.append((''.join(parts), regions))
+            parts, regions, offset, previous = [], [], 0, None
+        separator = '' if previous is None else ' ' if previous == key else '\n'
+        offset += len(separator.encode())
+        end = offset + len(region.text.encode())
+        parts.extend((separator, region.text))
+        regions.append(DocumentTextRegion(text=region.text, box=region.box, score=region.score, block=region.block,
+                                          paragraph=region.paragraph, line=region.line, start=offset, end=end,
+                                          coordinate_space='normalized_displayed_frame_top_left'))
+        offset, previous = end, key
+    if regions:
+        paragraphs.append((''.join(parts), regions))
+    return paragraphs
+
+
 class ImageDocumentParser:
     """OCR the first frame by default; all-frame mode rejects excess frames.
 
@@ -117,6 +150,22 @@ class ImageDocumentParser:
                 timeout_seconds=timeout), timeout)
             if (result.width, result.height) != (frame.width, frame.height):
                 raise InvalidInput('OCR result dimensions do not match the decoded frame')
+            if _laid_out(result):
+                for paragraph_number, paragraph in enumerate(_paragraphs(result), 1):
+                    text, regions = paragraph
+                    size += len(text.encode()) + (2 if segments else 0)
+                    if len(segments) >= limits.max_segments or size > limits.max_text_bytes:
+                        raise InvalidInput('image OCR exceeds its segment or text byte limit')
+                    boxes = [region.box for region in regions]
+                    box = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes),
+                           max(b[3] for b in boxes))
+                    segments.append(DocumentSegment(text=text, locator=f'frame:{number}/paragraph:{paragraph_number}',
+                        metadata={'frame': str(number), 'paragraph': str(paragraph_number),
+                            'box': json.dumps(box), 'coordinate_space': 'normalized-displayed-frame',
+                            'width': str(frame.width), 'height': str(frame.height), 'engine': result.engine,
+                            'block': str(regions[0].block), 'words': str(len(regions)), 'extraction': 'ocr'},
+                        regions=tuple(regions)))
+                continue
             for region_number, region in enumerate(result.regions, 1):
                 if not region.text.strip():
                     continue

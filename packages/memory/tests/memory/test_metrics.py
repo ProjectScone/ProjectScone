@@ -48,6 +48,26 @@ def metric(report, name):
     return m
 
 
+def turn(i, ts, mode, **latency):
+    return Event(event_id=i, ts=ts, space="alpha", kind="conversation_turn",
+                 payload={"session_id": "s", "turn_id": f"t{i}", "mode": mode, "latency_ms": latency})
+
+
+def test_turn_latency_is_reported_by_mode_and_only_over_turns_that_reached_each_moment():
+    events = [turn(1, "2026-01-01T00:00:01Z", "text", context=10, first_token=40, total=100),
+              turn(2, "2026-01-01T00:00:02Z", "text", context=20, total=300),
+              turn(3, "2026-01-01T00:00:03Z", "voice", context=30, first_token=50, first_audio=90, total=400)]
+    by_name = {m.name: m for m in compute(events, since="2026-01-01T00:00:00Z", until="2026-01-02T00:00:00Z").metrics}
+    assert (by_name["conversation.text.turns"].value, by_name["conversation.voice.turns"].value) == (2, 1)
+    assert by_name["conversation.text.latency_ms.total.p50"].value == 100 and by_name["conversation.text.latency_ms.total.p95"].value == 300
+    assert by_name["conversation.text.latency_ms.first_token.p50"].n == 1, "only the streamed turn reached a first token"
+    assert "conversation.text.latency_ms.first_audio.p50" not in by_name, "a text turn has no first audio"
+    assert by_name["conversation.voice.latency_ms.first_audio.p50"].value == 90 and by_name["conversation.voice.latency_ms.first_audio.p50"].n == 1
+    assert by_name["conversation.voice.latency_ms.first_audio.p50"].unit == "ms" and "perf_counter" in by_name["conversation.voice.latency_ms.total.p95"].definition
+    empty = {m.name: m for m in compute([], since="2026-01-01T00:00:00Z", until="2026-01-02T00:00:00Z").metrics}
+    assert empty["conversation.text.latency_ms.total.p50"].value is None and empty["conversation.text.latency_ms.total.p50"].n == 0
+
+
 def test_nearest_rank_is_the_documented_quantile():
     assert nearest_rank([], 0.5) is None
     assert nearest_rank([10.0], 0.95) == 10.0

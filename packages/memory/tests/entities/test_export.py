@@ -44,7 +44,7 @@ def projection():
 
 def test_every_format_is_offered():
     assert set(EXPORT_FORMATS) == {"json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki", "mermaid",
-                                   "svg", "canvas", "html", "explorer"}
+                                   "svg", "canvas", "html", "explorer", "communities", "tree"}
 
 
 def test_node_link_json_carries_entities_relations_and_facts(projection):
@@ -92,7 +92,11 @@ def test_json_ld_is_linked_data(projection):
 def test_the_obsidian_vault_links_notes_with_safe_file_names(projection):
     vault = zipfile.ZipFile(io.BytesIO(export_graph(projection, "obsidian").body))
     names = vault.namelist()
-    assert all("/" not in name.removeprefix("entities/") and ".." not in name for name in names)
+    # Notes sit one level down, in entities/ or communities/; the rest is the index and the graph view's colours.
+    assert all(".." not in name for name in names)
+    assert all(name.count("/") == 1 for name in names if name.startswith(("entities/", "communities/")))
+    assert {name for name in names if not name.startswith(("entities/", "communities/"))} == {
+        "index.md", "graph.canvas", ".obsidian/graph.json"}
     alice = next(name for name in names if name.lower().startswith("entities/alice chen"))
     note = vault.read(alice).decode()
     assert "[[" in note and "works_at" in note and "May 2021" in note and "fact 1" in note
@@ -131,7 +135,8 @@ def test_names_that_clash_once_made_safe_get_their_own_notes_and_every_link_open
     notes = {name[len("entities/"):-len(".md")] for name in bundle.namelist() if name.startswith("entities/")}
     assert len(notes) == len(projection.entities) == 3
     links = set(re.findall(r"\[\[([^\]]+)\]\]", "\n".join(bundle.read(name).decode() for name in bundle.namelist())))
-    assert len(links) == 3 and links <= notes
+    entity_links = {link for link in links if not link.startswith("communities/")}
+    assert len(entity_links) == 3 and entity_links <= notes
 
 
 
@@ -486,7 +491,8 @@ def test_mermaid_is_a_flowchart_of_entities_and_the_relations_between_them():
     text = mermaid()
     lines = text.splitlines()
     assert lines[0].startswith("%% ") and lines[1] == "flowchart LR"
-    nodes = dict(re.findall(r'^  (n\d+)\["([^"]*)"\]$', text, re.M))
+    # A node in a community's subgraph is indented one level further.
+    nodes = dict(re.findall(r'^(?:  |    )(n\d+)\["([^"]*)"\]$', text, re.M))
     edges = re.findall(r'^  (n\d+) -->\|"([^"]*)"\| (n\d+)$', text, re.M)
     assert "alice chen" in nodes.values() and len(edges) == len(project_entities("alpha", LEDGER, revision=1).relations)
     assert all("(fact" in label for _, label, _ in edges)
@@ -495,7 +501,7 @@ def test_mermaid_is_a_flowchart_of_entities_and_the_relations_between_them():
 
 def test_mermaid_text_cannot_close_a_label_or_start_markup():
     text = mermaid([fact(1, 'eve "x"] --> evil["y', "knows", "Bob <b>#1</b>")])
-    labels = re.findall(r'\["([^"]*)"\]', text)
+    labels = re.findall(r'^\s+n\d+\["([^"]*)"\]$', text, re.M)
     assert len(labels) == 2 and all('"' not in label and "<" not in label for label in labels)
     assert any("#quot;" in label for label in labels) and any("#35;1" in label for label in labels)
     assert text.count("-->") == 1, "one relation, one arrow: a name cannot add an edge"
@@ -504,7 +510,7 @@ def test_mermaid_text_cannot_close_a_label_or_start_markup():
 def test_mermaid_shows_the_most_connected_and_counts_the_rest():
     ledger = [fact(n, f"worker {n:03d}", "works_at", "zenith corp") for n in range(1, 80)]
     text = mermaid(ledger)
-    assert len(re.findall(r'^  n\d+\[', text, re.M)) == 60 and '  n1["zenith corp"]' in text
+    assert len(re.findall(r'^\s+n\d+\[', text, re.M)) == 60 and re.search(r'^\s+n1\["zenith corp"\]$', text, re.M)
     assert text.splitlines()[0].endswith("20 entities and 20 relations left out of the chart; values are not drawn")
 
 
@@ -857,6 +863,89 @@ def test_explorer_draws_the_codebases_own_first_and_says_what_it_left_out(monkey
     assert "relations left out of the page" in data["about"]
 
 
+def test_explorer_lists_the_codebase_as_a_tree_of_directories_files_and_definitions(projection, monkeypatch):
+    from scone_memory.entities import explorer
+
+    rows = [fact(1, "pkg/a.py", "defines", "pkg/a.py:Thing"), fact(2, "pkg/a.py:Thing", "defines", "pkg/a.py:Thing.run"),
+            fact(3, "pkg/sub/b.py", "imports", "pkg/a.py"), fact(4, "top.py", "defines", "top.py:main"),
+            fact(5, "pkg/a.py", "imports", "typing"), fact(6, "alice chen", "works_at", "Acme"),
+            fact(7, "pkg/sub/b.py", "defines", "pkg/sub/b.py:Outer.Inner"), fact(8, "pkg/a.py", "calls", "pkg/a.py:Thing.run")]
+    code = project_entities("alpha", rows, revision=1)
+    data = json.loads(_page(export_graph(code, "explorer").body).data["graph-data"])
+    tree = data["tree"]
+
+    def shape(item):
+        return (item["name"], [shape(child) for child in item.get("children", [])]) if "more" not in item else ("+more", [])
+
+    assert shape(tree) == ("", [("pkg/", [("sub/", [("b.py", [("Outer.Inner", [])])]), ("a.py", [("Thing", [("run", [])])])]),
+                                ("top.py", [("main", [])])]), \
+        "directories first, then files, then what each defines, nested as the code nests it; a person and `typing` are not files"
+    ids = {entity.label: entity.entity_id for entity in code.entities}
+    named = {item["name"]: item for item in tree["children"][0]["children"][1]["children"]}
+    assert named["Thing"]["id"] == ids["pkg/a.py:Thing"] and tree["children"][0]["children"][1]["id"] == ids["pkg/a.py"]
+    assert tree["count"] == 7 and tree["children"][0]["count"] == 5, "a count is the entries beneath"
+    page = export_graph(code, "explorer").body.decode()
+    assert 'id="tree"' in page and 'id="unfold"' in page and "the module tree" not in data["about"]
+    assert "tree" not in json.loads(_page(export_graph(projection, "explorer").body).data["graph-data"])["about"]
+    assert json.loads(_page(export_graph(projection, "explorer").body).data["graph-data"])["tree"] is None
+    assert 'id="tree"' not in export_graph(projection, "explorer").body.decode(), "a graph of people has no module tree"
+    monkeypatch.setattr(explorer, "MAX_TREE_CHILDREN", 1)
+    data = json.loads(_page(export_graph(code, "explorer").body).data["graph-data"])
+    top = data["tree"]["children"]
+    assert [item.get("name") for item in top] == ["pkg/", "+1 more"] and top[1]["more"] == 1
+    assert "folded" in data["about"] and "lists 1 entries per directory or file" in data["about"]
+
+
+def test_a_module_tree_places_a_declaration_by_its_relation_first_and_by_its_name_when_none_says():
+    from scone_memory.entities.explorer import module_tree
+
+    entities = [("f", "src/x.py"), ("c", "src/x.py:Box"), ("m", "src/x.py:Box.open"), ("s", "src/x.py:stray"),
+                ("o", "other.txt"), ("p", "a person"), ("w", "web/app.ts"), ("d", "web/app.ts:App")]
+    tree, folded = module_tree(entities, [("f", "defines", "c"), ("c", "defines", "m"), ("w", "imports", "f")])
+    files = {item["name"]: item for item in tree["children"] if "id" in item}
+    assert set(files) == {"other.txt"} and [d["name"] for d in tree["children"] if "id" not in d] == ["src/", "web/"]
+    [x] = tree["children"][0]["children"]
+    assert [child["name"] for child in x["children"]] == ["Box", "stray"], "a declaration nothing places sits under its file"
+    assert [child["name"] for child in x["children"][0]["children"]] == ["open"], "a nested name is shortened to what it adds"
+    assert tree["children"][1]["children"][0]["children"][0]["name"] == "App", "placed under its file by name when no relation is drawn"
+    assert folded == 0 and module_tree([("p", "a person")], []) == (None, 0)
+    library, _ = module_tree([("f", "top.py"), ("r", "README.md"), ("a", "asyncio.run"), ("m", "ast.Module"), ("j", "json.dumps"),
+                              ("d", "pkg/deep.py")], [])
+    assert [item["name"] for item in library["children"]] == ["pkg/", "README.md", "top.py"], \
+        "a dotted library name is not a file; a bare name is one when a reader knows its suffix"
+
+
+def test_a_module_tree_keeps_every_declaration_reachable_and_bounds_its_depth():
+    from scone_memory.entities import explorer
+    from scone_memory.entities.explorer import module_tree
+
+    def names(item):
+        return [child["name"] for child in item["children"]]
+
+    # A relation from a person, a colon in a person's label, and a loop of
+    # `defines` place nothing: each declaration still sits under its file.
+    entities = [("f", "pkg/a.py"), ("p", "alice chen"), ("t", "pkg/a.py:Thing"), ("d", "alice:note"),
+                ("x", "pkg/a.py:X"), ("y", "pkg/a.py:Y")]
+    tree, _ = module_tree(entities, [("p", "defines", "t"), ("x", "defines", "y"), ("y", "defines", "x")])
+    [pkg] = tree["children"]
+    [a] = pkg["children"]
+
+    def beneath(item):
+        return [child["name"] for child in item["children"]] + [name for child in item["children"] for name in beneath(child)]
+
+    assert sorted(beneath(a)) == ["Thing", "X", "Y"] and tree["count"] == 4, "nothing is lost, and a person's label is not a declaration"
+    assert "Thing" in names(a), "a relation from a person places nothing: the declaration sits under its file"
+    chain = [("f", "pkg/a.py")] + [(f"d{n}", f"pkg/a.py:D{n}") for n in range(1_200)]
+    relations = [("f", "defines", "d0")] + [(f"d{n}", "defines", f"d{n + 1}") for n in range(1_199)]
+    deep, _ = module_tree(chain, relations)
+    assert deep["count"] == 1_201, "a chain of definitions longer than the stack does not crash the export"
+    file_entry = deep["children"][0]["children"][0]
+    assert len(file_entry["children"]) > 1, "declarations held deeper than the bound sit under their file"
+    def depth(item):
+        return 1 + max((depth(child) for child in item.get("children", [])), default=0)
+    assert depth(file_entry) <= explorer.MAX_TREE_DEPTH + 3
+
+
 def test_explorer_pins_its_policy_to_the_bytes_it_emits_and_its_script_parses(projection):
     import base64
     import hashlib
@@ -878,3 +967,183 @@ def test_explorer_pins_its_policy_to_the_bytes_it_emits_and_its_script_parses(pr
     checked = subprocess.run([node, "-e", "new Function(process.argv[1])", code], capture_output=True, text=True, timeout=30)
     assert checked.returncode == 0, checked.stderr
     assert "Object.create(null)" in code and "pointerleave" in code and "settle()" in code
+
+
+def _two_communities():
+    triples = [(f"worker {n}", "works_at", "Acme") for n in range(3)] + [
+        (f"resident {n}", "lives_in", "Porto") for n in range(3)] + [
+        ("worker 0", "lives_in", "Porto"), ("worker 1", "knows", "Worker 1"), ("Lone Star", "is_a", "Lone Star")]
+    return project_entities("alpha", [fact(n + 1, *triple) for n, triple in enumerate(triples)], revision=1)
+
+
+def _drawing_of(body: bytes):
+    """The page's drawing, parsed as the SVG it is."""
+    text = body.decode("utf-8")
+    start = text.index("<svg", text.index('id="drawing"'))
+    return ElementTree.fromstring(text[start:text.index("</svg>", start) + len("</svg>")])
+
+
+def _legend(body: bytes):
+    """Each legend row: its community, its checkbox, its swatch's classes and its text."""
+    from html.parser import HTMLParser
+
+    class Legend(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.rows, self.row, self.all = [], None, None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "li" and "data-group" in attrs:
+                self.row = {"group": attrs["data-group"], "checkbox": None, "swatch": None, "text": ""}
+                self.rows.append(self.row)
+            elif tag == "input" and attrs.get("id") == "legend-all":
+                self.all = attrs
+            elif self.row is not None and tag == "input":
+                self.row["checkbox"] = attrs
+            elif self.row is not None and tag == "span" and "swatch" in attrs.get("class", "").split():
+                self.row["swatch"] = attrs["class"].split()
+
+        def handle_endtag(self, tag):
+            if tag == "li":
+                self.row = None
+
+        def handle_data(self, data):
+            if self.row is not None:
+                self.row["text"] += data
+
+    legend = Legend()
+    legend.feed(body.decode("utf-8"))
+    return legend
+
+
+def test_html_legend_lists_each_drawn_community_with_its_colour_and_what_is_drawn_of_it():
+    body = export_graph(_two_communities(), "html").body
+    root, legend = _drawing_of(body), _legend(body)
+    boxes = root.find(f"{SVG}g[@class='communities']")
+    communities = boxes.findall(f"{SVG}rect")
+    assert len(communities) == 3, "two communities and the entity with no relation to another"
+    assert [row["group"] for row in legend.rows] == [rect.get("data-group") for rect in communities]
+    style = body.decode("utf-8").split("<style>", 1)[1].split("</style>", 1)[0]
+    for row, community in zip(legend.rows, communities):
+        rect = community
+        [title] = [text for text in boxes.findall(f"{SVG}text") if text.get("data-group") == row["group"]]
+        [colour_class] = [name for name in row["swatch"] if re.fullmatch(r"c\d+", name)]
+        rule = re.search(r"\.swatch\." + colour_class + r"\s*\{\s*background:\s*(#[0-9A-Fa-f]{6})", style)
+        assert rule and rule.group(1) == rect.get("fill"), "the swatch is the colour of the community's box"
+        drawn = sum(1 for group in root.iter(f"{SVG}g")
+                    if group.get("data-entity") and group.get("data-group") == row["group"])
+        label, count = row["text"].strip().rsplit(" ", 2)[0].strip(), " ".join(row["text"].split()[-2:])
+        assert label == title.text and count == f"{drawn} drawn", row["text"]
+        assert row["checkbox"]["type"] == "checkbox" and "checked" in row["checkbox"]
+        assert row["checkbox"]["data-group"] == row["group"]
+    assert legend.all is not None and legend.all["type"] == "checkbox" and "checked" in legend.all
+    assert len({row["checkbox"]["id"] for row in legend.rows}) == len(legend.rows), "controls keep stable ids"
+
+
+def test_html_drawing_marks_what_hiding_a_community_must_hide():
+    projection = _two_communities()
+    body = export_graph(projection, "html").body
+    root, data = _drawing_of(body), json.loads(_page(body).data["graph-data"])
+    group_of = {group.get("data-entity"): group.get("data-group") for group in root.iter(f"{SVG}g")
+                if group.get("data-entity")}
+    assert set(group_of) == {entity.entity_id for entity in projection.entities} and all(group_of.values())
+    assert {node["id"]: node["group"] for node in data["nodes"]} == group_of
+    drawn = {element.get("data-relation"): element for element in root.iter()
+             if element.get("data-relation") is not None}
+    assert set(drawn) == {edge["id"] for edge in data["edges"]}, "a loop is found by its relation too"
+    loops = [edge for edge in data["edges"] if edge["source"] == edge["target"]]
+    assert len(loops) == 2
+    for edge in data["edges"]:
+        element = drawn[edge["id"]]
+        assert element.get("data-from-group") == group_of[edge["source"]]
+        assert element.get("data-to-group") == group_of[edge["target"]]
+
+
+def test_html_code_hides_communities_and_moves_the_view_to_a_chosen_entity(projection):
+    page = _page(export_graph(projection, "html").body)
+    code = page.data["graph-code"]
+    tags = [(tag, attrs) for tag, attrs in page.tags]
+    assert ("ul", {"id": "matches", "aria-label": "Matching entities"}) in tags
+    # Hiding is by community on every mark that belongs to it; choosing an
+    # entity reveals its community and centres the view on it.
+    for needle in ("data-from-group", "data-to-group", "indeterminate", "function centre(", "function choose("):
+        assert needle in code, needle
+    assert "textContent" in code and "innerHTML" not in code
+
+
+def _subgraphs(text):
+    """Each subgraph's id, label and the node ids declared inside it, and the nodes declared outside any."""
+    found, outside, current = {}, [], None
+    for line in text.splitlines():
+        opened = re.fullmatch(r'  subgraph (c\d+)\["([^"]*)"\]', line)
+        if opened:
+            current = opened.group(1)
+            found[current] = (opened.group(2), [])
+        elif line == "  end":
+            current = None
+        elif node := re.fullmatch(r'\s+(n\d+)\["[^"]*"\]', line):
+            (found[current][1] if current else outside).append(node.group(1))
+    return found, outside
+
+
+def test_mermaid_groups_the_drawn_entities_of_each_community_in_a_subgraph():
+    from scone_memory.entities.analysis import cached_analysis
+
+    projection = _two_communities()
+    text = export_graph(projection, "mermaid").body.decode()
+    groups, outside = _subgraphs(text)
+    ids = dict(re.findall(r'^\s+(n\d+)\["([^"]*)"\]$', text, re.M))
+    label_of = {entity.entity_id: entity.label for entity in projection.entities}
+    expected = {tuple(sorted(label_of[member] for member in community.members))
+                for community in cached_analysis(projection).communities if len(community.members) > 1}
+    assert {tuple(sorted(ids[node] for node in members)) for _, members in groups.values()} == expected
+    assert len(groups) == 2 and outside == [node for node, label in ids.items() if label == "Lone Star"], \
+        "an entity alone in its community is drawn outside any subgraph"
+    labels = {community.label for community in cached_analysis(projection).communities}
+    assert {label for label, _ in groups.values()} <= labels
+    assert text.count("  subgraph ") == text.count("\n  end\n") == 2
+    edges = re.findall(r'^  (n\d+) -->\|"[^"]*"\| (n\d+)$', text, re.M)
+    assert len(edges) == len(projection.relations), "relations still run between the grouped nodes"
+
+
+def test_mermaid_subgraph_labels_are_text():
+    text = mermaid([fact(1, 'eve "x"] --> evil["y', "knows", "Bob <b>#1</b>"),
+                    fact(2, "Bob <b>#1</b>", "knows", 'eve "x"] --> evil["y')])
+    groups, _ = _subgraphs(text)
+    assert len(groups) == 1
+    [(label, members)] = groups.values()
+    assert '"' not in label and "<" not in label and len(members) == 2
+    assert text.count("-->") == 2
+
+
+def test_mermaid_styles_each_entity_by_its_kind():
+    from scone_memory.entities.kinds import EntityKind
+    from typing import get_args
+
+    projection = _two_communities()
+    text = export_graph(projection, "mermaid").body.decode()
+    ids = dict(re.findall(r'^\s+(n\d+)\["([^"]*)"\]$', text, re.M))
+    kind_of = {entity.label: entity.kind for entity in projection.entities}
+    styles = dict(re.findall(r"^  classDef (\w+) (.+)$", text, re.M))
+    classes = {kind: members.split(",") for members, kind in re.findall(r"^  class ([n\d,]+) (\w+)$", text, re.M)}
+    drawn_kinds = {kind for kind in kind_of.values() if kind is not None}
+    assert set(styles) == set(classes) == drawn_kinds and drawn_kinds <= set(get_args(EntityKind))
+    assert len(drawn_kinds) >= 2 and len(set(styles.values())) == len(styles), "each kind looks different"
+    for kind, members in classes.items():
+        assert sorted(ids[node] for node in members) == sorted(
+            label for label, of in kind_of.items() if of == kind and label in ids.values())
+    assert all(kind_of[label] is None for node, label in ids.items() if not any(node in m for m in classes.values()))
+
+
+def test_mermaid_draws_an_entity_outside_any_subgraph_when_the_chart_cut_the_rest_of_its_community():
+    # 70 workers fill the chart after their employer; Porto's two residents
+    # sort last and are cut, so Porto is drawn without another of its community.
+    ledger = [fact(n, f"worker {n:02d}", "works_at", "Zenith Corp") for n in range(1, 71)]
+    ledger += [fact(71, "zz resident 1", "lives_in", "Porto"), fact(72, "zz resident 2", "lives_in", "Porto")]
+    text = mermaid(ledger)
+    groups, outside = _subgraphs(text)
+    ids = dict(re.findall(r'^\s+(n\d+)\["([^"]*)"\]$', text, re.M))
+    assert len(ids) == 60 and "zz resident 1" not in ids.values()
+    assert [ids[node] for node in outside] == ["Porto"]
+    assert len(groups) == 1 and "Porto" not in [ids[node] for node in next(iter(groups.values()))[1]]
