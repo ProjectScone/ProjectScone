@@ -62,6 +62,32 @@ def test_labels_recover_the_casing_people_wrote() -> None:
     assert entities["bob"].label == "Bob"
 
 
+def test_a_code_name_keeps_the_casing_it_was_declared_with() -> None:
+    rows = [Fact(fact_id=1, space="alpha", subject="pkg/sync.py", predicate="defines", object="pkg/sync.py:DirectorySync._finish",
+                 valid_from="2025-01-01T00:00:00Z")]
+    for n in range(2, 8):
+        rows.append(Fact(fact_id=n, space="alpha", subject="pkg/sync.py:directorysync._finish", predicate="calls",
+                         object=f"pkg/other.py:helper{n}", valid_from="2025-01-01T00:00:00Z", quote="self._finish(x)"))
+    rows.append(Fact(fact_id=9, space="alpha", subject="alice chen", predicate="knows", object="Bob", valid_from="2025-01-01T00:00:00Z"))
+    for n in range(10, 14):
+        rows.append(Fact(fact_id=n, space="alpha", subject="alice chen", predicate="knows", object=f"Cho{n}", valid_from="2025-01-01T00:00:00Z"))
+    entities = by_key(project_entities("alpha", rows, revision=1))
+    assert entities["pkg/sync.py:directorysync._finish"].label == "pkg/sync.py:DirectorySync._finish", \
+        "six calls by the lowercased key do not outvote the one declaration"
+    assert entities["alice chen"].label == "alice chen", "a person's label is still the spelling used most"
+    prose = [Fact(fact_id=n, space="alpha", subject="https://example.com/x", predicate="mentions", object=f"Thing{n}",
+                  valid_from="2025-01-01T00:00:00Z") for n in range(1, 8)]
+    prose.append(Fact(fact_id=8, space="alpha", subject="HTTPS://EXAMPLE.COM/X", predicate="mentions", object="Shout",
+                      valid_from="2025-01-01T00:00:00Z"))
+    prose += [Fact(fact_id=n, space="alpha", subject="the ratio 1:2", predicate="describes", object=f"Mix{n}",
+                   valid_from="2025-01-01T00:00:00Z") for n in range(9, 12)]
+    prose.append(Fact(fact_id=12, space="alpha", subject="The Ratio 1:2", predicate="describes", object="Loud",
+                      valid_from="2025-01-01T00:00:00Z"))
+    named = by_key(project_entities("alpha", prose, revision=1))
+    assert named["https://example.com/x"].label == "https://example.com/x", "a URL is not a code name: the spelling used most still wins"
+    assert named["the ratio 1:2"].label == "the ratio 1:2", "nor is a sentence with a colon in it"
+
+
 def test_a_chain_of_claims_about_related_things_is_connected() -> None:
     projection = project_entities("alpha", LEDGER, revision=1)
     ids = {entity.key: entity.entity_id for entity in projection.entities}

@@ -39,6 +39,7 @@ GRAPH_ARGUMENTS = {
     "memory_graph_changes": {"since", "until", "limit", "max_bytes", "space"},
     "memory_entity_duplicates": {"limit", "min_score", "max_bytes", "space"},
     "memory_temporal_answer": {"question", "now", "limit", "max_bytes", "space"},
+    "memory_graph_cycles": {"limit", "max_bytes", "space"},
     "memory_graph_health": {"limit", "max_bytes", "space"},
     "memory_graph_affected": {"name", "max_hops", "limit", "max_bytes", "space"},
 }
