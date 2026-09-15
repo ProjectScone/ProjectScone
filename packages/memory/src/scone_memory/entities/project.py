@@ -49,6 +49,10 @@ class Support:
     stated: int = 0
     extracted: int = 0
     inferred: int = 0
+    #: Active and not excluded: the facts that would answer a question now.
+    #: Status and exclusion are counted apart above, so this is the only
+    #: count that says whether anything behind the item is usable.
+    held: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,12 +204,36 @@ def _grounding(fact: Fact) -> Grounding:
     return "quoted" if fact.quote else "unquoted"
 
 
+Origin = Literal["stated", "extracted", "inferred", "mixed"]
+Standing = Literal["active", "proposed", "excluded", "closed"]
+
+
+def backing_of(support: Support) -> tuple[Origin, Standing, Grounding]:
+    """What backs an item, as three words a drawing can show.
+
+    Origin is the one kind of fact behind it, or ``mixed``. Standing is the
+    best of its facts, in the order that matters to a reader: anything held
+    makes it ``active``; otherwise anything proposed makes it ``proposed``;
+    otherwise anything excluded makes it ``excluded``; otherwise it is
+    ``closed``. Grounding is its best evidence: a quote, then a source with
+    no quote, then no source. Best, not worst, because an edge is as
+    trustworthy as the strongest fact behind it -- and the counts stay on
+    the item for a reader who wants the rest."""
+    kinds = [name for name in ("stated", "extracted", "inferred") if getattr(support, name)]
+    origin: Origin = cast(Origin, kinds[0]) if len(kinds) == 1 else "mixed"
+    standing: Standing = ("active" if support.held else "proposed" if support.proposed
+                          else "excluded" if support.excluded else "closed")
+    grounding: Grounding = "quoted" if support.quoted else "unquoted" if support.unquoted else "unsourced"
+    return origin, standing, grounding
+
+
 def _support(facts: Iterable[Fact]) -> Support:
     counts: Counter[str] = Counter()
     for fact in facts:
         counts["facts"] += 1
         counts[fact.status] += 1
         counts["excluded"] += fact.excluded
+        counts["held"] += fact.status == "active" and not fact.excluded
         counts[_grounding(fact)] += 1
         counts[fact.origin] += 1
     return Support(**{name: counts[name] for name in Support.__slots__})
@@ -236,6 +264,20 @@ def quoted_form(key: str, quote: str | None) -> str | None:
 
 def _label(forms: Counter[str], key: str) -> str:
     return min(forms, key=lambda form: (-forms[form], not any(c.isupper() for c in form), form)) if forms else key
+
+
+def _undigested_held(record: object) -> object:
+    """The digest's view of an item: its support without ``held``.
+
+    ``held`` counts facts that are active and not excluded, and every
+    fact's status and exclusion are already in the digest through its
+    role. So it adds nothing to what the digest identifies, and leaving it
+    out keeps every digest computed before it existed -- ids, cursors and
+    caches rest on those."""
+    support = record.get("support") if isinstance(record, dict) else None
+    if isinstance(record, dict) and isinstance(support, dict) and "held" in support:
+        record = {**record, "support": {key: value for key, value in support.items() if key != "held"}}
+    return record
 
 
 def _canonical(value: object) -> bytes:
@@ -321,8 +363,8 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
     implied, capped = _implied(space, relations, spans, meanings)
     digest = hashlib.sha256(_canonical({
         "version": [PROJECTION_VERSION, CLASSIFIER_VERSION, KIND_HINTS_VERSION], "space": space,
-        "entities": [_plain(item) for item in entities], "relations": [_plain(item) for item in relations],
-        "attributes": [_plain(item) for item in attributes], "roles": [_plain(item) for item in roles],
+        "entities": [_plain(item) for item in entities], "relations": [_undigested_held(_plain(item)) for item in relations],
+        "attributes": [_undigested_held(_plain(item)) for item in attributes], "roles": [_plain(item) for item in roles],
         **({"meanings": meanings.record(), "implied": [_plain(item) for item in implied]}
            if meanings else {}),
     })).hexdigest()

@@ -6,10 +6,13 @@ reference framework itself -- installed, unmodified -- over the same bench
 items we score ourselves with: every session becomes one of its Documents,
 its ``SentenceSplitter`` cuts them, its ``VectorStoreIndex`` embeds them
 through an adapter around **our** embedder, and its retriever ranks the
-nodes for the question. Nodes are folded to sessions in rank order so the
-two sides are scored by the same rule (session recall, MRR) on the same
-items. No model, reranker or query rewriting runs on either side, and the
-configuration both ran under is written into the report.
+nodes for the question. Each side's ranking is folded to distinct
+sessions in rank order -- its nodes, our passages -- and our recall is
+asked for enough passages that the top ``k`` sessions are reachable, so
+the two sides are scored by the same rule (session recall at k, MRR,
+precision and NDCG at k) on the same items. No model, reranker or query
+rewriting runs on either side, and the configuration both ran under is
+written into the report.
 
 What this measures is retrieval over conversation sessions with one
 embedder. It does not measure answer quality, and it is not the reference
@@ -173,11 +176,22 @@ def _documents(item: BenchItem) -> list[tuple[str, str]]:
 
 
 async def llamaindex_session_ranking(item: BenchItem, embedder: Embedder, *, k: int,
-                                     chunk_size: int = 512, chunk_overlap: int = 0) -> list[str]:
-    """Sessions in the order LlamaIndex's default vector retrieval ranks
-    their nodes for the item's question, at most ``k`` distinct."""
+                                     chunk_size: int = 512, chunk_overlap: int = 0, hybrid: bool = False) -> list[str]:
+    """Sessions in the order LlamaIndex ranks their nodes for the item's
+    question, at most ``k`` distinct: its default vector retrieval, or with
+    ``hybrid`` its own BM25 retriever fused with the vector retriever by
+    reciprocal rank -- the reference at its best rather than its default."""
     from llama_index.core import Document, VectorStoreIndex
     from llama_index.core.node_parser import SentenceSplitter
+
+    if hybrid:
+        try:
+            from llama_index.retrievers.bm25 import BM25Retriever  # type: ignore[import-untyped]
+        except ImportError:  # pragma: no cover - depends on the optional package
+            raise ImportError("the hybrid reference needs llama-index-retrievers-bm25; install it beside llama-index-core") from None
+        from llama_index.core.llms import MockLLM
+        from llama_index.core.retrievers import QueryFusionRetriever
+        from llama_index.core.retrievers.fusion_retriever import FUSION_MODES
 
     if type(k) is not int or k < 1:
         raise ValueError("k must be a positive integer")
@@ -195,8 +209,17 @@ async def llamaindex_session_ranking(item: BenchItem, embedder: Embedder, *, k: 
         # Every node is ranked, so a session that splits into many nodes
         # cannot crowd the others out of a fixed top-N before the folding.
         nodes_in_index = max(1, len(index.docstore.docs))
-        retriever = index.as_retriever(similarity_top_k=nodes_in_index)
-        return list(retriever.retrieve(item.question))
+        vector = index.as_retriever(similarity_top_k=nodes_in_index)
+        if not hybrid:
+            return list(vector.retrieve(item.question))
+        lexical = BM25Retriever.from_defaults(docstore=index.docstore, similarity_top_k=nodes_in_index)
+        # One query, no LLM: the fusion here is the reference's rank fusion
+        # of its two retrievers, not its model-written query variants.
+        # A mock model satisfies the fusion retriever's constructor; with one
+        # query it is never asked anything, and no hosted model is touched.
+        fused = QueryFusionRetriever([vector, lexical], llm=MockLLM(), similarity_top_k=nodes_in_index, num_queries=1,
+                                     mode=FUSION_MODES.RECIPROCAL_RANK, use_async=False, verbose=False)
+        return list(fused.retrieve(item.question))
 
     nodes = await asyncio.to_thread(build_and_retrieve)
     ranked: list[str] = []
@@ -211,9 +234,17 @@ async def llamaindex_session_ranking(item: BenchItem, embedder: Embedder, *, k: 
 
 @dataclass(frozen=True)
 class SideScores:
+    """One side's numbers at every k: whether any answer session was in
+    the top k, whether all were, the mean reciprocal rank, and -- the
+    reference framework's own retrieval measures -- precision at k (the
+    share of the top k that answer) and NDCG at k (the answers' places,
+    discounted by rank)."""
+
     recall_any: dict[int, float]
     recall_all: dict[int, float]
     mrr: float
+    precision: dict[int, float] = field(default_factory=dict)
+    ndcg: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -252,7 +283,9 @@ class Comparison:
     def record(self) -> dict[str, Any]:
         def side(scores: SideScores) -> dict[str, Any]:
             return {"recall_any": {str(k): v for k, v in scores.recall_any.items()},
-                    "recall_all": {str(k): v for k, v in scores.recall_all.items()}, "mrr": scores.mrr}
+                    "recall_all": {str(k): v for k, v in scores.recall_all.items()}, "mrr": scores.mrr,
+                    "precision": {str(k): v for k, v in scores.precision.items()},
+                    "ndcg": {str(k): v for k, v in scores.ndcg.items()}}
 
         ks = sorted(self.delta.recall_any)
         return {"protocol": "comparative-retrieval-v1", "n": self.n,
@@ -267,32 +300,60 @@ class Comparison:
 
 def _scores(rankings: Sequence[tuple[Sequence[str], set[str]]], ks: Sequence[int]) -> SideScores:
     if not rankings:
-        return SideScores({k: 0.0 for k in ks}, {k: 0.0 for k in ks}, 0.0)
+        return SideScores({k: 0.0 for k in ks}, {k: 0.0 for k in ks}, 0.0, {k: 0.0 for k in ks}, {k: 0.0 for k in ks})
     recall_any = {k: round(bench_metrics.hit_rate(rankings, k), 4) for k in ks}
     recall_all = {k: round(sum(1.0 for retrieved, relevant in rankings if relevant <= set(retrieved[:k])) / len(rankings), 4)
                   for k in ks}
-    return SideScores(recall_any, recall_all, round(bench_metrics.mrr(rankings), 4))
+    precision = {k: round(sum(bench_metrics.precision_at(retrieved, relevant, k) for retrieved, relevant in rankings)
+                          / len(rankings), 4) for k in ks}
+    ndcg = {k: round(sum(bench_metrics.ndcg_at(retrieved, relevant, k) for retrieved, relevant in rankings)
+                     / len(rankings), 4) for k in ks}
+    return SideScores(recall_any, recall_all, round(bench_metrics.mrr(rankings), 4), precision, ndcg)
+
+
+def distinct_sessions(ranked: Sequence[str], k: int) -> tuple[str, ...]:
+    """The first ``k`` distinct sessions of a ranking of passages, in
+    the order their first passage held: a session cut into many passages
+    is one session in the ranking, as it is on the reference's side."""
+    return tuple(dict.fromkeys(session for session in ranked if session))[:k]
 
 
 def side_delta(ours: SideScores, theirs: SideScores) -> SideScores:
-    """Ours minus theirs, at every k and for MRR; positive means we did better."""
+    """Ours minus theirs, at every k for recall, precision and NDCG, and
+    for MRR; positive means we did better. Two sides scored at different
+    ks, or one with precision and NDCG and one without, are refused: a
+    missing number is not a zero."""
     if set(ours.recall_any) != set(theirs.recall_any):
         raise ValueError("both sides must be scored at the same ks")
+    for name in ("precision", "ndcg"):
+        if set(getattr(ours, name)) != set(getattr(theirs, name)):
+            raise ValueError(f"both sides must carry {name} at the same ks, or neither")
     return SideScores({k: round(ours.recall_any[k] - theirs.recall_any[k], 4) for k in ours.recall_any},
                       {k: round(ours.recall_all[k] - theirs.recall_all[k], 4) for k in ours.recall_all},
-                      round(ours.mrr - theirs.mrr, 4))
+                      round(ours.mrr - theirs.mrr, 4),
+                      {k: round(ours.precision[k] - theirs.precision[k], 4) for k in ours.precision},
+                      {k: round(ours.ndcg[k] - theirs.ndcg[k], 4) for k in ours.ndcg})
 
 
 async def compare(items: Iterable[BenchItem], make_engine: Callable[[], Any], embedder: Embedder, *,
-                  ks: Sequence[int] = (5, 10, 15), chunk_size: int = 512, chunk_overlap: int = 0) -> Comparison:
-    """Both sides over the same items, scored by the same rule."""
+                  ks: Sequence[int] = (5, 10, 15), chunk_size: int = 512, chunk_overlap: int = 0,
+                  hybrid: bool = False) -> Comparison:
+    """Both sides over the same items, scored by the same rule; ``hybrid``
+    runs the reference with its BM25 retriever fused in, its best configuration."""
     import llama_index.core
 
     items = list(items)
     if not ks or any(type(k) is not int or k < 1 for k in ks):
         raise ValueError("ks must be positive integers")
     k_max = max(ks)
-    ours = await run(make_engine, items, ks=tuple(ks), limit=k_max)
+    # Our recall returns passages, up to PER_EPISODE_CAP of one session;
+    # asked for that many times k, it can reach k distinct sessions, and
+    # the ranking is folded to sessions before it is scored -- the same
+    # rule the reference's nodes are folded by.
+    from ..retrieval.fusion import PER_EPISODE_CAP
+
+    recall_limit = k_max * PER_EPISODE_CAP
+    ours = await run(make_engine, items, ks=tuple(ks), limit=recall_limit)
     by_id: dict[str, ItemResult] = {result.question_id: result for result in ours.results}
     compared: list[ItemComparison] = []
     excluded = 0
@@ -300,17 +361,22 @@ async def compare(items: Iterable[BenchItem], make_engine: Callable[[], Any], em
         if not item.has_evidence:
             excluded += 1
             continue
-        theirs = await llamaindex_session_ranking(item, embedder, k=k_max, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        theirs = await llamaindex_session_ranking(item, embedder, k=k_max, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                                                  hybrid=hybrid)
         mine = by_id.get(item.question_id)
         compared.append(ItemComparison(item.question_id, item.question_type, tuple(item.answer_session_ids),
-                                       tuple(mine.retrieved_sessions[:k_max]) if mine else (), tuple(theirs)))
+                                       distinct_sessions(mine.retrieved_sessions, k_max) if mine else (), tuple(theirs)))
     scone = _scores([(item.scone, set(item.answer_sessions)) for item in compared], ks)
     llama = _scores([(item.llamaindex, set(item.answer_sessions)) for item in compared], ks)
     delta = side_delta(scone, llama)
     config: dict[str, Any] = {
         "embedder": embedder.id, "llm": None, "reranker": None, "ks": list(ks),
-        "scone": {"recall_limit": k_max, "retrieval": "engine defaults: vector + lexical lanes, reciprocal rank fusion"},
-        "llamaindex": {"version": llama_index.core.__version__, "index": "VectorStoreIndex", "retriever": "VectorIndexRetriever",
+        "scone": {"recall_limit": recall_limit, "retrieval": "engine defaults: vector + lexical lanes, reciprocal rank fusion",
+                  "sessions_folded_from_passages": True},
+        "llamaindex": {"version": llama_index.core.__version__, "index": "VectorStoreIndex",
+                       "retriever": ("QueryFusionRetriever(VectorIndexRetriever + BM25Retriever)" if hybrid
+                                     else "VectorIndexRetriever"),
+                       "fusion": "reciprocal_rerank" if hybrid else None,
                        "splitter": "SentenceSplitter", "chunk_size": chunk_size, "chunk_overlap": chunk_overlap,
                        "similarity_top_k": "every node in the item's index", "sessions_folded_from_nodes": True},
     }

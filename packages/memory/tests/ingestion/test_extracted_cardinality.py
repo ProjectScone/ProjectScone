@@ -71,7 +71,7 @@ async def test_every_predicate_the_framework_extracts_is_declared_many_valued():
     """The declaration lives apart from the readers; this keeps them from
     drifting when a reader gains a predicate."""
     from_code = {getattr(code_graph, name) for name in ("DEFINES", "IMPORTS", "CALLS", "INHERITS", "MIXES_IN",
-                                                          "NOTES", "FLAGS", "CITES")}
+                                                          "NOTES", "FLAGS", "CITES", "REFERENCES")}
     from_manifests = {manifests.DEPENDS_ON, manifests.DEVELOPS_WITH}
     assert from_code | from_manifests == set(MANY_VALUED)
 

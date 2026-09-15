@@ -105,7 +105,10 @@ async def test_native_pdf_manifest_keeps_its_original_v1_bytes_and_identity():
     from scone_memory.ingestion import PypdfParser
     memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
     raw = pdf_bytes()
-    parsed = await PypdfParser().parse(raw, PdfLimits())
+    # The v1 manifest is what the text layer as extracted gives; the default
+    # reading-order pass writes receipts, which is version three.
+    as_extracted = PypdfParser(layout='as_extracted')
+    parsed = await as_extracted.parse(raw, PdfLimits())
     old_pages = [page.model_dump(exclude={'extraction', 'region_geometry', 'regions', 'ocr_engine'})
         for page in parsed.pages]
     old_manifest = json.dumps({'schema_version': 1, 'offset_unit': 'extracted_text_utf8_bytes',
@@ -113,7 +116,7 @@ async def test_native_pdf_manifest_keeps_its_original_v1_bytes_and_identity():
         'text_sha256': hashlib.sha256(parsed.text.encode()).hexdigest(), 'parser': parsed.parser,
         'pages': old_pages}, separators=(',', ':'), ensure_ascii=False).encode()
     try:
-        result = await ingest_pdf(memory, 'alpha', raw)
+        result = await ingest_pdf(memory, 'alpha', raw, parser=as_extracted)
         assert (await memory.attachment('alpha', result.manifest.attachment_id))[1] == old_manifest
     finally:
         await memory.close()

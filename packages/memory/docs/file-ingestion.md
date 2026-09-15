@@ -93,6 +93,21 @@ existing serialized attachment identities; existing version 1 evidence stays
 readable. Re-extract an old OCR document to obtain typed regions. When using a
 workflow, change its `parser_revision` and use a new run for that re-extraction.
 
+## Claims from stored source files
+
+A source file, or a manifest the text reader keeps line by line
+(`pyproject.toml`, `Cargo.toml`, `requirements*.txt`), ingested as a document
+says what it defines, imports, calls and depends on, recorded as claims cited
+to the document's episode and quoted from its lines (at most 2,000 characters
+of a line), under the filename it was stored with; the receipt's `claims`
+counts them, and it is zero for every other document. A `package.json` is
+walked as JSON, not kept as lines, so its dependencies are read through `map`
+rather than from a stored document.
+The reader sees the document's segments one per line, so every quote is a
+line the episode holds. A name given bare (`utils.py`) names a bare module;
+give the path from the project root, as the directory sync does, for the
+module the graph's other files name.
+
 ## Coverage
 
 | Reader | Evidence retained | Limits |
@@ -101,9 +116,9 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
-| DOCX | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
-| XLSX | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
-| PPTX | Slides, table text and notes | No rendered Office layout or macro execution |
+| DOCX, and DOCM, DOTX, DOTM | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
+| XLSX, and XLSM, XLTX, XLTM | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
+| PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
@@ -111,6 +126,14 @@ workflow, change its `parser_revision` and use a new run for that re-extraction.
 | PDF | Page locators, extraction method, configured OCR regions and engine | Native text by default; OCR requires an explicit parser |
 | Images | Frame/region locators and typed OCR geometry | Explicit `ImageDocumentParser` and OCR engine required |
 | Audio/video | Audio-stream timestamps | Explicit `MediaDocumentParser` and transcription provider required; video frames are not analyzed |
+
+The macro-enabled, template and slideshow variants of Word, Excel and
+PowerPoint files are the same package as the plain one with another content
+type on its main part, and are read alike, under their own extension
+(`document_format` says `docm`). Macros a package carries are neither run nor
+read; a document that carried them says so in its metadata (`macros:
+present, not read`), so a search over a folder of macro-enabled files can
+tell which ones held code.
 
 OpenDocument extraction uses current content: `text:tracked-changes` revision
 history and `office:change-info` metadata are omitted. Current text, including
@@ -176,8 +199,8 @@ does not guarantee that every valid variant of a format is supported.
 Media readers must be registered explicitly on a `BuiltinDocumentParser`;
 the default HTTP route does not configure OCR or transcription providers.
 
-The local LlamaIndex reference also advertises HWP, PPTM and MBOX
-readers, which remain gaps. Table understanding, semantic chunking, layout
+The local LlamaIndex reference also advertises an HWP reader,
+which remains a gap. Table understanding, semantic chunking, layout
 reconstruction, directory synchronization and general connector ingestion
 also remain open. The [PDF OCR guide](pdf-ocr.md) describes separate OCR
 geometry, recognition limits and model-quality caveats.
@@ -334,6 +357,40 @@ older flattened workbooks. General worksheet header inference, merged layouts
 outside declared tables, number-format rendering, XLS/XLSB table structure and
 spreadsheet image/chart interpretation remain separate gaps.
 
+## Import a page by URL
+
+```bash
+SCONE_URL_IMPORT=1 scone import-url https://example.org/report.html
+curl -X POST http://127.0.0.1:7437/v1/documents/from-url -H "Authorization: Bearer $KEY" \
+  -d '{"url": "https://example.org/report.html"}'
+```
+
+The document lane reads what a caller hands it; this fetches the page
+itself and reads it as the document its media type says it is (HTML,
+plain text, Markdown, JSON, CSV or PDF, by the same readers as an
+uploaded file). The bytes fetched are retained as the original, the text
+is indexed, and the episode says where it came from: `document_url`,
+`document_final_url` after redirects, `document_media_type` and
+`document_fetched_at`. The same bytes read the same way are the same
+document, so importing a page again does not duplicate it.
+
+It is off unless the server is started with `SCONE_URL_IMPORT=1`, because
+a server that fetches whatever URL it is told to will fetch its own
+metadata service, its database, or the neighbour on its subnet. When on,
+three rules hold, each with a test: every address a hostname resolves to
+must be on the public internet, at the first URL and at every redirect,
+and the connection is made to the address that was checked rather than to
+the name again, so a name that changes its answer between the check and
+the connection gains nothing (`SCONE_URL_IMPORT_PRIVATE=1`, or
+`WebLimits(allow_private=True)` in code, is for a lab and says so); a page
+is read up to `max_bytes`
+(10 MiB by default) and refused past it rather than cut, a redirect chain
+past `max_redirects` (5) is refused, and the fetch has a deadline; a media
+type the document lane does not read is refused, not guessed at. Only
+`http` and `https` are fetched, and a URL carrying credentials is not
+sent. `scone import-url --json` prints the record: episode, URLs, media
+type, bytes, redirects, format and segment count.
+
 ## Durable extraction checkpoints
 
 `DocumentIngestionWorkflow` reuses the shared encrypted workflow journal:
@@ -441,7 +498,7 @@ Read provenance through
 `GET /v1/episodes/{episode_id}/document?chunk_id=...`. The API uses its
 authenticated space, write-role authorization and ingestion backpressure.
 HTTP indexing is synchronous and does not automatically create a durable
-workflow journal.
+workflow journal. A mailbox (`.mbox`) is read as one document of many messages: each message as an `.eml` is, its headers and text parts under `message:N/`, every segment carrying the message's number, date and sender so a passage recalled from a mailbox says which mail it came from; attachments are counted, not read, mbox `>From ` quoting is undone, a failure names the message it was in, and past 1,000 messages the rest are counted (`messages_unread`); the document's own limits (20,000 segments, 2 MB of text) refuse a mailbox whole before that, as they do an `.eml`. A message is opened only by an envelope line (`From sender Www Mmm dd hh:mm:ss yyyy`); a file not opened by one is read whole as one message.
 
 Parsers enforce input, extracted-text, segment, archive and execution limits.
 Office/ODF/EPUB ZIP members must use stored or deflated compression. Standalone
@@ -515,6 +572,50 @@ revision tracking and explicit missing-file deletion, use the separate
 revision history, metadata-only updates and transactional attachment transfer
 remain separate gaps; ordinary content-addressed document ingestion does not
 itself manage an external source's current revision.
+
+### Reusing embeddings across updates
+
+A file that changes on one line is stored again whole, and every chunk of
+it is embedded again though all but one are the same text as before. With
+an embedding cache the embedder sees only the chunks whose text is new:
+vectors are kept by the embedder's id and width and the exact text it was
+given (a contextual prefix included), so a hit is the vector the embedder
+would have returned, and a different embedder, width or prefix is a
+different key. `SCONE_EMBEDDING_CACHE=memory` keeps vectors for the
+process; a path keeps them in a file every process that opens it shares,
+so tomorrow's `scone sync` reuses what today's embedded. Unset (or
+`none`), nothing is cached. A file cache holds at most 20,000 vectors
+(`max_entries`; about 120 MB on disk at 768 doubles each) and the
+in-memory one 5,000 (a Python list of floats is about four times the
+packed size); both drop the least recently used past that, evicting as
+they write, and their record says how many they dropped. A vector read
+back from the file is checked for width and finiteness, and a row that
+fails is removed rather than served. A cache is not evidence and cannot
+refuse a write: one that fails (a full disk, a damaged or read-only
+file, a locked database) is a miss, counted as `failures` in its record
+with the last failure named, and the embedder answers instead. A path
+that cannot be opened is refused by name before any store is opened.
+`reembed_vectors` clears the cache first, since a model can change
+behind an id that did not; the engine closes the cache with its stores.
+
+Every receipt says what it did not pay for: `Added.embeddings_reused` on
+the record, `embeddings_reused` in `map`'s and `sync`'s receipts.
+Interrupted preparation keeps nothing partial: a batch is kept in the
+cache only after every vector in it was validated. One interaction to
+know: contextual embeddings prefix each chunk with the record's day and
+source, so a file re-stored on a later day is a new key and is embedded
+again unless the record carries its own `created_at`.
+
+Measured on this framework's own source (409 files, 7,679 chunks, the
+hash embedder): a second `map` after a one-line edit to `engine.py`
+embedded 1 chunk and reused 140; a third with nothing changed embedded
+none. Without the cache the second pass embeds all 141 chunks of the
+edited file.
+
+```bash
+SCONE_EMBEDDING_CACHE=~/.scone/embeddings.sqlite scone map src/ --graph
+# 312 file(s) read, 1 updated, 311 already here, 4 chunk embedding(s) reused, unchanged since last stored, …
+```
 
 ### Inspecting source removal
 
@@ -702,3 +803,26 @@ a temporary verification outage refuses the result without replaying work.
 
 The capability `documents.jobs` is advertised only when configured. The existing
 synchronous `/v1/documents` endpoint remains available.
+
+### Languages read from their syntax tree
+
+The Python reader walks Python's own tree and the brace reader finds
+the headers a brace family shares (JavaScript, TypeScript, Go, Rust,
+Java, C, C#, Kotlin, Swift, PHP and their kin — TypeScript and
+JavaScript also through a grammar when `scone-memory[code-graph]` is
+installed). Ruby, Lua, Perl, fish, shell and languages like them were
+neither, and a file in one of them was prose that happened to contain
+code: no declaration names on its chunks, no cuts at its definitions.
+With the optional `scone-memory[code-languages]` extra (one grammar
+pack) a file with a suffix the reader knows — `.rb`, `.rake`, `.lua`,
+`.sh`, `.bash`, `.zsh`, `.pl`, `.pm`, `.fish` — is read from
+its syntax tree by the one convention the grammars share: a definition
+node carries its name in a field called `name`. Declarations are named
+by everything that holds them (`Cart.total`), carry their byte and line
+spans, cut the chunks as the other readers' do, and name a recalled
+chunk in `declaration`. What the grammar does not name is not a
+declaration here; a language whose grammar names things another way
+(Kotlin's and Elixir's do) keeps the reader it had, and a brace-family
+file (PHP, Swift, Scala) keeps the brace reader. Without the extra
+nothing changes. The code graph's claims (imports, calls) are not read
+from these trees yet; that is the next step on this lane.

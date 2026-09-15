@@ -12,12 +12,15 @@ from html.parser import HTMLParser
 from io import StringIO
 from pathlib import PurePath
 from time import monotonic
+
+from pydantic import ValidationError
 from typing import cast
 from xml.etree.ElementTree import Element
 
 from ...core.errors import InvalidInput
 from .bounded_xml import parse_xml
 from .html_tables import HtmlTables
+from .table_types import DocumentTableCell
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 
 TEXT_EXTENSIONS = frozenset({
@@ -27,7 +30,7 @@ TEXT_EXTENSIONS = frozenset({
     '.swift', '.kt', '.kts', '.scala', '.sh', '.bash', '.zsh', '.sql', '.css',
     '.scss', '.sass', '.less', '.r', '.lua', '.pl', '.ex', '.exs', '.erl', '.hs',
     '.vue', '.svelte', '.graphql', '.gql', '.csv', '.tsv', '.json', '.jsonl',
-    '.ndjson', '.xml', '.html', '.htm', '.eml', '.ipynb',
+    '.ndjson', '.xml', '.html', '.htm', '.eml', '.mbox', '.ipynb',
     '.ldjson', '.qmd', '.skill', '.mts', '.cts', '.mjs', '.cjs', '.ejs', '.ets',
     '.groovy', '.gradle', '.cxx', '.cu', '.cuh', '.metal', '.rake', '.luau', '.toc',
     '.zig', '.ps1', '.psm1', '.psd1', '.m', '.mm', '.ml', '.mli', '.jl', '.astro',
@@ -53,7 +56,8 @@ class _Collector:
         if monotonic() > self.deadline:
             raise InvalidInput('document parsing timed out')
 
-    def add(self, text: str, locator: str, metadata: dict[str, str] | None = None) -> None:
+    def add(self, text: str, locator: str, metadata: dict[str, str] | None = None,
+            table_cells: tuple[DocumentTableCell, ...] = ()) -> None:
         self.check()
         if not text.strip():
             return
@@ -65,7 +69,7 @@ class _Collector:
             raise InvalidInput('document exceeds its extracted text byte limit')
         if len(self.segments) >= self.limits.max_segments:
             raise InvalidInput('document exceeds its segment limit')
-        self.segments.append(DocumentSegment(text=text, locator=locator, metadata=metadata or {}))
+        self.segments.append(DocumentSegment(text=text, locator=locator, metadata=metadata or {}, table_cells=table_cells))
 
 
 def _valid_unicode(text: str) -> None:
@@ -91,9 +95,9 @@ def _decode(data: bytes) -> str:
     return text
 
 
-def _lines(text: str, out: _Collector, prefix: str = '') -> None:
+def _lines(text: str, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None) -> None:
     for line, value in enumerate(StringIO(text, newline=None), 1):
-        out.add(value.removesuffix('\n'), f'{prefix}line:{line}')
+        out.add(value.removesuffix('\n'), f'{prefix}line:{line}', metadata)
 
 
 def _table(text: str, delimiter: str, out: _Collector) -> None:
@@ -120,10 +124,26 @@ def _table(text: str, delimiter: str, out: _Collector) -> None:
                 continue
             if len(row) != len(headers):
                 raise InvalidInput('delimited row has a different column count than its header')
-            out.add('\n'.join(f'{label}: {value}' for label, value in zip(labels, row)),
-                    f'row:{row_number}', {'line_start': str(start), 'line_end': str(end)})
+            # Each value is a cell with its span in the row's text, so a
+            # table query can quote it; the labels are the parser's rendering
+            # of the header line, named once per row in table_columns.
+            lines = [f'{label}: {value}' for label, value in zip(labels, row)]
+            cells = []
+            position = 0
+            for index, (label, value) in enumerate(zip(labels, row)):
+                head = position + len(f'{label}: '.encode('utf-8'))
+                cells.append(DocumentTableCell(table_locator='delimited', locator=f'row:{row_number}/column:{index + 1}',
+                                               row=row_number - header_record - 1, column=index, text=value,
+                                               start=head, end=head + len(value.encode('utf-8'))))
+                position += len(lines[index].encode('utf-8')) + 1
+            out.add('\n'.join(lines), f'row:{row_number}',
+                    {'line_start': str(start), 'line_end': str(end), 'table_locator': 'delimited',
+                     'table_columns': json.dumps(labels), 'table_status': 'structured'},
+                    table_cells=tuple(cells))
     except csv.Error:
         raise InvalidInput('document contains malformed delimited text') from None
+    except ValidationError:
+        raise InvalidInput('document exceeds its table row limit') from None
 
 
 class _Number(str):
@@ -153,10 +173,40 @@ def _json(text: str, out: _Collector, prefix: str = '') -> None:
     _json_value(value, '', out, prefix, 0)
 
 
-def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth: int) -> None:
+def _is_table(value: list[object]) -> bool:
+    """An array of flat objects is a table: every element an object whose values are all scalars."""
+    if not value or len(value) > 20_000:
+        return False
+    for element in value:
+        if not isinstance(element, dict) or not element:
+            return False
+        if any(isinstance(item, (dict, list)) for item in element.values()):
+            return False
+    return True
+
+
+def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth: int,
+                cell: tuple[str, int, int, tuple[str, ...]] | None = None) -> None:
     out.check(depth)
     if len(prefix) + 1 + len(pointer) > 4096:
         raise InvalidInput('document source locator exceeds its limit')
+    if isinstance(value, list) and value and _is_table(cast(list[object], value)):
+        # A table's rows: each scalar is a cell with its span in the leaf's
+        # text, named by its object key once per row in table_columns, so a
+        # JSON document queries like a spreadsheet's declared table.
+        columns: list[str] = []
+        for element in cast(list[dict[str, object]], value):
+            for key in element:
+                if key not in columns:
+                    columns.append(key)
+        if len(columns) > 1000:
+            columns = []
+        for index, element in enumerate(cast(list[dict[str, object]], value)):
+            for key, child in element.items():
+                escaped = key.replace('~', '~0').replace('/', '~1')
+                at = (f'json:{pointer or "/"}', index, columns.index(key), tuple(columns)) if columns else None
+                _json_value(child, f'{pointer}/{index}/{escaped}', out, prefix, depth + 2, at)
+        return
     if isinstance(value, dict) and value:
         for key, child in cast(dict[str, object], value).items():
             escaped = key.replace('~', '~0').replace('/', '~1')
@@ -169,8 +219,22 @@ def _json_value(value: object, pointer: str, out: _Collector, prefix: str, depth
     if isinstance(value, str):
         _valid_unicode(value)
     rendered = str(value) if isinstance(value, _Number) else json.dumps(value, ensure_ascii=False)
-    out.add(f'{pointer}: {rendered}' if pointer else rendered,
-            f'{prefix}#{pointer}', {'json_pointer': pointer})
+    text = f'{pointer}: {rendered}' if pointer else rendered
+    metadata = {'json_pointer': pointer}
+    cells: tuple[DocumentTableCell, ...] = ()
+    if cell is not None:
+        table, row, column, names = cell
+        quoted = isinstance(value, str) and not isinstance(value, _Number)  # a JSON number is a str subclass here
+        # The cell quotes the segment as written, so a string's text is its
+        # JSON rendering between the quotes, escapes and all: the span then
+        # holds exactly those bytes.
+        inner: str = rendered[1:-1] if quoted else rendered
+        head = len(f'{pointer}: '.encode('utf-8')) + (1 if quoted else 0)
+        cells = (DocumentTableCell(table_locator=table, locator=f'{prefix}#{pointer}', row=row, column=column,
+                                   text=inner, start=head, end=head + len(inner.encode('utf-8'))),)
+        metadata.update({'table_locator': table, 'table_columns': json.dumps(list(names)),
+                         'table_status': 'structured', 'header_basis': 'json_object_keys'})
+    out.add(text, f'{prefix}#{pointer}', metadata, table_cells=cells)
 
 
 _BLOCKS = frozenset({'p', 'div', 'section', 'article', 'header', 'footer', 'main', 'aside',
@@ -188,16 +252,17 @@ _SCOPE_BOUNDARIES = frozenset({'applet', 'caption', 'html', 'table', 'td', 'th',
 
 
 class _HTML(HTMLParser):
-    def __init__(self, out: _Collector, prefix: str = '') -> None:
+    def __init__(self, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self.out = out
         self.prefix = prefix
+        self.metadata = metadata
         self.stack: list[tuple[str, bool]] = []
         self.parts: list[str] = []
         self.line = 1
         self.has_content = False
         self.title_parts: list[str] = []
-        self.tables = HtmlTables(out, prefix)
+        self.tables = HtmlTables(out, prefix, metadata)
 
     def flush(self) -> None:
         text = ''.join(self.parts)
@@ -205,7 +270,7 @@ class _HTML(HTMLParser):
             text = re.sub(r'[ \t\r\f]+', ' ', text).strip(' \t\r\n\f')
         self.parts.clear()
         self.has_content = False
-        self.out.add(text, f'{self.prefix}line:{self.line}')
+        self.out.add(text, f'{self.prefix}line:{self.line}', self.metadata)
 
     def preformatted(self) -> bool:
         return any(tag == 'pre' for tag, _ in self.stack)
@@ -293,8 +358,8 @@ class _HTML(HTMLParser):
         self.tables.data(normalized, self.preformatted())
 
 
-def _html(text: str, out: _Collector, prefix: str = '') -> str:
-    parser = _HTML(out, prefix)
+def _html(text: str, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None) -> str:
+    parser = _HTML(out, prefix, metadata)
     parser.feed(text)
     parser.close()
     parser.flush()
@@ -334,7 +399,71 @@ def _email(data: bytes, out: _Collector) -> dict[str, str]:
     return {'attachments_skipped': str(skipped)}
 
 
-def _mime(message: Message, path: str, out: _Collector, depth: int) -> int:
+#: Messages a mailbox is read for before the rest are counted, not read.
+#: The document's own limits come first: 20,000 segments and 2 MB of
+#: text refuse the document whole, as they do an `.eml`, so a mailbox
+#: of ordinary mail reaches this bound at about a thousand messages.
+MAX_MAILBOX_MESSAGES = 1_000
+#: A message's envelope line, the shape every mbox writer makes:
+#: `From sender Www Mmm dd hh:mm:ss yyyy`. A body line that merely
+#: begins with `From ` (an mboxcl writer leaves it unquoted) is not one.
+_MBOX_FROM = re.compile(rb'^From \S+ +[A-Za-z]{3} +[A-Za-z]{3} +\d{1,2} +\d\d:\d\d(?::\d\d)?'
+                        rb'(?: +[A-Za-z]{3,5}| +[+-]\d{4})? +\d{4}[^\r\n]*\r?\n', re.MULTILINE)
+
+
+def _mailbox(data: bytes, out: _Collector) -> dict[str, str]:
+    """A Unix mailbox: one message after another, each opened by an
+    envelope line. Every message is read as an `.eml` is, its headers and
+    text parts under `message:N/`, and each segment carries the message's
+    number, date and sender so a passage recalled from a mailbox says
+    which mail it came from. A file not opened by an envelope line (an
+    `.eml` saved as `.mbox`, or one with text before its first message)
+    is read whole as one message, with nothing split and nothing
+    unquoted. A failure names the message it was in. Past the bound the
+    rest are counted."""
+    data = data.removeprefix(b'\xef\xbb\xbf')
+    starts = [found.start() for found in _MBOX_FROM.finditer(data)]
+    bare = not starts or bool(data[:starts[0]].strip())
+    if bare:
+        starts = [0]
+    read = skipped_attachments = 0
+    for number, start in enumerate(starts, 1):
+        out.check()
+        if number > MAX_MAILBOX_MESSAGES:
+            break
+        end = starts[number] if number < len(starts) else len(data)
+        raw = data[start:end]
+        if not bare:
+            raw = raw.split(b'\n', 1)[1] if b'\n' in raw else b''
+            # mboxrd quoting: a body line that began with `From ` was
+            # written with one more `>` than it had. An mboxo writer
+            # quotes only the bare line, so a genuine `>From ...` reply
+            # line in such a file loses its `>` here; the two cannot be
+            # told apart from the bytes.
+            raw = re.sub(rb'^>(?=>*From )', b'', raw, flags=re.MULTILINE)
+        try:
+            try:
+                message = BytesParser(policy=policy.default).parsebytes(raw)
+            except (ValueError, RecursionError):
+                raise InvalidInput('message contains malformed or excessively nested MIME') from None
+            about = {'message': str(number)}
+            for header in ('Date', 'From', 'Subject'):
+                value = message.get(header)
+                if value:
+                    about[header.lower()] = str(value)[:200]
+            for header in ('Subject', 'From', 'To', 'Cc', 'Date', 'Message-ID'):
+                for value in message.get_all(header, []):
+                    out.add(f'{header}: {value}', f'message:{number}/header:{header.lower()}', about)
+            skipped_attachments += _mime(message, '1', out, 0, f'message:{number}/', about)
+        except InvalidInput as refused:
+            raise InvalidInput(f'mailbox message {number}: {refused}') from None
+        read += 1
+    return {'messages': str(read), 'messages_unread': str(max(0, len(starts) - read)),
+            'attachments_skipped': str(skipped_attachments)}
+
+
+def _mime(message: Message, path: str, out: _Collector, depth: int, prefix: str = '',
+          about: dict[str, str] | None = None) -> int:
     out.check(depth)
     if message.get_content_disposition() == 'attachment' or message.get_filename():
         return 1
@@ -344,7 +473,7 @@ def _mime(message: Message, path: str, out: _Collector, depth: int) -> int:
         payload = message.get_payload()
         if not isinstance(payload, list):
             raise InvalidInput('message contains malformed multipart content')
-        return sum(_mime(part, f'{path}.{i}', out, depth + 1)
+        return sum(_mime(part, f'{path}.{i}', out, depth + 1, prefix, about)
                    for i, part in enumerate(cast(list[Message], payload), 1))
     if message.get_content_type() not in {'text/plain', 'text/html'}:
         return 0
@@ -359,9 +488,9 @@ def _mime(message: Message, path: str, out: _Collector, depth: int) -> int:
         raise InvalidInput('message text has an invalid charset or encoding') from None
     _valid_unicode(text)
     if message.get_content_type() == 'text/html':
-        _html(text, out, f'mime:{path}/')
+        _html(text, out, f'{prefix}mime:{path}/', about)
     else:
-        _lines(text, out, f'mime:{path}/')
+        _lines(text, out, f'{prefix}mime:{path}/', about)
     return 0
 
 
@@ -379,6 +508,8 @@ def parse_text(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocu
     metadata: dict[str, str] = {}
     if suffix == '.eml':
         metadata = _email(data, out)
+    elif suffix == '.mbox':
+        metadata = _mailbox(data, out)
     else:
         text = _decode(data)
         if suffix in {'.csv', '.tsv'}:

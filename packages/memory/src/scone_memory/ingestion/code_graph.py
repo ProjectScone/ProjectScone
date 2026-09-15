@@ -53,6 +53,9 @@ if TYPE_CHECKING:
 
 #: Claims from one file, past which a generated file is not worth reading.
 MAX_CLAIMS = 20_000
+#: The ledger's bound on a quote (memory/fact_placement); a longer line
+#: is quoted by its first MAX_QUOTE_CHARS characters.
+MAX_QUOTE_CHARS = 2_000
 #: What a claim can say. Each is a predicate in the ledger like any other.
 DEFINES = "defines"
 IMPORTS = "imports"
@@ -76,6 +79,10 @@ FLAGS = "flags"
 #: A decision record or standard the code says it follows. Unlike a note,
 #: this names something the graph can reach from more than one place.
 CITES = "cites"
+#: What a document points at: a file the walk read, linked from the page.
+#: Read by `doc_graph`; the predicate lives here with the rest so one
+#: table says what a file can claim.
+REFERENCES = "references"
 
 #: A comment that says why. The tag is kept out of the claim's object,
 #: which is the sentence a person wrote.
@@ -137,6 +144,11 @@ def _cited(text: str) -> list[str]:
     reason to put a citation in a graph -- stops working.
     """
     return [f"{tag.upper()}-{int(number)}" for tag, number in _CITED.findall(text)]
+
+
+def cited(text: str) -> list[str]:
+    """The decision records a line names, for readers outside this module."""
+    return _cited(text)
 
 
 def masked(content: str, *, prose: bool = True) -> str:
@@ -675,19 +687,34 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     cited to the episode, extracted rather than stated — so the engine and
     the command line cannot come to differ about it."""
     from .code import code_language
+    from .doc_graph import doc_claims, is_document
     from .manifests import is_manifest, manifest_claims
+    from .schema_claims import is_schema, schema_claims
 
     said = 0
-    # A manifest says what the project depends on; a source file says what
-    # it defines, imports and calls. Both are read the same way from here.
-    claims = (manifest_claims(content, path) if is_manifest(path)
-              else code_claims(content, path, language=code_language(path), resolve=resolve))
+    # A manifest says what the project depends on; a schema says what
+    # tables there are and what rests on what; a source file says what it
+    # defines, imports and calls; a document says what it references and
+    # cites. All are read the same way from here.
+    if is_manifest(path):
+        claims = manifest_claims(content, path)
+    elif is_schema(path):
+        claims = schema_claims(content, path)
+    elif is_document(path):
+        # The import resolver also follows a document's links when it can
+        # (`file_resolver`); a resolver that cannot leaves them unresolved.
+        claims = doc_claims(content, path, resolve=resolve if hasattr(resolve, "links") else None)
+    else:
+        claims = code_claims(content, path, language=code_language(path), resolve=resolve)
     for claim in claims:
         if _recorded is not None:
             _recorded.append(claim)
+        # A quote is the line the claim was read from; the ledger holds a
+        # quote of at most MAX_QUOTE_CHARS, so a generated line is quoted
+        # by its start, which is still the line's own text in the episode.
         fact = await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,
                                         valid_from=when, source_episode_id=episode_id,
-                                        quote=claim.quote, origin="extracted")
+                                        quote=claim.quote[:MAX_QUOTE_CHARS], origin="extracted")
         if _facts is not None:
             _facts.append(fact)
         said += 1
