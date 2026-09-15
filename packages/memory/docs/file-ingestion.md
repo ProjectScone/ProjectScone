@@ -102,7 +102,9 @@ to the document's episode and quoted from its lines (at most 2,000 characters
 of a line), under the filename it was stored with; the receipt's `claims`
 counts them, and it is zero for every other document. A `package.json` is
 walked as JSON, not kept as lines, so its dependencies are read through `map`
-rather than from a stored document.
+rather than from a stored document; so is an MCP configuration in JSON
+(`.mcp.json` and its kin), while Codex's `.codex/config.toml` is kept as
+lines and read from the stored document like any manifest in TOML.
 The reader sees the document's segments one per line, so every quote is a
 line the episode holds. A name given bare (`utils.py`) names a bare module;
 give the path from the project root, as the directory sync does, for the
