@@ -237,8 +237,9 @@ class MemoryEngine:
             # echo of the text lane. Measured on LongMemEval-S (the frozen
             # 50 and 100 items outside them), every voice it had in the order
             # cost the fused ranking; at a hundredth it still runs -- the
-            # confidence signal, a failed text lane, passages the text lane
-            # did not find -- and on both samples the fused ranking scored as
+            # confidence signal, passages the text lane did not find, and at
+            # full voice when the text lane brings nothing (recall applies
+            # that) -- and on both samples the fused ranking scored as
             # the text lane alone did (benchmarks/northstar-defaults-2026-09-14.results.md;
             # SCONE_VECTOR_WEIGHT=0.25 is the previous default). A real
             # embedder knows things the text lane does not and keeps its

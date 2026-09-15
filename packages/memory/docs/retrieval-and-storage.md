@@ -2066,6 +2066,15 @@ lane fails, and a passage only it found can still come back.
 default. Relative-score fusion and larger chunks also moved the numbers
 on these samples; neither is a default, and the results file says why.
 
+The weight is a voice against the text lane, so it applies only when the
+text lane brings passages. When it brings none (`lanes=["vector"]`, a text
+lane that failed, or one that found nothing), the vector lane ranks at a
+full voice of 1.0, and that recall's `fusion_weights` says so. The recency
+term is sized against a full voice: at a hundredth, the vector lane's
+first and second places differ by what about half an hour of age is
+worth to that term (at 1.0, about two days), so newer passages would
+come back first instead of closer ones.
+
 ### Both stores agree on every script
 
 Two stores that answer the same query differently are a bug a reader
