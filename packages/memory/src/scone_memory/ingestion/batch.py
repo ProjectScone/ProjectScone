@@ -133,6 +133,11 @@ class IngestionRuntime:
     embedding_budget: int | None = None
     #: The embedder's own token count, when it has one; the estimate otherwise.
     count_tokens: Callable[[str], int] | None = None
+    #: The length chunker's target in tokens, packed from whole sentences;
+    #: None cuts at chunk_target characters. Only the length cut reads it.
+    chunk_tokens: int | None = None
+    #: Tokens of the chunk before that each token-measured chunk starts with.
+    chunk_overlap_tokens: int = 0
     #: Whether a source stored under a name that says it is code is cut at
     #: its declarations rather than every chunk_target characters.
     code_aware: bool = True
@@ -459,6 +464,14 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
         return Cut(list(by_unit.spans), "unit", {key: value for key, value in by_unit.record().items() if key != "chunks"})
     if mode == "semantic":
         return Cut(list(await semantic_spans(content, runtime.embedder, runtime.chunk_target)), "semantic")
+    if runtime.chunk_tokens is not None:
+        from .embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION, estimated_tokens
+        from .token_chunks import token_spans
+
+        counted = token_spans(content, runtime.chunk_tokens, overlap=runtime.chunk_overlap_tokens,
+                              count=runtime.count_tokens or estimated_tokens,
+                              method=TOKENIZER_VERSION if runtime.count_tokens is not None else BUDGET_VERSION)
+        return Cut(list(counted.spans), "length", counted.record())
     return Cut(chunk_spans(content, runtime.chunk_target), "length")
 
 

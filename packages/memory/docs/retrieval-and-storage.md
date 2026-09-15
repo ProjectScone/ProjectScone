@@ -1089,6 +1089,113 @@ invariant test that should have caught the first asserted exactly the
 right property and passed, because its fixture never contained the
 junction.
 
+## A chunk measured in tokens
+
+The length cut's target is 700 characters. A model reads tokens, and the
+reference framework's splitter measures its nodes in them -- 512 by
+default -- filling each with whole sentences, so one of its nodes carries
+more of a conversation than one of our chunks. `chunk_tokens` measures
+the length cut in tokens instead:
+
+```python
+MemoryEngine(store, index, embedder, chunk_tokens=512)                           # or SCONE_CHUNK_TOKENS=512
+MemoryEngine(store, index, embedder, chunk_tokens=512, chunk_overlap_tokens=64)  # SCONE_CHUNK_OVERLAP_TOKENS=64
+```
+
+- **Whole sentences are packed.** Sentences are found as the semantic cut
+  finds them (a stop followed by space, not after an initial, a title or
+  before a lower-case word) and added to a chunk while its count stays
+  within the target. A chunk ends where a sentence ends.
+- **A sentence is cut inside only when it alone is over the target**, and
+  then at a line break before a space, and at a space before a hard cut
+  inside a word. The receipt counts both: `sentences_over_target` and
+  `hard_cuts`.
+- **Counted by the embedder's tokenizer when it has one** (`tokenizer-v1`;
+  the local BGE models do), **by the budget's estimate otherwise**
+  (`estimate-v1`, no model: see "Keeping that context inside the embedder's
+  window" below). The count of an empty text -- the start and end markers
+  a model adds -- is paid once a chunk, so a 512-token chunk fits a
+  512-token window as that count sees it. The estimate errs high against
+  BGE on this project's documents; it is not a count of the reference's
+  tokens (tiktoken's `cl100k_base`), and on the conversations below a
+  chunk it held to 512 had 330 of those at the median and 640 at most.
+- **The bound says when it did not hold.** The chunk is measured again
+  whole, and `over_target` counts the chunks a tokenizer counted over the
+  target (a tokenizer need not count a chunk as the sum of its
+  sentences); `largest` gives the largest count.
+- **An overlap repeats whole trailing sentences** of the chunk before, as
+  many as fit in `chunk_overlap_tokens`, and gives way from its front when
+  it and the next sentence do not fit. With it on, stored spans of
+  neighbouring chunks overlap; `overlapped` counts the chunks that start
+  with repeated text. Off (0) by default, and refused without
+  `chunk_tokens` or at or above it.
+- **Only the length cut.** Code, structure, semantic and unit cuts keep the
+  character target, and a record's receipt still says `chunking: length`,
+  with the token counts under `structure` (`measure: tokens`).
+- **Stored chunks are never recut.** The setting decides how records
+  stored from then on are cut; a record already stored keeps its chunks,
+  and the same content stored again is a duplicate that changes nothing.
+  Both values are part of the configuration a keyed replacement is
+  prepared under, so a replacement cut before the setting changed is
+  refused rather than stored as if cut under the new one.
+- **Scripts written without spaces are one sentence to it.** The sentence
+  finder knows `.`, `!` and `?`; Chinese or Japanese prose is packed by
+  hard cuts inside that one sentence and the receipt says so. Leave
+  `chunk_tokens` unset for such text until it learns the full-width stops.
+- **Off by default.** Cut positions decide what chunks exist, and the
+  numbers below are one sample on a hashed-token embedder.
+
+### What it measured
+
+LongMemEval-S, the 50 items stratified by question type (seed 42), the
+hashed-token embedder on both sides, no model, no reranker, engine
+defaults otherwise (stem prefixes on, vector weight 0.25), engines built
+through `Settings.from_env` with `SCONE_CHUNK_TOKENS`. The reference is
+LlamaIndex 0.14.24 at its best retrieval configuration:
+`QueryFusionRetriever(VectorIndexRetriever + BM25Retriever)` over
+`SentenceSplitter(chunk_size=512, chunk_overlap=0)`, every node ranked and
+folded to sessions. Both sides are deterministic: ours returned the same
+rankings in each of three rounds, and the reference the same scores in
+each of its four runs.
+
+| our chunks | R@5 | all-sessions@5 | R@15 | MRR | k=5 against the reference: won / lost |
+| --- | --- | --- | --- | --- | --- |
+| 700 characters (default) | 0.88 | 0.72 | 0.98 | 0.807 | 1 / 1 |
+| 256 tokens | 0.88 | 0.74 | 0.98 | 0.831 | 1 / 1 |
+| **512 tokens** | **0.92** | **0.78** | 0.96 | 0.840 | 2 / 0 |
+| 1,024 tokens | 0.90 | 0.74 | **1.00** | **0.856** | 2 / 1 |
+| *reference: `SentenceSplitter(512)`, BM25 + vector fusion* | 0.88 | 0.74 | 0.98 | 0.831 | |
+
+Chunk sizes over the same 2,355 sessions:
+
+| | chunks | a session | median characters | median `cl100k_base` tokens | largest | sentences over the target |
+| --- | --- | --- | --- | --- | --- | --- |
+| 700 characters | 46,640 | 19.8 | 576 | 117 | 643 | -- |
+| 256 tokens | 33,717 | 14.3 | 762 | 159 | 400 | 532 of 253,069 |
+| 512 tokens | 16,689 | 7.1 | 1,581 | 330 | 640 | 104 |
+| 1,024 tokens | 8,745 | 3.7 | 3,201 | 666 | 1,325 | 18 |
+| reference, 512 | 11,946 | 5.1 | 2,233 | 482 | | |
+
+No word was hard-cut and no chunk was counted over its target.
+
+What it says: at 512 estimated tokens our engine is ahead of the
+reference at its best at k=5 (R@5 0.92 vs 0.88, all-sessions@5 0.78 vs
+0.74, MRR 0.840 vs 0.831; two items won, none lost) and still one item
+behind at k=15; the best MRR was at 1,024. What it does not say: 50
+items is one or two items a column, so these are not differences a
+second sample is sure to repeat; with hashed-token vectors both lanes are
+lexical; and the two sides' chunks are not the same size -- the
+reference's 512 tiktoken nodes sit between our 512 and 1,024 estimated
+tokens. Nothing about answer quality.
+
+It costs time. Cutting those sessions (24.8 million characters) alone,
+the four ways interleaved, five rounds on a loaded machine: 0.97 s at
+700 characters, 41.8 s at 256 tokens, 31.7 s at 512 and 37.1 s at 1,024
+(medians); the whole bench side (ingest and recall of the 50 items,
+three interleaved rounds) took a median 37.0, 48.0, 51.3 and 67.2 s. The
+time is in the estimate, counted once for every sentence and again for
+every chunk.
+
 ## Embedding a chunk with the headings above it
 
 A chunk cut from a long document loses what the document said it was
