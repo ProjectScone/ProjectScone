@@ -72,6 +72,78 @@ samples are removed or resampled. The detector is closed with the other session
 resources, including on failure or cancellation. Without it, the recognizer's
 speech-start events continue to own early interruption.
 
+### Semantic end of turn
+
+A recognizer ends an utterance at a pause (`VoiceGate` waits 400 ms), and every
+final `Transcript` used to be a turn. People pause longer than that mid-sentence,
+so "I want to book a table for … four people." was answered as two questions.
+`turn_detector_factory` adds a second judgement on the words: an
+`EndOfTurnDetector` (`scone_memory.realtime.turn_end`) with `judge(text)` returning
+a `Judgement(verdict, cue)` and `aclose()`, created fresh per session.
+
+```python
+from scone_memory.realtime.turn_end import LexicalEndOfTurn
+
+session = VoiceSession(memory, "authorized-space", "voice-session-1", ...,
+                       turn_detector_factory=LexicalEndOfTurn,
+                       turn_hold=1.5, turn_max_duration=10, turn_judge_timeout=0.5)
+```
+
+| Verdict | When (lexical rules, in order) | What the session does |
+| --- | --- | --- |
+| `incomplete` | open `(` or quote; trailing filler (`um`, `uh`, `er`, `hmm`); trailing `,` `...` `;` `:` or dash; trailing conjunction (`and`, `but`, `or`, `because`, `if`, …), article (`the`, `a`, `my`, …) or preposition (`to`, `for`, `of`, `from`, …) unless a wh-word opens the question | holds the turn up to `turn_hold` seconds past the recognizer's pause |
+| `complete` | ends in `?`, `.` or `!` (closing quotes allowed); or opens with a question word | ends the turn at the pause, as before |
+| `unsure` | anything else, including unpunctuated text with no cue | ends the turn at the pause, as before |
+
+The rules are conservative on purpose: `on`, `in`, `up` and `that` end ordinary
+sentences, so they never hold a turn, and unpunctuated text is only held on a
+positive cue. While a turn is held, speech starting again (from the recognizer or
+the activity detector) keeps it open until `turn_max_duration`; the next final
+transcript joins it and the joined text is judged again. A held turn is never
+recorded or answered until it is released, and new speech still interrupts any
+reply that is playing.
+
+Every user turn records why it ended, as `metadata["turn_end"]` on its stored
+episode and as `session.last_turn_receipt` (`reason`, `verdict`, `cue`,
+`fragments`, `held_ms` after the last words, `turn_ms` from the first):
+
+| `reason` | Meaning |
+| --- | --- |
+| `silence` | the recognizer's pause, with no evidence either way, no detector, or a detector that failed or took longer than `turn_judge_timeout` (the cue says which) |
+| `semantic_complete` | the words finished a sentence or question |
+| `semantic_incomplete_timeout` | the clause stayed open and `turn_hold` ran out |
+| `max_duration` | the turn reached `turn_max_duration` while held |
+| `max_bytes` | joining the next transcript would pass 32 000 bytes; the held turn was released first |
+| `speaker_changed` | another speaker's transcript arrived; the held turn was released first |
+| `input_ended` | audio input ended while a turn was held; it is answered before the session ends |
+
+A detector that returns something other than a `Judgement` fails the session, as a
+malformed activity detector does. `ChatEndOfTurn(chat)` puts any `ChatModel`
+(`complete(system, user)`) behind the same seam; an answer other than `complete`
+or `incomplete` is `unsure`. A model detector is judged while the session's
+controller is held, so its time comes out of every turn: keep `turn_judge_timeout`
+short.
+
+`scone serve` gives served voice sessions the lexical detector when
+`SCONE_SEMANTIC_TURN=1` (default off) and reports `voice_turn_end`
+(`semantic` or `silence`) in `/v1/conversations/capabilities`. The hold and turn
+bounds are the defaults above there. The pure turn state (`TurnHold`) takes the
+time as an argument, so it can be driven with a scripted clock.
+
+Measured on a scripted fixture of 32 utterances, 16 cut mid-clause
+([`semantic-turn-v1.json`](../benchmarks/semantic-turn-v1.json), results in
+[`semantic-turn-v1.results.md`](../benchmarks/semantic-turn-v1.results.md),
+replayed by `scone_memory.bench.semantic_turn`). The fixture models the energy
+gate's timing; it is not a recording of real speech, and no real recognizer or
+model ran.
+
+Events are assumed to arrive in order: the recognizer's final transcript before
+the `SpeechStarted` of the speech after it, as `BufferedTranscription` and the
+local activity detector deliver them. With a duplex recognizer that reports new
+speech before the transcript of the old, that speech start finds nothing held; the
+hold then runs from the transcript although the speaker is already talking, and a
+continuation longer than `turn_hold` is released as `semantic_incomplete_timeout`.
+
 ## Personas and independent provider selection
 
 `realtime.persona.Persona` is a frozen, versioned configuration containing a name,

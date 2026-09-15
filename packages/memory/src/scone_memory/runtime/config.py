@@ -82,6 +82,10 @@
                                    history-only serving refuses it, and voice sessions do not take it
     SCONE_FOLLOWUP_URL, SCONE_FOLLOWUP_MODEL, SCONE_FOLLOWUP_API_KEY, SCONE_FOLLOWUP_TIMEOUT (5)
                                    rewrite only: its own self-hosted endpoint, never another setting's key
+    SCONE_SEMANTIC_TURN 1 | 0      served voice sessions judge each final transcript: one that stops
+                                   mid-clause ("book a table for") is held up to 1.5 s more for the
+                                   rest of it, instead of being answered at the recognizer's pause
+                                   (default 0; no model; `scone serve` voice personas only)
 
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)
@@ -290,6 +294,8 @@ class Settings:
     followup_model: str | None = None
     followup_api_key: str | None = field(default=None, repr=False)
     followup_timeout: float = REWRITE_TIMEOUT_S
+    #: SCONE_SEMANTIC_TURN: voice turns end on what was said as well as the pause.
+    semantic_turn: bool = False
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
@@ -527,6 +533,7 @@ class Settings:
             followup_model=env.get("SCONE_FOLLOWUP_MODEL") or None,
             followup_api_key=env.get("SCONE_FOLLOWUP_API_KEY") or None,
             followup_timeout=parse_seconds("SCONE_FOLLOWUP_TIMEOUT", env.get("SCONE_FOLLOWUP_TIMEOUT"), REWRITE_TIMEOUT_S),
+            semantic_turn=parse_flag("SCONE_SEMANTIC_TURN", env.get("SCONE_SEMANTIC_TURN")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
