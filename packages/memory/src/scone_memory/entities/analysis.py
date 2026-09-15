@@ -411,10 +411,10 @@ def _community_id(members: list[str]) -> str:
     return "com:" + hashlib.sha256("\x1f".join(members).encode("utf-8")).hexdigest()[:16]
 
 
-#: Analyses kept by projection digest and resolution: one is the same for an
+#: Analyses kept by projection digest, resolution and hub percentiles: one is the same for an
 #: unchanged graph, and the work grows with the graph.
 _KEPT = 8
-_ANALYSES: OrderedDict[tuple[str, float, float | None], GraphAnalysis] = OrderedDict()
+_ANALYSES: OrderedDict[tuple[str, float, float | None, float | None], GraphAnalysis] = OrderedDict()
 
 
 def cached_analysis(projection: EntityProjection, resolution: float = 1.0,

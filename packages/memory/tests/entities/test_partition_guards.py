@@ -343,3 +343,27 @@ def test_an_oversized_community_is_split_even_when_its_own_split_is_weak():
     graph = adjacency(dense + clique("c", 4))
     parts, fired = _guarded(graph, [sorted(nodes), sorted(f"c{n}" for n in range(4))], 1.0)
     assert sorted(nodes) not in parts and fired == {"split_oversized": 1, "split_nested": 0, "unsplittable": 0}
+
+
+def test_hubs_held_apart_are_out_before_hubs_are_detached_and_neither_is_placed_twice():
+    """With both percentiles, a hub held apart (exclude_hubs) is out before
+    detached hubs are picked, so the next hub down is the one detached: it
+    rejoins as a member and counts in modularity, while the held-apart one
+    is only attached for reading and counts in neither."""
+    import scone_memory.entities.analysis as module
+
+    edges = (clique("a", 8) + clique("b", 8) + [("big", f"{p}{n}") for p in "ab" for n in range(8)]
+             + [("mid", f"a{n}") for n in range(8)] + [("mid", f"b{n}") for n in range(4)])
+    projection = project_entities("alpha", facts(edges), revision=1)
+    ids = {entity.label: entity.entity_id for entity in projection.entities}
+    labels = {entity_id: label for label, entity_id in ids.items()}
+    analysis = analyze_projection(projection, exclude_hubs=90, detach_hubs=90)
+    assert {labels[hub] for hub in analysis.hubs} == {"big"}
+    assert analysis.coverage.hubs_held_apart == 1 and analysis.coverage.hubs_detached == 1
+    members = [labels[member] for community in analysis.communities for member in community.members]
+    assert sorted(members) == sorted(ids), "every entity is in exactly one community, once"
+    of = {labels[member]: community.community_id for community in analysis.communities for member in community.members}
+    assert of["mid"] == of["a0"] != of["b0"], "the detached hub rejoined where most of its links go"
+    assert all(ids["big"] not in community.top_entities for community in analysis.communities)
+    own = adjacency([(ids[left], ids[right]) for left, right in edges if "big" not in (left, right)])
+    assert analysis.modularity == pytest.approx(module._modularity(own, {member: of[labels[member]] for member in own}))
