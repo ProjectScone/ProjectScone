@@ -142,7 +142,7 @@ many landed. Only `.md`, `.markdown` and `.mdx` are read this way.
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
 | DOC, PPT | Converted text locators | Explicit offline converter; macOS textutil also supports DOC; page/slide structure may be lost |
-| PDF | Page locators, extraction method, configured OCR regions and engine | Native text by default; OCR requires an explicit parser |
+| PDF | Page locators, extraction method, configured OCR regions and engine, the section its bookmarks put each page in | Native text by default; OCR requires an explicit parser |
 | Images | Frame/region locators and typed OCR geometry | Explicit `ImageDocumentParser` and OCR engine required |
 | Audio/video | Audio-stream timestamps | Explicit `MediaDocumentParser` and transcription provider required; video frames are not analyzed |
 
