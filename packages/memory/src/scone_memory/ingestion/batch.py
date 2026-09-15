@@ -128,6 +128,11 @@ class IngestionRuntime:
     #: Vectors kept by the text they embed, so a chunk unchanged since it
     #: was last stored is not embedded again. None embeds everything.
     embedding_cache: EmbeddingCache | None = None
+    #: With an embedding budget on: the tokens the embedder reads, which
+    #: the context in front of each chunk is shortened to fit.
+    embedding_budget: int | None = None
+    #: The embedder's own token count, when it has one; the estimate otherwise.
+    count_tokens: Callable[[str], int] | None = None
     #: Whether a source stored under a name that says it is code is cut at
     #: its declarations rather than every chunk_target characters.
     code_aware: bool = True
@@ -287,18 +292,25 @@ def context_lines(content: str, source: str | None, spans: Sequence[tuple[int, i
 async def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
     cut = await cut_for(runtime, new.content, new.source, new.metadata.get("chunking"), episode=new)
     byte_offsets = [(sp.start, sp.end) for sp in byte_spans(new.content, cut.spans)]
-    receipt = None
+    receipt: dict[str, object] | None = None
     if runtime.heading_context:
         lines, lines_cut = context_lines(new.content, new.source, byte_offsets, runtime.chunk_target,
                                          await headings_of(runtime, new))
         receipt = {"mode": "headings", "chunks_with_context": sum(1 for line in lines if line),
                    "context_bytes": sum(len(line.encode()) for line in lines), "context_cut": lines_cut}
+    if runtime.embedding_budget is not None:
+        from .embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION
+
+        # Counted as the inputs are built, which is where the context is known.
+        method = TOKENIZER_VERSION if runtime.count_tokens is not None else BUDGET_VERSION
+        receipt = {**(receipt or {}), "budget": {"tokens": runtime.embedding_budget, "method": method,
+                                                 "fits": 0, "shortened": 0, "dropped": 0, "body_over": 0}}
     return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in cut.spans],
                     spans=byte_offsets, chunking=cut.chunking, structure=cut.structure, embedding_context=receipt)
 
 
 async def embedding_inputs(runtime: IngestionRuntime, new: NewEpisode, spans: Sequence[tuple[int, int]],
-                           texts: Sequence[str]) -> list[str]:
+                           texts: Sequence[str], *, outcomes: dict[str, object] | None = None) -> list[str]:
     if not texts:
         return []
     if runtime.context_inputs is not None:
@@ -315,11 +327,23 @@ async def embedding_inputs(runtime: IngestionRuntime, new: NewEpisode, spans: Se
     contextual = await runtime.context_inputs(new, spans) if runtime.context_inputs is not None else texts
     if len(contextual) != len(texts):
         raise InvalidInput('embedding context must preserve the chunk count')
-    if runtime.heading_context:
-        # One place for both ingestion and recovery, so a recovered chunk is
-        # embedded exactly as an uninterrupted one would have been.
-        lines, _ = context_lines(new.content, new.source, spans, runtime.chunk_target, await headings_of(runtime, new))
-        contextual = [f"{line}\n{text}" if line else text for line, text in zip(lines, contextual)]
+    lines = (context_lines(new.content, new.source, spans, runtime.chunk_target, await headings_of(runtime, new))[0]
+             if runtime.heading_context else ["" for _ in texts])
+    if runtime.embedding_budget is not None:
+        from .embedding_budget import estimated_tokens, fitted
+
+        inputs = []
+        for line, text, with_table in zip(lines, texts, contextual):
+            made, outcome = fitted(body=text, heading=line, table=with_table if with_table != text else None,
+                                   wrap=lambda chunk: runtime.embed_text(new, chunk), budget=runtime.embedding_budget,
+                                   count=runtime.count_tokens or estimated_tokens)
+            if outcomes is not None:
+                outcomes[outcome] = cast(int, outcomes.get(outcome, 0)) + 1
+            inputs.append(made)
+        return inputs
+    # One place for both ingestion and recovery, so a recovered chunk is
+    # embedded exactly as an uninterrupted one would have been.
+    contextual = [f"{line}\n{text}" if line else text for line, text in zip(lines, contextual)]
     return [runtime.embed_text(new, text) for text in contextual]
 
 
@@ -330,7 +354,9 @@ async def embed_pending_counted(runtime: IngestionRuntime, space: str,
     texts: list[str] = []
     counts: list[int] = []
     for pending in fresh:
-        inputs = await embedding_inputs(runtime, pending.new, pending.spans, pending.texts)
+        budget = (pending.embedding_context or {}).get("budget")
+        inputs = await embedding_inputs(runtime, pending.new, pending.spans, pending.texts,
+                                        outcomes=cast(dict[str, object], budget) if budget is not None else None)
         counts.append(len(inputs))
         texts.extend(inputs)
     binding = '' if runtime.embedding_checkpoint is None else json.dumps(
