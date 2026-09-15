@@ -161,6 +161,32 @@ def test_a_value_meets_a_folded_subject_only_when_case_cannot_matter() -> None:
     assert any(a.predicate == "unit" and a.value == "mb" for a in projection.attributes)
 
 
+def test_code_entities_are_kinded_by_their_shape() -> None:
+    from scone_memory.entities.kinds import code_kind, is_file_name
+
+    rows = [fact(1, "pkg/a.py", "defines", "pkg/a.py:Thing"), fact(2, "pkg/a.py", "imports", "typing"),
+            fact(3, "pkg/a.py", "imports", "pkg/b.py"), fact(4, "pkg/a.py:Thing", "calls", "pkg/b.py:run"),
+            fact(5, "pkg/a.py", "imports", "requests"), fact(6, "pyproject.toml", "depends_on", "requests"),
+            fact(7, "pkg/a.py:Thing", "cites", "ADR-12"), fact(8, "web/app.ts", "imports", "github.com/gorilla/mux"),
+            fact(9, "alice chen", "works_at", "Acme")]
+    entities = by_key(project_entities("alpha", rows, revision=1))
+    kinds = {key: (entity.kind, entity.kind_status) for key, entity in entities.items()}
+    assert kinds["pkg/a.py"] == ("file", "inferred") and kinds["pkg/b.py"] == ("file", "inferred"), "a path is a file, imported or importing"
+    assert kinds["pkg/a.py:thing"] == ("declaration", "inferred") and kinds["pkg/b.py:run"] == ("declaration", "inferred")
+    assert kinds["typing"] == ("module", "inferred") and kinds["github.com/gorilla/mux"] == ("module", "inferred"), "imported, no suffix: a module"
+    assert kinds["requests"] == ("product", "inferred"), "a module a manifest also depends on is the package it comes from"
+    assert kinds["pyproject.toml"] == ("file", "inferred")
+    assert code_kind("ADR-12", "cites", "object") is None and code_kind("README.md: Getting Started", "describes", "subject") is None, \
+        "a citation and a sentence about a file are neither files nor declarations"
+    assert code_kind("notes.txt: don't forget", "says", "subject") is None and code_kind("pkg/a.py:Store.keep", "defines", "object") == "declaration"
+    assert kinds["alice chen"] == ("person", "inferred") and kinds["acme"] == ("organisation", "inferred"), "prose is hinted as before"
+    assert set(entities["pkg/a.py"].kind_basis) >= {1, 2, 3, 5}, "a shape's hint names the facts it was read from"
+    assert not is_file_name("asyncio.run") and not is_file_name("1/2") and not is_file_name("12:30") and not is_file_name("https://x/y.md")
+    assert not is_file_name("a b.py") and is_file_name("README.md") and is_file_name("src/x.ts") and not is_file_name("Makefile")
+    assert code_kind("12:30", "starts_at", "object") is None and code_kind("asyncio.run", "calls", "object") is None
+    assert code_kind("os", "imports", "object") == "module" and code_kind("os", "calls", "object") is None
+
+
 def test_a_kind_conflict_shows_evidence_for_every_side() -> None:
     # Eight claims make acme a person (it 'works at' offices); one makes it an
     # organisation. The bounded evidence must still name the dissenting claim.
@@ -182,5 +208,6 @@ def test_the_projection_digest_of_a_fixed_ledger_does_not_drift():
                   valid_from="2024-02-01T00:00:00Z"),
              Fact(fact_id=3, space="alpha", subject="alice chen", predicate="joined_on", object="May 2021",
                   valid_from="2024-01-01T00:00:00Z", status="closed", valid_until="2025-01-01T00:00:00Z")]
+    # kinds/2 (code entities kinded by their shape) changed the digest on purpose.
     assert project_entities("alpha", facts, revision=1).digest == \
-        "012b6a529ba69407521ac8dbc90ab3517babf2f93f9cafac18928cfc7d2646f8"
+        "f5548d5261767c5db5cd2a1b493e9e1d26ce9751e2b9a7d3702a1632ea6ea9f1"

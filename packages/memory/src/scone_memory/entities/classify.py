@@ -201,6 +201,12 @@ def _declaration(text: str) -> bool:
     return bool(parts) and all(part.isidentifier() for part in parts)
 
 
+def is_declaration_name(text: str) -> bool:
+    """Whether a name is what a code reader writes after a file and a
+    colon: a chain of identifiers (`Store.keep`), never a sentence."""
+    return _declaration(text)
+
+
 def _code_shaped(text: str) -> bool:
     """Whether a code predicate's object is shaped like a code symbol.
 
