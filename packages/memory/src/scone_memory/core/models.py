@@ -450,6 +450,38 @@ class Narrowing(BaseModel):
     window_exhausted: bool
 
 
+class PhraseTrace(BaseModel):
+    """What required and excluded phrases did to one recall's passages."""
+
+    required: list[str] = Field(default_factory=list)
+    excluded: list[str] = Field(default_factory=list)
+    #: Fused candidates the phrases were checked against, before the limit.
+    checked: int = 0
+    dropped_required: int = 0
+    dropped_excluded: int = 0
+    #: True when fewer passages came back than the limit after phrases
+    #: dropped some: passages beyond the candidates checked were never read.
+    short: bool = False
+    why: str = ""
+
+
+class DiversityTrace(BaseModel):
+    """What diversity did to one recall's order."""
+
+    weight: float
+    #: Candidates the places were filled from, after any phrases.
+    candidates: int = 0
+    #: Candidates past the budget, left in relevance order after the rest.
+    not_diversified: int = 0
+    #: Where the likeness came from: "index" (stored vectors), "embedded"
+    #: (the candidates embedded once), or "unavailable" (neither; order kept).
+    vectors: str = "index"
+    #: Of the first ``limit`` candidates before the per-episode cap, how many
+    #: are not the ones relevance alone put there.
+    replaced: int = 0
+    why: str = ""
+
+
 class RecallResult(BaseModel):
     #: Id of the evidence event recorded for this recall, when an event
     #: log is attached; feedback refers to it.
@@ -480,6 +512,14 @@ class RecallResult(BaseModel):
     #: ``score`` (each lane's scores scaled to its own range, then added) or
     #: ``distribution`` (each lane's scores placed by its mean and spread).
     fusion: Literal["rank", "score", "distribution"] = "rank"
+    #: The lanes that answered, of those asked for ("vector", "text"). A lane
+    #: not asked for did not run; one that failed is in ``degraded`` instead.
+    #: Empty on a result recall did not build.
+    lanes: list[str] = Field(default_factory=list)
+    #: With ``require`` or ``exclude``: what the phrases dropped. None otherwise.
+    phrases: Optional[PhraseTrace] = None
+    #: With ``diversity``: how the order was changed. None otherwise.
+    diversity: Optional[DiversityTrace] = None
     #: With ``graph_boost``: the entities the entity lane searched for.
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
