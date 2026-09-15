@@ -924,7 +924,9 @@ chunk in `declaration`. What the grammar does not name is not a
 declaration here; a language whose grammar names things another way
 (Kotlin's and Elixir's do) keeps the reader it had, and a brace-family
 file (PHP, Swift, Scala) keeps the brace reader. Without the extra
-nothing changes.
+nothing changes. `scone map` and `scone sync` read these suffixes as
+they read the Python and brace families, so a repository's Ruby, Lua,
+shell, Perl and fish files reach the graph by the same walk.
 
 The same tree speaks to the graph: every definition is a
 `defines` claim held by what encloses it (`app/cart.rb:Shop.Cart defines
