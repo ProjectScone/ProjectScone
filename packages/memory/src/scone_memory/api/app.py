@@ -1241,6 +1241,9 @@ def create_app(
             response["lessons_read"] = result.lessons_read
         if result.expanded is not None:
             response["expanded"] = result.expanded
+        if result.feedback_prior is not None:
+            # A re-ranked answer carries what moved it, and where the prior's bounds bit.
+            response["feedback_prior"] = result.feedback_prior
         if joined is not None:
             response["merged"] = staged(joined.record())
         if cut is not None:
