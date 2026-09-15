@@ -220,3 +220,33 @@ def test_html_elements_declare_headings_lists_captions_and_code() -> None:
 
 def test_html_that_declares_nothing_parses_as_it_did() -> None:
     assert html_roles('<p>Friday launch</p><div>x<br>y</div>') == [('line:1', 'Friday launch', {}), ('line:1', 'x\ny', {})]
+
+
+def test_a_block_inside_an_html_list_item_names_the_item_it_sits_in() -> None:
+    page = ('<ol start="4"><li>Install<pre>pip install x</pre><h3>Check</h3>'
+            '<figure><figcaption>F</figcaption></figure>'
+            '<table><caption>T</caption><tr><th>K</th></tr><tr><td>v</td></tr></table></li></ol>'
+            '<pre>outside</pre><ol start="x"><li>a</li></ol><ol start="-1"><li>b</li></ol><ul start="3"><li>c</li></ul>')
+    item = {'list_id': '1', 'list_level': '0', 'list_kind': 'ordered', 'list_item_id': '1', 'list_start': '4'}
+    assert [(text, metadata) for _, text, metadata in html_roles(page)] == [
+        ('Install', {'block_role': 'list_item', **item}),
+        ('pip install x', {'block_role': 'code', **item}),
+        ('Check', {'block_role': 'heading', 'heading_level': '3', **item}),
+        ('F', {'block_role': 'caption', **item}),
+        ('T', {**item, 'block_role': 'caption', 'caption_target': 'table:1'}),
+        ('K', {**item, 'table_locator': 'table:1', 'table_status': 'structured'}),
+        ('K: v', {**item, 'table_locator': 'table:1', 'table_status': 'structured'}),
+        ('outside', {'block_role': 'code'}),
+        ('a', {'block_role': 'list_item', 'list_id': '2', 'list_level': '0', 'list_kind': 'ordered', 'list_item_id': '2'}),
+        ('b', {'block_role': 'list_item', 'list_id': '3', 'list_level': '0', 'list_kind': 'ordered', 'list_item_id': '3'}),
+        ('c', {'block_role': 'list_item', 'list_id': '4', 'list_level': '0', 'list_kind': 'bullet', 'list_item_id': '4'}),
+    ]
+
+
+def test_html_list_ids_name_the_mail_part_they_come_from() -> None:
+    mail = (b'From: a@example.com\nSubject: x\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=B\n\n'
+            b'--B\nContent-Type: text/html\n\n<ul><li>first</li></ul>\n'
+            b'--B\nContent-Type: text/html\n\n<ul><li>second<p>more</p></li></ul>\n--B--\n')
+    parsed = parse_text(mail, 'm.eml', DocumentLimits())
+    assert [(s.text, s.metadata['list_id'], s.metadata['list_item_id']) for s in parsed.segments if 'list_id' in s.metadata] == [
+        ('first', 'mime:1.1/1', 'mime:1.1/1'), ('second', 'mime:1.2/1', 'mime:1.2/1'), ('more', 'mime:1.2/1', 'mime:1.2/1')]

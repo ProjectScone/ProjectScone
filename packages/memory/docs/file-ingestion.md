@@ -395,7 +395,14 @@ The readers record what the source declares, in segment metadata:
 | `list_kind` | `bullet`, `ordered`; absent when the source does not say | Both |
 | `list_id` | Word `numId`; HTML ordinal of the outermost list | Both |
 | `list_item_id` | Ordinal of the `li` the text sits in | HTML |
+| `list_start` | The number an `<ol start>` declares, when it is 0-999999999 | HTML |
 | `caption_target` | The table a `<caption>` belongs to | HTML |
+
+In an email or mailbox, each HTML part is read on its own, so its `list_id` and
+`list_item_id` carry the part's locator prefix (`message:2/mime:1/1`) and two
+parts' lists never share an id. A heading, `pre`, `figcaption` or table inside
+an `li` keeps its own role and also carries that item's `list_level`,
+`list_item_id`, `list_id` and `list_kind`.
 
 A Word paragraph is a heading because its own outline level, or the outline
 level or name (`heading 2`, `Title`) of the style it is based on, says so --
@@ -429,13 +436,20 @@ break; a blank line starts a new paragraph.
 A pipe table has one header row and no spans, and the writer does not pretend
 otherwise. A declared header row is the header. A table with no header cells
 uses column names its reader recorded (`table_columns`, for CSV and JSON), or
-else an empty header row -- its first row is never promoted. Further header rows
-are written as body rows. A cell spanning rows or columns is written in its
-first slot with the slots it covers left empty, and a quoted note before the
+else an empty header row -- its first row is never promoted. Any other header
+row, a second one at the top or one between body rows, is written as a body row
+and counted in `extra_header_rows`. A cell spanning rows or columns is written in
+its first slot with the slots it covers left empty, and a quoted note before the
 table says how many cells spanned and how many header rows were demoted. A line
-break in a cell is written as `<br>` and counted. A table its reader could only
-read as text (`table_status=text_fallback`) keeps its lines as paragraphs after
-a note naming the reason.
+break in a cell or a column name is written as `<br>` and counted. A table its
+reader could only read as text (`table_status=text_fallback`) keeps its lines as
+paragraphs after a note naming the reason.
+
+A table is written whole where its first segment is. A spreadsheet reader emits
+cells row by row, so a cell beside a declared table sits between the table's
+rows, and an HTML `<caption>` can come after the first row. Such a caption is
+written before the table; any other segment between its rows is written after
+it, counted in `interleaved_segments`, and named in the note.
 
 Referenced Word notes, comments and text boxes, which the reader queues after
 the body, are quoted with their role: `> footnote 2: ...`. A Word heading below
@@ -445,7 +459,18 @@ more than one level below its predecessor is nested one level and counted in
 and counted in `list_kinds_unsaid`; role metadata no reader writes (a heading
 level `0`, an unknown role) is written as a paragraph and counted in
 `roles_unreadable`. An ordered list the document interrupts carries on
-counting; a paragraph inside an HTML list item stays inside it.
+counting, and an `<ol start>` is where it starts; `<li value>` and a Word
+numbering's start value are not read, so those lists count from 1. A paragraph,
+code block, heading, caption or table inside an HTML list item stays inside it,
+indented under the item, and a block that is the first thing in its item is
+written after the item's marker (`- ## Title`). `blocks.list_item` counts items,
+whatever opens them. Two separate lists that would touch are written with
+different markers (`-` then `*`, `1.` then `1)`), which is how CommonMark tells
+them apart; no text changes.
+
+A code block's line ends are written as `\n`, and the closing fence follows the
+code's own final line break, so a Markdown reader sees the same code the source
+held.
 
 `spans` maps the Markdown back to the source. Each span has its byte range
 (`markdown_start`, `markdown_end`), its 1-based `first_line` and `last_line`,
@@ -459,9 +484,11 @@ and name the rows they describe.
 `max_bytes` (default and maximum 8,000,000) bounds the Markdown. No block is
 written past it; a table's note, header and delimiter row are written together
 or not at all, and its rows are cut between rows. `bound.cut` says whether it
-cut, `bound.cut_at` is the extracted-text byte the first unwritten block starts
-at, and `bound.segments_omitted` counts segments not wholly written. The command
-repeats this on stderr.
+cut, `bound.cut_at` is the first extracted-text byte not written (a table is
+written where its first segment is, so a segment between its rows can be
+unwritten though it comes before the row the bound cut at), and
+`bound.segments_omitted` counts segments not wholly written. The command repeats
+this on stderr.
 
 Inline formatting (bold, links, code spans) is not kept by the readers, so it
 is not in the Markdown; images and charts are not emitted.
@@ -469,14 +496,19 @@ is not in the Markdown; images and charts are not emitted.
 Measured on this repository's `packages/memory/docs` (45 files): each file was
 rendered to HTML by an independent CommonMark renderer (markdown-it-py with
 tables), read by the HTML reader and rebuilt. Parsed back with the same
-renderer, the rebuilt Markdown holds 307 of 307 headings with the same level and
-text in order, 414 of 414 list items (61 nested) with the same text, 40 of 40
-tables with 269 of 269 rows and 776 of 776 cells equal, 154 of 154 code blocks
-byte-equal, and 1,514 of 1,514 paragraphs. The extracted text as stored today,
-read as Markdown, holds none of those tables or list items, and 95 "headings"
-that are all `#` comment lines from code blocks (none matches a source heading).
-No DOCX corpus is in the repository; Word reconstruction is covered by
-constructed fixtures only.
+renderer, the rebuilt Markdown holds 310 of 310 headings with the same level and
+text in order, 414 of 414 list items (61 nested) with the same text, 41 of 41
+tables with 279 of 279 rows and 806 of 806 cells equal, 156 of 156 code blocks
+whose content is exactly the source's, and 1,529 of 1,529 paragraphs. (Before
+the closing fence stopped adding a line, none of the 156 code blocks matched
+exactly: each gained a trailing blank line.) The extracted text as stored today,
+read as Markdown, holds none of those tables or list items, 2 code blocks, and
+95 "headings" that are all `#` comment lines from code blocks (none matches a
+source heading). The corpus has no code block, heading or table inside a list
+item, and no spreadsheet or mail, so those cases are covered by constructed
+fixtures only; one of them, a numbered step holding a code block, rebuilt with 3
+list items instead of 2 before list items kept their blocks. No DOCX corpus is
+in the repository; Word reconstruction is covered by constructed fixtures only.
 
 ## Import a page by URL
 
