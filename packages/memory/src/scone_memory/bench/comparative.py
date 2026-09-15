@@ -119,7 +119,13 @@ class CachedEmbedder:
     id. Each wrapper counts for itself: texts asked for, served from the
     cache, sent to the model, and the wall seconds the model took. A cache
     that fails raises: a bench that quietly embedded again would misreport
-    what it cost."""
+    what it cost.
+
+    The model's window drops the tokens past it without saying so, so where
+    the model has both a window and a tokenizer the wrapper counts the texts
+    asked for that ran past it and the tokens it cut, a text read back as
+    well as one embedded, since its vector was cut when it was made. Where it
+    cannot count, both are None rather than a zero that would read as a fact."""
 
     def __init__(self, inner: Embedder, cache: VectorCache) -> None:
         self.inner = inner
@@ -131,6 +137,9 @@ class CachedEmbedder:
         self.count_tokens: Optional[Callable[[str], int]] = counter if callable(counter) else None
         self.asked = self.reused = self.embedded = 0
         self.seconds = 0.0
+        counts_window = self.count_tokens is not None and self.max_input_tokens is not None
+        self.over_window: Optional[int] = 0 if counts_window else None
+        self.tokens_past_window: Optional[int] = 0 if counts_window else None
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         keys = [cache_key(self.id, self.dim, text) for text in texts]
@@ -149,11 +158,21 @@ class CachedEmbedder:
         self.asked += len(texts)
         self.reused += sum(1 for key in keys if key in found)
         self.embedded += len(wanted)
+        self._count_past_window(texts)
         return [list(fresh[key]) if key in fresh else list(found[key]) for key in keys]
+
+    def _count_past_window(self, texts: Sequence[str]) -> None:
+        if self.count_tokens is None or self.max_input_tokens is None:
+            return
+        past = [tokens - self.max_input_tokens for tokens in map(self.count_tokens, texts)
+                if tokens > self.max_input_tokens]
+        self.over_window = (self.over_window or 0) + len(past)
+        self.tokens_past_window = (self.tokens_past_window or 0) + sum(past)
 
     def record(self) -> dict[str, Any]:
         return {"asked": self.asked, "reused": self.reused, "embedded": self.embedded,
-                "embed_seconds": round(self.seconds, 3)}
+                "embed_seconds": round(self.seconds, 3), "over_window": self.over_window,
+                "tokens_past_window": self.tokens_past_window}
 
 
 class OneThreadCache:
@@ -277,6 +296,39 @@ def _documents(item: BenchItem) -> list[tuple[str, str]]:
     return kept
 
 
+def reference_splitter(embedder: Embedder, *, chunk_size: int, chunk_overlap: int) -> Any:
+    """The reference's ``SentenceSplitter``, counting the tokens the embedding
+    model reads where the model can count them.
+
+    LlamaIndex counts tiktoken's tokens by default, and a model such as BGE
+    reads more of its own for the same text and drops the tokens past its
+    window: at 512 tiktoken tokens, 297 of the reference's 729 nodes over
+    three LongMemEval-S items ran past BGE's 512. So with a model that counts
+    (``count_tokens``), the splitter counts with it, and a chunk's start and
+    end markers (the count of an empty text) are paid once a chunk, as the
+    engine's token chunks count them: ``chunk_size`` is what the model reads.
+    An embedder that cannot count, the hashed one, keeps LlamaIndex's default."""
+    from llama_index.core.node_parser import SentenceSplitter
+
+    counter = getattr(embedder, "count_tokens", None)
+    if not callable(counter):
+        return SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    markers = counter("")
+
+    def tokens(text: str) -> range:
+        # The splitter sums its pieces' counts, so each is counted without the markers.
+        return range(max(0, counter(text) - markers))
+
+    return SentenceSplitter(chunk_size=chunk_size - markers, chunk_overlap=chunk_overlap, tokenizer=tokens)
+
+
+def reference_tokenizer(embedder: Embedder) -> str:
+    """What counts the reference's chunk tokens, as ``reference_splitter`` chooses."""
+    if callable(getattr(embedder, "count_tokens", None)):
+        return f"{embedder.id}, a chunk's markers included"
+    return "tiktoken gpt-3.5-turbo (LlamaIndex's default)"
+
+
 async def llamaindex_session_ranking(item: BenchItem, embedder: Embedder, *, k: int,
                                      chunk_size: int = 512, chunk_overlap: int = 0, hybrid: bool = False) -> list[str]:
     """Sessions in the order LlamaIndex ranks their nodes for the item's
@@ -284,7 +336,6 @@ async def llamaindex_session_ranking(item: BenchItem, embedder: Embedder, *, k: 
     ``hybrid`` its own BM25 retriever fused with the vector retriever by
     reciprocal rank -- the reference at its best rather than its default."""
     from llama_index.core import Document, VectorStoreIndex
-    from llama_index.core.node_parser import SentenceSplitter
 
     if hybrid:
         try:
@@ -303,11 +354,11 @@ async def llamaindex_session_ranking(item: BenchItem, embedder: Embedder, *, k: 
     if not documents:
         return []
     adapter = SconeEmbedding(embedder)
+    splitter = reference_splitter(embedder, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     def build_and_retrieve() -> list[Any]:
-        index = VectorStoreIndex.from_documents(
-            documents, embed_model=adapter, show_progress=False,
-            transformations=[SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)])
+        index = VectorStoreIndex.from_documents(documents, embed_model=adapter, show_progress=False,
+                                                transformations=[splitter])
         # Every node is ranked, so a session that splits into many nodes
         # cannot crowd the others out of a fixed top-N before the folding.
         nodes_in_index = max(1, len(index.docstore.docs))
@@ -480,6 +531,7 @@ async def compare(items: Iterable[BenchItem], make_engine: Callable[[], Any], em
                                      else "VectorIndexRetriever"),
                        "fusion": "reciprocal_rerank" if hybrid else None,
                        "splitter": "SentenceSplitter", "chunk_size": chunk_size, "chunk_overlap": chunk_overlap,
+                       "tokenizer": reference_tokenizer(embedder),
                        "similarity_top_k": "every node in the item's index", "sessions_folded_from_nodes": True},
     }
     return Comparison(len(compared), excluded, {"scone": scone, "llamaindex": llama}, delta, tuple(compared), config)
