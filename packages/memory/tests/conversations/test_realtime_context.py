@@ -219,36 +219,78 @@ def test_invalid_context_settings_rejected(memory, options):
 
 class _StalledChat(FakeChat):
     async def complete(self, system, user):
+        self.calls.append((system, user))
         await asyncio.Event().wait()
         return ""
 
 
-def test_a_listwise_pass_longer_than_the_recall_budget_is_refused(memory):
-    # The pass keeps its own deadline, past the scorer's rerank_timeout, so a
-    # shorter recall budget would cancel every turn's recall whole.
-    memory.reranker = ListwiseReranker(FakeChat([]), timeout=60)
-    with pytest.raises(ValueError, match="listwise"):
-        MemoryContext(memory, "alpha", "one", recall_timeout=2.0)
-    memory.reranker = ListwiseReranker(FakeChat([]), timeout=5)
-    MemoryContext(memory, "alpha", "one", recall_timeout=5)
+async def _two_records(memory):
+    await memory.remember("alpha", "Juniper uses Polaris for calibration")
+    await memory.remember("alpha", "Juniper was calibrated last Tuesday")
 
 
-def test_a_scorer_is_held_to_the_engine_rerank_timeout_not_its_own(memory):
+# A listwise pass takes seconds per model call and a turn's recall budget is
+# two seconds, so a conversation turn never starts one: it keeps fused order
+# and says so, whatever the budget, the follow-up search or the reranker's
+# own deadline.
+
+async def test_a_turn_under_a_budget_equal_to_the_pass_keeps_its_evidence_without_the_pass(memory):
+    await _two_records(memory)
+    chat = _StalledChat([])
+    memory.reranker = ListwiseReranker(chat, timeout=0.5)
+    _, receipt = await MemoryContext(memory, "alpha", "one", recall_timeout=0.5).prepare(
+        [{"role": "user", "content": "Juniper calibration"}])
+    assert receipt["status"] == "prepared" and receipt["error_type"] is None
+    assert len(receipt["references"]) == 2 and chat.calls == []
+    assert receipt["listwise_rerank"] == "skipped"
+
+
+async def test_a_followup_turn_runs_no_pass_for_either_search(memory):
+    await _two_records(memory)
+    chat = _StalledChat([])
+    memory.reranker = ListwiseReranker(chat, timeout=0.6)
+    messages = [{"role": "user", "content": "Tell me about Juniper calibration"}, {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "when was it done?"}]
+    _, receipt = await MemoryContext(memory, "alpha", "one", recall_timeout=1.0, followup_queries="carry").prepare(messages)
+    assert receipt["followup"]["applied"] is True
+    assert receipt["status"] == "prepared" and len(receipt["references"]) == 2 and chat.calls == []
+
+
+async def test_a_pass_longer_than_any_turn_budget_does_not_stop_a_conversation(memory):
+    # Voice keeps 2 s and the pass may have 600 s: the context is built and
+    # the turn prepared, rather than refused at the start route.
+    await _two_records(memory)
+    chat = _StalledChat([])
+    memory.reranker = ListwiseReranker(chat, timeout=600)
+    _, receipt = await MemoryContext(memory, "alpha", "one").prepare([{"role": "user", "content": "Juniper calibration"}])
+    assert receipt["status"] == "prepared" and chat.calls == []
+
+
+async def test_a_scorer_still_reranks_a_turn_and_the_receipt_names_no_skip(memory):
+    await _two_records(memory)
+    asked: list[int] = []
+
     class Scorer:
-        timeout = 60  # its own setting; recall cuts it at rerank_timeout
-
         async def rerank(self, query, candidates):
+            asked.append(len(candidates))
             return []
 
     memory.reranker = Scorer()
-    MemoryContext(memory, "alpha", "one", recall_timeout=2.0)
+    _, receipt = await MemoryContext(memory, "alpha", "one").prepare([{"role": "user", "content": "Juniper calibration"}])
+    assert asked and receipt["status"] == "prepared" and "listwise_rerank" not in receipt
 
 
-async def test_a_listwise_pass_that_times_out_leaves_the_turn_its_fused_evidence(memory):
-    await memory.remember("alpha", "Juniper uses Polaris for calibration")
-    await memory.remember("alpha", "Juniper was calibrated last Tuesday")
-    memory.reranker = ListwiseReranker(_StalledChat([]), timeout=0.05)
-    request, receipt = await MemoryContext(memory, "alpha", "one", recall_timeout=10).prepare(
+async def test_adaptive_retrieval_is_not_refused_for_a_pass_it_never_runs(memory):
+    from scone_memory.retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, EvidenceDecision
+
+    class Assessor:
+        async def assess(self, question, candidates):
+            return EvidenceDecision(status="sufficient", selected_ids=tuple(c.id for c in candidates))
+
+    await _two_records(memory)
+    chat = _StalledChat([])
+    memory.reranker = ListwiseReranker(chat, timeout=5)
+    retriever = AdaptiveRetriever(memory, Assessor(), limits=AdaptiveLimits(timeout_s=2))
+    _, receipt = await MemoryContext(memory, "alpha", "one", adaptive_retriever=retriever, recall_timeout=2).prepare(
         [{"role": "user", "content": "Juniper calibration"}])
-    assert receipt["status"] == "prepared" and receipt["error_type"] is None
-    assert len(receipt["references"]) == 2 and receipt["degraded"] == ["unknown"]
+    assert receipt["status"] == "prepared" and chat.calls == [] and receipt["listwise_rerank"] == "skipped"

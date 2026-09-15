@@ -22,7 +22,8 @@ Where it differs from the reference, on purpose:
   window's outcome, and the reason, is on the receipt.
 - One deadline covers the whole pass. When it passes, or the model fails,
   the fused order stands, the reason is given, and the receipt shows how far
-  the pass got.
+  the pass got. A caller that recalls several times for one request runs
+  them inside ``one_listwise_budget`` so every pass shares that one timeout.
 """
 
 from __future__ import annotations
@@ -30,7 +31,9 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Optional
 
@@ -83,15 +86,42 @@ def validate_listwise_options(window: int, step: int, passage_bytes: int, timeou
 
 def sliding_windows(count: int, window: int, step: int) -> list[tuple[int, int]]:
     """Half-open windows over ``count`` places, bottom first, each ``step``
-    above the last; the final window is the top one, full when it can be."""
+    above the last; the final window is the top one, full when it can be.
+    Fewer than two places have no order to ask for, and get no window."""
     windows: list[tuple[int, int]] = []
     end = count
     while end - window > 0:
         windows.append((end - window, end))
         end -= step
-    if count:
+    if count > 1:
         windows.append((0, min(window, count)))
     return windows
+
+
+@dataclass
+class _Budget:
+    #: Seconds the passes started under this budget have taken so far.
+    spent: float = 0.0
+
+
+_BUDGET: ContextVar[_Budget | None] = ContextVar("scone_listwise_budget", default=None)
+
+
+@contextmanager
+def one_listwise_budget() -> Iterator[None]:
+    """Listwise passes started inside share one ``timeout`` between them.
+
+    A caller that recalls several times for one request -- each part of a
+    question, a follow-up's second search -- would otherwise wait on the
+    model a whole timeout per recall. Inside, each pass has what the passes
+    before it left; one that finds nothing left calls no model and keeps
+    fused order, saying whose time ran out. Time between passes (searching,
+    fusing) is not counted."""
+    token = _BUDGET.set(_Budget())
+    try:
+        yield
+    finally:
+        _BUDGET.reset(token)
 
 
 def passage_text(text: str, limit: int) -> tuple[str, bool]:
@@ -194,17 +224,31 @@ class ListwiseReranker:
         shown = [passage_text(candidate.text, self.passage_bytes) for candidate in pool]
         receipt.clipped = sum(clipped for _, clipped in shown)
         places = list(range(len(pool)))
-        deadline = asyncio.timeout(self.timeout)
+        windows = sliding_windows(len(pool), self.window, self.step)
+        if not windows:
+            return ListwiseOutcome(tuple(candidate.chunk_id for candidate in pool), receipt)
+        budget = _BUDGET.get()
+        spent = 0.0 if budget is None else budget.spent
+        shared = f"listwise timeout: the {self.timeout:g}s this request allows listwise passes ran out; fused order kept"
+        if spent >= self.timeout:
+            return self._fell_back(pool, receipt, "timeout", shared)
+        deadline = asyncio.timeout(self.timeout - spent)
+        began = time.perf_counter()
         try:
             async with deadline:
-                for start, end in sliding_windows(len(pool), self.window, self.step):
+                for start, end in windows:
                     await self._rank_window(" ".join(query.split()), shown, places, start, end, receipt)
         except TimeoutError:
             if deadline.expired():
-                return self._fell_back(pool, receipt, "timeout", f"listwise timeout after {self.timeout:g}s; fused order kept")
+                return self._fell_back(pool, receipt, "timeout",
+                                       shared if spent else f"listwise timeout after {self.timeout:g}s; fused order kept")
             return self._fell_back(pool, receipt, "failed", "listwise model failed: TimeoutError; fused order kept")
         except Exception as error:  # noqa: BLE001 - any model failure keeps fused order, named by type only
             return self._fell_back(pool, receipt, "failed", f"listwise model failed: {type(error).__name__}; fused order kept")
+        finally:
+            if budget is not None:
+                # A deadline that fired used all that was left.
+                budget.spent = self.timeout if deadline.expired() else spent + time.perf_counter() - began
         receipt.moved = sum(place != index for index, place in enumerate(places))
         return ListwiseOutcome(tuple(pool[place].chunk_id for place in places), receipt, _notes(receipt))
 
@@ -240,7 +284,8 @@ class ListwiseReranker:
     @staticmethod
     def _fell_back(pool: tuple[RerankCandidate, ...], receipt: ListwiseReceipt,
                    outcome: Literal["failed", "timeout"], reason: str) -> ListwiseOutcome:
-        receipt.calls[-1].outcome = outcome
-        receipt.calls[-1].reason = reason
+        if receipt.calls:
+            receipt.calls[-1].outcome = outcome
+            receipt.calls[-1].reason = reason
         receipt.fallback = reason
         return ListwiseOutcome(tuple(candidate.chunk_id for candidate in pool), receipt)

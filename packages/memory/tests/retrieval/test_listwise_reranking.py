@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+import tomllib
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,8 +13,11 @@ from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorInde
 from scone_memory.core.errors import InvalidInput
 from scone_memory.core.models import RerankTrace
 from scone_memory.providers.llm import ChatError, FakeChat
-from scone_memory.retrieval.listwise import (ListwiseFallbackError, ListwiseReranker, parse_permutation, passage_text,
-                                             sliding_windows)
+import scone_memory.retrieval.listwise as listwise_module
+from scone_memory.integrations.chat import recall_context
+from scone_memory.retrieval.listwise import (ListwiseFallbackError, ListwiseReranker, one_listwise_budget,
+                                             parse_permutation, passage_text, sliding_windows)
+from scone_memory.retrieval.parts import recall_parts
 from scone_memory.retrieval.reranking import RerankCandidate, RerankScore
 
 STAMP = "2026-09-07T00:00:00.000Z"
@@ -39,7 +44,8 @@ def test_windows_slide_from_the_bottom_and_finish_on_a_full_top_window():
     assert sliding_windows(21, 20, 10) == [(1, 21), (0, 20)]
     assert sliding_windows(20, 20, 10) == [(0, 20)]
     assert sliding_windows(5, 20, 10) == [(0, 5)]
-    assert sliding_windows(1, 20, 10) == [(0, 1)]
+    assert sliding_windows(2, 20, 10) == [(0, 2)]
+    assert sliding_windows(1, 20, 10) == []  # one passage has no order to ask for
     assert sliding_windows(0, 20, 10) == []
     assert sliding_windows(7, 3, 2) == [(4, 7), (2, 5), (0, 3)]
 
@@ -353,3 +359,94 @@ async def test_cancellation_reaches_the_model_call(engine):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert cancelled.is_set()
+
+
+async def test_one_candidate_asks_the_model_nothing(engine):
+    await ordered(engine, count=1)
+    chat = FakeChat([ranking(1)])
+    engine.reranker = ListwiseReranker(chat, timeout=5)
+    result = await engine.recall("alpha", "which record answers", limit=2, candidate_limit=8)
+    assert len(result.items) == 1 and chat.calls == []
+    assert result.rerank.status == "applied" and result.rerank.listwise.model_calls == 0
+    assert result.rerank.listwise.calls == [] and result.degraded == []
+
+
+# One request, several recalls: the passes share one timeout between them.
+
+class Stalled(FakeChat):
+    async def complete(self, system, user):
+        self.calls.append((system, user))
+        await asyncio.Event().wait()
+        return ""
+
+
+SPENT = "listwise timeout: the {:g}s this request allows listwise passes ran out; fused order kept"
+
+
+async def test_recall_parts_waits_on_the_model_one_timeout_in_all(engine):
+    await ordered(engine)
+    chat = Stalled()
+    engine.reranker = ListwiseReranker(chat, timeout=0.05)
+    parted = await recall_parts(engine, "alpha", "Who calibrates Juniper and where does Birch run the archive?")
+    assert len(parted.per_part) == 2 and len(chat.calls) == 1
+    assert parted.per_part[0].degraded == ("rerank: listwise timeout after 0.05s; fused order kept",)
+    assert parted.per_part[1].degraded == ("rerank: " + SPENT.format(0.05),)
+
+
+async def test_a_followup_search_in_chat_shares_the_questions_timeout(engine):
+    await ordered(engine)
+    chat = Stalled()
+    engine.reranker = ListwiseReranker(chat, timeout=0.05)
+    messages = [{"role": "user", "content": "Where does Alice Chen work?"}, {"role": "assistant", "content": "Acme."},
+                {"role": "user", "content": "since when?"}]
+    _, receipt = await recall_context(engine, "alpha", messages, followup="carry")
+    assert receipt.followup is not None and receipt.followup["applied"] is True
+    assert len(chat.calls) == 1
+
+
+async def test_a_shared_budget_counts_the_time_each_pass_took(monkeypatch):
+    # The passes' own clock is faked, so the first pass "takes" 0.45 s at once.
+    clock = type("Clock", (), {"now": 0.0, "perf_counter": lambda self: self.now})()
+    monkeypatch.setattr(listwise_module, "time", clock)
+
+    class Ticking(FakeChat):
+        async def complete(self, system, user):
+            clock.now += 0.45
+            return await super().complete(system, user)
+
+    quick, stalled, after = Ticking([ranking(2, 1)]), Stalled(), FakeChat([ranking(2, 1)])
+    loop = asyncio.get_running_loop()
+    with one_listwise_budget():
+        first = await ListwiseReranker(quick, timeout=0.5).order("q", candidates(2))
+        began = loop.time()
+        second = await ListwiseReranker(stalled, timeout=0.5).order("q", candidates(2))
+        waited = loop.time() - began
+        third = await ListwiseReranker(after, timeout=0.5).order("q", candidates(2))
+        alone = await ListwiseReranker(after, timeout=0.5).order("q", candidates(1))
+    assert first.fallback is None and first.ordered == (101, 100)
+    # 0.45 s spent, so the second pass had 0.05 s, not 0.5, and says whose time ran out.
+    assert waited < 0.3
+    assert second.fallback == SPENT.format(0.5) and [call.outcome for call in second.receipt.calls] == ["timeout"]
+    # Nothing left: the third pass calls no model at all.
+    assert third.fallback == SPENT.format(0.5) and after.calls == [] and third.receipt.model_calls == 0
+    assert third.receipt.calls == [] and third.ordered == (100, 101)
+    # A single passage needs no model, so it is not a timeout.
+    assert alone.fallback is None and alone.ordered == (100,)
+
+
+async def test_outside_a_shared_budget_each_pass_has_its_own_timeout():
+    chat = FakeChat([ranking(2, 1), ranking(2, 1)])
+    for _ in range(2):
+        assert (await ListwiseReranker(chat, timeout=0.05).order("q", candidates(2))).fallback is None
+    assert len(chat.calls) == 2
+
+
+def test_the_pydantic_floor_has_the_field_option_the_trace_relies_on():
+    # RerankTrace.listwise leaves itself out through Field(exclude_if=...),
+    # which pydantic 2.12 added. An older pydantic ignores the keyword with a
+    # warning: a scorer's trace gains "listwise": null and the schema of the
+    # trace and of RecallResult no longer builds.
+    project = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    (pydantic,) = [spec for spec in project["project"]["dependencies"] if spec.startswith("pydantic")]
+    floor = tuple(int(part) for part in pydantic.removeprefix("pydantic>=").split(",")[0].split(".")[:2])
+    assert floor >= (2, 12), pydantic
