@@ -204,12 +204,34 @@ engine` or `layout: inferred`.
 
 ## Inspect possible tables without repeating OCR
 
-The original `aligned-rows-v1` strategy groups retained OCR rectangles into
+The `aligned-rows-v2` strategy groups retained OCR rectangles into
 candidate cells and checks for common column gaps across at least three
-consecutive rows. It returns `geometry_inferred` results; it does not identify
-semantic headers, merged or multi-line cells, or missing values. Aligned prose
-can resemble a table, and irregular tables can remain unassigned. This is an
-inspection feature, not table-aware indexing or an accuracy benchmark.
+consecutive rows. A row of fewer cells beside the full rows -- a title
+across the table, a "Total" beside two numbers -- is read as cells that
+span the grid's columns, each over the contiguous columns its own width
+covers (`column_span`), judged against the full rows' column extents;
+nothing narrower is widened, and a row that fits no column stays
+unassigned. A sentence above the grid is not its title; a row of one
+cell at its foot, or one opening with a footnote's mark, is its note or
+the prose below it, not its last row; all stay unassigned. It returns `geometry_inferred` results; it does not identify
+semantic headers, multi-line cells or missing values. Aligned prose can
+resemble a table, and irregular tables can remain unassigned. A layout
+stored under `aligned-rows-v1` is one read before spans were.
+
+A page's candidates also reach the document: the segment of a
+recognized page, or of a text-layer page laid out in reading order,
+carries them as `table_cells` the way the DOCX and HTML readers give
+theirs (`DocumentTableCell` with row, column, `column_span`, and a byte
+span of the segment's text holding exactly the cell's words), located
+`page:N/table:T/cell:R,C`, and validated the same way. Only the regions
+labelled `table` are read for cells; a page whose labels name no table
+carries none, whatever a grid over its lines would propose. The cells
+come in the order the page's text reads them, each keeping its row and
+column, so a table a recognizer read column by column cites its columns
+in turn; a table whose cells do not sit together in the page's text is
+left out rather than cited wrongly, and the segment's `tables` and
+`tables_unreadable` metadata count both. No header, row span or empty
+cell is invented.
 
 ```python
 from scone_memory.ocr import infer_tables
