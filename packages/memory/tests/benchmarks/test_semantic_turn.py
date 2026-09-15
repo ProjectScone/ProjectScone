@@ -65,10 +65,10 @@ def test_the_fixture_measurement():
     assert tally.premature == {"silence": 17, "semantic": 5}
     assert tally.answered_early["silence"] == [f"cut-{n:02}" for n in range(1, 17)]
     assert tally.answered_early["semantic"] == ["cut-04", "cut-09", "cut-11", "cut-15", "cut-16"]
-    assert sum(value > 0 for value in tally.complete_added_ms["semantic"]) == 2
+    assert sum(value > 0 for value in tally.complete_added_ms["semantic"]) == 3
     assert all(value == 0 for value in tally.complete_added_ms["silence"])
     assert tally.reasons == {"silence": {"silence": 49},
-                             "semantic": {"semantic_complete": 24, "silence": 10, "semantic_incomplete_timeout": 3}}
+                             "semantic": {"semantic_complete": 24, "silence": 9, "semantic_incomplete_timeout": 4}}
     [cut04] = [u for u in load(FIXTURE) if u["id"] == "cut-04"]
     first = replay(cut04, semantic=True).released[0][1].receipt
     assert (first.reason, first.cue) == ("silence", "no cue"), "cut-04 was released for want of a cue, not as complete"

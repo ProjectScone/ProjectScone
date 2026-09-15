@@ -274,6 +274,10 @@ class VoiceSession:
                             # clause waits its hold again from here, not the turn's bound.
                             self._turns.speech_stopped(now=time.perf_counter())
                             held.set()  # that deadline may come before the one being waited on
+                        elif event.text.strip():
+                            # Words not yet final (a streaming recognizer's partial):
+                            # the speaker is still talking, as when speech starts.
+                            self._turns.speech_started(now=time.perf_counter())
             async with control:
                 now = time.perf_counter()
                 for end in self._turns.drain(now):

@@ -93,18 +93,28 @@ session = VoiceSession(memory, "authorized-space", "voice-session-1", ...,
 | --- | --- | --- |
 | `incomplete` | open `(` or quote; trailing filler (`um`, `uh`, `er`, `hmm`); trailing `,` `...` `;` `:` or dash; trailing conjunction (`and`, `but`, `or`, `because`, `if`, …), article (`the`, `a`, `my`, …) or preposition (`to`, `for`, `of`, `from`, …) | holds the turn up to `turn_hold` seconds past the recognizer's pause |
 | `complete` | ends in `?`, `.` or `!` (closing quotes allowed) | ends the turn at the pause, as before |
-| `unsure` | anything else: unpunctuated text with no cue, a last word that is a number or in another script (`set a timer for 20`), and a trailing preposition after a wh-phrase that can be its object (`who`, `what`, `which`, `where`, `how much`, …: `who is this for`) | ends the turn at the pause, as before |
+| `unsure` | anything else: unpunctuated text with no cue, a last word that is a number or in another script (`set a timer for 20`), and a trailing preposition right after a pronoun in text that opens with a wh-phrase that can be its object (`who`, `what`, `which`, `where`, `how much`, …: `who is this for`, `where did you send it to`) | ends the turn at the pause, as before |
 
 The rules are conservative on purpose: `on`, `in`, `up` and `that` end ordinary
 sentences, so they never hold a turn, and unpunctuated text is only held on a
 positive cue. A question word first is not such a cue (`what I really need is`),
 and `when`, `why` and a bare `how` cannot take a trailing preposition as their
-object, so `how do I get from` is held. While a turn is held, speech starting
-again (from the recognizer or the activity detector) keeps it open until
+object, so `how do I get from` is held. A wh-phrase excuses a trailing
+preposition only when a pronoun comes just before it: a noun, verb or adjective
+there can still go on (`what's the best way to`, `who should I talk to about`,
+`what would you recommend for`), so those are held, and so is a finished
+`what are you waiting for`, which pays the hold. While a turn is held, speech
+starting again (from the recognizer or the activity detector), or a partial
+(`final=False`) transcript with words in it, keeps it open until
 `turn_max_duration` after its first final transcript, not `turn_hold`; the next
-final transcript joins it and the joined text is judged again. Speech that ends
-without words (a cough the recognizer transcribes as an empty final `Transcript`)
-runs `turn_hold` again from that transcript, capped by `turn_max_duration`. A
+final transcript joins it and the joined text is judged again. A recognizer that
+reports speech ending without words as an empty final `Transcript` runs
+`turn_hold` again from that transcript, capped by `turn_max_duration`. The HTTP
+recognizers `scone serve` uses (`BufferedTranscription`) do not: an empty
+transcription is their error, so a cough they send for transcription ends the
+session, and a held turn is stored as `session_ended` without being answered. A
+noise they transcribe as words ("Thank you.") joins the held turn instead and is
+judged with it; that was not measured. A
 noise onset that never produces a final transcript at all waits the full
 `turn_max_duration` and is released as `max_duration`. A held turn is never
 recorded or answered until it is released, and new speech still interrupts any
