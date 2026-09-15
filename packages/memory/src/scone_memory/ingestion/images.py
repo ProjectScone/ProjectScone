@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from ..core import forget_after as schedule
 from ..core.errors import Gone, InvalidInput, NotFound
 from ..core.models import Added, Attachment, RecallResult
 from ..core.ports import ImageEmbedder
@@ -91,7 +92,8 @@ def _entity_tag(entity_id: str) -> str:
 
 
 async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_type: Literal['image/png', 'image/jpeg', 'image/webp'],
-                       context: ImageContext, filename: str | None = None) -> ImageIngested:
+                       context: ImageContext, filename: str | None = None,
+                       forget_after: str | None = None) -> ImageIngested:
     """Retain original + context manifest, then index attribution without inference.
 
     Writes use existing primitives, not a transaction. Exact retries repair links.
@@ -99,12 +101,18 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
     With the image lane configured, an episode forgotten while its image is
     embedded raises ``Gone`` (``NotFound`` mid-forget) and keeps no image vector;
     an index recording another image embedder gets no vector (``blocked``).
+
+    ``forget_after`` schedules the episode's forgetting as ``remember``'s does
+    (``core.forget_after``), resolved before the image is stored: a refused
+    schedule stores nothing. The same image and context again is a duplicate
+    and keeps the schedule it holds; the receipt says which.
     """
     check_space(space)
     if not isinstance(data, bytes) or not 0 < len(data) <= min(10_000_000, memory.max_attachment_bytes):
         raise InvalidInput('image input is empty or exceeds its byte limit')
     if media_type not in SUPPORTED_IMAGE_TYPES:
         raise InvalidInput('image context supports still PNG, JPEG and WebP images')
+    when = schedule.asked(forget_after, memory.clock())
     context = ImageContext.model_validate_json(context.model_dump_json())
     output = await run_bounded(python_worker('scone_memory.ingestion._image_worker', media_type),
         data, timeout=15., max_output=4096)
@@ -129,7 +137,8 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
         attachment_ids=(image.attachment_id, retained.attachment_id),
         dedup_key=f'image-v1:{image.attachment_id}:{retained.attachment_id}',
         metadata={'document_format': 'image', 'evidence_origin': 'image_context',
-            'image_original': image.attachment_id, 'image_manifest': retained.attachment_id})
+            'image_original': image.attachment_id, 'image_manifest': retained.attachment_id},
+        forget_after=when)
     if memory.image_vectors is None:
         return ImageIngested(added, image, retained)
     episode = await memory.episode(space, added.episode_id)

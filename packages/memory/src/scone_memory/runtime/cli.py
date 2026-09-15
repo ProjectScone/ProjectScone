@@ -310,6 +310,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import-url", help="fetch a page by URL and read it as the document its media type says it is "
                                           "(needs SCONE_URL_IMPORT=1; private hosts need SCONE_URL_IMPORT_PRIVATE=1)")
     p.add_argument("url", help="an http or https URL")
+    p.add_argument("--forget-after", help="forget the page's memory at this time: RFC 3339, YYYY-MM-DD, or a duration "
+                                          "such as 30d; a page already held keeps the schedule it has")
     from .document_markdown import add_document_markdown_parser
     add_document_markdown_parser(sub)
 
@@ -1850,12 +1852,16 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
         if settings is None or not settings.url_import:
             raise InvalidInput("URL import is off; start with SCONE_URL_IMPORT=1 to fetch pages")
-        imported = await ingest_url(engine, space, args.url, limits=WebLimits(allow_private=settings.url_import_private))
+        imported = await ingest_url(engine, space, args.url, limits=WebLimits(allow_private=settings.url_import_private),
+                                    forget_after=args.forget_after)
         if args.json:
             emit(imported.record())
         else:
+            added = imported.document.added
             print(f"imported {imported.url} as {imported.document.format} ({imported.bytes} bytes, "
-                  f"{imported.document.segments} segment(s)) into episode {imported.document.added.episode_id}", file=out)
+                  f"{imported.document.segments} segment(s)) into episode {added.episode_id}", file=out)
+            if added.forget_after is not None:
+                print(f"  episode {added.episode_id} is to be forgotten after {added.forget_after}", file=out)
         return 0
     if args.command == "summarize":
         from .config import build_chat

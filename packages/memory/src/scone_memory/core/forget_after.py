@@ -63,6 +63,13 @@ def resolve(value: object, now: str, *, allow_past: bool = False) -> str:
     return stamp
 
 
+def asked(value: object, now: str) -> Optional[str]:
+    """``resolve`` for a write that may name no schedule: None when it names
+    none. An ingestion path calls it before it stores anything, so a refused
+    schedule leaves no attachment behind."""
+    return None if value is None else resolve(value, now)
+
+
 def read(value: str) -> Optional[datetime]:
     """A stored schedule as an instant, or None when it cannot be read."""
     try:

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, Mapping, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from ..core import forget_after as schedule
 from ..core.errors import InvalidInput
 from ..core.models import Added, Attachment
 from ..core.validation import MAX_METADATA_VALUE, check_space
@@ -228,13 +229,17 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
                          source: DocumentSource | None = None,
                          embedding_checkpoint: EmbeddingCheckpoint | None = None,
                          metadata: Mapping[str, str] | None = None,
-                         chunking: str | None = None) -> DocumentIngested:
+                         chunking: str | None = None,
+                         forget_after: str | None = None) -> DocumentIngested:
     """Index prepared extraction. Replays repair links using content identities.
     ``metadata`` is what the caller knows about where the bytes came from
     (a URL, a moment); the document's own keys are written after it and win.
     ``chunking`` is how this file's episode is cut, as for ``remember``; unset
-    keeps the engine's rule."""
+    keeps the engine's rule. ``forget_after`` schedules the episode's
+    forgetting as for ``remember``, resolved before the manifest is stored; a
+    replay of the same document keeps the schedule its episode holds."""
     validate_document(manifest.parsed, DocumentLimits())
+    when = schedule.asked(forget_after, memory.clock())
     if original.attachment_id != manifest.original_sha256:
         raise InvalidInput('document extraction does not match its original')
     encoded = encode_manifest(manifest)
@@ -257,11 +262,11 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
         from .records import RetainedVideoRecord
         [added] = await memory.remember_many(space, [RetainedVideoRecord(
             content='', kind='file', source=f'attachment:{original.attachment_id}',
-            dedup_key=key, metadata=metadata)])
+            dedup_key=key, metadata=metadata, forget_after=when)])
     else:
         added = await memory.remember(space, content, kind='file', source=f'attachment:{original.attachment_id}',
             dedup_key=key, attachment_ids=(original.attachment_id, retained.attachment_id),
-            embedding_checkpoint=embedding_checkpoint, metadata=metadata, chunking=chunking)
+            embedding_checkpoint=embedding_checkpoint, metadata=metadata, chunking=chunking, forget_after=when)
     # A source file or manifest stored as a document says what it defines,
     # imports, calls and depends on, as one remembered through `map` does.
     claims = await record_document_claims(memory, space, added, manifest.parsed, manifest.filename)
@@ -273,9 +278,12 @@ async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, file
                            parser: DocumentParser | None = None,
                            limits: DocumentLimits = DocumentLimits(),
                            metadata: Mapping[str, str] | None = None,
-                           chunking: str | None = None) -> DocumentIngested:
-    """Parse, retain, index and link a file. Use the workflow for durable retries."""
+                           chunking: str | None = None,
+                           forget_after: str | None = None) -> DocumentIngested:
+    """Parse, retain, index and link a file. Use the workflow for durable retries.
+    ``forget_after`` is refused before the file is parsed or stored."""
     check_space(space)
+    asked = schedule.asked(forget_after, memory.clock())
     if len(data) > memory.max_attachment_bytes:
         raise InvalidInput('document exceeds the attachment byte limit')
     manifest = await prepare_document(data, filename, parser=parser or BuiltinDocumentParser(), limits=limits)
@@ -283,7 +291,8 @@ async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, file
         raise InvalidInput('document manifest exceeds its attachment byte limit')
     original = await memory.attach(space, data, FILE_MEDIA_TYPES.get(extension(filename), 'application/octet-stream'),
                                    filename=filename)
-    return await store_document(memory, space, original, manifest, metadata=metadata, chunking=chunking)
+    return await store_document(memory, space, original, manifest, metadata=metadata, chunking=chunking,
+                                forget_after=asked)
 
 
 async def document_provenance(memory: MemoryEngine, space: str, episode_id: int, *,
