@@ -37,9 +37,10 @@ SCONE_SQLITE_PATH=./source-state/memory.db scone-memory sync-directory ./documen
 
 `--forget-after 90d` (or `synchronize(forget_after="90d")`) schedules every
 source revision the run writes to be forgotten at one instant, resolved once for
-the run; an unchanged source keeps the schedule it holds, and a source forgotten
-by its schedule is suppressed like any other forget (see
-[scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
+the run; an unchanged source keeps the schedule it holds, a pending revision
+keeps the schedule it was prepared under, and a source whose time has come is
+read afresh by the next run, while one forgotten by hand before its time stays
+suppressed (see [scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
 
 Use the same command with `--delete-missing` to retire files removed from the
 directory. Without it, missing sources remain in memory. Exit status is `0` for

@@ -421,7 +421,7 @@ async def sync_directory(
     max_bytes: int = MAX_BYTES,
     ignore: bool = True,
     repo: Optional[str] = None,
-    forget_after: Optional[str] = None,
+    forget_after: str | schedule.Resolved | None = None,
 ) -> SyncReceipt:
     """Bring ``space`` into step with ``root``, or say what that would do.
     ``ignore`` reads the tree's `.gitignore` and `.sconeignore` files and
@@ -431,8 +431,9 @@ async def sync_directory(
 
     ``forget_after`` schedules every file this sync writes to be forgotten,
     as ``remember``'s does. It is resolved once, before the walk, so a
-    duration names one instant for the whole run, and a refused one refuses
-    the run before anything is read. An unchanged file is not written and
+    duration names one instant for the whole run, a walk that outlasts it
+    still writes that instant (the files written after it are due at once),
+    and a refused one refuses the run before anything is read. An unchanged file is not written and
     keeps the schedule its memory holds; ``schedule_kept`` counts those whose
     schedule is not this one."""
     from .repositories import repository_prefix
@@ -493,7 +494,7 @@ async def sync_directory(
         held = known.get(here)
         if held is not None and held.content == text:
             tally.unchanged += 1
-            tally.schedule_kept += held.metadata.get(schedule.KEY) != when
+            tally.schedule_kept += held.metadata.get(schedule.KEY) != schedule.instant(when)
             tally.saw(here, "unchanged")
             continue
         what = "updated" if held is not None else "added"
@@ -560,7 +561,7 @@ async def sync_directory(
         empty=tally.empty, cut=tally.cut, changes=tuple(tally.changes),
         listed_all=tally.listed_all, checked_for_missing=whole,
         claims_closed=tally.claims_closed, claims_unread=tally.claims_unread,
-        forget_after=when, schedule_kept=tally.schedule_kept)
+        forget_after=schedule.instant(when), schedule_kept=tally.schedule_kept)
     if apply:
         # Only a sync that wrote can be a last success; a plan succeeded
         # at nothing and must not look like a completed sync.

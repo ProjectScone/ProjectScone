@@ -91,12 +91,20 @@ the engine's clock before it stores anything of its own, and refuses a past or
 unreadable one with `remember`'s `InvalidInput` (HTTP 422): no image, original
 or manifest attachment is left behind, a URL import fetches nothing, `POST
 /v1/documents` parses nothing, a sync reads nothing and a journaled run writes no
-journal, and `POST /v1/sync-runs` admits no run. Bytes the caller uploaded
-through `POST /v1/attachments` beforehand stay, as they would for any refusal.
+journal, and `POST /v1/sync-runs` admits no run. A value that is not text at all
+(`30`, `true`, a list) is refused the same way, with 422, on every route. Bytes
+the caller uploaded through `POST /v1/attachments` beforehand stay, as they
+would for any refusal.
 
 **One instant per call.** The schedule is resolved once and that instant is
-passed on, so a duration names one time for everything the call writes: every
-file a sync adds or updates carries the same `forget_after`. The receipts name
+passed on (as `core.forget_after.Resolved`, which the layers below store without
+checking it against their own later clock), so a duration names one time for
+everything the call writes: every file a sync adds or updates carries the same
+`forget_after`. The work is not refused part way when it outlasts a short
+schedule -- a parse or OCR longer than `2m`, a walk longer than `1h`, a sync run
+near its deadline: what it stores after the instant is stored with that instant,
+is due at once (reads withhold it), and the next sweep forgets it with the
+attachments it carries. The receipts name
 it: `Added.forget_after` (inside `ImageIngested.added` and
 `DocumentIngested.added`), `forget_after` in the URL import's record,
 `SyncReceipt.forget_after`, `DirectorySyncResult.forget_after` and each
@@ -115,24 +123,35 @@ memory holds another schedule than the run's, or holds one when the run asked
 for none. To give content already held a new schedule, forget it and import it
 again.
 
-**Content already past its time is stored afresh.** An image, document or page
-whose episode is past its `forget_after` (not yet swept) is stored again as a
-new episode: the overdue one is forgotten first, `Added.forgot_overdue` names
-it, and the image or file is still linked to the new episode -- a write puts
-back the attachment bytes that the overdue memory's forget released. `sync` does
-the same for a file (reads leave the overdue memory out, so the file is written
-again with the run's schedule).
+**Content already past its time is stored afresh.** An image, document, page
+or video stored as sampled frames only whose episode is past its `forget_after`
+(not yet swept) is stored again as a new episode: the overdue one is forgotten
+first, `Added.forgot_overdue` names it, and the image or file is still linked to
+the new episode -- a write puts back the attachment bytes that the overdue
+memory's forget released. `sync` does the same for a file (reads leave the
+overdue memory out, so the file is written again with the run's schedule).
 
-A journaled `DirectorySync` does not. It reads an overdue revision as gone and
-suppresses the path, as it suppresses a managed source forgotten any other way:
-the sweep forgets the episode, and a later run does not bring the file back.
-Two more rules for journaled runs: a pending revision an interrupted run left
-unindexed is written by the run that finishes it, with that run's schedule,
-while one indexed before the interruption is a duplicate and keeps the schedule
-it was stored with; and a run admitted over HTTP keeps its resolved instant, so
-every attempt writes the same one, a retry of the same request (the same text,
-even a duration) is the same run, and a resume after the instant has passed is
-refused with `sync_schedule_passed` (409).
+A journaled `DirectorySync` holds the same window. A source whose revision's
+time has come is read afresh from the file by the next run that sees it, changed
+or not, with that run's schedule: an ordinary replacement, reported `updated`,
+which closes the claims the file no longer states and forgets the old revision
+if the sweep has not. A missing file whose revision was swept is `absent`, its
+claims closed as for a deletion, and may come back. Only a forget *before* the
+revision's time -- a forget by hand -- suppresses the path, as for any managed
+source; the journal keeps each revision's schedule, and the tombstone's time
+says which it was (a forget by hand after the time reads as the schedule's).
+
+Recovery keeps the schedule. A pending revision keeps the schedule of the run
+that prepared it, whichever run finishes it -- one asking for another schedule
+or none included -- and is stored with it even if the time has passed since. A
+pending revision swept before its replacement finished (stored, then taken at
+its time, before the run that stored it could retire the last revision) is
+abandoned: the claims both revisions were cited for are closed as for a
+deletion, a last revision still held is forgotten, and the file is read afresh.
+A run admitted over HTTP keeps its resolved instant, so every attempt writes
+the same one; a retry of the same request (the same text, even a duration) is
+the same run, even after its instant has passed; and a resume after the instant
+has passed is refused with `sync_schedule_passed` (409).
 
 **The sweep takes what ingestion attached.** `forget_due` forgets an ingested
 episode through the ordinary forget: its chunks and text vectors, its image
@@ -142,10 +161,11 @@ held by another occurrence stays with that occurrence. Before the sweep, recall
 withholds an overdue image from every lane, the image lane included.
 
 Not covered yet: durable document jobs (`POST /v1/document-jobs`) and the
-Python client's `DirectorySyncRuns.start` take no schedule; and a video stored
-as sampled frames only, imported again after its time has come but before the
-sweep, is refused with `Gone` naming the scheduled time instead of being stored
-afresh -- run `forget_due` first.
+Python client's `DirectorySyncRuns.start` take no schedule.
+
+A frames-only video interrupted between its store and the clearing of its
+unfinished mark is finished by recovery when the engine next opens, whether or
+not its time has come since; the sweep then forgets it.
 
 ## Before the sweep: the read
 

@@ -75,6 +75,21 @@ async def test_a_duration_is_resolved_once_for_the_whole_run(tmp_path):
         await engine.close()
 
 
+async def test_a_walk_that_outlasts_its_schedule_writes_every_file_with_the_one_instant(tmp_path):
+    ticks = itertools.count()
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                clock=lambda: format_rfc3339(START + timedelta(minutes=next(ticks)))).open()
+    try:
+        tree(tmp_path, **{f"f{n}.md": f"# file number {n}" for n in range(8)})
+        done = await sync_directory(engine, "default", tmp_path, marker="repo", apply=True, forget_after="3m")
+        assert done.added == 8 and done.forget_after == "2026-09-15T12:03:00.000Z"
+        assert (await engine.status("default")).episodes == 8, "the run is not refused part way through its walk"
+        report = await engine.forget_due("default")
+        assert len(report.forgotten) == 8 and {item.forget_after for item in report.items} == {done.forget_after}
+    finally:
+        await engine.close()
+
+
 async def test_a_plan_names_the_schedule_it_would_write_and_writes_nothing(memory, tmp_path):
     tree(tmp_path, **{"a.md": "# plan"})
     plan = await sync_directory(memory, "default", tmp_path, marker="repo", forget_after="2026-10-01")

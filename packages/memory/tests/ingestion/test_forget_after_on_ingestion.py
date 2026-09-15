@@ -206,3 +206,93 @@ async def test_a_frames_only_video_takes_a_schedule_and_keeps_the_one_it_holds(m
     assert (await memory.episode("s", stored.added.episode_id)).metadata["forget_after"] == "2026-09-17T12:00:00.000Z"
     again = await store_document(memory, "s", original, manifest, forget_after="9d")
     assert again.added.deduplicated and again.added.forget_after == "2026-09-17T12:00:00.000Z"
+
+
+async def frames_only(memory, video):
+    from scone_memory.ingestion.files import prepare_document
+    from scone_memory.ingestion.formats.types import DocumentLimits
+    from scone_memory.ingestion.video_ocr import VideoDocumentParser
+
+    from .test_video_ocr import ScriptedOcr
+
+    data, decoder = video
+    manifest = await prepare_document(data, "slides.mp4", parser=VideoDocumentParser(
+        decoder, ScriptedOcr(empty=True), model_revision="fixture-v1"), limits=DocumentLimits())
+    return await memory.attach("s", data, media_type="video/mp4"), manifest
+
+
+async def test_a_frames_only_video_stored_again_after_its_time_is_stored_afresh(memory, video):
+    from scone_memory.ingestion.files import store_document
+
+    original, manifest = await frames_only(memory, video)
+    first = await store_document(memory, "s", original, manifest, forget_after="1h")
+    note = await memory.remember("s", "an ordinary note kept for an hour", forget_after="1h")
+    at(memory, "2026-09-15T14:00:00.000Z")
+    again = await store_document(memory, "s", original, manifest)
+    assert again.added.outcome == "accepted" and again.added.episode_id != first.added.episode_id
+    assert again.added.forgot_overdue is not None and again.added.forgot_overdue.episode_id == first.added.episode_id
+    assert again.added.forget_after is None
+    assert await memory.documents.inflight() == [], "a stored-again video leaves no unfinished mark"
+    evidence = await document_provenance(memory, "s", again.added.episode_id)
+    assert (await memory.attachment("s", evidence.original.attachment_id))[1] == video[0], "its original is still held"
+    report = await memory.forget_due("s")
+    assert report.forgotten == [note.episode_id], "the sweep still reaches the rest of the space"
+
+
+async def test_an_interrupted_frames_only_video_past_its_time_still_lets_the_engine_open(tmp_path, video):
+    from scone_memory.backends import SqliteDocumentStore, SqliteVectorIndex
+    from scone_memory.backends.blobs import FileBlobStore
+    from scone_memory.ingestion.files import store_document
+
+    clock = Clock(NOW)
+
+    def opened():
+        return MemoryEngine(SqliteDocumentStore(tmp_path / "m.db"), SqliteVectorIndex(tmp_path / "m.db"), HashEmbedder(),
+                            blobs=FileBlobStore(tmp_path / "blobs"), clock=clock).open()
+
+    engine = await opened()
+    original, manifest = await frames_only(engine, video)
+    stored = await store_document(engine, "s", original, manifest, forget_after="1h")
+    held = await engine.documents.get_episode("s", stored.added.episode_id)
+    # As a crash between the mark and its clearing leaves it.
+    await engine.documents.mark_inflight("s", held.content_hash)
+    await engine.close()
+    clock.now = "2026-09-15T14:00:00.000Z"
+    engine = await opened()
+    try:
+        assert await engine.documents.inflight() == [], "recovery finishes the video even though its time has come"
+        assert (await engine.forget_due("s")).forgotten == [stored.added.episode_id]
+    finally:
+        await engine.close()
+
+
+async def test_a_document_whose_schedule_passes_during_its_parse_is_stored_due_at_once(memory):
+    from scone_memory.ingestion.formats.registry import BuiltinDocumentParser
+
+    class SlowParser(BuiltinDocumentParser):
+        async def parse(self, *args, **kwargs):
+            at(memory, "2026-09-15T12:05:00.000Z")
+            return await super().parse(*args, **kwargs)
+
+    saved = await ingest_document(memory, "s", NOTES, filename="harbour.md", parser=SlowParser(), forget_after="2m")
+    assert saved.added.forget_after == "2026-09-15T12:02:00.000Z", "the instant resolved at the door is the one stored"
+    with pytest.raises(Gone):
+        await memory.episode("s", saved.added.episode_id)
+    assert (await memory.forget_due("s")).forgotten == [saved.added.episode_id]
+    assert await memory.blobs.held("s") == [], "the sweep takes the original and manifest with it"
+
+
+async def test_an_image_whose_schedule_passes_while_it_is_read_is_stored_due_at_once(memory, monkeypatch):
+    from scone_memory.ingestion import images
+
+    real = images.run_bounded
+
+    async def slow(*args, **kwargs):
+        at(memory, "2026-09-15T12:05:00.000Z")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(images, "run_bounded", slow)
+    saved = await ingest_image(memory, "s", picture(), media_type="image/png", context=context(), forget_after="2m")
+    assert saved.added.forget_after == "2026-09-15T12:02:00.000Z"
+    assert (await memory.forget_due("s")).forgotten == [saved.added.episode_id]
+    assert await memory.blobs.held("s") == []

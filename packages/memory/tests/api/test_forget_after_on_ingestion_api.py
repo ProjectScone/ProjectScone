@@ -75,3 +75,23 @@ async def test_a_page_by_url_takes_a_schedule_and_refuses_a_past_one(served, ser
     made = await client.post("/v1/documents/from-url", json={"url": server + "/page.html", "forget_after": "1h"}, headers=AUTH)
     assert made.status_code == 200, made.text
     assert made.json()["forget_after"] == "2026-09-15T13:00:00.000Z"
+
+
+@pytest.mark.parametrize("bad", [30, True, ["30d"], {"days": 30}])
+async def test_a_schedule_that_is_not_text_is_refused_as_post_episodes_refuses_it(served, bad):
+    engine, client = served
+    image = (await client.post("/v1/attachments", content=picture(), headers={**AUTH, "content-type": "image/png"})).json()
+    upload = (await client.post("/v1/attachments", content=b"# Harbour\n\nClosed in November.\n",
+                                headers={**AUTH, "content-type": "application/octet-stream", "x-filename": "harbour.md"})).json()
+    answers = {
+        "episodes": await client.post("/v1/episodes", json={"content": "the harbour closes", "forget_after": bad}, headers=AUTH),
+        "images": await client.post("/v1/images", json={"attachment_id": image["attachment_id"], "forget_after": bad,
+                                                         "context": context().model_dump(mode="json")}, headers=AUTH),
+        "documents": await client.post("/v1/documents", json={"attachment_id": upload["attachment_id"], "forget_after": bad},
+                                       headers=AUTH),
+        "from-url": await client.post("/v1/documents/from-url", json={"url": "http://127.0.0.1:9/x.html", "forget_after": bad},
+                                      headers=AUTH),
+    }
+    assert {route: answer.status_code for route, answer in answers.items()} == dict.fromkeys(answers, 422)
+    assert set(await engine.blobs.held("alpha")) == {image["attachment_id"], upload["attachment_id"]}, \
+        "no manifest is stored for a refused schedule"

@@ -11,7 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from ..core import forget_after as schedule
 from ..core.errors import InvalidInput
-from ..core.models import Added, Attachment
+from ..core.models import Added, Attachment, ScheduledForget
+from ..core.timeutil import parse_rfc3339
 from ..core.validation import MAX_METADATA_VALUE, check_space
 from .extraction_checkpoint import CheckpointedDocumentParser, ExtractionCheckpoints, checkpoint_dispatch_allowed
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
@@ -230,14 +231,16 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
                          embedding_checkpoint: EmbeddingCheckpoint | None = None,
                          metadata: Mapping[str, str] | None = None,
                          chunking: str | None = None,
-                         forget_after: str | None = None) -> DocumentIngested:
+                         forget_after: str | schedule.Resolved | None = None) -> DocumentIngested:
     """Index prepared extraction. Replays repair links using content identities.
     ``metadata`` is what the caller knows about where the bytes came from
     (a URL, a moment); the document's own keys are written after it and win.
     ``chunking`` is how this file's episode is cut, as for ``remember``; unset
     keeps the engine's rule. ``forget_after`` schedules the episode's
-    forgetting as for ``remember``, resolved before the manifest is stored; a
-    replay of the same document keeps the schedule its episode holds."""
+    forgetting as for ``remember``, resolved before the manifest is stored (a
+    ``Resolved`` one, which a caller checked before its parse, is stored as
+    it is); a replay of the same document keeps the schedule its episode
+    holds, and one over an episode past its time stores the document afresh."""
     validate_document(manifest.parsed, DocumentLimits())
     when = schedule.asked(forget_after, memory.clock())
     if original.attachment_id != manifest.original_sha256:
@@ -259,10 +262,13 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
                 **source_metadata}
     key = identity or f'document-v1:{original.attachment_id}:{retained.attachment_id}'
     if visual_only(manifest.parsed):
-        from .records import RetainedVideoRecord
+        from .records import RetainedVideoRecord, content_hash
+        forgot = await _forget_overdue_video(memory, space, content_hash(space, '', key), (original, retained))
         [added] = await memory.remember_many(space, [RetainedVideoRecord(
             content='', kind='file', source=f'attachment:{original.attachment_id}',
             dedup_key=key, metadata=metadata, forget_after=when)])
+        if forgot is not None:
+            added = added.model_copy(update={'forgot_overdue': forgot})
     else:
         added = await memory.remember(space, content, kind='file', source=f'attachment:{original.attachment_id}',
             dedup_key=key, attachment_ids=(original.attachment_id, retained.attachment_id),
@@ -274,14 +280,35 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
                             len(manifest.parsed.segments), manifest.filename, claims)
 
 
+async def _forget_overdue_video(memory: MemoryEngine, space: str, identity: str,
+                                held: tuple[Attachment, ...]) -> ScheduledForget | None:
+    """Forget a frames-only video's episode already past its ``forget_after``
+    before the video is stored again, as ``remember`` forgets any overdue
+    duplicate: kept, the write would be a duplicate the next sweep takes with
+    it. The forget releases the original and manifest nothing else carries, so
+    their bytes are read first and put back for the new episode to link."""
+    existing = await memory.documents.episode_by_hash(space, identity)
+    now = memory.clock()
+    if existing is None or not schedule.is_due(existing.metadata, parse_rfc3339(now)):
+        return None
+    kept = [await memory.blobs.get(space, attachment.attachment_id) for attachment in held]
+    receipt = await memory.forget(space, existing.episode_id)
+    for attachment, data in kept:
+        await memory.blobs.put(space, data, attachment.media_type, attachment.filename)
+    stamp = existing.metadata[schedule.KEY]
+    return ScheduledForget(episode_id=existing.episode_id, forget_after=stamp, outcome='forgotten',
+                           reason=schedule.reason(stamp, now), receipt=receipt)
+
+
 async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, filename: str,
                            parser: DocumentParser | None = None,
                            limits: DocumentLimits = DocumentLimits(),
                            metadata: Mapping[str, str] | None = None,
                            chunking: str | None = None,
-                           forget_after: str | None = None) -> DocumentIngested:
+                           forget_after: str | schedule.Resolved | None = None) -> DocumentIngested:
     """Parse, retain, index and link a file. Use the workflow for durable retries.
-    ``forget_after`` is refused before the file is parsed or stored."""
+    ``forget_after`` is refused before the file is parsed or stored, and the
+    instant resolved then is the one stored, however long the parse takes."""
     check_space(space)
     asked = schedule.asked(forget_after, memory.clock())
     if len(data) > memory.max_attachment_bytes:
