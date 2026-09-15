@@ -11,6 +11,8 @@ both sides ran under written into the report.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
@@ -201,3 +203,96 @@ async def test_the_reference_at_its_best_fuses_its_bm25_and_vector_retrievers(re
     report = await compare([rare], make_engine, embedder, ks=(1,), hybrid=True)
     assert "BM25" in report.config["llamaindex"]["retriever"] and report.config["llamaindex"]["fusion"] == "reciprocal_rerank"
     assert report.sides["llamaindex"].recall_any[1] == 1.0
+
+
+class Counting:
+    """A model that counts what it is asked, answering with hashed vectors under an id of its own."""
+
+    def __init__(self, model_id: str = "counting-model-v1") -> None:
+        self.hashed = HashEmbedder()
+        self.id = model_id
+        self.dim = self.hashed.dim
+        self.calls: list[list[str]] = []
+
+    async def embed(self, texts):
+        self.calls.append(list(texts))
+        return await self.hashed.embed(texts)
+
+
+async def test_a_cached_embedder_asks_the_model_once_per_text_and_the_other_side_reads_it_back():
+    """Embedding is what a real model's run costs: the sweep's engines and the
+    reference's index embed the same kind of text, and a text either side
+    already embedded is read from the one cache both wrappers share."""
+    from scone_memory.bench.comparative import CachedEmbedder
+    from scone_memory.ingestion.embedding_cache import InMemoryEmbeddingCache
+
+    model, cache = Counting(), InMemoryEmbeddingCache(100)
+    ours, theirs = CachedEmbedder(model, cache), CachedEmbedder(model, cache)
+    first = await ours.embed(["blue binder", "lab notes", "blue binder"])
+    assert model.calls == [["blue binder", "lab notes"]], "a text twice in one call goes to the model once"
+    assert first == await HashEmbedder().embed(["blue binder", "lab notes", "blue binder"]), "the model's own vectors"
+    again = await theirs.embed(["lab notes", "blue binder", "rua augusta"])
+    assert model.calls[1:] == [["rua augusta"]], "only the text neither side had embedded reaches the model"
+    assert again[:2] == [first[1], first[0]]
+    assert await ours.embed([]) == [] and len(model.calls) == 2
+    assert ours.record()["asked"] == 3 and ours.record()["reused"] == 0 and ours.record()["embedded"] == 2
+    assert theirs.record()["asked"] == 3 and theirs.record()["reused"] == 2 and theirs.record()["embedded"] == 1
+    assert ours.seconds > 0 and ours.record()["embed_seconds"] == round(ours.seconds, 3)
+
+    class Slow(Counting):
+        async def embed(self, texts):
+            await asyncio.sleep(0.02)
+            return await super().embed(texts)
+
+    slow = CachedEmbedder(Slow(), cache)
+    await slow.embed(["a text that takes a while"])
+    assert slow.record()["embed_seconds"] >= 0.02, "the record carries the seconds the model took"
+
+    class Short(Counting):
+        async def embed(self, texts):
+            return (await super().embed(texts))[:-1]
+
+    with pytest.raises(ValueError, match="one vector per input"):
+        await CachedEmbedder(Short(), cache).embed(["one new text", "and another"])
+    assert cache.record()["entries"] == 4, (
+        "a model's short answer is refused before anything is kept")
+
+
+async def test_a_cached_embedder_is_the_model_to_the_engine_by_id_width_window_and_tokenizer():
+    from scone_memory.bench.comparative import CachedEmbedder
+    from scone_memory.ingestion.embedding_cache import InMemoryEmbeddingCache
+
+    class Tokenized(Counting):
+        max_input_tokens = 512
+
+        def count_tokens(self, text: str) -> int:
+            return len(text.split()) + 2
+
+    cache = InMemoryEmbeddingCache(100)
+    wrapped = CachedEmbedder(Tokenized(), cache)
+    assert (wrapped.id, wrapped.dim) == ("counting-model-v1", HashEmbedder().dim)
+    assert wrapped.max_input_tokens == 512 and wrapped.count_tokens is not None and wrapped.count_tokens("a b") == 4, (
+        "token chunks are counted by the model's tokenizer through the wrapper, not by the estimate")
+    plain = CachedEmbedder(Counting(), cache)
+    assert plain.max_input_tokens is None and plain.count_tokens is None
+    hashed = MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), CachedEmbedder(HashEmbedder(), cache))
+    assert hashed.vector_weight == 0.01, "the engine's default voice reads the model's id through the wrapper"
+
+
+def test_the_bench_embedder_is_hash_or_a_local_model_and_anything_else_is_refused(monkeypatch):
+    from scone_memory.bench.comparative import bench_embedder
+    from scone_memory.embedders import local
+
+    hashed = bench_embedder("hash")
+    assert type(hashed) is HashEmbedder, "the hashed path every earlier number used, unwrapped"
+    made: list[tuple[str, object]] = []
+
+    class Local:
+        def __init__(self, name: str, cache_dir=None) -> None:
+            made.append((name, cache_dir))
+
+    monkeypatch.setattr(local, "LocalEmbedder", Local)
+    assert isinstance(bench_embedder("bge-small-en-v1.5", cache_dir="/models"), Local)
+    assert made == [("bge-small-en-v1.5", "/models")]
+    with pytest.raises(ValueError, match="bge-small-en-v1.5"):
+        bench_embedder("bge-smol")

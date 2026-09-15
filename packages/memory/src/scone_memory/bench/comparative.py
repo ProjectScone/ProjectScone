@@ -25,9 +25,12 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine, Iterable, Optional, Sequence, TypeVar
+import time
+from typing import Any, Callable, Coroutine, Iterable, Mapping, Optional, Protocol, Sequence, TypeVar
 
 from ..core.ports import Embedder
+from ..ingestion.embedding_cache import cache_key
+from ..ingestion.vectors import validated_vectors
 from ..providers.llm import ChatModel
 from . import metrics as bench_metrics
 from .runner import BenchItem, ItemResult, run
@@ -89,6 +92,105 @@ def _adapter_class() -> Any:
 def SconeEmbedding(embedder: Embedder) -> Any:  # noqa: N802 - reads as the adapter's name at call sites
     """An instance of the LlamaIndex embedding adapter around ``embedder``."""
     return _adapter_class()(embedder)
+
+
+class VectorCache(Protocol):
+    """What a bench's embedding wrapper needs of a cache: the part of
+    ``ingestion.embedding_cache.EmbeddingCache`` that reads, writes and says what it holds."""
+
+    def take(self, keys: Sequence[str], dim: int) -> dict[str, list[float]]: ...
+
+    def keep(self, vectors: Mapping[str, Sequence[float]], dim: int) -> None: ...
+
+    def record(self) -> dict[str, object]: ...
+
+
+class CachedEmbedder:
+    """A model that is asked only for texts the cache does not hold.
+
+    A real model's run is spent embedding. The sweep's engines, the
+    reference's index and every recall's question go through wrappers over
+    one cache, keyed as the engine's own embedding cache keys a chunk (the
+    model's id, its width and the exact text), so a text is embedded once
+    for the whole run and a rerun reads every vector back. The wrapper is
+    the model to whoever holds it: the same id and width, and the model's
+    input window and tokenizer where it has them, so a token chunk is
+    counted by the model and the engine's default voice reads the model's
+    id. Each wrapper counts for itself: texts asked for, served from the
+    cache, sent to the model, and the wall seconds the model took. A cache
+    that fails raises: a bench that quietly embedded again would misreport
+    what it cost."""
+
+    def __init__(self, inner: Embedder, cache: VectorCache) -> None:
+        self.inner = inner
+        self.cache = cache
+        self.id = inner.id
+        self.dim = inner.dim
+        self.max_input_tokens: Optional[int] = getattr(inner, "max_input_tokens", None)
+        counter = getattr(inner, "count_tokens", None)
+        self.count_tokens: Optional[Callable[[str], int]] = counter if callable(counter) else None
+        self.asked = self.reused = self.embedded = 0
+        self.seconds = 0.0
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        keys = [cache_key(self.id, self.dim, text) for text in texts]
+        found = self.cache.take(keys, self.dim)
+        first_text: dict[str, str] = {}
+        for key, text in zip(keys, texts):
+            first_text.setdefault(key, text)
+        wanted = [key for key in first_text if key not in found]
+        fresh: dict[str, list[float]] = {}
+        if wanted:
+            started = time.perf_counter()
+            answered = await self.inner.embed([first_text[key] for key in wanted])
+            self.seconds += time.perf_counter() - started
+            fresh = dict(zip(wanted, validated_vectors(answered, len(wanted), self.dim)))
+            self.cache.keep(fresh, self.dim)
+        self.asked += len(texts)
+        self.reused += sum(1 for key in keys if key in found)
+        self.embedded += len(wanted)
+        return [list(fresh[key]) if key in fresh else list(found[key]) for key in keys]
+
+    def record(self) -> dict[str, Any]:
+        return {"asked": self.asked, "reused": self.reused, "embedded": self.embedded,
+                "embed_seconds": round(self.seconds, 3)}
+
+
+class OneThreadCache:
+    """An embedding cache every call of which runs on one thread of its own.
+
+    The reference builds its index in a worker thread and embeds from
+    there, and a SQLite connection may be used only by the thread that
+    opened it; so the cache is opened on this thread and asked there,
+    whichever thread asks."""
+
+    def __init__(self, open_cache: Callable[[], VectorCache]) -> None:
+        self._thread = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="embedding-cache")
+        self._cache = self._thread.submit(open_cache).result()
+
+    def take(self, keys: Sequence[str], dim: int) -> dict[str, list[float]]:
+        return self._thread.submit(self._cache.take, keys, dim).result()
+
+    def keep(self, vectors: Mapping[str, Sequence[float]], dim: int) -> None:
+        self._thread.submit(self._cache.keep, vectors, dim).result()
+
+    def record(self) -> dict[str, object]:
+        return self._thread.submit(self._cache.record).result()
+
+
+def bench_embedder(name: str, *, cache_dir: Optional[str] = None) -> Embedder:
+    """The embedder a comparison runs on both sides, by name: ``hash`` for
+    the hashed-token embedder every earlier row used, or a local model
+    (``embedders.local.MODELS``) run in-process through fastembed, its
+    files kept in ``cache_dir``."""
+    from ..embedders import local
+    from ..embedders.hash import HashEmbedder
+
+    if name == "hash":
+        return HashEmbedder()
+    if name not in local.MODELS:
+        raise ValueError(f"unknown bench embedder {name!r}; known: hash, {', '.join(sorted(local.MODELS))}")
+    return local.LocalEmbedder(name, cache_dir=cache_dir)
 
 
 def _llm_class() -> Any:
