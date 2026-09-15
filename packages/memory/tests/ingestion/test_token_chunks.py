@@ -12,6 +12,8 @@ and by the budget's estimate otherwise, so no model is needed.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine, Record
@@ -135,7 +137,34 @@ def test_a_word_longer_than_the_target_is_cut_inside_and_counted():
     assert record["hard_cuts"] == 3 and record["sentences_over_target"] == 1, record
     start = content.index(blob)
     assert all(any(span.start <= index < span.end for span in cut.spans) for index in range(start, start + 600))
+    # A part the room holds exactly is taken: 128 letters are 32 tokens.
+    assert [span.end - span.start for span in token_spans(blob, 34).spans] == [128] * 4 + [88]
 
+
+def test_cutting_a_long_word_reads_it_a_part_at_a_time():
+    """Text written without spaces is one word to the cut, so a long document
+    in such a script is hard-cut all the way through. Each part is found
+    without counting far past it. A search that starts from the word's end
+    counts about the rest of the word for every part, so the reading grows
+    with the square of the word: this one would be read some 340 times over."""
+    counts: list[int] = []
+
+    def counted(text: str) -> int:
+        counts.append(len(text))
+        return estimated_tokens(text)
+
+    word = "b" * 100_000
+    cut = token_spans(word, 40, count=counted)
+    # Parts of 152 letters, as above, and the last one ends with the word.
+    assert [(span.start, span.end) for span in cut.spans] == [(at, min(at + 152, len(word)))
+                                                                for at in range(0, len(word), 152)]
+    assert cut.hard_cuts == len(cut.spans) - 1 == 657, cut.record()
+    # Besides the word itself, counted as a sentence, a line and a word.
+    assert max(size for size in counts if size < len(word)) <= 2 * 152
+    assert sum(counts) < 40 * len(word), f"read {sum(counts) / len(word):.0f} times over"
+    # A part's end in no more than twice the logarithm of its length and one
+    # count, and one count more each of the part and of its chunk.
+    assert len(counts) <= len(cut.spans) * (2 * math.log2(152) + 1 + 2), len(counts) / len(cut.spans)
 
 def test_overlap_repeats_whole_trailing_sentences_of_the_chunk_before():
     cut = token_spans(PROSE, 48, overlap=16)
