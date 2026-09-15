@@ -476,9 +476,10 @@ class RecallResult(BaseModel):
     #: post-filtered lane's window was full when the filter removed
     #: candidates. None when nothing narrowed.
     narrowing: Optional[Narrowing] = None
-    #: How the lanes were fused: ``rank`` (reciprocal rank, the default) or
-    #: ``score`` (each lane's scores scaled to its own range, then added).
-    fusion: Literal["rank", "score"] = "rank"
+    #: How the lanes were fused: ``rank`` (reciprocal rank, the default),
+    #: ``score`` (each lane's scores scaled to its own range, then added) or
+    #: ``distribution`` (each lane's scores placed by its mean and spread).
+    fusion: Literal["rank", "score", "distribution"] = "rank"
     #: With ``graph_boost``: the entities the entity lane searched for.
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
@@ -524,7 +525,7 @@ class Added(BaseModel):
     #: landed on a boundary, what was split by size, whether a unit ran
     #: over the target and whether the unit bound bit. None on a receipt
     #: that stored nothing.
-    chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
+    chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     structure: Optional[dict[str, object]] = None
     #: With heading context on: how many chunks were embedded with a line
     #: of context in front, how many bytes that added, and how many lines

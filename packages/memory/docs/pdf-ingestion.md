@@ -105,6 +105,14 @@ per-document counts of pages cut, pages kept whole, and lines left out.
   image is not silently converted into a successful empty document.
 - A mixed document retains page numbering and reports `empty_pages`. Its episode
   has `pdf_coverage=partial`; empty pages may be blank or may require OCR.
+- A PDF's bookmarks give each page its section: the titles of the last
+  bookmark at each level that begins on or before the page, outermost first
+  (`page.section`, and `section: "Chapter 2 > Refunds"` on the page's segment
+  in a file import). The text is unchanged. At most 2,000 bookmarks and 8 levels
+  are read, each title cut to 256 characters; past those the outline is read to
+  its bound and `outline` says `capped`, one that cannot be read says
+  `unreadable`, and a PDF without bookmarks says nothing. A segment's section is
+  bounded to one metadata value by dropping its outermost titles (`… > `).
 - `pdf_coverage=text_layer` means every page yielded text. It does **not** certify
   that every visible word, figure or table was understood.
 - Encrypted PDFs, malformed files, absent parser dependencies and exceeded limits
