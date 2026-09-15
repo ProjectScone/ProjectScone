@@ -117,8 +117,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-rerank", action="store_true", help="skip the configured reranker for this search")
     p.add_argument("--graph-boost", action="store_true",
                    help="add the entity lane: passages naming what the question is about, or one relation away")
-    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
-                   help="fuse the lanes by rank (default) or by each lane's scores scaled to its own range")
+    p.add_argument("--fusion", choices=("rank", "score", "distribution"), default="rank",
+                   help="fuse the lanes by rank (default), by each lane's scores scaled to its own range (score), or by each lane's mean and spread (distribution)")
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each")
@@ -290,8 +290,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them "
                         "before scoring, to measure what that changes")
-    p.add_argument("--fusion", choices=("rank", "score"), default="rank",
-                   help="fuse recall's lanes by rank (default) or by score, to measure what that changes")
+    p.add_argument("--fusion", choices=("rank", "score", "distribution"), default="rank",
+                   help="fuse recall's lanes by rank (default), score or distribution, to measure what that changes")
     p.add_argument("--window", type=int, default=0, metavar="BYTES",
                    help="widen every returned passage by this many bytes either side before "
                         "scoring, to measure what that changes")
