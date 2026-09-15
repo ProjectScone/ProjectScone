@@ -1335,7 +1335,7 @@ class MemoryEngine:
         for chunk in await self.documents.get_chunks(space, [chunk_id]):
             episode = await self.documents.get_episode(space, chunk.episode_id)
             if episode is not None:
-                marked["fingerprint"] = fingerprint(episode.content_hash, chunk.text)
+                marked["fingerprint"] = fingerprint(episode.content, chunk.text)
         return await self._emit(space, "feedback", {
             "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note, **marked,
         })  # type: ignore[return-value]

@@ -271,7 +271,7 @@ it was. Needs an event log. The judgements are weighed as lessons weigh them
 - a judgement against a passage outweighs every useful one older than it,
   so a passage people stopped finding useful has to be corroborated again;
 - `feedback` records a fingerprint of what the judged passage said (its
-  text and its episode's content hash). A judgement whose passage no
+  text and its episode's content). A judgement whose passage no
   longer matches is dropped as `stale`: a rebuilt store can hand its id to
   other text, to a span of an episode whose content changed, or to a span
   chunked differently. One recorded before fingerprints existed is

@@ -10,8 +10,9 @@ recall counts, each judgement weighs 1 and halves every ``half_life_days``
 - ``contested``: judged both ways;
 - ``tentative``: useful, but not yet corroborated.
 
-A lesson is shown beside a passage, never used to move it: nothing here
-has been measured to rank better, so the score is information, not order.
+A lesson is shown beside a passage and never moves it. Ranking by the same
+judgements is ``feedback_prior.py``, a separate setting that is off by default and
+measured on its own replay.
 """
 
 from __future__ import annotations

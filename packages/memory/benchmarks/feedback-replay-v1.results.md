@@ -48,12 +48,15 @@ the question. The bound was then set from rank fusion itself, before the
 sweep below: `MAX_FEEDBACK_BOOST` is what first place is worth over second
 when both lanes agree, 2 × (1/61 − 1/62) = 0.000529.
 
-The weights 0.00002 to 0.001 were swept on the replay that judges half a
-only (kind and strict judges). The rule, stated before half b was run, was
-to take the largest weight whose unrelated MRR stayed within 0.01 of off:
-**0.0001**. Half b is its held-out check. The other weights are reported
-for both halves so the trade can be seen, but none of them was chosen on
-half b.
+The weights 0.00002 to 0.001 were first swept on the replay that judges
+half a only (kind and strict judges), still under the 0.01 cut. That cut
+does not touch a term below 0.0002. The rule was to take the largest weight
+whose unrelated MRR stayed within 0.01 of off, and it picked **0.0001**.
+Only after that were both halves swept together, under the new bound. Half
+b agreed at 0.0001 and is reported as its check. The number was not written
+into the code until after that joint run, so the order shown here is the
+order of the runs, not a pre-registration. The other weights are reported
+for both halves so the trade can be seen.
 
 ## Results
 
