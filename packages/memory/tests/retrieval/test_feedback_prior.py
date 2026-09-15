@@ -104,6 +104,13 @@ def test_a_recall_judged_again_counts_at_its_latest_time():
     assert found.terms == {7: pytest.approx(0.001 * (-(0.5 ** (ages[0] / 30)) + 0.5 ** (ages[1] / 30) + 0.5 ** (ages[2] / 30)))}
 
 
+def test_events_other_than_feedback_are_not_judgements():
+    recall = Event(event_id=9, space="default", kind="recall", ts=NOW, schema_version=1,
+                   payload={"items": [{"chunk_id": 7}], "useful": True, "chunk_id": 7})
+    assert terms([recall, judged(1, NOW, 7, True, recall=1), judged(2, NOW, 7, True, recall=2)]).terms == \
+        {7: pytest.approx(0.002)}
+
+
 def test_the_record_names_the_terms_of_returned_passages_only():
     record = feedback_prior.PriorTerms({1: 0.0002, 2: -0.0001}, weight=0.0001).record([1, 3])
     assert record["returned_terms"] == {"1": 0.0002} and (record["boosted"], record["demoted"]) == (1, 1)

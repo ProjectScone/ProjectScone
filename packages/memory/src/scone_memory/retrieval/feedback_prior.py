@@ -161,6 +161,7 @@ async def read_prior(events: "Optional[EventLog]", documents: "DocumentStore", s
     fingerprints = {chunk: fingerprint(episodes[candidates[chunk].episode_id].content_hash,
                                        candidates[chunk].text)
                     for chunk in judged if candidates[chunk].episode_id in episodes}
-    terms = prior_terms(kept, fingerprints, now=now, weight=weight, max_boost=MAX_FEEDBACK_BOOST)
+    relevant = [event for event in kept if int(event.payload["chunk_id"]) in fingerprints]  # type: ignore[call-overload]
+    terms = prior_terms(relevant, fingerprints, now=now, weight=weight, max_boost=MAX_FEEDBACK_BOOST)
     return PriorTerms(terms.terms, terms.weight, terms.max_boost, terms.capped, terms.stale, terms.unverified,
                       terms.tentative, True, len(kept), len(read) > bound)
