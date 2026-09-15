@@ -465,7 +465,9 @@ unless the fourth route is asked for by name:
      left out (matched by passage and quote, so a reworded sentence is
      carried), and a reason names the round. `notes.kept` counts every
      sentence each round kept, so a carried sentence is counted once per
-     round. Rounds are packed by bytes, and a round after the first answer
+     round; `notes.carried` (and each round's `notes_carried`) counts those
+     repeats, so `notes.kept` less `notes.carried` is what the rounds
+     wrote new. Rounds are packed by bytes, and a round after the first answer
      carries that answer inside the bound: its passages get
      `max_round_bytes` less the answer's bytes, and each round's record
      gives both `bytes` and `answer_bytes`. That is the reference's
@@ -480,15 +482,30 @@ unless the fourth route is asked for by name:
 
    In every mode the calls are bounded by the rounds bound (six by
    default; `evidence` may add its one fold), and passages past it are
-   left unread, counted, and the answer is `partial`. `detail` names the
+   left unread, counted, and the answer is `partial`. A `partial` answer's
+   text ends with one line, `partial:` and the reasons, so `scone answer`
+   without `--json` says what was left unread or cut. `detail` names the
    `mode`, the `model_calls`, and under `passages` how many were read and
    how many the shown sentences `cited`. A mode on any other route is
    refused. `scone answer --route synthesize --synthesis-mode refine`,
    `GET /v1/answer?route=synthesize&synthesis_mode=accumulate`,
    `answer_question(..., route="synthesize", synthesis_mode="refine")`.
-   Measured on eight multi-session questions with a local 8B model, no
-   mode spoke more often than `evidence`, and `refine`'s second round
-   changed no answer ([results](../benchmarks/synthesis-modes-v1.results.md)).
+
+   The route reads with rounds of 12,000 bytes and a bound of six rounds;
+   `limit` sets the passages, and no option of the command line or the API
+   sets the round size or the rounds. What a mode does depends on how much
+   its passages hold. Twelve passages of about 600 bytes fit one round:
+   `refine` makes one call, the same call `evidence` makes, and has nothing
+   to refine; `accumulate` reads six of the twelve, one call each, and is
+   `partial`. `refine` refines only when the passages read overflow a
+   round, and `accumulate` reads them all only when `limit` is six or less.
+   A measurement on eight multi-session questions with a local 8B model
+   set rounds of 6,000 bytes and a bound of 16, limits the route does not
+   use, so that its twelve passages (6.6 to 7.2 kB) took two rounds: no
+   mode spoke more often than `evidence`, and `refine`'s second rounds
+   returned the answer so far with nothing new
+   ([results](../benchmarks/synthesis-modes-v1.results.md)). At the route's
+   limits those passages fit one round, and `refine` makes no second.
 
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
@@ -1060,10 +1077,33 @@ from the nearest `src`, `super::` and `self::` from the module,
 `com.acme.store.Shelf` from where the file's `package` line roots it --
 is resolved to the file that holds the module (`src/store.rs`,
 `src/util/mod.rs`, `com/acme/store/Shelf.java`) when whoever walked the
-tree can confirm one, and kept as written otherwise. **No call is claimed**:
-resolving a call means knowing what a name refers to, which needs a
-parser this does not have, and an edge nobody can check is worse than no
-edge. Python gets calls because Python's own parser gives them.
+tree can confirm one, and kept as written otherwise. **The line reader
+claims no call**: resolving a call means knowing what a name refers to,
+which needs a parser it does not have, and an edge nobody can check is
+worse than no edge. Python gets calls because Python's own parser gives
+them; TypeScript and JavaScript get them from their grammar with the
+`code-graph` extra; and with the `code-languages` extra (the grammar
+pack that already reads Ruby, Lua, shell, Perl and fish) Go, Rust,
+Java, C#, Swift, C, C++, Scala and PHP get them the same way: a call to
+a bare name is an edge when this file declares the name at its top or
+in the type that holds the caller and nothing nearer binds it, so a
+parameter, a local, a closure's argument or a nested function is a
+value and not an edge, and a call through a receiver (`x.y()`,
+`T::f()`, `this.m()`) is left alone, since it needs a type nobody here
+has. Where a grammar speaks it decides `defines` and `calls` for that
+file, and a method is named by what holds it: Go's by its receiver
+(`K.m`), a Rust `impl`'s by its type, a `mod`'s functions by the mod, a
+C++ method by its class whether declared inside it or defined as `K::m`
+outside; a namespace or a package holds nothing by its own name.
+A bare call inside a Rust `impl` or `trait` or a PHP class names a
+free function, never a sibling method, since those need `Self::f` or
+`$this->f`; a C++ method defined outside its class still sees the
+class's other members. Past the reader's depth or line bound the
+grammar says nothing and the line reader's whole answer stands.
+Measured over 2,545 files of the reference corpus: 18,128 calls bound
+in 1,389 files, and the grammar's declarations agreeing with the line
+reader's on 31,733 of the line reader's 41,819, most of the rest being
+closures and calls the line reader had read as declarations.
 
 A relative import is followed only to a file the map actually read.
 Resolution belongs to the walk, because that is what knows which files
