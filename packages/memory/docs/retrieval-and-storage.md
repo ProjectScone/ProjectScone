@@ -2607,6 +2607,23 @@ not strip a plural after "s", "u" or "i", and reduce a doubled consonant
 except where English keeps it. Measured on LongMemEval-S before it was
 a flag; the numbers are on the pull request that added it.
 
+A family counts once, so a passage holding "bills" earns as much from a
+question about "billing" as a passage holding "billing" itself.
+`SCONE_LEXICAL_EXACT_FORMS=1` (`MemoryEngine(..., lexical_exact_forms=True)`)
+keeps the family one term and moves its weight: in a passage that holds
+one of the query's own words, the family's count is weighed at the idf of
+the rarest such word it holds instead of the family's, which is never
+higher. A passage holding only "billing" then scores what "billing" alone
+would; one holding "billing" and "bills" scores their joint count at
+"billing"'s idf, not the word and then the family again; one holding only
+relatives scores as it did. The extra credit is bounded by the gap
+between the two idfs. Both stores that take prefixes apply it: the
+in-memory scorer directly, and SQLite by reading the family phrase's own
+`bm25()` beside the whole expression and moving that part to the word's
+idf, computed as FTS5 computes it (a count of the rows holding each
+phrase, per query). It does nothing without `SCONE_LEXICAL_STEMS`, and
+the result's `prefixes.exact_forms` says whether it ran. Off by default.
+
 ### Synonyms the caller wrote down
 
 The lexical lane finds the words a passage has, and only those. A

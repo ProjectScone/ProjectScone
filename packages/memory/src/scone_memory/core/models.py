@@ -593,7 +593,9 @@ class RecallResult(BaseModel):
     #: when no list is configured or nothing in the query was on it.
     expansion: Optional[dict[str, object]] = None
     #: With stem prefixes on: the prefixes added to the text lane's query
-    #: (``added``) and whether the store could take them (``applied``).
+    #: (``added``), whether the store could take them (``applied``), and
+    #: whether a passage holding the query's own word weighed its family at
+    #: that word's idf (``exact_forms``).
     prefixes: Optional[dict[str, object]] = None
     #: With ``lessons``: what the lessons beside the items were read from, and whether the read was cut.
     lessons_read: Optional[dict[str, object]] = None

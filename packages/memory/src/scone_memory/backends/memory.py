@@ -268,8 +268,8 @@ class InMemoryDocumentStore:
         return self._bm25[space].search(query, limit, self._allowed(space, filter))
 
     async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
-                           prefixes: Sequence[str]) -> list[tuple[int, float]]:
-        return self._bm25[space].search(query, limit, self._allowed(space, filter), prefixes)
+                           prefixes: Sequence[str], exact_forms: bool = False) -> list[tuple[int, float]]:
+        return self._bm25[space].search(query, limit, self._allowed(space, filter), prefixes, exact_forms)
 
     async def index_context(self, space: str, chunk_id: int, text: str) -> None:
         self._context[space].remove(chunk_id)

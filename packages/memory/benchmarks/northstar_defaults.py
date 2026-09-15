@@ -15,7 +15,8 @@ they do).
 Ingestion is the costly part, so settings read at recall time share one
 engine per item and chunk size: fusion and diversity are recall
 arguments, and the vector weight is the engine attribute every recall
-reads (``MemoryEngine.vector_weight``), set between recalls.
+reads (``MemoryEngine.vector_weight``), set between recalls, as is
+``--exact-forms`` (``MemoryEngine.lexical_exact_forms``).
 
 Run from packages/memory:
 
@@ -62,10 +63,13 @@ def _records(item: BenchItem) -> list[Record]:
     return records
 
 
-def _name(chunk: int, fusion: str, weight: Optional[float], diversity: Optional[float], lanes: Sequence[str]) -> str:
+def _name(chunk: int, fusion: str, weight: Optional[float], diversity: Optional[float], lanes: Sequence[str],
+          exact_forms: Optional[bool] = None) -> str:
+    # Rows name exact forms only when the sweep sets them, so older result files keep their names.
+    suffix = "" if exact_forms is None else f" exact_forms={'on' if exact_forms else 'off'}"
     if tuple(lanes) != ("vector", "text"):
-        return f"chunk={chunk} lanes={'+'.join(lanes)}"
-    return f"chunk={chunk} fusion={fusion} vector_weight={weight} diversity={diversity}"
+        return f"chunk={chunk} lanes={'+'.join(lanes)}{suffix}"
+    return f"chunk={chunk} fusion={fusion} vector_weight={weight} diversity={diversity}{suffix}"
 
 
 def _row(rankings: list[tuple[Sequence[str], set[str]]]) -> dict[str, Any]:
@@ -75,11 +79,13 @@ def _row(rankings: list[tuple[Sequence[str], set[str]]]) -> dict[str, Any]:
 
 
 async def sweep(items: list[BenchItem], *, chunks: Sequence[int], fusions: Sequence[str], weights: Sequence[float],
-                diversities: Sequence[Optional[float]], log: Any) -> dict[str, Any]:
+                diversities: Sequence[Optional[float]], log: Any,
+                exact_forms: Sequence[Optional[bool]] = (None,)) -> dict[str, Any]:
     embedder = HashEmbedder()
     rankings: dict[str, list[list[str]]] = {}
     relevant: list[set[str]] = []
     default_weight: Optional[float] = None
+    default_exact: Optional[bool] = None
     started = time.perf_counter()
     for position, item in enumerate(items, 1):
         relevant.append(set(item.answer_session_ids))
@@ -92,22 +98,27 @@ async def sweep(items: list[BenchItem], *, chunks: Sequence[int], fusions: Seque
             engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
                                         chunk_target=chunk).open()
             default_weight = engine.vector_weight
+            default_exact = engine.lexical_exact_forms
             await engine.remember_many("item", records)
-            asks: list[tuple[str, float, Optional[float], tuple[str, ...]]] = [
-                (fusion, weight, diversity, ("vector", "text"))
-                for fusion in fusions for weight in weights for diversity in diversities]
-            asks += [("rank", default_weight, None, ("text",)), ("rank", default_weight, None, ("vector",))]
-            for fusion, weight, diversity, lanes in asks:
+            asks: list[tuple[str, float, Optional[float], tuple[str, ...], Optional[bool]]] = [
+                (fusion, weight, diversity, ("vector", "text"), exact)
+                for exact in exact_forms for fusion in fusions for weight in weights for diversity in diversities]
+            asks += [("rank", default_weight, None, lanes, exact) for exact in exact_forms
+                     for lanes in (("text",), ("vector",))]
+            for fusion, weight, diversity, lanes, exact in asks:
                 engine.vector_weight = weight
+                engine.lexical_exact_forms = default_exact if exact is None else exact
                 pack = await engine.recall("item", item.question, limit=RECALL_LIMIT, fusion=fusion,
                                            diversity=diversity, lanes=lanes)
                 folded = distinct_sessions([hit.source or "" for hit in pack.items], max(KS))
-                rankings.setdefault(_name(chunk, fusion, weight, diversity, lanes), []).append(list(folded))
+                rankings.setdefault(_name(chunk, fusion, weight, diversity, lanes, exact), []).append(list(folded))
             engine.vector_weight = default_weight
+            engine.lexical_exact_forms = default_exact
         print(f"{position}/{len(items)} {time.perf_counter() - started:.0f}s", file=log, flush=True)
     rows = {name: _row([(ranked, answers) for ranked, answers in zip(per_item, relevant)])
             for name, per_item in rankings.items()}
     return {"rows": rows, "rankings": rankings, "engine_default_vector_weight": default_weight,
+            "engine_default_exact_forms": default_exact,
             "question_ids": [item.question_id for item in items]}
 
 
@@ -129,6 +140,14 @@ def _floats(raw: str) -> list[Optional[float]]:
     return [None if part in ("none", "off") else float(part) for part in raw.split(",")]
 
 
+def _switches(raw: str) -> list[Optional[bool]]:
+    known: dict[str, Optional[bool]] = {"default": None, "off": False, "on": True}
+    parts = raw.split(",")
+    if any(part not in known for part in parts):
+        raise SystemExit(f"--exact-forms takes default, off or on, comma-separated; not {raw!r}")
+    return [known[part] for part in parts]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data", required=True)
@@ -139,6 +158,8 @@ def main() -> None:
     parser.add_argument("--fusions", default="rank,score,distribution")
     parser.add_argument("--weights", default="0.05,0.1,0.25,0.5,1.0")
     parser.add_argument("--diversities", default="none,0.3")
+    parser.add_argument("--exact-forms", default="default",
+                        help="off,on -- sweep MemoryEngine.lexical_exact_forms; 'default' leaves the engine's own")
     parser.add_argument("--check", action="store_true", help="also run compare() at engine defaults")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
@@ -153,7 +174,8 @@ def main() -> None:
     weights = [w for w in _floats(args.weights) if w is not None]
     started = time.perf_counter()
     result = asyncio.run(sweep(items, chunks=[int(c) for c in args.chunks.split(",")], fusions=args.fusions.split(","),
-                               weights=weights, diversities=_floats(args.diversities), log=sys.stderr))
+                               weights=weights, diversities=_floats(args.diversities), log=sys.stderr,
+                               exact_forms=_switches(args.exact_forms)))
     if args.check:
         result["compare_at_defaults"] = asyncio.run(check(items, sys.stderr))
     result["sample"] = {"dataset": Path(args.data).name, "n": args.n, "seed": args.seed, "holdout_of": args.holdout_of,

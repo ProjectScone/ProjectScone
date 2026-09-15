@@ -233,6 +233,7 @@ class MemoryEngine:
         synonyms: "Synonyms | None" = None,
         context_lane: bool = False,
         lexical_stems: bool = True,
+        lexical_exact_forms: bool = False,
         vector_weight: Optional[float] = None,
         chunk_tokens: int | None = None,
         chunk_overlap_tokens: int = 0,
@@ -262,6 +263,12 @@ class MemoryEngine:
         #: Whether a query term's family (bills, billing, billed) is searched
         #: by stem prefix in the text lane; the index is untouched.
         self.lexical_stems = lexical_stems
+        if type(lexical_exact_forms) is not bool:
+            raise InvalidInput("lexical_exact_forms must be a boolean")
+        #: With stem prefixes: whether a passage holding the query's own word
+        #: in a family has the family weighed at that word's idf (still one
+        #: term, counted once). Nothing without ``lexical_stems``.
+        self.lexical_exact_forms = lexical_exact_forms
         if type(context_lane) is not bool:
             raise InvalidInput("context_lane must be a boolean")
         #: Whether what each chunk is under is indexed beside its text and
@@ -1185,6 +1192,7 @@ class MemoryEngine:
             context_lane=self.context_lane,
             question_lane=self.question_lane,
             lexical_stems=self.lexical_stems,
+            lexical_exact_forms=self.lexical_exact_forms,
             vector_weight=self.vector_weight,
         )
         if type(lessons) is not bool:

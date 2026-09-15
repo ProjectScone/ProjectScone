@@ -33,7 +33,7 @@ from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, Ne
 from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
-from .sqlite_lexical import initialize_lexical, lexical_match, synchronize_lexical
+from .sqlite_lexical import exact_form_rank, initialize_lexical, lexical_match, synchronize_lexical
 from ..core.space_deletion import (
     SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
 )
@@ -540,7 +540,7 @@ class SqliteDocumentStore:
         return self._lexical_behind.get(space, 0)
 
     async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
-                           prefixes: Sequence[str]) -> list[tuple[int, float]]:
+                           prefixes: Sequence[str], exact_forms: bool = False) -> list[tuple[int, float]]:
         # The lane ranks our own tokens (see sqlite_lexical), so it agrees
         # with the in-memory lane on every script and every accent.
         match = lexical_match(query, prefixes)
@@ -548,14 +548,17 @@ class SqliteDocumentStore:
             return []
         _, behind = synchronize_lexical(self.conn, space)
         self._lexical_behind[space] = behind
+        rank, joins, parameters = (exact_form_rank(self.conn, query, prefixes) if exact_forms
+                                   else ("bm25(chunk_lexical_fts)", "", []))
         sql = (
-            "SELECT c.id AS id, bm25(chunk_lexical_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
+            f"SELECT c.id AS id, {rank} AS rank, e.tags AS tags, e.metadata AS metadata"
             " FROM chunk_lexical_fts JOIN chunk_lexical cl ON cl.chunk_id = chunk_lexical_fts.rowid"
             " JOIN chunks c ON c.id = cl.chunk_id"
             " JOIN episodes e ON e.id = c.episode_id"
+            f"{joins}"
             " WHERE chunk_lexical_fts MATCH ? AND c.space = ?"
         )
-        return self._ranked(sql, [match, space], filter, limit)
+        return self._ranked(sql, [*parameters, match, space], filter, limit)
 
     async def index_context(self, space: str, chunk_id: int, text: str) -> None:
         with self.conn:
