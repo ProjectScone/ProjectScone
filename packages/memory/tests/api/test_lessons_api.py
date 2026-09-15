@@ -38,6 +38,8 @@ async def test_recall_carries_lessons_when_asked_and_the_space_lists_them(engine
         listed = client.get("/v1/lessons", headers=auth())
         refused = client.get("/v1/lessons", params={"half_life_days": 0}, headers=auth())
         capabilities = client.get("/v1/capabilities", headers=auth()).json()
+        merged = client.get("/v1/recall", params={"q": "crane survey booked", "lessons": "true", "merge": "true"},
+                            headers=auth())
     assert "lessons" not in plain["items"][0]
     assert shown["items"][0]["lessons"]["state"] == "dead_end"
     assert [item["chunk_id"] for item in shown["items"]] == [item["chunk_id"] for item in plain["items"]]
@@ -45,6 +47,7 @@ async def test_recall_carries_lessons_when_asked_and_the_space_lists_them(engine
     assert listed.json()["events_cut"] is False and refused.status_code in (400, 422)
     flat = json.dumps(capabilities)
     assert '"recall.lessons": true' in flat
+    assert merged.status_code in (400, 422) and "merge" in merged.text
 
 
 async def test_the_command_line_shows_lessons(engine):
