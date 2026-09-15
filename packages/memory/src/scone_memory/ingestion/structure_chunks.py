@@ -47,12 +47,13 @@ and counts them.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import re
 from typing import Protocol
 
 from .chunker import DEFAULT_TARGET, Span, chunk_spans
-from .structure import parse_structure
+from .structure import Heading, parse_structure
 
 #: Structural units read from one document. Past this the rest is split
 #: by size and the receipt says the count is what we read.
@@ -81,7 +82,20 @@ _CLAUSE = re.compile(
     r"|[IVXLC]+[.)]"                                       # IV. or XI)
     r"|§ ?\d+"                                             # § 12
     r"|(?i:Article|Section|Chapter|Clause|Rule|Schedule|Appendix|Part)[ \t]+\d+"
-    r")(?=[ \t]+\S|[ \t]*$)")
+    r")(?=[ \t]+\S|[ \t]*$)"
+    # Chinese and Japanese numbering, which needs no space before its text:
+    # 第三条, 第2章, 一、, （二）, 1、. A numeral alone is not enough -- 第一次 is
+    # "the first time" -- so the counter word or the mark after it is required.
+    # Every spelling holds a full-width mark or a CJK numeral, so ASCII text
+    # such as "(2024) Annual report" keeps the boundaries the Latin rule gives.
+    r"|^ {0,3}(?:"
+    r"第[0-9０-９一二三四五六七八九十百千零〇两]+[章节節条條款篇部编編项項回]"
+    r"|[一二三四五六七八九十]+、"
+    r"|（[0-9０-９一二三四五六七八九十]+[）)]"
+    r"|\([０-９一二三四五六七八九十]+[）)]"
+    r"|\([0-9]+）"
+    r"|[0-9０-９]+、"
+    r")(?=[ \t]*\S|[ \t]*$)")
 #: A question or an answer opening a pair.
 _PAIR = re.compile(r"^ {0,3}(?:Q|A|Question|Answer)[ \t]*[:.][ \t]*\S")
 #: The depth of a table, and of the prose left between a table and the
@@ -118,6 +132,8 @@ class Unit:
     label: str
     #: What this unit sits under, as a reader ranked it; 0 without one.
     depth: int = 0
+    #: Whether the heading came from the document's own marks rather than its text.
+    marked: bool = False
 
 
 @dataclass(frozen=True)
@@ -143,11 +159,15 @@ class Structured:
     #: split by size alone.
     capped: bool = False
     why: str = ""
+    #: Units read that are headings the document marked itself, when it was
+    #: asked to use them; None when there were none to use.
+    document_headings: int | None = None
 
     def record(self) -> dict[str, object]:
         return {"chunks": len(self.spans), "units": self.units, "at_boundary": self.at_boundary,
                 "by_size": self.by_size, "tables": self.tables, "over_target": self.over_target,
                 "capped": self.capped, "why": self.why,
+                **({"document_headings": self.document_headings} if self.document_headings is not None else {}),
                 "spans": [[s.start, s.end] for s in self.spans]}
 
 
@@ -187,7 +207,8 @@ def _after_front_matter(lines: list[str]) -> int:
     return 0
 
 
-def units(content: str, limit: int = MAX_SECTIONS, *, reader: UnitReader | None = None) -> tuple[Unit, ...]:
+def units(content: str, limit: int = MAX_SECTIONS, headings: Sequence[Heading] = (), *,
+          reader: UnitReader | None = None) -> tuple[Unit, ...]:
     """The structural units this document carries, in order.
 
     Reads at most ``limit``; a caller needing to know whether it read all
@@ -204,6 +225,9 @@ def units(content: str, limit: int = MAX_SECTIONS, *, reader: UnitReader | None 
     # from it too, and are where a clause pattern must not fire.
     heads = {section.start: section.title for section in structure.sections if section.level > 0}
     levels = {section.start: section.level for section in structure.sections if section.level > 0}
+    # A heading the document marked starts a line of its own in the stored text, and is a
+    # heading whatever the line says; the text's own reading does not see it.
+    marked = {heading.start: heading for heading in headings}
     tables = {block.start: block.end for block in structure.blocks if block.kind == "table"}
     quiet = [(block.start, block.end) for block in structure.blocks
              if block.kind in ("fenced_code", "table")]
@@ -217,8 +241,12 @@ def units(content: str, limit: int = MAX_SECTIONS, *, reader: UnitReader | None 
         line = lines[index]
         stripped = line.rstrip("\r\n")
         inside = any(start <= byte < end for start, end in quiet)
-        if byte in heads:
-            kind, depth = ("heading", 0) if reader is None else reader.heading(heads[byte], levels[byte])
+        if byte in heads or byte in marked:
+            kind, depth = "heading", 0
+            if reader is not None and byte in heads:
+                kind, depth = reader.heading(heads[byte], levels[byte])
+            elif reader is not None:
+                kind, depth = reader.heading(marked[byte].title, marked[byte].level)
             found.append((byte, kind, stripped.strip(), depth))
         elif byte in tables:
             found.append((byte, "table", stripped.strip(), LEAF))
@@ -242,7 +270,7 @@ def units(content: str, limit: int = MAX_SECTIONS, *, reader: UnitReader | None 
         if len(found) >= limit:
             break
         # A blank line, a heading and a rule or setext underline each end a paragraph.
-        opens = not stripped.strip() or byte in heads or bool(_UNDERLINE.match(stripped))
+        opens = not stripped.strip() or byte in heads or byte in marked or bool(_UNDERLINE.match(stripped))
         byte += len(line.encode())
 
     ends = {start: tables[start] for start, _, _, _ in found if start in tables}
@@ -254,7 +282,7 @@ def units(content: str, limit: int = MAX_SECTIONS, *, reader: UnitReader | None 
     for position, (start, kind, label, depth) in enumerate(found):
         after = starts[position + 1] if position + 1 < len(starts) else len(content.encode())
         end = min(ends[start], after) if start in ends else after
-        out.append(Unit(at[start], _point(at, end, content), kind, label, depth))
+        out.append(Unit(at[start], _point(at, end, content), kind, label, depth, marked=start in marked))
         if end < after:
             # A table ends where its rows end, not where the next unit
             # begins, so the prose between the two belongs to neither.
@@ -272,18 +300,19 @@ def _point(at: dict[int, int], byte: int, content: str) -> int:
 
 
 def structured_spans(content: str, target: int = DEFAULT_TARGET, *,
-                     units_max: int = MAX_SECTIONS) -> Structured:
+                     units_max: int = MAX_SECTIONS, headings: Sequence[Heading] | None = None) -> Structured:
     """Chunk at the document's own divisions, falling back to size."""
     if target <= 0:
         raise ValueError("target must be positive")
     if units_max <= 0:
         raise ValueError("units_max must be positive")
-    read = units(content, units_max + 1)
+    read = units(content, units_max + 1, headings or ())
     capped = len(read) > units_max
     read = read[:units_max]
+    document = None if headings is None else sum(1 for unit in read if unit.marked)
     if not read:
         plain = chunk_spans(content, target)
-        return Structured(spans=tuple(plain), by_size=len(plain),
+        return Structured(spans=tuple(plain), by_size=len(plain), document_headings=document,
                           why=f"no structure found, so {len(plain)} chunk(s) were split by size "
                               f"exactly as they would have been without this pass")
 
@@ -391,4 +420,4 @@ def structured_spans(content: str, target: int = DEFAULT_TARGET, *,
                 f"{units_max} of them, not all of them -- the rest was split by size")
     return Structured(spans=tuple(spans), units=labelled, at_boundary=at_boundary,
                       by_size=by_size, tables=kept_tables, over_target=over, capped=capped,
-                      why=why)
+                      why=why, document_headings=document)
