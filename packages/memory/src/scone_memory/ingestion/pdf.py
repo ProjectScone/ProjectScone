@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler
 from ..core.errors import InvalidInput
 from ..ocr.types import OrderedOcrRegion
 from ..ocr.layout import ReadingOrderReceipt, validate_reading_order
+from ..ocr.labels import LayoutLabels
 from ..ocr.process import python_worker, run_bounded
 
 
@@ -62,6 +63,9 @@ class PdfPage(BaseModel):
     regions: tuple[PdfTextRegion, ...] = Field(default=(), max_length=50_000)
     ocr_engine: str | None = Field(default=None, min_length=1, max_length=96)
     reading_order: ReadingOrderReceipt | None = None
+    #: How the page's regions were labelled (``ocr.labels``): by a layout
+    #: engine's boxes or by the rules; None when the page was left as extracted.
+    labels: LayoutLabels | None = None
     running: tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...] = Field(default=(), max_length=4)
     #: The titles of the PDF's own bookmarks in force on this page, outermost first.
     section: tuple[str, ...] = Field(default=(), max_length=8)
@@ -82,6 +86,8 @@ class PdfPage(BaseModel):
             value.pop('running', None)
         if not self.section:
             value.pop('section', None)
+        if self.labels is None:
+            value.pop('labels', None)
         return value
 
 
