@@ -12,27 +12,31 @@ import asyncio
 import json
 from pathlib import Path
 import sys
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from ..core.errors import SconeError
-from ..ingestion.formats.markdown_assembly import MAX_MARKDOWN_BYTES, MarkdownDocument, assemble_markdown
-from ..ingestion.formats.registry import BuiltinDocumentParser
-from ..ingestion.formats.types import DocumentLimits
+
+if TYPE_CHECKING:
+    from ..ingestion.formats.markdown_assembly import MarkdownDocument
+
+#: The parser is built for every command, so the reader stack is imported only
+#: when this one runs; the default here must equal MAX_MARKDOWN_BYTES (a test checks).
+DEFAULT_MAX_BYTES = 8_000_000
 
 
 def add_document_markdown_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     p = sub.add_parser("doc-markdown", help="read a document (DOCX, HTML, PDF, ...) and write it as Markdown; "
                                             "no store is opened")
     p.add_argument("file", help="the document; its extension chooses the reader")
-    p.add_argument("--max-bytes", type=int, default=MAX_MARKDOWN_BYTES,
-                   help=f"Markdown written at most; the receipt says where it cut (default {MAX_MARKDOWN_BYTES})")
+    p.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES,
+                   help=f"Markdown written at most; the receipt says where it cut (default {DEFAULT_MAX_BYTES})")
 
 
 def _plural(count: int, word: str) -> str:
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
-def summary(result: MarkdownDocument) -> str:
+def summary(result: "MarkdownDocument") -> str:
     record = result.record()
     blocks: dict[str, int] = record["blocks"]  # type: ignore[assignment]
     named = [_plural(blocks[key], label) for key, label in (("heading", "heading"), ("list_item", "list item"),
@@ -47,6 +51,10 @@ def summary(result: MarkdownDocument) -> str:
 
 
 def document_markdown_command(args: argparse.Namespace, out: TextIO) -> int:
+    from ..ingestion.formats.markdown_assembly import assemble_markdown
+    from ..ingestion.formats.registry import BuiltinDocumentParser
+    from ..ingestion.formats.types import DocumentLimits
+
     limit = DocumentLimits().max_input_bytes
     try:
         with open(args.file, "rb") as stream:

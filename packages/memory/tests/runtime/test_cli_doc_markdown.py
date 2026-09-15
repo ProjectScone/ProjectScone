@@ -55,3 +55,10 @@ def test_an_unreadable_or_unsupported_file_is_an_error_not_a_trace(tmp_path, cap
     page.write_bytes(PAGE)
     assert run(['doc-markdown', str(page), '--max-bytes', '0'])[0] == 2
     assert 'markdown byte bound' in capsys.readouterr().err
+
+
+def test_the_command_default_bound_is_the_assemblers_bound() -> None:
+    from scone_memory.ingestion.formats.markdown_assembly import MAX_MARKDOWN_BYTES
+    from scone_memory.runtime.document_markdown import DEFAULT_MAX_BYTES
+
+    assert DEFAULT_MAX_BYTES == MAX_MARKDOWN_BYTES
