@@ -90,6 +90,8 @@ class BuiltinDocumentParser:
                               **({'tables': str(tables[p.number].proposed),
                                   'tables_unreadable': str(tables[p.number].unreadable)}
                                  if p.number in tables and tables[p.number].proposed else {}),
+                              **({'tables_headed': str(tables[p.number].headed), 'header_basis': 'pdf_first_row'}
+                                 if p.number in tables and tables[p.number].headed else {}),
                               **({'section': _section(p.section)} if p.section else {})},
                     regions=tuple(DocumentTextRegion(text=r.text, box=r.box, score=r.score,
                         block=r.block, paragraph=r.paragraph, line=r.line, label=r.label,
@@ -100,7 +102,10 @@ class BuiltinDocumentParser:
                 for p in pdf.pages if not p.empty),
                 metadata={'empty_pages': ','.join(str(p.number) for p in pdf.pages if p.empty),
                           **({'unreadable_pages': ','.join(map(str, unreadable_pages))} if unreadable_pages else {}),
-                          **({'outline': pdf.outline} if pdf.outline != 'none' else {})})
+                          **({'outline': pdf.outline} if pdf.outline != 'none' else {}),
+                          **({'pdf_opened_with': pdf.encryption.opened_with, 'pdf_password_matched': pdf.encryption.matched,
+                              **({'pdf_restricted': ','.join(pdf.encryption.restricted)} if pdf.encryption.restricted else {})}
+                             if pdf.encryption else {})})
         else:
             raw = await run_bounded(python_worker('scone_memory.ingestion.formats.worker',
                 filename, limits.model_dump_json()), data, timeout=limits.timeout_seconds,
