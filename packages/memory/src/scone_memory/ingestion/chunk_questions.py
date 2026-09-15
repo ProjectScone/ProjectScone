@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 import time
 from typing import TYPE_CHECKING, Optional, Sequence
 
-from ..bench.questions import MAX_PER_CHUNK, MAX_QUESTION_CHARS, MIN_QUOTE_WORDS, anchored, parse_pairs
+from ..bench.questions import MAX_PER_CHUNK, MAX_QUESTION_CHARS, MIN_QUOTE_WORDS, anchored, parse_pairs, partial_pairs
 from ..core.errors import InvalidInput
 from ..core.ports import context_index
 from ..core.validation import check_space
@@ -94,6 +94,8 @@ class QuestionLaneReport:
     model_calls: int = 0
     calls_failed: int = 0
     dropped_unparsed: int = 0
+    #: Replies whose list was never closed, read up to their last whole object.
+    read_partial: int = 0
     dropped_unquoted: int = 0
     dropped_unasked: int = 0
     #: Pairs past ``per_chunk`` in one reply.
@@ -117,7 +119,8 @@ class QuestionLaneReport:
         return {"space": self.space, "model": self.model, "per_chunk": self.per_chunk, "chunks_total": self.chunks_total,
                 "chunks_asked": self.chunks_asked, "chunks_cut": self.chunks_cut, "resume_after": self.resume_after,
                 "skipped_long": self.skipped_long, "model_calls": self.model_calls, "calls_failed": self.calls_failed,
-                "dropped_unparsed": self.dropped_unparsed, "dropped_unquoted": self.dropped_unquoted,
+                "dropped_unparsed": self.dropped_unparsed, "read_partial": self.read_partial,
+                "dropped_unquoted": self.dropped_unquoted,
                 "dropped_unasked": self.dropped_unasked, "dropped_extra": self.dropped_extra,
                 "dropped_repeated": self.dropped_repeated, "chunks_indexed": self.chunks_indexed,
                 "questions": self.questions, "kept": [kept.record() for kept in self.kept], "kept_lane": self.kept_lane,
@@ -129,7 +132,8 @@ class QuestionLaneReport:
                 f"{self.model_calls} call(s) and {self.seconds:.1f}s; dropped {self.dropped_unquoted} whose quote was not "
                 f"in the chunk or under {MIN_QUOTE_WORDS} words, {self.dropped_unasked} with no question or one over "
                 f"{MAX_QUESTION_CHARS} characters, {self.dropped_extra} over the per-chunk limit, {self.dropped_repeated} "
-                f"repeated, and {self.dropped_unparsed} repl(ies) not written as asked; {self.skipped_long} chunk(s) too "
+                f"repeated, and {self.dropped_unparsed} repl(ies) not written as asked; {self.read_partial} read from a list "
+                f"never closed; {self.skipped_long} chunk(s) too "
                 f"long to show, {self.calls_failed} call(s) failed")
         if self.chunks_cut:
             said += f"; {self.chunks_cut} chunk(s) past max_chunks, resume after chunk {self.resume_after}"
@@ -168,7 +172,7 @@ async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatM
         rows.extend((chunk, episode) for chunk in await engine.documents.chunks_of(space, episode.episode_id)
                     if after_chunk is None or chunk.chunk_id > after_chunk)
     rows.sort(key=lambda row: row[0].chunk_id)
-    counts = dict.fromkeys(("asked", "skipped_long", "failed", "unparsed", "unquoted", "unasked", "extra",
+    counts = dict.fromkeys(("asked", "skipped_long", "failed", "unparsed", "partial", "unquoted", "unasked", "extra",
                             "repeated", "indexed"), 0)
     kept: list[ChunkQuestions] = []
     resume_after: Optional[int] = None
@@ -191,8 +195,11 @@ async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatM
             continue
         pairs = parse_pairs(reply)
         if pairs is None:
-            counts["unparsed"] += 1
-            continue
+            pairs = partial_pairs(reply)
+            if pairs is None:
+                counts["unparsed"] += 1
+                continue
+            counts["partial"] += 1
         found = anchored(pairs, chunk.text, per_chunk)
         counts["unasked"] += found.unasked
         counts["unquoted"] += found.unquoted
@@ -221,7 +228,7 @@ async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatM
     return QuestionLaneReport(
         space, name, per_chunk, chunks_total=len(rows), chunks_asked=counts["asked"],
         chunks_cut=len(rows) - examined, resume_after=resume_after, skipped_long=counts["skipped_long"],
-        model_calls=counts["asked"], calls_failed=counts["failed"], dropped_unparsed=counts["unparsed"],
+        model_calls=counts["asked"], calls_failed=counts["failed"], dropped_unparsed=counts["unparsed"], read_partial=counts["partial"],
         dropped_unquoted=counts["unquoted"], dropped_unasked=counts["unasked"], dropped_extra=counts["extra"],
         dropped_repeated=counts["repeated"], chunks_indexed=counts["indexed"], kept=tuple(kept),
         seconds=time.perf_counter() - started)

@@ -29,6 +29,13 @@ Everything else is dropped and counted in the report: `dropped_unquoted`,
 `dropped_unparsed` for a reply that is not such a list. A call that fails
 is counted in `calls_failed` and the pass goes on to the next chunk.
 
+A small model often writes every object of the list and stops before the
+closing bracket (llama3.2-ctx8k did on the documents measured below). Such
+a reply is read object by object up to the first that is not whole
+(`bench.questions.partial_pairs`) and counted in `read_partial`; each pair
+read that way still has to pass every check above. The bench's own
+question sets keep the strict reader.
+
 ## Where the questions go
 
 Into the context index (`core.ports.ContextIndex`), the one the context

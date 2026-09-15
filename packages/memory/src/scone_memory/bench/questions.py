@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+import re
 from pathlib import Path
 import random
 from typing import Optional, Sequence, TYPE_CHECKING
@@ -146,6 +147,10 @@ def parse_pairs(reply: str) -> Optional[list[tuple[str, str]]]:
             break
         except ValueError:
             start = reply.find("[", start + 1)
+    return _pairs_in(parsed)
+
+
+def _pairs_in(parsed: object) -> Optional[list[tuple[str, str]]]:
     if not isinstance(parsed, list):
         return None
     pairs: list[tuple[str, str]] = []
@@ -157,6 +162,35 @@ def parse_pairs(reply: str) -> Optional[list[tuple[str, str]]]:
             return None
         pairs.append((question.strip(), quote.strip()))
     return pairs
+
+
+_LIST_OF_OBJECTS = re.compile(r"\[\s*(?=\{)")
+_BETWEEN_ITEMS = re.compile(r"\s*,\s*")
+
+
+def partial_pairs(reply: str) -> Optional[list[tuple[str, str]]]:
+    """The pairs of a list of objects the reply opens and does not finish,
+    read object by object up to the first that is not whole -- a small
+    model often writes every object and stops before the closing bracket.
+    None when no whole object is read or one of them is not a pair. Not
+    used by ``write_questions``, whose sets stay as strict as before."""
+    opened = _LIST_OF_OBJECTS.search(reply)
+    if opened is None:
+        return None
+    decoder = json.JSONDecoder()
+    items: list[object] = []
+    position = opened.end()
+    while True:
+        try:
+            item, position = decoder.raw_decode(reply, position)
+        except ValueError:
+            break
+        items.append(item)
+        between = _BETWEEN_ITEMS.match(reply, position)
+        if between is None:
+            break
+        position = between.end()
+    return _pairs_in(items) if items else None
 
 
 @dataclass(frozen=True)

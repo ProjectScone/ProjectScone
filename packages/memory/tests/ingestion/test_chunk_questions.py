@@ -107,6 +107,27 @@ async def test_only_questions_anchored_in_the_chunk_are_kept_and_every_drop_is_c
     assert "2 whose quote" in report.text() and "1 over the per-chunk limit" in report.text()
 
 
+async def test_a_list_the_model_never_closed_is_read_up_to_its_last_whole_question():
+    from scone_memory.bench.questions import parse_pairs, partial_pairs
+
+    # Seen from llama3.2-ctx8k: every object written, the closing bracket not.
+    unclosed = ("[\n  " + json.dumps({"question": QUESTION, "quote": QUOTE}) + ",\n  "
+                + json.dumps({"question": "When was the lighthouse rebuilt?",
+                              "quote": "Its lighthouse was rebuilt in 1904 after a storm took the first one."}) + ',\n  {"question": "Who pil')
+    assert parse_pairs(unclosed) is None, "the bench's reader stays strict"
+    whole = json.dumps({"question": QUESTION, "quote": QUOTE})
+    assert partial_pairs("See [1] first: [" + whole) == [(QUESTION, QUOTE)], "a bracket in the prose is not the list"
+    assert partial_pairs('[{"question": "Who pil') is None, "no whole object, nothing read"
+    assert partial_pairs("I could not think of any questions.") is None, "no list opened, nothing read"
+    assert partial_pairs("[" + whole + ', "and a string"') is None, "every item read must be a pair"
+    broken = '[{"question": "When does picking start?", "quote": 7}'
+    engine = await corpus(InMemoryDocumentStore())
+    report = await engine.build_chunk_questions("s", FakeChat([unclosed, broken]))
+    assert report.kept[0].questions == (QUESTION, "When was the lighthouse rebuilt?")
+    assert (report.read_partial, report.dropped_unparsed, report.chunks_indexed) == (1, 1, 1)
+    assert "1 read from a list never closed" in report.text()
+
+
 async def test_a_failed_call_is_counted_and_the_pass_goes_on():
     engine = await corpus(InMemoryDocumentStore())
     picking = ("When does picking start?", "Picking starts in the last week of September and ends before the first frost.")
