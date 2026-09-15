@@ -460,7 +460,8 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
     Given the ``episode``, a structure cut also cuts at the headings an
     imported file marked itself, which its text alone does not show."""
     if profile:
-        profiled = profiled_spans(content, runtime.chunk_target, profile=profile)
+        profiled = profiled_spans(content, runtime.chunk_target, profile=profile,
+                                  headings=await headings_of(runtime, episode))
         return Cut(list(profiled.spans), "structure",
                    {key: value for key, value in profiled.record().items() if key not in ("spans", "chunks")})
     if chunking is not None and chunking not in CHUNKINGS:

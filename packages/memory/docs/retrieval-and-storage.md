@@ -1108,11 +1108,11 @@ on `POST /v1/episodes` and in each batch record, or the same key in a
 refused with `--jsonl` rather than silently not applied to its records). The profiles are `statute`, `paper`, `manual`, `qa` and
 `resume` (`ingestion/chunking_profiles.py`, `PROFILES`).
 
-**Why a field and not a fifth chunking mode.** A profile is a set of
+**Why a field and not another chunking mode.** A profile is a set of
 boundaries for structure chunking, not another way to cut: `chunking` stays
-the closed set of four, and `chunking_profile` names what one of them cuts
+the closed set of modes, and `chunking_profile` names what one of them cuts
 at. A profile implies `chunking="structure"` (stored explicitly), naming it
-with `length`, `code` or `semantic` is refused, and the receipt's `chunking`
+with `length`, `code`, `semantic` or `unit` is refused, and the receipt's `chunking`
 still reads `structure`. It is not called `profile` because that already
 names a space's profile of facts (`GET /v1/profile`), and one name serves the
 record, the metadata key, the HTTP field and the flag.
@@ -1149,6 +1149,10 @@ The units are then packed as a tree rather than a list:
   `over_target`, rather than a pair that fits being split.
 - **Kept-apart units never share a chunk with a sibling.**
 - **A table is never cut**, as without a profile.
+- **An imported file's own headings are headings**, as without a profile: a
+  Word, OpenDocument or HTML heading the file marked is a unit, named by the
+  rule its title matches, and the receipt's `document_headings` counts those
+  read.
 - **A unit longer than the target is split by size**, the first piece at the
   unit and the rest counted in `by_size`.
 

@@ -39,12 +39,14 @@ and which kind of unit each chunk began at.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 import re
 from typing import Mapping
 
 from ..core.errors import InvalidInput
 from .chunker import DEFAULT_TARGET, MIN_CHUNK, Span, chunk_spans
+from .structure import Heading
 from .structure_chunks import MAX_SECTIONS, Structured, Unit, units
 
 #: Where a rule's own ranks start, so that a Markdown heading (depth 1..6)
@@ -253,24 +255,30 @@ class Profiled(Structured):
 
 
 def profiled_spans(content: str, target: int = DEFAULT_TARGET, *, profile: str,
-                   units_max: int = MAX_SECTIONS) -> Profiled:
+                   units_max: int = MAX_SECTIONS, headings: Sequence[Heading] | None = None) -> Profiled:
     """Chunk at the boundaries this profile declares, falling back to size.
 
-    A target that is not positive is refused by ``chunk_spans``, which
-    every path reaches."""
+    ``headings`` are those an imported file marked itself, which its text
+    alone does not show; each is a heading the profile's rules name, as
+    ``structured_spans`` cuts at them without a profile, and the receipt
+    counts those read. A target that is not positive is refused by
+    ``chunk_spans``, which every path reaches."""
     if units_max <= 0:
         raise ValueError("units_max must be positive")
     chosen = profile_named(profile)
     reader = chosen.reader()
-    read = units(content, units_max + 1, reader=reader)
+    read = units(content, units_max + 1, headings or (), reader=reader)
     capped = len(read) > units_max
     read = read[:units_max]
+    document = None if headings is None else sum(1 for unit in read if unit.marked)
     if not read:
         plain = chunk_spans(content, target)
         return Profiled(spans=tuple(plain), by_size=len(plain), profile=chosen.name, matched=dict(reader.matched),
+                        document_headings=document,
                         why=f"profile {chosen.name} found none of its boundaries, so {len(plain)} chunk(s) were "
                             f"split by size exactly as they would have been without it")
-    return _Packer(content, target, chosen, read, capped, units_max, dict(reader.matched)).pack()
+    packed = _Packer(content, target, chosen, read, capped, units_max, dict(reader.matched)).pack()
+    return replace(packed, document_headings=document)
 
 
 class _Packer:
