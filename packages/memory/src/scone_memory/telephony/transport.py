@@ -10,29 +10,40 @@ learns it is on a phone.
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, Union
 
 from ..realtime.audio import AudioChunk
+from ..realtime.keypad import Keypress
 from .dialects import Dialect
 from .stream import CallEnded, CallStarted, Dtmf, MediaStream
 
 #: Keypresses kept for the session to read. A caller leaning on a key is
 #: not a reason to grow without bound.
 MAX_DIGITS = 64
+#: What reaches the session from the keypad: nothing (the default), or the
+#: keys the carrier reports in its own messages.
+KEYPAD = ("off", "events")
 
 
 class CarrierTransport:
     """One call, as the transport a voice session expects.
 
     ``socket`` is anything with ``receive_text``, ``send_text`` and
-    ``close``: a framework's WebSocket, or a double in a test."""
+    ``close``: a framework's WebSocket, or a double in a test. With
+    ``keypad`` on, ``receive`` yields each key as a ``Keypress`` among the
+    audio, in the order the carrier sent them; off, it yields audio alone."""
 
-    def __init__(self, socket, dialect: Dialect, *, rate: int = 16000) -> None:
+    def __init__(self, socket, dialect: Dialect, *, rate: int = 16000, keypad: str = "off") -> None:
+        if keypad not in KEYPAD:
+            raise ValueError(f"keypad must be one of {KEYPAD}")
         self._socket = socket
         self._stream = MediaStream(dialect, rate=rate)
         self.rate = self._stream.rate
-        #: Keypresses heard so far, in order.
+        self.keypad = keypad
+        #: Keypresses heard so far, in order, up to MAX_DIGITS.
         self.digits: list[str] = []
+        #: Keypresses heard after ``digits`` was full.
+        self.dropped_digits = 0
         self._ended = False
         self._closed = False
 
@@ -56,14 +67,17 @@ class CarrierTransport:
         while self.stream_id is None and not self._ended:
             await self._read()
 
-    def receive(self) -> AsyncIterator[AudioChunk]:
-        """The caller's speech, at the rate this transport was built for."""
+    def receive(self) -> AsyncIterator[Union[AudioChunk, Keypress]]:
+        """The caller's speech, at the rate this transport was built for,
+        and their keys when the keypad is on."""
 
-        async def audio() -> AsyncIterator[AudioChunk]:
+        async def audio() -> AsyncIterator[Union[AudioChunk, Keypress]]:
             while not self._ended:
                 for frame in await self._read():
                     if isinstance(frame, AudioChunk):
                         yield frame
+                    elif isinstance(frame, Dtmf) and self.keypad != "off":
+                        yield Keypress(frame.digit, frame.source, frame.offset_ms, frame.tone_ms)
 
         return audio()
 
@@ -82,6 +96,8 @@ class CarrierTransport:
             elif isinstance(frame, Dtmf):
                 if len(self.digits) < MAX_DIGITS:
                     self.digits.append(frame.digit)
+                else:
+                    self.dropped_digits += 1
             elif isinstance(frame, CallStarted):
                 pass  # the stream keeps the identifiers; nothing else to do
             kept.append(frame)

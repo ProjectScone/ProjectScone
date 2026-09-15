@@ -9,6 +9,7 @@ from typing import Any, Mapping, Optional, Union
 
 from ..audio import Resampler, pcm
 from ..realtime.audio import AudioChunk
+from ..realtime.keypad import keypad_key
 from .dialects import Dialect
 from .g711 import CODECS
 
@@ -32,9 +33,17 @@ class CallEnded:
 
 @dataclass(frozen=True)
 class Dtmf:
-    """A key pressed on the phone."""
+    """A key pressed on the phone: which, how it arrived (``event`` for the
+    carrier's own message), and how far into the caller's audio."""
 
     digit: str
+    source: str = "event"
+    offset_ms: Optional[float] = None
+    tone_ms: Optional[float] = None
+
+
+#: Which digits a stream reports: none, or those in the carrier's dtmf messages.
+DIGITS = ("off", "events")
 
 
 def _first(source: Mapping[str, Any], keys) -> Optional[str]:
@@ -50,8 +59,15 @@ class MediaStream:
     back in its envelope, converting rates in both directions so the rest
     of the pipeline never has to know it is on a phone line."""
 
-    def __init__(self, dialect: Dialect, *, rate: Optional[int] = None) -> None:
+    def __init__(self, dialect: Dialect, *, rate: Optional[int] = None, digits: str = "events") -> None:
+        if digits not in DIGITS:
+            raise ValueError(f"digits must be one of {DIGITS}")
         self.dialect = dialect
+        self.digits = digits
+        #: Dtmf messages whose digit was not a key on a keypad.
+        self.unreadable_digits = 0
+        #: Samples of the caller's audio decoded so far, at the line's rate.
+        self._heard = 0
         #: The rate the rest of the pipeline runs at. None means the line's.
         self.rate = rate or dialect.rate
         self.stream_id: Optional[str] = None
@@ -78,12 +94,18 @@ class MediaStream:
             if not payload:
                 return []
             audio = self._decode(base64.b64decode(payload))
+            self._heard += len(audio) // 2
             if self._inbound is not None:
                 audio = self._inbound.feed(audio)
             return [AudioChunk(pcm=audio, sample_rate=self.rate, channels=1)] if audio else []
         if event == dialect.dtmf_event:
-            digit = _first(body.get(dialect.dtmf_event) or {}, dialect.digit_keys)
-            return [Dtmf(digit=digit)] if digit else []
+            if self.digits == "off":
+                return []
+            digit = keypad_key(_first(body.get(dialect.dtmf_event) or {}, dialect.digit_keys))
+            if digit is None:
+                self.unreadable_digits += 1
+                return []
+            return [Dtmf(digit=digit, offset_ms=self._heard * 1000 / dialect.rate)]
         if event == dialect.stop_event:
             return [CallEnded(stream_id=self.stream_id or _first(body, [dialect.stream_key]) or "")]
         return []
