@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 from ..core.errors import InvalidInput, SconeError
 from .code import BRACE_SUFFIXES, PYTHON_SUFFIXES
 from .manifests import is_manifest
+from .mcp_config import WALKED_DOT_NAMES, is_mcp_config
 from .code_resolution import file_resolver
 from .ignore import Ignore
 from .records import Record
@@ -289,7 +290,10 @@ def _in_scope(here: pathlib.PurePath, wanted: set[str]) -> bool:
     file sitting on disk.
     """
     if any(part.startswith(".") or part == "__pycache__" for part in here.parts):
-        return False
+        # A dot-name is left alone, except an MCP configuration, which
+        # every tool keeps in one; and only the configuration, so a
+        # `.vscode/settings.json` beside it stays unread.
+        return bool(wanted & _CODE_SUFFIXES) and is_mcp_config(here.as_posix())
     if here.suffix.lower() in wanted:
         return True
     # By its path below the root, so `requirements/test.txt` is the
@@ -368,7 +372,8 @@ def _files(root: pathlib.Path, suffixes: Sequence[str],
                 continue
             below = entry.relative_to(root)
             if directory:
-                if any(part.startswith(".") or part == "__pycache__" for part in below.parts):
+                if any((part.startswith(".") and part.lower() not in WALKED_DOT_NAMES) or part == "__pycache__"
+                       for part in below.parts):
                     continue
                 if ignore is not None and ignore.ignored(below.as_posix(), directory=True):
                     pruned += 1

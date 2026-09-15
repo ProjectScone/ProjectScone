@@ -578,6 +578,22 @@ async def test_an_unknown_withhold_kind_is_refused_before_any_recall_runs():
         await engine.close()
 
 
+def test_a_window_can_be_counted_in_whole_sentences_over_http(client):
+    content = ("The survey of the harbour crane was booked for the third of May. "
+               "It found rust on the jib and a slew ring that needed grease. "
+               "The yard did both in the same week.")
+    assert client.post("/v1/episodes", json={"content": content, "source": "crane.txt"},
+                       headers=auth()).status_code == 200
+    asked = {"q": "rust jib slew grease", "limit": 1, "window": 1, "window_unit": "sentences"}
+    answered = client.get("/v1/recall", params=asked, headers=auth())
+    assert answered.status_code == 200, answered.text
+    body = answered.json()
+    assert body["widened"]["unit"] == "sentences" and body["items"][0]["text"].endswith(".")
+    assert client.get("/v1/recall", params={**asked, "window": 21}, headers=auth()).status_code == 422
+    assert client.get("/v1/recall", params={**asked, "window_unit": "words"}, headers=auth()).status_code == 422
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["recall.sentence_window"] is True
+
+
 def test_a_window_and_code_context_are_reachable_over_http(client):
     """Both shipped to the CLI and stopped there, and HTTP is the surface
     everything else uses. A retrieval feature only the terminal can ask

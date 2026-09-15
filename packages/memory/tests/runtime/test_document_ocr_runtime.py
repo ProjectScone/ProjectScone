@@ -67,3 +67,17 @@ async def test_standard_hosts_mount_ocr_and_retain_real_scan(tmp_path, composed)
             assert any(region['text'] == 'Polaris' for region in evidence['segments'][0]['regions'])
     finally:
         await memory.close()
+
+
+def test_orientation_is_chosen_by_setting_and_changes_the_ocr_identity():
+    from scone_memory.api.__main__ import document_ocr_identity
+
+    executable = shutil.which('tesseract') or '/usr/bin/true'
+    plain = Settings.from_env({'SCONE_DOCUMENT_OCR_EXECUTABLE': executable})
+    turned = Settings.from_env({'SCONE_DOCUMENT_OCR_EXECUTABLE': executable, 'SCONE_DOCUMENT_OCR_ORIENTATION': '1'})
+    if build_document_ocr(plain) is None:
+        pytest.skip('the pdf-ocr extra is not installed')
+    assert build_document_ocr(plain).engine.orientation is False
+    assert build_document_ocr(turned).engine.orientation is True
+    assert document_ocr_identity(plain) == f'{executable}:eng:3', 'a store synced before keeps its identity'
+    assert document_ocr_identity(turned) == f'{executable}:eng:3:orientation', 'turned pages extract differently'

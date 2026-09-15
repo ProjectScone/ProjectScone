@@ -18,7 +18,7 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.core.extracted import MANY_VALUED
-from scone_memory.ingestion import code_graph, manifests
+from scone_memory.ingestion import code_graph, manifests, mcp_config
 from scone_memory.ingestion.code_graph import record_claims
 
 pytestmark = pytest.mark.asyncio
@@ -70,10 +70,12 @@ async def test_configuration_cannot_make_an_extracted_predicate_one_valued():
 async def test_every_predicate_the_framework_extracts_is_declared_many_valued():
     """The declaration lives apart from the readers; this keeps them from
     drifting when a reader gains a predicate."""
-    from_code = {getattr(code_graph, name) for name in ("DEFINES", "IMPORTS", "CALLS", "INHERITS", "MIXES_IN", "USES_TYPE",
-                                                          "NOTES", "FLAGS", "CITES", "REFERENCES")}
+    from_code = {getattr(code_graph, name) for name in ("DEFINES", "IMPORTS", "IMPORTS_WHEN_CALLED", "IMPORTS_FOR_TYPES",
+                                                          "CALLS", "INHERITS", "MIXES_IN", "USES_TYPE", "NOTES", "FLAGS",
+                                                          "CITES", "REFERENCES")}
     from_manifests = {manifests.DEPENDS_ON, manifests.DEVELOPS_WITH}
-    assert from_code | from_manifests == set(MANY_VALUED)
+    from_mcp_configs = {mcp_config.RUNS_WITH, mcp_config.REQUIRES_ENV, mcp_config.CONNECTS_TO}
+    assert from_code | from_manifests | from_mcp_configs == set(MANY_VALUED)
 
 
 async def test_a_stated_predicate_still_holds_one_value_at_a_time():
