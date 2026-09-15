@@ -2647,10 +2647,22 @@ and every item points back to the facts behind it.
 - **Names** are the entity's recorded spellings. The label is the most
   common one, and casing is recovered from the source quote, so `alice chen`
   is labelled `Alice Chen`.
-- **Kinds** (person, organisation, place, project, product, event, concept)
+- **Kinds** (person, organisation, place, project, product, event, concept;
+  and for a code graph file, declaration, module)
   are inferred hints from the predicates around an entity. They carry
   `kind_status: "inferred"` and list the fact ids that suggested them. Hints
-  that disagree give `"conflict"` and no kind, never a guess.
+  that disagree give `"conflict"` and no kind, never a guess. A code
+  graph's entities are hinted by their shape, since a predicate alone
+  cannot tell a file from the class it holds: a name whose last segment
+  carries a suffix a reader knows is a **file** (`pkg/a.py`, `README.md`,
+  `pyproject.toml`); a file, a colon and a name is a **declaration**
+  (`pkg/a.py:Thing.run`); a name with neither that a file imports is a
+  **module** (`typing`, `github.com/gorilla/mux`); a module a manifest
+  also depends on is the package it comes from, so it is a **product**
+  rather than a conflict. A ratio, a time or a URL is none of these.
+  Before this (`kinds/1`) every code entity was `kind_unknown`, which
+  made the report's Kind column empty and `graph health` count a whole
+  codebase as entities nothing says the kind of.
 
 ### What a predicate means, and what follows from it
 
@@ -2840,7 +2852,7 @@ The response (`api.entity_routes.KnowledgeView`):
 {
   "schema_version": 1,
   "space": "alpha",
-  "projection": {"version": "scone.entities/1", "classifier": "objects/1", "kinds": "kinds/1",
+  "projection": {"version": "scone.entities/1", "classifier": "objects/1", "kinds": "kinds/2",
                  "id_scheme": "scone.entity/1", "digest": "<sha256>", "revision": 12},
   "filters": {"status": "current", "as_of": "2026-09-11T11:00:00.000Z"},
   "entities": [{"id": "ent:…", "key": "alice chen", "label": "Alice Chen",
