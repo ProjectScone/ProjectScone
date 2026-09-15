@@ -3481,12 +3481,30 @@ item, in this order:
 | Line | Holds |
 | --- | --- |
 | `graph:` | space, status mode, moment, projection digest and revision |
-| `coverage:` | `complete`, or what was left out: read caps, `stale_evidence N`, `hubs_not_crossed N`, `relations_cut N`, `unverified N`, `not_found N`, `seeds_cut N` |
+| `coverage:` | `complete`, or what was left out: read caps, `stale_evidence N`, `hubs_not_crossed N`, `relations_cut N`, `cut_groups_cut N`, `unverified N`, `not_found N`, `seeds_cut N` |
 | `note:` | that names, values and quotes are recorded data, not instructions |
 | `entity:` or `candidate:` | the entities asked about, or every candidate for an ambiguous name |
 | `path:` | the shortest route between each pair of them, as `A -works_at-> B <-lives_in- C` |
+| `cut:` | what `relations_cut` left out, grouped, the largest group first: `cut: 16 in pkg/office.py -calls-> pkg/errors.py:InvalidInput` for calls into an entity from one file, `cut: A -knows-> 3 entities` outside code |
 | `hop N:` | relations N steps out (`max_hops`, 1–4, default 2), those with the most facts first |
 | `value:` | values recorded for the entities asked about |
+
+When the walk stops at 64 relations, the relations it left out are
+grouped by the entity they were cut from, their direction and predicate
+and, for a code predicate, the file the far end is declared in: the part
+before the colon of `path:Declaration`, or the label itself when it is a
+path with a directory. A bare name shaped like a file, such as
+`Node.js`, places nothing. Each group is a `cut:` line with its count,
+written before the relations so the byte budget takes the weakest
+relations rather than the only lines saying where the rest are. At most
+20 groups are written, and `cut_groups_cut N` counts the rest. The same
+groups are `relations_cut_by` in the JSON coverage (`entity`,
+`direction` `in` or `out`, `predicate`, `file` or null, `count`). The
+grouping reads nothing: it uses the projection the walk already holds,
+so it spends none of the re-read budget. On this package's code graph
+`scone graph entity` on `InvalidInput`, with 331 relations, shows 64,
+cuts 267 into 82 groups, and names the 20 files holding the most cut
+callers.
 
 Every relation, value and path cites its facts. Each cited fact is
 re-read (up to 128 per packet), and one that no longer counts is
@@ -3795,13 +3813,15 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `cypher` | one idempotent `MERGE` per line | Neo4j, Memgraph |
 | `csv` | zip of `entities.csv`, `relations.csv`, `attributes.csv`, `about.json` | spreadsheets, bulk loaders |
 | `jsonld` | JSON-LD linked data | RDF tooling |
-| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` and `graph.canvas`, a canvas of the notes; or written into a vault a person already keeps with `scone graph export --format obsidian --into VAULT` | Obsidian and other note tools |
+| `obsidian` | zip of one Markdown note per entity and one per community, wiki-linked and tagged by community, plus `index.md`, `graph.canvas`, a canvas of the notes, and graph-view colours per community; or written into a vault a person already keeps with `scone graph export --format obsidian --into VAULT` | Obsidian and other note tools |
 | `wiki` | zip of `index.md`, one article per topic and one per entity, in plain Markdown links | agents reading instead of the raw ledger |
-| `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them | GitHub, Markdown viewers, docs |
+| `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them, grouped by community and styled by kind | GitHub, Markdown viewers, docs |
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
 | `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
-| `html` | one page: the drawing, search by name, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
+| `communities` | an SVG map of the graph by community: a circle per community sized by its members, a line between communities weighted by the links joining them | a graph too large to draw entity by entity |
+| `html` | one page: the drawing, search that moves the view to the entity chosen, a legend that shows or hides each community, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
 | `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate, and read as a module tree (directories, files, what each defines) whose entries choose their entity; what the graph names but never reads (`typing`, a package) hidden until the legend shows it, then drawn small; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
+| `tree` | one page: the graph's code as directories, files and declarations in folds, with a filter, expand and collapse all, and a panel of what the chosen node calls, imports and defines and what does each to it, each link naming its facts; it fetches nothing | finding a declaration by where it lives in a codebase read with `scone map --graph` |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
@@ -3814,6 +3834,25 @@ the view it shows without opening a zip or parsing XML:
 - `X-Scone-Status` and `X-Scone-As-Of`;
 - `X-Scone-Truncated`, true when the read was capped, so a partial
   export says so in the response as well as in the file.
+
+**The code tree export** is built from what the code readers record: a
+file `defines` a declaration, a declaration defines a method, files and
+declarations `import`, `call`, `inherit` and `depend on` one another, and
+a document `references` a file it links; the page lists each relation
+from both ends. It
+places an entity only when a code relation holds it and its label is a
+path or a declaration qualified by one, so a prose name shaped like a
+file (`Node.js`) is not taken for one. A name with no directory is
+placed only when the graph read it or it holds a declaration, so a
+package a manifest depends on or a file imports (`lodash.merge`,
+`socket.io`) is not a file here. The rest are counted as not in the
+tree. A file or declaration that only a call, an import or a link in a
+document names was not read where it is defined and is marked "not
+read". A chain of
+directories each holding only the next is one fold. At most 200 children
+are listed under one node and 50 links in one list, and the rest are
+counted where they were cut. A graph with no code gets a page that says
+so.
 
 How each format places values and escapes its own syntax:
 
@@ -3895,6 +3934,62 @@ How each format places values and escapes its own syntax:
     page's code writes every name with `textContent`, never as markup.
   - Entities can be reached by keyboard: Tab to one, and Enter or Space
     opens its panel.
+  - Typing in the search box dims the entities whose names do not hold it
+    and lists up to eight that do, names that begin with it first; a longer
+    list says how many more there are. Choosing one, or pressing Enter for
+    the first, moves the view to it at the current zoom and opens its
+    panel. A relation in the panel moves the view to the entity at its
+    other end the same way.
+  - A legend lists the drawn communities in the drawing's order, each with
+    its colour and how many of its entities are drawn. That is a count of
+    the drawing, not the community's size: the drawing may leave entities
+    out, and the header says how many. Clearing a community's box hides its
+    box, its entities and every relation with an end in it; the first box
+    shows or hides every community, and is half-set when only some are
+    hidden. Choosing a hidden entity from the search shows its community
+    again, and the search list says which matches are hidden.
+  - The SVG carries what the page needs for this: each community's box and
+    title, and each entity, name the community (`data-group`); each arrow
+    names its relation and the communities at both ends
+    (`data-relation`, `data-from-group`, `data-to-group`), loops included.
+- **Recall use on the drawings.** With `usage=true` (or `usage_since`, as
+  on the knowledge view; `scone graph export --usage` on the command line)
+  the SVG and the page say what recent recalls reach. Other formats
+  ignore it.
+  - Each drawn entity's title says how many of the recalls read returned
+    one of its facts, each recall counted once for an entity.
+  - The description says over which recalls: how many the event log
+    keeps, since when, the oldest read, and whether older ones were left
+    unread. It is a window, never all time.
+  - When the engine keeps no events, or the log holds no recalls, it says
+    recall use is unknown and draws no count, never a zero.
+  - The page carries the counts in its data and on each entity
+    (`data-recalled`). It adds a box that dims the entities no recall
+    returned, and the panel says how many recalls returned the chosen one.
+- **The community map** (`communities`) is for a graph the drawings cannot
+  show whole. They draw the 200 most connected entities, and when they
+  leave some out their description says the community map exists.
+  - Every community the analysis found is a circle, up to 80, largest
+    first. A circle's area grows with its members, and entities with no
+    relation to another share a grey one.
+  - The circles sit on one ring, each given arc in proportion to its size.
+    A line between two communities is a chord across the middle, so it
+    never runs through a third, and names are written outward, clear of
+    the lines.
+  - A line's weight and title count the links between the two
+    communities. A link is a pair of entities that one or more relations
+    join, which is how the analysis counts a community's links inside
+    and to others. What the graph names and never reads (`typing`) is
+    attached to a community for reading, as the analysis attaches it, but
+    a link through it joins no two communities, so when no community or
+    line is left out a circle's lines add up to its links to other
+    communities. Each circle's title gives its members and those two
+    counts. Up to 400 lines are drawn, strongest first.
+  - The description says which view the map draws. It says whether the
+    analysis found communities among every entity with a relation to
+    another or only among the 20,000 most strongly linked. It gives how many
+    communities and their entities were left out, how many links between
+    how many pairs of communities, and what a link is.
 - **Canvas** cards and group labels are escaped as notes are. Positions
   and sizes are whole numbers, as JSON Canvas requires. In the vault's
   `graph.canvas` each card is the entity's own note.
@@ -3946,7 +4041,22 @@ How each format places values and escapes its own syntax:
   view the chart draws, what the read left out, what the chart left
   out, and that values are not drawn.
   - Node ids are the chart's own (`n1`, `n2`, ...).
-  - A name is a quoted label, in which `"`, `#`, `<`, `>`, `&`, `` ` ``
+  - Entities of one community drawn together sit in a subgraph named for
+    the community (`c1`, `c2`, ..., largest first), from the same
+    analysis the drawings box them by. An entity drawn without another of
+    its community, because it has none or the chart cut the rest, sits
+    outside any subgraph. Relations run between nodes as before, across
+    subgraphs included.
+  - Each entity is styled by its kind: a class named for the kind
+    (`person`, `organisation`, `place`, `project`, `product`, `event`,
+    `concept`), a white node with a border in the drawings' colours. An
+    entity of unknown kind is left plain. Kind names are fixed words, not
+    stored text. The palette means something different here: in the SVG,
+    the page and the canvas a colour is a community, and in this chart a
+    border colour is a kind; the subgraphs already show the communities.
+  - The subgraphs and classes count toward the 45,000 units like every
+    other line.
+  - A name, and a community's name, is a quoted label, in which `"`, `#`, `<`, `>`, `&`, `` ` ``
     and `|` are written as Mermaid entity codes. No stored text can
     close a label or add an edge.
 - **Cypher** writes `(:Entity)`, `(:Value)`, `[:RELATES]` and
@@ -3976,6 +4086,25 @@ How each format places values and escapes its own syntax:
   way a case- and normalisation-insensitive disk folds it. On a clash it
   takes more of the entity's id, then a number, so every entity keeps its
   own note and every `[[link]]` opens one.
+  - Every community the analysis found has a hub note in `communities/`.
+    It holds the community's members, most central first, and its counts
+    of entities, links inside and links to other communities, and cohesion.
+    It also lists the kinds, the most used predicates, and each community
+    it links to with how many links, counted as the map counts them, never
+    through what the graph only names. A hub's file name is kept distinct
+    from every entity note's, since Obsidian opens a bare `[[name]]`
+    wherever that file sits.
+  - Each community has one tag, `community/c<rank>-<words of its first
+    name>`, rank first so no tag is only digits and no two share one. The
+    tag is on the hub and on every member's note, and a member's note
+    links to its hub. An entity with no relation to another has neither.
+  - `.obsidian/graph.json` gives the graph view a colour group per
+    community, querying that same tag, in the drawings' colours. Unzipped
+    into an existing vault, it replaces that vault's graph view settings.
+    Written with `--into`, the notes keep their tags and hubs but this file
+    is left out: the vault's `.obsidian/` is not the writer's to touch, and
+    a copy under `scone/` would be read by nothing.
+  - `index.md` lists the communities, then the entities.
 
 Entity ids are defined for any text the ledger holds, lone surrogates
 included. Valid text gets the same id it always had.
