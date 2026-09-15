@@ -335,6 +335,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="hold entities with more links than this degree percentile (50 to 100) out of the "
                         "community partition and the central ranking, and list them apart")
     g.add_argument("--usage", action="store_true", help="also say what recent recalls returned, and what they never reach")
+    g.add_argument("--detach-hubs", type=float, metavar="PERCENTILE",
+                   help="leave entities above this degree percentile (50 to 100) out while communities are found")
     g = graph.add_parser("path", help="how two entities connect, each hop with its facts")
     g.add_argument("source")
     g.add_argument("target")
@@ -1428,6 +1430,8 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
         raise InvalidInput("--resolution must be a number above 0 and at most 10")
     if command == "report" and args.exclude_hubs is not None and not 50 <= args.exclude_hubs <= 100:
         raise InvalidInput("--exclude-hubs must be a percentile from 50 to 100")
+    if command == "report" and args.detach_hubs is not None and not 50 <= args.detach_hubs <= 100:
+        raise InvalidInput("--detach-hubs is a degree percentile from 50 to 100")
     named = {"path": [args.source, args.target] if command == "path" else [],
              "context": args.names if command == "context" else [],
              "entity": [args.name] if command == "entity" else [],
@@ -1658,7 +1662,7 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
         return 0
     if command == "report":
         report = await report_record(engine, space, as_of=when, resolution=args.resolution,
-                                     exclude_hubs=args.exclude_hubs, usage=args.usage)
+                                     exclude_hubs=args.exclude_hubs, usage=args.usage, detach_hubs=args.detach_hubs)
         print(render_markdown(report) if args.markdown else _ledger_json(report), file=out)
         return 0
     projection, coverage = await load_projection(engine, space, mode="current", as_of=when)

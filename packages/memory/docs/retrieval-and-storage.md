@@ -2964,6 +2964,34 @@ the same `status` and `as_of`:
   when at least two members are paths, most are, and every path sits
   under one directory. Three file names are not what a person calls a
   subsystem; its directory is.
+  Before communities are named, two guards look again at the
+  communities a reader cannot use, each re-partitioning one community on
+  its own links at the same resolution:
+  - one holding over a quarter of the analysed entities (and at least 10)
+    is split into what its links give, since a map by community draws it
+    as one blob;
+  - one of 50 or more is split when its own partition reaches modularity
+    0.3, because over a large graph modularity merges small modules into
+    one community that holds several. The share of member pairs linked is
+    not the test: in a sparse graph it falls with size, and on this
+    project's own code graph it fired on 12 of the 17 communities of 50
+    or more.
+
+  The resolution is never raised to force a split. A community a guard
+  looked at and kept whole (one piece, or a weak split of a large one) is
+  counted in `unsplittable`, and splits in `split_oversized` and
+  `split_nested`. The pieces of a split are looked at again, like any
+  community, until none splits: a community's own partition can leave a
+  piece that still holds two. Finer communities often score lower on
+  modularity, so `modularity_before_guards` gives the modularity before
+  any split beside the final `modularity`, both over the graph's own
+  entities (externals and held-apart hubs left out, detached hubs
+  rejoined). Measured on an
+  earlier base, before externals were kept out of the partition, on this
+  project's retrieval, entities, API and ingestion code (2,713 entities):
+  28 communities became 158, the largest three (341, 205 and 199 entities)
+  became 62, 48 and 42, and modularity went from 0.702 to 0.584, with 19
+  nested splits and one community kept whole.
 - **Central entities**: by PageRank, with degree, fact weight,
   betweenness (exact up to 500 entities, from 64 evenly spaced sources
   beyond) and participation across communities.
@@ -3006,6 +3034,17 @@ Two parameters tune the analysis:
   apart". A report built over an analysis that was not run with the
   percentile ranks the same hubs out by the same rule and says the
   partition was found with them in it.
+- `detach_hubs` (a degree percentile, 50 to 100; CLI `--detach-hubs`)
+  leaves those entities out while communities are found, so an entity
+  everything links to does not pull unrelated groups into one; each then
+  joins the community most of its link weight goes to as a full member,
+  so, unlike a hub held apart by `exclude_hubs`, it names communities,
+  counts in their links and in modularity, and can be a surprising
+  connection. `hubs_detached` counts them. Removing hubs can leave
+  groups with no link between them, so expect more communities. Hubs
+  are picked among the graph's own entities, by their links to each
+  other, once externals (below) and any hubs held apart by `exclude_hubs`
+  are out; the guards above run on the partition found without them.
 
 **What the graph names and never reads is kept apart, without asking.**
 In a code graph every file imports `typing`, so `typing` was the most
@@ -3030,8 +3069,9 @@ The drawing spends its room on the graph's own entities first. The
 coverage says how many were set apart (`external_entities`); a graph of
 people and places has none.
 
-The report echoes both under `analysis`, and `analysis.coverage` carries
-`resolution`.
+The report echoes these under `analysis`, and `analysis.coverage` carries
+`resolution`, `external_entities` and what the guards and `detach_hubs`
+did.
 
 Results are deterministic: the same facts give the same report. The report
 states the projection digest and analysis version it came from, and

@@ -273,9 +273,12 @@ def render_markdown(report: Mapping[str, Any]) -> str:
 
 async def report_record(engine: "MemoryEngine", space: str, *, status: "StatusMode" = "current",
                         as_of: str | None = None, resolution: float = 1.0, exclude_hubs: float | None = None,
-                        usage: bool = False, usage_since: str | None = None) -> dict[str, object]:
+                        usage: bool = False, usage_since: str | None = None,
+                        detach_hubs: float | None = None) -> dict[str, object]:
     """The report of one view, as every surface answers it: read at one
-    instant, analysed, and labelled with that same instant."""
+    instant, analysed, and labelled with that same instant. ``detach_hubs``
+    leaves entities above that degree percentile out while communities are
+    found; each then joins the community most of its links go to."""
     from .analysis import analyze_projection
     from .read import load_projection
     from .view import knowledge_view
@@ -286,6 +289,7 @@ async def report_record(engine: "MemoryEngine", space: str, *, status: "StatusMo
     from .usage import recall_usage
 
     recalls = await recall_usage(engine, space, since=usage_since) if usage or usage_since is not None else None
-    return build_report(projection, analyze_projection(projection, resolution=resolution, exclude_hubs=exclude_hubs),
+    return build_report(projection, analyze_projection(projection, resolution=resolution, exclude_hubs=exclude_hubs,
+                                                       detach_hubs=detach_hubs),
                         meta=cast(Mapping[str, object], view["projection"]), filters={"status": status, "as_of": when},
                         coverage=coverage, exclude_hubs=exclude_hubs, usage=recalls)

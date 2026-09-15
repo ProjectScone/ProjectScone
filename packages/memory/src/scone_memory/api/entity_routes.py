@@ -258,6 +258,17 @@ class AnalysisCoverage(BaseModel):
     #: apart as hubs, and how many were; None and 0 when none was asked for.
     exclude_hubs: Optional[float] = None
     hubs_held_apart: int = 0
+    #: How often a partition guard fired: a community over a quarter of the
+    #: graph, or large and holding communities of its own, split on its own
+    #: links; or looked at and kept whole.
+    split_oversized: int = 0
+    split_nested: int = 0
+    unsplittable: int = 0
+    #: Hubs left out while communities were found, above this degree percentile.
+    detach_hubs: Optional[float] = None
+    hubs_detached: int = 0
+    #: When a guard split a community, the modularity before it did.
+    modularity_before_guards: Optional[float] = None
 
 
 class Groupings(BaseModel):
@@ -441,15 +452,17 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         status: StatusMode = "current", as_of: Optional[str] = None,
         format: Literal["json", "markdown"] = "json", resolution: float = Query(default=1.0, gt=0, le=10),
         exclude_hubs: Optional[float] = Query(default=None, ge=50, le=100), usage: bool = False,
+        detach_hubs: Optional[float] = Query(default=None, ge=50, le=100),
         usage_since: Optional[str] = None, space: str = Depends(space_for),
     ) -> dict[str, object] | PlainTextResponse:
         """The space's communities, central entities, surprising connections and
         questions worth asking, computed from recorded facts and citing them.
         ``resolution`` sets how fine the communities are; ``exclude_hubs``
         holds entities above that degree percentile out of the community
-        partition and the central ranking, and lists them apart."""
+        partition and the central ranking, and lists them apart;
+        ``detach_hubs`` leaves them out only while communities are found."""
         report = await report_record(engine, space, status=status, as_of=_moment(engine, as_of), resolution=resolution,
-                                     exclude_hubs=exclude_hubs, usage=usage,
+                                     exclude_hubs=exclude_hubs, usage=usage, detach_hubs=detach_hubs,
                                      usage_since=None if usage_since is None else _moment(engine, usage_since))
         if format == "markdown":
             return PlainTextResponse(render_markdown(report), media_type="text/markdown; charset=utf-8")
