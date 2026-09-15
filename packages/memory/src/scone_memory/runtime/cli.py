@@ -190,6 +190,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-files", type=int, default=1000)
     p.add_argument("--max-total-bytes", type=int, default=256_000_000)
     p.add_argument("--extension", action="append", help="restrict to a dotted suffix; repeat for several")
+    p.add_argument("--forget-after", help="forget every source this run writes at this time: RFC 3339, YYYY-MM-DD, "
+                                          "or a duration such as 30d, resolved once for the run; an unchanged "
+                                          "source keeps the schedule it holds")
 
     p = sub.add_parser("jobs", help="recent ingest batches and how far each has got")
     p.add_argument("--limit", type=int, default=20)

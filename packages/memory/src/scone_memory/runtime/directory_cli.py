@@ -49,7 +49,7 @@ async def run_directory_sync(args: argparse.Namespace, engine: MemoryEngine, out
                          key=key, store_id=args.store_id, parser_revision=args.parser_revision,
                          scan_limits=limits,
                          extensions=frozenset(args.extension) if args.extension else None)
-    result = await sync.synchronize(delete_missing=args.delete_missing)
+    result = await sync.synchronize(delete_missing=args.delete_missing, forget_after=args.forget_after)
     if args.json:
         print(json.dumps(asdict(result), ensure_ascii=True), file=out)
     else:
@@ -62,6 +62,10 @@ async def run_directory_sync(args: argparse.Namespace, engine: MemoryEngine, out
             print(f'{issue.code}: {json.dumps(issue.path or ".", ensure_ascii=True)}', file=out)
         if result.skipped:
             print(f'{result.skipped} unsupported file(s) skipped', file=out)
+        if result.forget_after is not None:
+            print(f'every source written is to be forgotten after {result.forget_after}', file=out)
+        if result.schedule_kept:
+            print(f'{result.schedule_kept} unchanged source(s) keep the schedule their memory holds', file=out)
         if result.claims or result.claims_closed:
             print(f'{result.claims} claim(s) recorded from source files and manifests; '
                   f'{result.claims_closed} closed that changed or removed files no longer make', file=out)
