@@ -200,19 +200,27 @@ def _parts(content: str, start: int, end: int, separator: str | None) -> list[tu
 
 def _hard(start: int, end: int, room: int, size: Callable[[int, int], int], pieces: list[_Piece]) -> int:
     """Cut one word into the longest parts that fit ``room``; each part holds
-    at least one character, so the cut always moves. Returns the cuts made."""
+    at least one character, so the cut always moves. Returns the cuts made.
+
+    The search for a part's end widens from the part's start, doubling,
+    until a part does not fit, and only then halves: no count reads more
+    than twice the part it finds. Halving from the word's end instead
+    counts about the rest of the word for every part."""
     cuts = 0
     at = start
     while at < end:
         low, high = at + 1, end
         # Invariant: a part ending at `low` is taken (it fits, or it is the
         # one character that must be taken); one ending past `high` is not.
+        # `step` doubles until the first part that does not fit, then is 0
+        # and the search halves.
+        step = 1
         while low < high:
-            middle = (low + high + 1) // 2
-            if size(at, middle) <= room:
-                low = middle
+            probe = min(low + step, high) if step else (low + high + 1) // 2
+            if size(at, probe) <= room:
+                low, step = probe, step * 2
             else:
-                high = middle - 1
+                high, step = probe - 1, 0
         pieces.append(_Piece(at, low, size(at, low)))
         cuts += low < end
         at = low

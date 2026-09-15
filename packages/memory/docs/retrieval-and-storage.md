@@ -1142,6 +1142,13 @@ MemoryEngine(store, index, embedder, chunk_tokens=512, chunk_overlap_tokens=64) 
   finder knows `.`, `!` and `?`; Chinese or Japanese prose is packed by
   hard cuts inside that one sentence and the receipt says so. Leave
   `chunk_tokens` unset for such text until it learns the full-width stops.
+  A hard cut's end is found by widening from the part's start, doubling
+  until a part does not fit, so the count never reads far past the part
+  it finds: a 100,000-letter word is counted 16 times over, where halving
+  from the word's end counted it 341 times over and grew with the square
+  of the word. 300,000 characters of Chinese prose took 3.4 s at 256
+  tokens and 2.3 s at 512, against 135 s and 61 s (three interleaved
+  rounds, medians; the same cuts).
 - **Off by default.** Cut positions decide what chunks exist, and the
   numbers below are one sample on a hashed-token embedder.
 
