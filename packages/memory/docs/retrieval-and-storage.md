@@ -3371,6 +3371,14 @@ that decision. Nothing is merged.
   1.23" is not "version 12.3"). Two related to each other are halved, since
   a thing rarely points at itself under another name, and the relation is
   named.
+  A name the projection classified as a code symbol (the object of
+  `calls`, `imports`, `defines` or another code predicate, with a
+  symbol's shape) is never judged by spelling, whatever the finder makes
+  of its shape: `json.dump` and `json.dumps` are two functions, not a
+  misspelling, while `J.Anderson` and `J.Andersen`, objects of no code
+  relation, are still compared. A code relation's subject is judged by
+  its shape alone, since `depends_on` may have a company for a subject
+  and a company one letter from another is still a misspelling.
 - **Every pair that can score is compared, and few others.**
   - Of two names alike by their words, one has all its words matched in
     the other. So each name is filed under the spellings of all its words
