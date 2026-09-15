@@ -130,7 +130,8 @@ class GraphAnalysis:
 
 #: A relation whose object can be something the graph only names: a module
 #: imported, a package depended on, a document cited, a type used.
-NAMED_ONLY = frozenset(("imports", "depends_on", "develops_with", "cites", "uses_type", "references"))
+NAMED_ONLY = frozenset(("imports", "depends_on", "develops_with", "cites", "uses_type", "references", "runs_with",
+                        "requires_env", "connects_to"))
 
 
 def external_entities(projection: EntityProjection) -> frozenset[str]:
