@@ -83,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
     p.add_argument("--chunking-profile", choices=tuple(CHUNKING_PROFILES),
                    help="cut at this genre's boundaries (implies --chunking structure)")
+    p.add_argument("--semantic-merge-threshold", type=float,
+                   help="join this record's semantic chunks again when at least this alike (implies --chunking semantic)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
     p = sub.add_parser("import-chat", help="a WhatsApp, Telegram, Discord or Slack export, one conversation memory per message")
@@ -503,6 +505,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only files with this suffix, repeatable (plus package manifests when any suffix is code); "
                         "defaults to code and prose")
     p.add_argument("--apply", action="store_true", help="actually write; without it this is a plan")
+    p.add_argument("--repo", default=None, metavar="NAME",
+                   help="name this repository: every file is held as NAME/path (see map --repo)")
     p.add_argument("--remove", action="store_true",
                    help="also forget memories whose file is gone from disk (destructive; needs --apply)")
     p.add_argument("--limit", type=int, default=100_000, help="files to read (1 to 100000)")
@@ -527,6 +531,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "changed, until interrupted or --rounds passes are done")
     p.add_argument("--every", type=float, default=5.0, help="seconds between passes under --watch (default 5)")
     p.add_argument("--rounds", type=int, default=0, help="passes to make under --watch, 0 for until interrupted (default 0)")
+    p.add_argument("--repo", default=None, metavar="NAME",
+                   help="name this repository: every file is held as NAME/path, so several repositories mapped "
+                        "into one space keep their files apart, and an import of a package another one "
+                        "publishes reaches that repository's file")
 
     p = sub.add_parser("fs", help="the space as a tree: ls, cat, find and write a note")
     tree = p.add_subparsers(dest="fs_command", required=True)
@@ -858,7 +866,7 @@ async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> i
     chosen = {"suffixes": tuple(args.suffix)} if args.suffix else {}
     done = await sync_directory(engine, args.space, args.directory, marker=args.marker,
                                 apply=args.apply, remove=args.remove, limit=args.limit,
-                                max_bytes=args.max_bytes, ignore=not args.no_ignore, **chosen)
+                                max_bytes=args.max_bytes, ignore=not args.no_ignore, repo=args.repo, **chosen)
     if args.json:
         print(json.dumps(done.record()), file=out)
         return 0
@@ -922,10 +930,16 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     from ..ingestion.doc_graph import doc_links, is_document
     from ..ingestion.sensitive import screen
     from ..ingestion.code_resolution import REACHABLE_DEPTH, unmistakable, resolve_across_files
+    from ..ingestion.manifests import manifest_claims
+    from ..ingestion.repositories import published_by, repository_prefix, space_publishes
 
     root = pathlib.Path(args.directory)
     if not root.is_dir():
         raise InvalidInput(f"{args.directory} is not a directory to map")
+    try:
+        prefix = repository_prefix(getattr(args, "repo", None))
+    except ValueError as refused:
+        raise InvalidInput(str(refused)) from None
     if not 1 <= args.limit <= 100_000:
         raise InvalidInput("--limit must be from 1 to 100000 files")
     if not 1 <= args.max_bytes <= 50_000_000:
@@ -948,8 +962,26 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     # Resolution belongs here, because this is what knows which files
     # exist: a relative import is followed only to a file actually read,
     # and one that leads anywhere else is left out rather than guessed at.
-    seen = {str(path.relative_to(root)) for path in found[: args.limit]}
-    resolve = file_resolver(seen)
+    seen = {prefix + str(path.relative_to(root)) for path in found[: args.limit]}
+    # What the space's other repositories publish and mapped, so an import
+    # of their package reaches their file; and what this tree's own
+    # manifests publish, read first so an import inside it reaches its own
+    # source the same way.
+    published, known = ({}, set()) if not args.graph else await space_publishes(engine, args.space, prefix)
+    if args.graph:
+        for path in found[: args.limit]:
+            relative = str(path.relative_to(root))
+            if is_manifest(relative):
+                try:
+                    spoken = manifest_claims(path.read_bytes()[: args.max_bytes].decode("utf-8", errors="replace"),
+                                             prefix + relative)
+                except OSError:
+                    continue
+                published.update(published_by((c.subject, c.predicate, c.object) for c in spoken))
+    resolve = file_resolver(seen, published, known)
+    # A Go import reaches a directory of another repository's files.
+    known_directories = {posixpath.dirname(key) for key in known}
+    crossed = 0
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
     updated, closed, unread_claims = 0, 0, False
@@ -984,7 +1016,7 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
         text = raw[: args.max_bytes].decode("utf-8", errors="replace")
         if not text.strip():
             continue
-        where = str(path.relative_to(root))
+        where = prefix + str(path.relative_to(root))
         if not args.include_sensitive:
             # Not `found`: that is this function's list of files, and the
             # receipt counts it.
@@ -1028,6 +1060,8 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
                                        content=text, path=where, when=engine.clock(),
                                        resolve=resolve, _recorded=recorded, _facts=facts)
             claims += said
+            crossed += sum(1 for claim in recorded if claim.predicate == "imports"
+                           and (claim.object in known or claim.object in known_directories))
             if done.replaced is not None:
                 # Read here, with the resolver, rather than by the engine:
                 # so the claims kept are exactly the ones just recorded.
@@ -1125,6 +1159,8 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
             parts.append(f"{unread} could not be read")
         if unbound:
             parts.append(f"{len(unbound)} call(s) left unbound")
+        if crossed:
+            parts.append(f"{crossed} import(s) reach another repository's file")
         if unresolved_links or ambiguous_links or outside_links:
             parts.append(f"documents: {len(unresolved_links)} link(s) to files not read, {len(ambiguous_links)} that "
                          f"two files would answer, {outside_links} outside the tree")
@@ -1148,6 +1184,8 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
                             "embeddings_reused": reused_vectors, "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
+                            "repository": getattr(args, "repo", None), "cross_repository_imports": crossed,
+                            "published": sorted(published),
                             "ignored": walked.ignored_files, "ignored_directories": walked.ignored_directories,
                             "ignore_files": list(rules.files) if rules is not None else [],
                             "ignore_truncated": rules.truncated if rules is not None else False,
@@ -1888,8 +1926,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "remember":
         if args.image is not None and args.jsonl:
             raise InvalidInput("--image cannot be combined with --jsonl; select a single source note")
-        if args.jsonl and (args.chunking or args.chunking_profile):
-            raise InvalidInput("--chunking and --chunking-profile are not applied to --jsonl; set them per record")
+        if args.jsonl and (args.chunking or args.chunking_profile or args.semantic_merge_threshold is not None):
+            raise InvalidInput("--chunking, --chunking-profile and --semantic-merge-threshold are not applied to --jsonl; "
+                               "set them per record")
         raw = read_source(args.file, stdin)
         attachment = None
         if args.jsonl:
@@ -1916,6 +1955,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     attachment_ids=[attachment.attachment_id] if attachment else [],
                     dedup_key=args.dedup_key, replace=args.replace, chunking=args.chunking,
                     chunking_profile=args.chunking_profile,
+                    semantic_merge_threshold=args.semantic_merge_threshold,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)
@@ -2175,6 +2215,13 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         if result.lessons_read is not None and result.lessons_read.get("events_cut"):
             print(f"lessons were read from the newest {result.lessons_read['events_read']} judgement(s) only; "
                   f"older ones in the window were left out", file=out)
+        prior = result.feedback_prior
+        if prior is not None and prior.get("events_cut"):
+            print(f"feedback was read from the newest {prior['events_read']} judgement(s) only; "
+                  f"older ones in the window were left out", file=out)
+        if prior is not None and prior.get("capped"):
+            print(f"feedback's term was cut at its bound of {prior['max_boost']} for {prior['capped']} candidate(s)",
+                  file=out)
         if result.low_confidence:
             top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)

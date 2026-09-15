@@ -24,7 +24,7 @@ from collections.abc import Callable
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, StrictInt, Field
+from pydantic import BaseModel, ConfigDict, StrictFloat, StrictInt, Field
 
 from contextlib import asynccontextmanager
 
@@ -123,6 +123,10 @@ class EpisodeBody(BaseModel):
     #: The genre whose boundaries structure chunking cuts at; an unknown
     #: name is refused by the engine, which owns the list.
     chunking_profile: Optional[str] = Field(default=None, max_length=64)
+    #: The similarity at which this record's semantic chunks are joined
+    #: again; implies semantic chunking. A number, never a bool or text,
+    #: and the engine refuses one that is not a similarity.
+    semantic_merge_threshold: Optional[StrictFloat] = None
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
@@ -649,6 +653,7 @@ def create_app(
             replace=body.replace,
             chunking=body.chunking,
             chunking_profile=body.chunking_profile,
+            semantic_merge_threshold=body.semantic_merge_threshold,
         )
         return added.model_dump()
 
@@ -674,7 +679,8 @@ def create_app(
                         "job": job_json(replayed), "replayed": True}
         records = [
             Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
-                   chunking=r.chunking, chunking_profile=r.chunking_profile)
+                   chunking=r.chunking, chunking_profile=r.chunking_profile,
+                   semantic_merge_threshold=r.semantic_merge_threshold)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
@@ -1241,6 +1247,9 @@ def create_app(
             response["lessons_read"] = result.lessons_read
         if result.expanded is not None:
             response["expanded"] = result.expanded
+        if result.feedback_prior is not None:
+            # A re-ranked answer carries what moved it, and where the prior's bounds bit.
+            response["feedback_prior"] = result.feedback_prior
         if joined is not None:
             response["merged"] = staged(joined.record())
         if cut is not None:

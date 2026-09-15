@@ -600,14 +600,20 @@ class RecallResult(BaseModel):
     #: With ``expand_summaries``: what was expanded, refused and cut
     #: (``summary_expand.Expanded.record``). None otherwise.
     expanded: Optional[dict[str, object]] = None
+    #: With a feedback weight set: what recorded feedback added in fusion, what the read took,
+    #: and whether its bounds bit (see retrieval/feedback_prior.py). Left out otherwise.
+    feedback_prior: Optional[dict[str, object]] = None
 
     @model_serializer(mode="wrap")
     def omit_unasked_lessons_read(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # A recall that asked for neither answers exactly as it did before they existed.
         value: dict[str, object] = handler(self)
         if self.lessons_read is None:
             value.pop("lessons_read", None)
         if self.expanded is None:
             value.pop("expanded", None)
+        if self.feedback_prior is None:
+            value.pop("feedback_prior", None)
         return value
 
     @property
@@ -645,8 +651,14 @@ class Added(BaseModel):
     #: in tokens (``chunk_tokens``) carries its own counts here too, with
     #: ``measure: "tokens"``: sentences cut inside because one alone was
     #: over the target, cuts inside a word, chunks that overlap the one
-    #: before and chunks the count measured over. None on a receipt that
-    #: stored nothing.
+    #: before and chunks the count measured over. A semantic cut under a
+    #: ``semantic_merge_threshold`` (the record's own, or the engine's)
+    #: carries what its second pass did: ``merge_threshold``, ``groups``
+    #: (chunks the first pass made), ``merges``, and each join that did not
+    #: happen counted once, as ``stopped_by_similarity`` or
+    #: ``stopped_by_size`` (alike enough and too long together, or beside a
+    #: sentence the size bound cut: the bound bit), so the three sum to
+    #: ``groups - 1``. None on a receipt that stored nothing.
     chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
     structure: Optional[dict[str, object]] = None
     #: With heading context on: how many chunks were embedded with a line

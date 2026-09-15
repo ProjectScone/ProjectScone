@@ -10,6 +10,7 @@ than no map.
 from __future__ import annotations
 
 import io
+import json
 
 import pytest
 
@@ -334,3 +335,109 @@ async def test_map_and_sync_share_one_identity_for_a_directory(tree):
     assert "0 file(s) read" in said or "updated" not in said, said
     held = [e for e in await engine.episodes("default", {"sync": str(tree.resolve())}) if e.source == "app/store.py"]
     assert len(held) == 1
+
+
+LIB_UTIL = "def tidy(text: str) -> str:\n    return text.strip()\n"
+APP_MAIN = "import libpkg.util\nfrom libpkg.util import tidy\n\n\ndef run(text: str) -> str:\n    return tidy(text)\n"
+
+
+def two_repositories(tmp_path):
+    lib, app = tmp_path / "lib", tmp_path / "app"
+    (lib / "src" / "libpkg").mkdir(parents=True)
+    (lib / "pyproject.toml").write_text('[project]\nname = "libpkg"\nversion = "1.0"\n', encoding="utf-8")
+    (lib / "src" / "libpkg" / "__init__.py").write_text("", encoding="utf-8")
+    (lib / "src" / "libpkg" / "util.py").write_text(LIB_UTIL, encoding="utf-8")
+    (lib / "src" / "main.py").write_text("import libpkg.util\n\n\ndef go() -> None:\n    libpkg.util.tidy('x')\n", encoding="utf-8")
+    (app / "src").mkdir(parents=True)
+    (app / "src" / "main.py").write_text(APP_MAIN, encoding="utf-8")
+    return lib, app
+
+
+async def test_two_repositories_in_one_space_keep_their_files_apart_and_an_import_reaches_the_other_s_file(tmp_path):
+    from scone_memory.core.errors import InvalidInput
+    from scone_memory.entities.read import load_projection
+
+    lib, app = two_repositories(tmp_path)
+    engine = await memory()
+    said = await mapped(engine, str(lib), "--graph", "--repo", "lib")
+    assert "1 import(s) reach another repository's file" not in said, "its own package is its own, not another's"
+    said = await mapped(engine, str(app), "--graph", "--repo", "app")
+    assert "2 import(s) reach another repository's file" in said, said
+    projection, _ = await load_projection(engine, "default", mode="current")
+    keys = {entity.key for entity in projection.entities}
+    assert {"lib/src/main.py", "app/src/main.py", "lib/src/libpkg/util.py"} <= keys, "two main.py, two entities"
+    by_id = {entity.entity_id: entity.key for entity in projection.entities}
+    edges = {(by_id[r.subject_id], r.predicate, by_id[r.object_id]) for r in projection.relations}
+    assert ("app/src/main.py", "imports", "lib/src/libpkg/util.py") in edges, "the import reaches the library's file"
+    assert ("app/src/main.py:run", "calls", "lib/src/libpkg/util.py:tidy") in edges, "and the call reaches its function"
+    assert ("lib/src/main.py", "imports", "lib/src/libpkg/util.py") in edges, "a repository's own package resolves too"
+    assert ("lib/pyproject.toml", "defines", "libpkg") in edges
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["map", str(app), "--graph", "--repo", "app", "--json"]), engine,
+                     io.StringIO(""), out)
+    receipt = json.loads(out.getvalue())
+    assert code == 0 and receipt["repository"] == "app" and receipt["published"] == ["libpkg"]
+    assert receipt["cross_repository_imports"] == 0, "a map that changed nothing records nothing, and counts so"
+    with pytest.raises(InvalidInput, match="one path segment"):
+        await run(build_parser().parse_args(["map", str(app), "--repo", "a/b"]), engine, io.StringIO(""), io.StringIO())
+    await engine.close()
+
+
+async def test_without_a_repository_name_a_package_nobody_here_publishes_stays_a_name(tmp_path):
+    from scone_memory.entities.read import load_projection
+
+    lib, app = two_repositories(tmp_path)
+    engine = await memory()
+    await mapped(engine, str(app), "--graph")
+    projection, _ = await load_projection(engine, "default", mode="current")
+    by_id = {entity.entity_id: entity.key for entity in projection.entities}
+    edges = {(by_id[r.subject_id], r.predicate, by_id[r.object_id]) for r in projection.relations}
+    assert ("src/main.py", "imports", "libpkg.util") in edges, "nobody here publishes libpkg: the module is a name"
+    await engine.close()
+
+
+async def test_an_unnamed_map_links_its_own_package_and_never_reports_another_repository(tmp_path):
+    from scone_memory.entities.read import load_projection
+
+    root = tmp_path / "flat"
+    (root / "mypkg").mkdir(parents=True)
+    (root / "pyproject.toml").write_text('[project]\nname = "mypkg"\nversion = "1.0"\n', encoding="utf-8")
+    (root / "mypkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "mypkg" / "util.py").write_text(LIB_UTIL, encoding="utf-8")
+    (root / "main.py").write_text("import mypkg.util\n\n\ndef go() -> None:\n    mypkg.util.tidy('x')\n", encoding="utf-8")
+    engine = await memory()
+    await mapped(engine, str(root), "--graph")
+    projection, _ = await load_projection(engine, "default", mode="current")
+    by_id = {entity.entity_id: entity.key for entity in projection.entities}
+    edges = {(by_id[r.subject_id], r.predicate, by_id[r.object_id]) for r in projection.relations}
+    assert ("main.py", "imports", "mypkg/util.py") in edges, "a package published at the root resolves below it"
+    (root / "main.py").write_text("import mypkg.util\n\n\ndef go() -> None:\n    return mypkg.util.tidy('y')\n", encoding="utf-8")
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["map", str(root), "--graph", "--json"]), engine, io.StringIO(""), out)
+    receipt = json.loads(out.getvalue())
+    assert code == 0 and receipt["updated"] == 1 and receipt["cross_repository_imports"] == 0, \
+        "a map without a name has no other repository: its own files, however stale, never count as one"
+    await engine.close()
+
+
+async def test_a_go_import_reaches_another_repository_s_package_directory_and_a_manifest_like_name_is_refused(tmp_path):
+    from scone_memory.core.errors import InvalidInput
+    from scone_memory.entities.read import load_projection
+
+    svc, app = tmp_path / "svc", tmp_path / "app"
+    (svc / "pkg" / "store").mkdir(parents=True)
+    (svc / "go.mod").write_text("module example.com/svc\n\ngo 1.22\n", encoding="utf-8")
+    (svc / "pkg" / "store" / "store.go").write_text("package store\n\nfunc Open() {}\n", encoding="utf-8")
+    app.mkdir()
+    (app / "main.go").write_text('package main\n\nimport "example.com/svc/pkg/store"\n\nfunc main() { store.Open() }\n', encoding="utf-8")
+    engine = await memory()
+    await mapped(engine, str(svc), "--graph", "--repo", "svc")
+    said = await mapped(engine, str(app), "--graph", "--repo", "app")
+    assert "1 import(s) reach another repository's file" in said, said
+    projection, _ = await load_projection(engine, "default", mode="current")
+    by_id = {entity.entity_id: entity.key for entity in projection.entities}
+    edges = {(by_id[r.subject_id], r.predicate, by_id[r.object_id]) for r in projection.relations}
+    assert ("app/main.go", "imports", "svc/pkg/store") in edges, "a Go package is its directory of files"
+    with pytest.raises(InvalidInput, match="package manifests"):
+        await run(build_parser().parse_args(["map", str(app), "--repo", "requirements"]), engine, io.StringIO(""), io.StringIO())
+    await engine.close()
