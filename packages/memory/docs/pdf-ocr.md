@@ -239,8 +239,15 @@ come in the order the page's text reads them, each keeping its row and
 column, so a table a recognizer read column by column cites its columns
 in turn; a table whose cells do not sit together in the page's text is
 left out rather than cited wrongly, and the segment's `tables` and
-`tables_unreadable` metadata count both. No header, row span or empty
-cell is invented.
+`tables_unreadable` metadata count both. A table's header is read from
+its shape: the first row filling every column is the header when none
+of its cells is a number (a bare year is a label) and a column below it
+is mostly numbers; its cells say `is_header`, every cell below carries a
+`column` reference to the header over it, and the segment says
+`header_basis: pdf_first_row` and counts `tables_headed`, so the table
+query names the columns. A table of words alone gets no header, as
+nothing tells one from a first row. No row span or empty cell is
+invented.
 
 ```python
 from scone_memory.ocr import infer_tables
