@@ -2054,6 +2054,13 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         if result.lessons_read is not None and result.lessons_read.get("events_cut"):
             print(f"lessons were read from the newest {result.lessons_read['events_read']} judgement(s) only; "
                   f"older ones in the window were left out", file=out)
+        prior = result.feedback_prior
+        if prior is not None and prior.get("events_cut"):
+            print(f"feedback was read from the newest {prior['events_read']} judgement(s) only; "
+                  f"older ones in the window were left out", file=out)
+        if prior is not None and prior.get("capped"):
+            print(f"feedback's term was cut at its bound of {prior['max_boost']} for {prior['capped']} candidate(s)",
+                  file=out)
         if result.low_confidence:
             top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)

@@ -24,7 +24,12 @@ judged ones should gain, and questions nobody judged should stay within 0.01.
   passage useful when it is shown. The `strict` judge also marks not useful
   every passage shown above it (all five when it is not shown). A second
   pair of runs judges only the first way of asking, one judgement per
-  subject, as a control.
+  subject, as a control, and a third pair piles judgements up: six days
+  of judging, the two ways of asking each asked three times, the repeats
+  with their first space doubled. Judgements count per question (the hash
+  its recall recorded), so the same words asked again would replace a
+  judgement, not add one; a respelling is another question, as it would be
+  from another caller.
 - Evaluation, a day after the last judgement: each question is asked at
   weight 0 and at every weight measured, one weight after another on the
   same engine and the same recorded judgements, reading MRR@10. `judged`
@@ -46,7 +51,10 @@ unrelated questions fell, 34 of them about a sibling of a judged subject. Rank f
 second place by about 0.0003 per lane, so any term that size overrides
 the question. The bound was then set from rank fusion itself, before the
 sweep below: `MAX_FEEDBACK_BOOST` is what first place is worth over second
-when both lanes agree, 2 × (1/61 − 1/62) = 0.000529.
+when both lanes agree, 2 × (1/61 − 1/62) = 0.000529. It bounds each
+candidate's term, not who a candidate can pass: a leader sunk and a
+follower lifted close twice the bound, and deeper ranks sit closer than
+first and second.
 
 The weights 0.00002 to 0.001 were first swept on the replay that judges
 half a only (kind and strict judges), still under the 0.01 cut. That cut
@@ -103,6 +111,44 @@ one useful judgement moves nothing.
 **Judgements recorded.** Kind: 24 per half. Strict: 26 (half a) and 28
 (half b).
 
+## Judgements piling up
+
+A real log piles judgements on popular passages. Before this replay existed
+the term grew with every judgement: a review run judging the same two
+questions over four days took unrelated MRR at 0.0001 from 0.8611 to 0.7755
+(half a) and 0.8773 to 0.7778 (half b), and over six days to 0.7477 and
+0.7731, the 0.0002 column's cost. Now only a passage's newest two judgements
+each way count, and a question judged again replaces its judgement, so that
+run's repeats fold to two. The six-day replay respells instead, so every
+judgement is a question of its own and the hold is what is tested. MRR@10:
+
+| Judge | Half judged | Set | n | off | **0.0001** | 0.0002 |
+|---|---|---|---:|---:|---:|---:|
+| kind | a | judged | 12 | 0.7153 | **0.7708** | 0.8125 |
+| kind | a | unrelated | 36 | 0.8611 | **0.8611** | 0.7755 |
+| kind | b | judged | 12 | 0.7222 | **0.7778** | 0.7778 |
+| kind | b | unrelated | 36 | 0.8773 | **0.8773** | 0.7778 |
+| strict | a | judged | 12 | 0.7153 | **0.8125** | 0.8542 |
+| strict | a | unrelated | 36 | 0.8611 | **0.8611** | 0.7755 |
+| strict | b | judged | 12 | 0.7222 | **0.7778** | 0.8194 |
+| strict | b | unrelated | 36 | 0.8773 | **0.8912** | 0.7917 |
+
+Judgements recorded: kind 72 per half, strict 78 and 84. Every evaluated
+recall's record says how many candidates were `held`: up to 12 (kind) and
+15 (strict). At 0.0001 no question fell; 4 rose under the kind judge and 6
+under the strict one. The kind judge's rows equal its two-judgement rows,
+since a subject's newest two judgements are as old as the two-day replay's.
+The strict judge's gain is its judgements against: more of them, from more
+recalls, sink passages that sat above the answers, and unrelated questions
+rose with them (half b, 0.8773 to 0.8912).
+
+**The edge.** 0.0001 is close to a term that costs. A first version of the
+hold fixed every pile at 2, whatever its age, so the six-day term was 0.0002
+where the two-day one is 0.000193. That cost ledger-backup's question on
+half b under the kind judge: unrelated 0.8773 to 0.8634. Two judgements made
+just before a question weigh 2 now too, so at 0.0001 a fresh pair reaches
+that term.
+
 ## Cost
 
 With the weight set, every recall reads up to 5,000 judgements from the
@@ -128,6 +174,10 @@ another process counts on the next recall. The trade is that cost.
 
 ## What this does not show
 
+- No identity is recorded. One caller can corroborate a passage by asking
+  two questions, or one question spelled two ways, and lift it for every
+  question it is a candidate for. The hold caps what repeating that buys
+  at two judgements' worth, and it does not stop the first two.
 - The corpus is small and authored. The sibling pairs are the case that
   breaks a prior that does not know the question, and there are eight of
   them against eight standalone subjects. A real corpus's share of alike
