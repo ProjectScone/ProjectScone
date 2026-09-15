@@ -159,3 +159,24 @@ def test_a_hub_note_never_shares_a_name_with_an_entity_note():
     stems = [name.split("/", 1)[1][:-len(".md")].casefold() for name in files
              if name.startswith(("entities/", "communities/"))]
     assert len(stems) == len(set(stems)), sorted(stems)
+
+
+def test_a_hub_counts_no_link_through_what_the_graph_only_names():
+    """`typing`, imported by every module, is attached to one community for
+    reading; the analysis counts no link through it, and neither does a hub."""
+    rows = []
+    for side in ("a", "b"):
+        for n in range(4):
+            rows += [(f"{side}/m{n}.py", "defines", f"{side}/m{n}.py:run"),
+                     (f"{side}/m{n}.py", "imports", f"{side}/m{(n + 1) % 4}.py"),
+                     (f"{side}/m{n}.py", "imports", "typing")]
+    projection = project_entities("alpha", [fact(n + 1, *row) for n, row in enumerate(rows)], revision=1)
+    analysis = cached_analysis(projection)
+    assert analysis.external
+    files = vault(projection)
+    hub_of = {front(text)["id"]: name for name, text in files.items() if name.startswith("communities/")}
+    for community in analysis.communities:
+        text = files[hub_of[community.community_id]]
+        linked = re.findall(r"^- \[\[communities/[^\]]+\]\] \((\d+) links?\)$",
+                            text.split("## Linked communities", 1)[1] if "## Linked communities" in text else "", re.M)
+        assert sum(map(int, linked)) == community.boundary_links, (community.label, linked)

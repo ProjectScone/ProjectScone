@@ -459,12 +459,16 @@ def _file_names(items: list[tuple[str, str]], *, fallback: str, taken: set[str] 
     return names
 
 
-def _community_links(projection: EntityProjection, community_of: Mapping[str, str]) -> Counter[tuple[str, str]]:
+def _community_links(projection: EntityProjection, community_of: Mapping[str, str], *,
+                     external: frozenset[str]) -> Counter[tuple[str, str]]:
     """Links between each pair of communities, as the analysis counts a
-    community's links: pairs of entities one or more relations join."""
+    community's links: pairs of entities one or more relations join, never
+    through an entity the graph only names (``external``), which is attached
+    to a community for reading and is not a tie between two."""
     joined: Counter[tuple[str, str]] = Counter()
     for pair in {tuple(sorted((relation.subject_id, relation.object_id))) for relation in projection.relations
-                 if relation.subject_id != relation.object_id}:
+                 if relation.subject_id != relation.object_id
+                 and relation.subject_id not in external and relation.object_id not in external}:
         ends = sorted({community_of.get(pair[0], ""), community_of.get(pair[1], "")} - {""})
         if len(ends) == 2:
             joined[(ends[0], ends[1])] += 1
@@ -487,8 +491,8 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
     from .analysis import cached_analysis
 
     names = _note_names(projection.entities)
-    ranked = sorted(cached_analysis(projection).communities,
-                    key=lambda community: (-len(community.members), community.community_id))
+    analysis = cached_analysis(projection)
+    ranked = sorted(analysis.communities, key=lambda community: (-len(community.members), community.community_id))
     community_of = {member: community.community_id for community in ranked for member in community.members}
     tag_of = {community.community_id: _community_tag(rank, community.label)
               for rank, community in enumerate(ranked, start=1)}
@@ -524,7 +528,7 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
             if lines:
                 body += [f"## {title}", "", *sorted(lines), ""]
         files[f"entities/{names[entity.entity_id]}.md"] = "\n".join(body)
-    linked = _community_links(projection, community_of)
+    linked = _community_links(projection, community_of, external=analysis.external)
     for community in ranked:
         members = sorted(community.members, key=lambda member: (member not in community.top_entities,
                                                                  community.top_entities.index(member)
@@ -1076,7 +1080,6 @@ def _communities_map(projection: EntityProjection, about: Mapping[str, object]) 
     description says what view it draws, how much of the graph the analysis
     read, and what the map left out."""
     import math
-    from collections import Counter
 
     from .analysis import cached_analysis
     from .layout import UNLINKED
@@ -1086,7 +1089,7 @@ def _communities_map(projection: EntityProjection, about: Mapping[str, object]) 
     kept, left = ranked[:_MAP_COMMUNITIES], ranked[_MAP_COMMUNITIES:]
     community_of = {member: community.community_id for community in kept for member in community.members}
     label_of = {community.community_id: community.label for community in kept}
-    joined = _community_links(projection, community_of)
+    joined = _community_links(projection, community_of, external=analysis.external)
     strongest = sorted(joined.items(), key=lambda item: (-item[1], item[0]))
     links, links_left = strongest[:_MAP_LINKS], strongest[_MAP_LINKS:]
 

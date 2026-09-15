@@ -3045,17 +3045,20 @@ the view it shows without opening a zip or parsing XML:
 - `X-Scone-Truncated`, true when the read was capped, so a partial
   export says so in the response as well as in the file.
 
-**The code tree** is built from what the code readers record: a file
-`defines` a declaration, a declaration defines a method, and files and
-declarations `import`, `call`, `inherit` and `depend on` one another. It
+**The code tree export** is built from what the code readers record: a
+file `defines` a declaration, a declaration defines a method, files and
+declarations `import`, `call`, `inherit` and `depend on` one another, and
+a document `references` a file it links; the page lists each relation
+from both ends. It
 places an entity only when a code relation holds it and its label is a
 path or a declaration qualified by one, so a prose name shaped like a
 file (`Node.js`) is not taken for one. A name with no directory is
 placed only when the graph read it or it holds a declaration, so a
 package a manifest depends on or a file imports (`lodash.merge`,
 `socket.io`) is not a file here. The rest are counted as not in the
-tree. A file or declaration that only a call or an import names was
-not read where it is defined and is marked "not read". A chain of
+tree. A file or declaration that only a call, an import or a link in a
+document names was not read where it is defined and is marked "not
+read". A chain of
 directories each holding only the next is one fold. At most 200 children
 are listed under one node and 50 links in one list, and the rest are
 counted where they were cut. A graph with no code gets a page that says
@@ -3160,7 +3163,11 @@ How each format places values and escapes its own syntax:
   - A line's weight and title count the links between the two
     communities. A link is a pair of entities that one or more relations
     join, which is how the analysis counts a community's links inside
-    and to others. Each circle's title gives its members and those two
+    and to others. What the graph names and never reads (`typing`) is
+    attached to a community for reading, as the analysis attaches it, but
+    a link through it joins no two communities, so when no community or
+    line is left out a circle's lines add up to its links to other
+    communities. Each circle's title gives its members and those two
     counts. Up to 400 lines are drawn, strongest first.
   - The description says which view the map draws. It says whether the
     analysis found communities among every entity with a relation to
@@ -3267,7 +3274,8 @@ How each format places values and escapes its own syntax:
     It holds the community's members, most central first, and its counts
     of entities, links inside and links to other communities, and cohesion.
     It also lists the kinds, the most used predicates, and each community
-    it links to with how many links. A hub's file name is kept distinct
+    it links to with how many links, counted as the map counts them, never
+    through what the graph only names. A hub's file name is kept distinct
     from every entity note's, since Obsidian opens a bare `[[name]]`
     wherever that file sits.
   - Each community has one tag, `community/c<rank>-<words of its first

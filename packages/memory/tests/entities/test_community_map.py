@@ -199,3 +199,32 @@ def test_an_empty_or_single_entity_graph_still_draws_a_map(entities):
     root = drawn(project_entities("alpha", facts, revision=1))
     assert root.tag == f"{SVG}svg" and float(root.get("width")) > 0
     assert len(circles(root)) == entities
+
+
+def code_ledger():
+    """Two rings of modules, every one importing `typing`: what the graph
+    names and never reads is attached to a community for reading, and joins
+    no two communities."""
+    rows = []
+    for side in ("a", "b"):
+        for n in range(4):
+            rows.append((f"{side}/m{n}.py", "defines", f"{side}/m{n}.py:run"))
+            rows.append((f"{side}/m{n}.py", "imports", f"{side}/m{(n + 1) % 4}.py"))
+            rows.append((f"{side}/m{n}.py", "imports", "typing"))
+    return [fact(n + 1, *row) for n, row in enumerate(rows)]
+
+
+def test_a_line_counts_the_links_the_analysis_counts_and_none_through_what_the_graph_only_names():
+    projection = project_entities("alpha", code_ledger(), revision=1)
+    analysis = cached_analysis(projection)
+    assert analysis.external, "the fixture has an entity the graph only names"
+    attached = [community for community in analysis.communities if analysis.external & set(community.members)]
+    assert attached and len(attached[0].members) > 1, "and it is attached to a community of the graph's own"
+    root = drawn(projection)
+    across: dict[str, int] = {community.community_id: 0 for community in analysis.communities}
+    for line in root.iter(f"{SVG}line"):
+        count = int(line.find(f"{SVG}title").text.split(" ", 1)[0])
+        across[line.get("data-from-group")] += count
+        across[line.get("data-to-group")] += count
+    for community in analysis.communities:
+        assert across[community.community_id] == community.boundary_links, community.label
