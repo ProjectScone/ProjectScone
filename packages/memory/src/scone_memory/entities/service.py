@@ -44,6 +44,7 @@ from ..core.errors import SconeError
 from ..core.models import Fact
 from ..core.timeutil import parse_rfc3339
 from .meanings import RelationMeanings
+from .merges import is_decision
 from .project import EntityProjection, project_entities
 from . import read as reading
 from .read import LedgerRead, read_ledger
@@ -227,16 +228,17 @@ class EntityService:
 
     async def _project(self, space: str, facts: list[Fact], revision: int,
                        meanings: "RelationMeanings | None" = None,
-                       source: str = "none", why: str = "") -> tuple[EntityProjection, int]:
+                       source: str = "none", why: str = "",
+                       merges_at: datetime | None = None) -> tuple[EntityProjection, int]:
         if len(facts) <= INLINE_FACTS:
             return project_entities(space, facts, revision=revision, meanings=meanings,
                                     vocabulary_source=source,
-                                    vocabulary_why=why), len(facts)
+                                    vocabulary_why=why, merges_at=merges_at), len(facts)
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="scone-projection")
         worker = self._executor.submit(partial(project_entities, space, facts, revision=revision,
                                                meanings=meanings, vocabulary_source=source,
-                                               vocabulary_why=why))
+                                               vocabulary_why=why, merges_at=merges_at))
         self._workers.add(worker)
         worker.add_done_callback(self._workers.discard)
         return await asyncio.wrap_future(worker), len(facts)
@@ -256,9 +258,10 @@ class EntityService:
 
     async def _admitted(self, space: str, facts: list[Fact], revision: int,
                         meanings: "RelationMeanings | None" = None,
-                        source: str = "none", why: str = "") -> tuple[EntityProjection, int]:
+                        source: str = "none", why: str = "",
+                        merges_at: datetime | None = None) -> tuple[EntityProjection, int]:
         try:
-            return await self._project(space, facts, revision, meanings, source, why)
+            return await self._project(space, facts, revision, meanings, source, why, merges_at)
         finally:
             self._free()
 
@@ -280,8 +283,13 @@ class EntityService:
             slot = (space, held.ledger.revision, held.ledger.limit, held.digest, key)
             pending = self._projecting.get(slot)
             if pending is None:
+                # Merge decisions are read at the view's moment whatever the
+                # mode counts, so a proposal or a closed claim names the same
+                # entity the current view does. A mode whose view is not
+                # tied to a moment reads the decisions in force now.
                 facts = [fact for fact in held.ledger.facts
-                         if counts(fact.status, fact.excluded, fact.valid_from, fact.valid_until, mode, when)]
+                         if counts(fact.status, fact.excluded, fact.valid_from, fact.valid_until, mode, when)
+                         or is_decision(fact)]
                 await self._admit(space, timed)
                 pending = self._projecting.get(slot)  # another request may have started it meanwhile
                 if pending is not None:
@@ -289,7 +297,8 @@ class EntityService:
                 else:
                     pending = asyncio.ensure_future(
                         self._admitted(space, facts, held.ledger.revision, vocabulary.meanings,
-                                       vocabulary.source, vocabulary.why))
+                                       vocabulary.source, vocabulary.why,
+                                       when if mode in ("current", "history") else None))
                     self._projecting[slot] = pending
                     pending.add_done_callback(partial(self._projected, slot))
             found = await asyncio.shield(pending)

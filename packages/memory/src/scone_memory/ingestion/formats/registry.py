@@ -25,6 +25,16 @@ def extension(filename: str) -> str:
     return PurePosixPath(filename).suffix.lower()
 
 
+def _section(titles: tuple[str, ...], limit: int = 4_096) -> str:
+    """The titles as one metadata value, dropping the outermost until it fits: the innermost
+    section is the one a passage is about."""
+    kept = list(titles)
+    while len(kept) > 1 and len(' > '.join(kept).encode('utf-8')) + (len('… > '.encode('utf-8')) if len(kept) < len(titles) else 0) > limit:
+        kept.pop(0)
+    joined = ' > '.join(kept)
+    return joined if len(kept) == len(titles) else '… > ' + joined
+
+
 class BuiltinDocumentParser:
     """Text, structured data, Office and PDF. OCR is an explicit PDF parser option."""
     def __init__(self, *, pdf_parser: PdfParser | None = None,
@@ -71,14 +81,16 @@ class BuiltinDocumentParser:
                               'width_points': str(p.width_points), 'height_points': str(p.height_points),
                               'rotation': str(p.rotation),
                               **({'ocr_reading_order': p.reading_order.model_dump_json()} if p.reading_order else {}),
-                              **({'ocr_engine': p.ocr_engine} if p.ocr_engine else {})},
+                              **({'ocr_engine': p.ocr_engine} if p.ocr_engine else {}),
+                              **({'section': _section(p.section)} if p.section else {})},
                     regions=tuple(DocumentTextRegion(text=r.text, box=r.box, score=r.score,
                         block=r.block, line=r.line, start=r.start - p.start, end=r.end - p.start,
                         provider_index=r.provider_index, reading_column=r.reading_column,
                         coordinate_space=p.region_geometry) for r in p.regions))
                 for p in pdf.pages if not p.empty),
                 metadata={'empty_pages': ','.join(str(p.number) for p in pdf.pages if p.empty),
-                          **({'unreadable_pages': ','.join(map(str, unreadable_pages))} if unreadable_pages else {})})
+                          **({'unreadable_pages': ','.join(map(str, unreadable_pages))} if unreadable_pages else {}),
+                          **({'outline': pdf.outline} if pdf.outline != 'none' else {})})
         else:
             raw = await run_bounded(python_worker('scone_memory.ingestion.formats.worker',
                 filename, limits.model_dump_json()), data, timeout=limits.timeout_seconds,
