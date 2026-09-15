@@ -942,7 +942,7 @@ def create_app(
         evidence_graph: bool = False,
         graph_analysis: bool = False,
         candidate_limit: Optional[int] = Query(default=None, ge=1, le=1000),
-        fusion: Literal["rank", "score"] = Query(default="rank", description="Fuse the lanes by rank (default) or by "
+        fusion: Literal["rank", "score", "distribution"] = Query(default="rank", description="Fuse the lanes by rank (default), by each lane's scores scaled to its own range (score), or by each lane's mean and spread (distribution)."
                                                   "each lane's scores scaled to its own range."),
         withhold_kinds: Optional[str] = Query(
             default=None, alias="withhold",

@@ -1492,6 +1492,28 @@ index, and an engine with the lane on over a store that does not
 reports `context lane: not kept by …` in `degraded` rather than
 pretending the lane ran.
 
+### Fusing by distribution
+
+`--fusion distribution` (`fusion="distribution"` on `recall`, the same name
+over HTTP) is a third way to add the lanes, beside rank fusion and
+relative-score fusion. Relative-score fusion scales each lane by its two
+extremes, so one outlier at the top of a lane pushes every other candidate
+toward zero. Distribution fusion scales each lane by its own mean and
+spread: the mean less three standard deviations is 0, the mean plus three
+is 1, and a score outside that range is clipped. An outlier then counts as
+an outlier, and the candidates near the lane's mean keep their credit
+instead of being pushed toward zero by it. (Neither scaling cares about a
+lane's units; both place a score by its lane's own shape.) What follows: a
+lane's top candidate no longer gets full credit for being top -- the top of
+a two-candidate lane sits at two thirds -- so a lane that returns few
+candidates speaks more quietly than one that returns many, and the lanes'
+weights apply on top of that; the clip itself bites only on lanes of eleven
+or more, since fewer candidates cannot put one past three deviations. The
+conventions of relative fusion hold: a lane whose scores do not spread gives
+every candidate full credit, and a lane that reports no score contributes
+its order. The recall event records which fusion ran. It is a choice, not a
+default, until a measurement on the benches says which mode should be.
+
 ### The vector lane's voice in fusion
 
 Reciprocal rank fusion gives every lane the same voice. That is right
