@@ -190,6 +190,36 @@ def test_recency_settings_come_from_the_environment_reach_the_engine_and_refuse_
     assert (blank.recency_weight, blank.recency_half_life_days) == (W_RECENCY, RECENCY_HALF_LIFE_DAYS), "an empty value is unset, as the neighbours treat it"
 
 
+def test_the_feedback_weight_comes_from_the_environment_is_off_by_default_and_refuses_bad_values(tmp_path):
+    import asyncio
+
+    import pytest
+
+    from scone_memory.core.errors import InvalidInput
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    base = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
+    assert Settings.from_env(base).feedback_weight == 0.0, "recorded feedback moves nothing unless asked"
+    assert Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": ""}).feedback_weight == 0.0
+    tuned = Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.004"})
+    assert tuned.feedback_weight == 0.004 and "feedback_weight" in ENGINE_SETTINGS
+    engine = asyncio.run(build_engine(tuned))
+    try:
+        assert engine.feedback_weight == 0.004
+    finally:
+        asyncio.run(engine.close())
+    from scone_memory import HashEmbedder
+
+    bench = asyncio.run(build_in_process_engine(tuned, HashEmbedder()))
+    try:
+        assert bench.feedback_weight == 0.004
+    finally:
+        asyncio.run(bench.close())
+    for value in ("-0.1", "two", "inf", "1.5"):
+        with pytest.raises(InvalidInput, match="SCONE_FEEDBACK_WEIGHT"):
+            Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": value})
+
+
 async def test_a_synonym_file_is_read_at_build_time_and_reaches_every_engine(tmp_path):
     from scone_memory import HashEmbedder
     from scone_memory.runtime.config import FILE_SETTINGS, build_in_process_engine, build_synonyms

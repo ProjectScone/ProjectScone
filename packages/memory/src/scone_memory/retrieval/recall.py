@@ -35,6 +35,8 @@ from .filters import Filter, parse_filter
 from .phrases import Phrases, checked_phrases
 if TYPE_CHECKING:
     from .synonyms import Synonyms
+    from ..core.models import Chunk
+    from .feedback_prior import PriorTerms
     from ..entities.project import EntityProjection
 from .reranking import (Reranker, RerankCandidate, candidate_is_retained,
     rerank_candidates, validate_candidate_limit, validate_rerank_options)
@@ -95,6 +97,9 @@ class RecallRuntime:
     lexical_stems: bool = False
     #: The vector lane's voice in rank fusion, against the text lane's 1.0.
     vector_weight: float = 1.0
+    #: Reads recorded feedback's term for each fused candidate, when the
+    #: engine's feedback weight is set; None leaves fusion as it was.
+    feedback_prior: "Callable[[str, Mapping[int, Chunk], str], Awaitable[PriorTerms]] | None" = None
 
 
 def _ms(since: float) -> float:
@@ -467,9 +472,12 @@ async def recall(
     fused = fuse(lane_hits, weights=weights)
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
     now = runtime.clock()
+    prior = await runtime.feedback_prior(space, chunks, now) if runtime.feedback_prior is not None else None
+    judged = prior.terms if prior is not None else {}
     items = [
         fusion.Fused(cid, score + fusion.recency_boost(chunks[cid].created_at, now, weight=runtime.recency_weight,
-                                                       half_life_days=runtime.recency_half_life_days), similarity.get(cid))
+                                                       half_life_days=runtime.recency_half_life_days)
+                     + judged.get(cid, 0.0), similarity.get(cid))
         for cid, score in fused.items()
         if cid in chunks
     ]
@@ -675,6 +683,7 @@ async def recall(
         space_bytes=counts.bytes,
         expansion=expansion.record() if expansion is not None else None,
         prefixes=({"added": list(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
+        feedback_prior=prior.record([item.chunk_id for item in result_items]) if prior is not None else None,
     )
     latency["total"] = _ms(started)
     if candidate_limit is not None:
@@ -704,6 +713,7 @@ async def recall(
         "space_bytes": result.space_bytes,
         **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
         **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
+        **({"feedback_prior": result.feedback_prior} if result.feedback_prior is not None else {}),
     })
     if event is not None:
         result.event_id = event.event_id

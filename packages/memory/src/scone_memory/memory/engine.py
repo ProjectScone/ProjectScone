@@ -42,6 +42,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
     from ..entities.vocabulary_store import VocabularyStore
+    from ..core.models import Chunk
+    from ..retrieval.feedback_prior import PriorTerms
     from ..retrieval.lessons import Lessons
 from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
@@ -208,6 +210,9 @@ class MemoryEngine:
         #: break near-ties only; zero weight turns the term off.
         recency_weight: float = fusion.W_RECENCY,
         recency_half_life_days: float = fusion.RECENCY_HALF_LIFE_DAYS,
+        #: How much recorded feedback moves a candidate in fusion (see
+        #: retrieval/feedback_prior.py). Zero, the default, reads no feedback.
+        feedback_weight: float = 0.0,
         demote_restated: bool = True,
         demote_superseded: bool = True,
         blobs: Optional[BlobStore] = None,
@@ -390,6 +395,10 @@ class MemoryEngine:
         fusion.validate_recency(recency_weight, recency_half_life_days)
         self.recency_weight = float(recency_weight)
         self.recency_half_life_days = float(recency_half_life_days)
+        from ..retrieval.feedback_prior import validate_feedback_weight
+
+        validate_feedback_weight(feedback_weight)
+        self.feedback_weight = float(feedback_weight)
 
     async def _emit(self, space: str, kind: str, payload: dict, dedup_key: Optional[str] = None) -> Optional[Event]:
         if self.events is None:
@@ -1138,6 +1147,7 @@ class MemoryEngine:
             context_lane=self.context_lane,
             lexical_stems=self.lexical_stems,
             vector_weight=self.vector_weight,
+            feedback_prior=self._feedback_prior if self.feedback_weight > 0 else None,
         )
         if type(lessons) is not bool:
             raise InvalidInput("lessons must be a boolean")
@@ -1294,6 +1304,11 @@ class MemoryEngine:
                                   min_corroboration=min_corroboration,
                                   max_events=MAX_FEEDBACK_EVENTS if max_events is None else max_events)
 
+    async def _feedback_prior(self, space: str, candidates: Mapping[int, "Chunk"], now: str) -> "PriorTerms":
+        from ..retrieval.feedback_prior import read_prior
+
+        return await read_prior(self.events, self.documents, space, candidates, now=now, weight=self.feedback_weight)
+
     async def feedback(
         self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None
     ) -> Event:
@@ -1312,8 +1327,17 @@ class MemoryEngine:
             raise InvalidInput(f"chunk {chunk_id} was not returned by recall {recall_event_id}")
         if note is not None and len(note) > 500:
             raise InvalidInput("note must be at most 500 chars")
+        from ..retrieval.feedback_prior import fingerprint
+
+        # What the passage said when it was judged, so a ranking prior can tell
+        # when the id now names other text. A passage already gone gets none.
+        marked: dict[str, object] = {}
+        for chunk in await self.documents.get_chunks(space, [chunk_id]):
+            episode = await self.documents.get_episode(space, chunk.episode_id)
+            if episode is not None:
+                marked["fingerprint"] = fingerprint(chunk.episode_id, episode.content_hash, chunk.text)
         return await self._emit(space, "feedback", {
-            "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note,
+            "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note, **marked,
         })  # type: ignore[return-value]
 
     async def _fact_fits_scope(self, space: str, fact: Fact, scope: TextFilter | None) -> bool:
