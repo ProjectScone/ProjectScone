@@ -109,6 +109,28 @@ revision before reporting success. Failed cleanup keeps both revision identities
 for retry. Missing-file deletion performed by this runner instead records an
 absent source, which can be ingested at a new generation if its file returns.
 
+## Claims from source files and manifests
+
+A source file in a language the code graph reads, or a package manifest,
+says what it defines, imports, calls and depends on when the sync stores it,
+as it would through `map`: claims quoted from its lines, cited to the
+document's episode, extracted rather than stated, naming the module by the
+file's root-relative path. Manifests are read when the text reader keeps them
+line by line (`pyproject.toml`, `Cargo.toml`, `requirements*.txt`);
+`package.json` is walked as JSON into one segment per value and `go.mod` is
+not a document format, so those two declare their dependencies through `map`
+only. A claim quotes the line it was read from, at most 2,000 characters of
+it. The journal keeps the earlier episodes a file's restated claims still cite
+(bounded at 64); a receipt's `claims_untracked` says how many were left
+untracked past that bound, and what those cite is no longer closed. A replacement closes the claims the new revision
+no longer makes (`source_changed`, naming the file) and a managed deletion
+closes them all (`source_removed`), each before the old episode is
+forgotten, so a run interrupted between the two closes again on retry. Each
+receipt carries `claims` and `claims_closed`, the result totals them, and a
+store that cannot read claims by episode is reported as `claims_unread`
+rather than as zero closed. An external forget of a managed episode
+suppresses the path and leaves its claims standing, by forget's contract.
+
 ## Scan and recovery limits
 
 Scans do not follow symlinks. Special files, unreadable entries, invalid paths,
@@ -136,7 +158,8 @@ without an intent or tombstone remain unresolved. Bytes retained before a failed
 unlinked; the runner does not garbage-collect them.
 
 Forgetting a source removes its episode, chunks and releasable attachment links.
-Extracted claims and their relationships **continue to stand**, following the
-existing retention policy. This workflow does not retract or recompute claims,
-retain a browsable archive of retired revisions, synchronize remote connectors,
-or expose arbitrary local filesystem paths through HTTP.
+An external forget leaves the source's extracted claims and their relationships
+standing, following the engine's retention policy; only a managed replacement
+or deletion closes them (see the section above). This workflow does not
+recompute claims, retain a browsable archive of retired revisions, synchronize
+remote connectors, or expose arbitrary local filesystem paths through HTTP.

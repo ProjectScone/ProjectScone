@@ -45,6 +45,11 @@ class SyncRunRecord(_Record):
     issue_count: int = Field(default=0, ge=0, le=MAX_OUTCOMES)
     outcome_count: int = Field(default=0, ge=0, le=MAX_OUTCOMES)
     skipped: int = Field(default=0, ge=0)
+    #: Totals over the outcomes: claims recorded, claims closed, and whether
+    #: some could not be read by episode and so were not closed.
+    claims: int = Field(default=0, ge=0, le=2**31 - 1)
+    claims_closed: int = Field(default=0, ge=0, le=2**31 - 1)
+    claims_unread: bool = False
 
     @model_validator(mode='after')
     def consistent(self) -> Self:
@@ -79,6 +84,11 @@ class SyncSourceOutcome(_Record):
     status: Literal['added', 'updated', 'unchanged', 'deleted', 'absent', 'suppressed', 'failed', 'withheld']
     episode_id: int | None = Field(default=None, gt=0, lt=2**63)
     previous_episode_id: int | None = Field(default=None, gt=0, lt=2**63)
+    #: Claims the stored revision makes, and claims of the previous revision
+    #: closed by this outcome; None when the store could not read them.
+    claims: int = Field(default=0, ge=0, le=2**31 - 1)
+    claims_closed: int | None = Field(default=0, ge=0, le=2**31 - 1)
+    claims_untracked: int = Field(default=0, ge=0, le=2**31 - 1)
     code: Identifier | None = None
 
     @field_validator('path')

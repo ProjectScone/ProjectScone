@@ -4,7 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import asyncio
 import hashlib
-from typing import TYPE_CHECKING, Literal, Self
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Literal, Mapping, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -15,6 +16,8 @@ from .extraction_checkpoint import CheckpointedDocumentParser, ExtractionCheckpo
 from .formats.registry import BuiltinDocumentParser, DocumentParser, extension
 from .formats.types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document, visual_only
 from .document_source import DocumentSource, source_revision_key
+if TYPE_CHECKING:
+    from .code_graph import CodeClaim
 from .video_evidence import DocumentVideoEvidence
 
 if TYPE_CHECKING:
@@ -26,13 +29,24 @@ FILE_MEDIA_TYPES = {
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.docm': 'application/vnd.ms-word.document.macroEnabled.12',
+    '.dotx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.template',
+    '.dotm': 'application/vnd.ms-word.template.macroEnabled.12',
+    '.xlsm': 'application/vnd.ms-excel.sheet.macroEnabled.12',
+    '.xltx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.template',
+    '.xltm': 'application/vnd.ms-excel.template.macroEnabled.12',
+    '.pptm': 'application/vnd.ms-powerpoint.presentation.macroEnabled.12',
+    '.potx': 'application/vnd.openxmlformats-officedocument.presentationml.template',
+    '.potm': 'application/vnd.ms-powerpoint.template.macroEnabled.12',
+    '.ppsx': 'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
+    '.ppsm': 'application/vnd.ms-powerpoint.slideshow.macroEnabled.12',
     '.doc': 'application/msword', '.xls': 'application/vnd.ms-excel', '.ppt': 'application/vnd.ms-powerpoint',
     '.xlsb': 'application/vnd.ms-excel.sheet.binary.macroEnabled.12',
     '.odt': 'application/vnd.oasis.opendocument.text', '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
     '.odp': 'application/vnd.oasis.opendocument.presentation', '.epub': 'application/epub+zip',
     '.pdf': 'application/pdf', '.json': 'application/json', '.ipynb': 'application/json', '.jsonl': 'application/x-ndjson',
     '.ndjson': 'application/x-ndjson', '.xml': 'application/xml', '.html': 'text/html', '.htm': 'text/html',
-    '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.eml': 'message/rfc822',
+    '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.eml': 'message/rfc822', '.mbox': 'application/mbox',
     '.msg': 'application/vnd.ms-outlook', '.rtf': 'application/rtf',
 }
 
@@ -94,6 +108,72 @@ class DocumentIngested:
     format: str
     segments: int
     filename: str
+    #: What the file said about itself, recorded as claims: a source file
+    #: its definitions, imports and calls, a manifest its dependencies.
+    #: Zero for every other kind of document.
+    claims: int = 0
+
+
+#: Manifests a stored document is read for: those the text reader keeps
+#: line by line (`pyproject.toml`, `Cargo.toml`, `requirements*.txt`),
+#: so every claim quotes a line the episode holds. `package.json` is
+#: walked as JSON into one segment per value, which is not the file's
+#: lines; `go.mod` is not a document format at all. Both read through
+#: `map`, not through a stored document.
+LINE_KEPT_MANIFEST_SUFFIXES = frozenset({'.toml', '.txt'})
+
+
+def says_claims(filename: str) -> bool:
+    """Whether a stored document of this name is read for claims: a
+    source file in a language the code graph reads, or a manifest the
+    text reader keeps line by line."""
+    from .code import code_language
+    from .manifests import is_manifest
+
+    if code_language(filename) is not None:
+        return True
+    return is_manifest(filename) and PurePosixPath(filename).suffix.lower() in LINE_KEPT_MANIFEST_SUFFIXES
+
+
+def source_text(parsed: ParsedDocument) -> str:
+    """The text the code graph reads a stored document by: its segments
+    in order, one per line, which for a source file is the file without
+    its blank lines. Every claim quotes one of those lines, and the
+    episode holds each line as a segment, so a quote is always found in
+    the episode it cites."""
+    return '\n'.join(segment.text for segment in parsed.segments)
+
+
+def document_claims(parsed: ParsedDocument, filename: str) -> tuple['CodeClaim', ...]:
+    """What a stored document says about itself, without recording it:
+    what the sync keeps when it replaces the document, so the claims the
+    new revision no longer makes can be closed."""
+    from .code import code_language
+    from .code_graph import code_claims
+    from .manifests import is_manifest, manifest_claims
+
+    if not says_claims(filename) or visual_only(parsed):
+        return ()
+    text = source_text(parsed)
+    if is_manifest(filename):
+        return manifest_claims(text, filename)
+    return code_claims(text, filename, language=code_language(filename))
+
+
+async def record_document_claims(memory: MemoryEngine, space: str, added: Added, parsed: ParsedDocument,
+                                 filename: str) -> int:
+    """Record what a stored source file or manifest says, cited to its
+    episode, and say how many claims that was. A duplicate store (the
+    same revision again, as a retried stage stores it) records them
+    again: an identical claim already held is a restatement and stays
+    one fact, so a retry after a crash between storing and recording
+    leaves the same ledger as a run that never crashed."""
+    from .code_graph import record_claims
+
+    if added.outcome not in ('accepted', 'duplicate') or not says_claims(filename) or visual_only(parsed):
+        return 0
+    return await record_claims(memory, space, episode_id=added.episode_id, content=source_text(parsed),
+                               path=filename, when=memory.clock())
 
 
 @dataclass(frozen=True)
@@ -145,8 +225,11 @@ async def prepare_document(data: bytes, filename: str, *, parser: DocumentParser
 async def store_document(memory: MemoryEngine, space: str, original: Attachment,
                          manifest: DocumentManifest, *,
                          source: DocumentSource | None = None,
-                         embedding_checkpoint: EmbeddingCheckpoint | None = None) -> DocumentIngested:
-    """Index prepared extraction. Replays repair links using content identities."""
+                         embedding_checkpoint: EmbeddingCheckpoint | None = None,
+                         metadata: Mapping[str, str] | None = None) -> DocumentIngested:
+    """Index prepared extraction. Replays repair links using content identities.
+    ``metadata`` is what the caller knows about where the bytes came from
+    (a URL, a moment); the document's own keys are written after it and win."""
     validate_document(manifest.parsed, DocumentLimits())
     if original.attachment_id != manifest.original_sha256:
         raise InvalidInput('document extraction does not match its original')
@@ -159,7 +242,7 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
     if retained.media_type != 'application/json':
         raise InvalidInput('document manifest has an incompatible retained media type')
     content = '\n\n'.join(segment.text for segment in manifest.parsed.segments)
-    metadata = {'document_format': manifest.parsed.format,
+    metadata = {**(metadata or {}), 'document_format': manifest.parsed.format,
                 **({'document_filename': manifest.filename} if len(manifest.filename) <= MAX_METADATA_VALUE else {}),
                 'document_original': original.attachment_id,
                 'document_manifest': retained.attachment_id,
@@ -175,13 +258,17 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
         added = await memory.remember(space, content, kind='file', source=f'attachment:{original.attachment_id}',
             dedup_key=key, attachment_ids=(original.attachment_id, retained.attachment_id),
             embedding_checkpoint=embedding_checkpoint, metadata=metadata)
+    # A source file or manifest stored as a document says what it defines,
+    # imports, calls and depends on, as one remembered through `map` does.
+    claims = await record_document_claims(memory, space, added, manifest.parsed, manifest.filename)
     return DocumentIngested(added, original, retained, manifest.parsed.format,
-                            len(manifest.parsed.segments), manifest.filename)
+                            len(manifest.parsed.segments), manifest.filename, claims)
 
 
 async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, filename: str,
                            parser: DocumentParser | None = None,
-                           limits: DocumentLimits = DocumentLimits()) -> DocumentIngested:
+                           limits: DocumentLimits = DocumentLimits(),
+                           metadata: Mapping[str, str] | None = None) -> DocumentIngested:
     """Parse, retain, index and link a file. Use the workflow for durable retries."""
     check_space(space)
     if len(data) > memory.max_attachment_bytes:
@@ -191,7 +278,7 @@ async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, file
         raise InvalidInput('document manifest exceeds its attachment byte limit')
     original = await memory.attach(space, data, FILE_MEDIA_TYPES.get(extension(filename), 'application/octet-stream'),
                                    filename=filename)
-    return await store_document(memory, space, original, manifest)
+    return await store_document(memory, space, original, manifest, metadata=metadata)
 
 
 async def document_provenance(memory: MemoryEngine, space: str, episode_id: int, *,

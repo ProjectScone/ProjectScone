@@ -20,6 +20,13 @@ from scone_memory.bench.runner import BenchItem
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture
+def reference() -> None:
+    """The reference framework is an optional extra; a test that runs it
+    skips where it is not installed, and the tests of our own scoring
+    still run there, as the CI lane without the extra found out."""
+    pytest.importorskip("llama_index.core")
+
 def item(question_id: str, question: str, sessions: list[list[str]], answer: list[str]) -> BenchItem:
     ids = [f"{question_id}-s{index}" for index in range(len(sessions))]
     return BenchItem(question_id=question_id, question_type="single-hop", question=question, question_date="2026-09-13",
@@ -48,7 +55,7 @@ ITEMS = [
 ]
 
 
-async def test_the_embedding_adapter_hands_llamaindex_our_vectors():
+async def test_the_embedding_adapter_hands_llamaindex_our_vectors(reference):
     embedder = HashEmbedder()
     adapter = SconeEmbedding(embedder)
     ours = (await embedder.embed(["calibration notes"]))[0]
@@ -57,13 +64,13 @@ async def test_the_embedding_adapter_hands_llamaindex_our_vectors():
     assert adapter.model_name == embedder.id
 
 
-async def test_llamaindex_ranks_sessions_for_a_question_with_our_embedder():
+async def test_llamaindex_ranks_sessions_for_a_question_with_our_embedder(reference):
     ranked = await llamaindex_session_ranking(ITEMS[0], HashEmbedder(), k=3)
     assert ranked[0] == "q1-s1", ranked
     assert len(ranked) == len(set(ranked)) <= 3 and set(ranked) <= {"q1-s0", "q1-s1", "q1-s2"}
 
 
-async def test_a_session_cut_into_many_nodes_is_one_session_in_the_ranking():
+async def test_a_session_cut_into_many_nodes_is_one_session_in_the_ranking(reference):
     """Small chunks make several nodes per session; the ranking folds them
     to the session, once, in the order its best node came."""
     long = item("q9", "Where are the calibration notes kept?", [
@@ -81,11 +88,43 @@ def test_the_delta_is_ours_minus_theirs_at_every_k():
     theirs = SideScores({1: 0.75, 3: 0.5}, {1: 0.5, 3: 0.5}, 0.4)
     delta = side_delta(ours, theirs)
     assert delta.recall_any == {1: -0.25, 3: 0.5} and delta.recall_all == {1: -0.25, 3: 0.25} and delta.mrr == pytest.approx(0.2)
+    assert delta.precision == {} and delta.ndcg == {}, "sides scored without them carry no delta for them: a missing number is not a zero"
     with pytest.raises(ValueError):
         side_delta(ours, SideScores({1: 0.5}, {1: 0.5}, 0.5))
 
 
-async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_it_ran():
+def test_precision_and_ndcg_are_scored_beside_recall_and_carried_in_the_record():
+    from scone_memory.bench.comparative import Comparison, SideScores, _scores, side_delta
+
+    rankings = [(["s1", "x", "s2"], {"s1", "s2"}), (["x", "y", "z"], {"s3"})]
+    scores = _scores(rankings, [1, 3])
+    assert scores.recall_any == {1: 0.5, 3: 0.5} and scores.recall_all == {1: 0.0, 3: 0.5}
+    assert scores.precision == {1: 0.5, 3: 0.3333}, "of the top three, two answered in one item and none in the other; four places"
+    # Item one: answers at places 1 and 3, DCG 1 + 1/log2(4) against an ideal of 1 + 1/log2(3), so 0.92; item two: 0.
+    assert scores.ndcg[1] == 0.5 and scores.ndcg[3] == pytest.approx(0.4599, abs=1e-4), "the second answer in third place is discounted"
+    empty = _scores([], [1, 3])
+    assert empty.precision == {1: 0.0, 3: 0.0} and empty.ndcg == {1: 0.0, 3: 0.0}
+    delta = side_delta(scores, _scores([(["s1"], {"s1"})], [1, 3]))
+    assert delta.precision[1] == pytest.approx(-0.5) and delta.ndcg[1] == pytest.approx(-0.5)
+    report = Comparison(2, 0, {"scone": scores, "llamaindex": scores}, side_delta(scores, scores), ())
+    record = report.record()
+    assert record["sides"]["scone"]["precision"] == {"1": 0.5, "3": round(1 / 3, 4)}
+    assert record["sides"]["scone"]["ndcg"]["1"] == 0.5 and record["delta"]["ndcg"] == {"1": 0.0, "3": 0.0}
+    with pytest.raises(ValueError, match="precision"):
+        side_delta(scores, SideScores(scores.recall_any, scores.recall_all, scores.mrr))
+    with pytest.raises(ValueError, match="ndcg"):
+        side_delta(scores, SideScores(scores.recall_any, scores.recall_all, scores.mrr, scores.precision, {1: 0.0}))
+
+
+def test_our_passages_fold_to_distinct_sessions_as_the_references_nodes_do():
+    from scone_memory.bench.comparative import distinct_sessions
+
+    assert distinct_sessions(["a", "a", "b", "a", "c", "", "d"], 3) == ("a", "b", "c"), "a session cut in three is one"
+    assert distinct_sessions([], 3) == () and distinct_sessions(["a"], 0) == ()
+
+
+
+async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_it_ran(reference):
     def make_engine():
         return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
 
@@ -104,7 +143,7 @@ async def test_the_comparison_scores_both_sides_on_the_same_items_and_says_how_i
     assert config["llamaindex"]["version"], "the version of the framework we ran against is on the record"
 
 
-async def test_the_report_records_and_serialises_every_item_ranking():
+async def test_the_report_records_and_serialises_every_item_ranking(reference):
     def make_engine():
         return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
 
@@ -115,7 +154,7 @@ async def test_the_report_records_and_serialises_every_item_ranking():
     assert record["protocol"] == "comparative-retrieval-v1"
 
 
-async def test_the_reference_synthesizer_writes_with_our_model_over_the_same_passages():
+async def test_the_reference_synthesizer_writes_with_our_model_over_the_same_passages(reference):
     """LlamaIndex's TreeSummarize runs over the passages we hand it, through
     our ChatModel port, so the two synthesizers share one local model."""
     from scone_memory.providers.llm import FakeChat
@@ -131,9 +170,34 @@ async def test_the_reference_synthesizer_writes_with_our_model_over_the_same_pas
     assert "Priya moved the launch to March." in prompt and "What happened with the launch?" in prompt
 
 
-async def test_a_reference_synthesizer_whose_model_fails_says_so_instead_of_raising():
+async def test_a_reference_synthesizer_whose_model_fails_says_so_instead_of_raising(reference):
     from scone_memory.providers.llm import ChatError, FakeChat
     from scone_memory.bench.comparative import llamaindex_summary
 
     summary = await llamaindex_summary(FakeChat([ChatError("down")]), "q", ["one passage"])
     assert summary.text == "" and summary.failed == "ChatError" and summary.model_calls == 1
+
+
+async def test_the_reference_at_its_best_fuses_its_bm25_and_vector_retrievers(reference):
+    """The default vector index misses a session that shares only rare exact
+    words with the question; the reference's own hybrid (BM25 fused with the
+    vector retriever by reciprocal rank) finds it, and the record says so."""
+    pytest.importorskip("llama_index.retrievers.bm25")
+    from scone_memory.bench.comparative import compare, llamaindex_session_ranking
+
+    rare = item("q-rare", "What did Ximena say about the zorbing trip?",
+                [["Ximena said the zorbing trip was on for Saturday."] + ["Nothing else here."] * 3,
+                 ["A long unrelated day: meetings, lunch, a walk, and a nap after the walk."] * 4,
+                 ["Another unrelated day with the same words: meetings, lunch, a walk, a nap."] * 4],
+                answer=[0])
+    embedder = HashEmbedder()
+    plain = await llamaindex_session_ranking(rare, embedder, k=3)
+    hybrid = await llamaindex_session_ranking(rare, embedder, k=3, hybrid=True)
+    assert hybrid[0].endswith("s0"), hybrid
+    assert set(plain) == set(hybrid), "both rank every session; the order is what the lexical retriever changes"
+    def make_engine():
+        return MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+
+    report = await compare([rare], make_engine, embedder, ks=(1,), hybrid=True)
+    assert "BM25" in report.config["llamaindex"]["retriever"] and report.config["llamaindex"]["fusion"] == "reciprocal_rerank"
+    assert report.sides["llamaindex"].recall_any[1] == 1.0
