@@ -49,7 +49,8 @@ MEANINGS = {
     "thin_predicate": "predicates one claim uses and nothing else does",
     "likely_duplicate": "pairs of names that may be one thing",
     "contested_instant": ("claims about one thing that begin at the same instant and say different "
-                          "things, so the order they arrived in decided which holds"),
+                          "things, so the order they arrived in decided which holds; many-valued "
+                          "predicates hold their values side by side and are not counted"),
 }
 ORDER = tuple(MEANINGS)
 #: Where to go with each concern. A count is only useful beside the
@@ -105,9 +106,11 @@ def _claims(projection: EntityProjection) -> dict[int, str]:
     return said
 
 
-def _found(projection: EntityProjection, limit: int,
-           grounding: dict[int, str]) -> tuple[list[dict[str, object]], dict[str, int]]:
-    """Every concern but the duplicate pairs, which cost a search."""
+def _found(projection: EntityProjection, limit: int, grounding: dict[int, str],
+           many_valued: frozenset[str] = frozenset()) -> tuple[list[dict[str, object]], dict[str, int]]:
+    """Every concern but the duplicate pairs, which cost a search.
+    ``many_valued`` names the predicates whose values hold side by side,
+    so two of them at one instant are no collision."""
     said = _claims(projection)
     concerns: list[dict[str, object]] = []
 
@@ -160,10 +163,14 @@ def _found(projection: EntityProjection, limit: int,
     # instant and say different things: valid time cannot separate them, so
     # arrival order did. Saying the same thing twice at one moment is
     # agreement, not a collision, so only differing claims count.
+    # A many-valued predicate (`calls`, `imports`, a configured one) holds
+    # every value at once by design: a file that imports two modules on
+    # one line is not contested, and counting it made a code graph read
+    # as thousands of collisions.
     at_once: dict[tuple[str, str, str], dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
     for role in projection.roles:
         claim = said.get(role.fact_id)
-        if claim:
+        if claim and role.predicate not in many_valued:
             at_once[(role.subject_id, role.predicate, role.valid_from)][claim].append(role.fact_id)
     collided = [(where, claims) for where, claims in at_once.items() if len(claims) > 1]
     if collided:
@@ -216,7 +223,7 @@ async def _look(engine: "MemoryEngine", space: str, limit: int, status: "StatusM
                for fact in await checked_facts(engine.documents, space, quoted[:MAX_CHECKED])}
     if len(quoted) > MAX_CHECKED:
         reasons.append(f"grounding_checked {MAX_CHECKED} of {len(quoted)}")
-    concerns, totals = _found(projection, limit, checked)
+    concerns, totals = _found(projection, limit, checked, frozenset(engine.many_valued))
 
     pairs = await likely_duplicates(engine, space, limit=MAX_PAIRS, min_score=DEFAULT_MIN_SCORE, status=status,
                                     as_of=when, max_bytes=max_bytes)

@@ -110,8 +110,37 @@ def compute(events: Iterable[Event], since: Optional[str] = None, until: Optiona
     report.metrics += ledger_metrics(by_kind["fact_assert"], by_kind["fact_close"])
     report.metrics += feedback_metrics(by_kind["recall"], by_kind["feedback"])
     report.metrics += scope_metrics(by_kind["recall"])
+    report.metrics += turn_metrics(by_kind["conversation_turn"])
     report.daily = daily_counts(kept)
     return report
+
+
+def turn_metrics(turns: list[Event]) -> list[Metric]:
+    """How long conversation turns took, by mode, from the moment each
+    question was heard: to prepare memory, to the first token, to the
+    first audio, and whole. Each figure counts only the turns whose
+    moment came: a text turn has no first audio, a text turn nobody
+    streamed no first token, so their n says so; a turn that failed
+    recorded no event, so these figures are over completed turns."""
+    out: list[Metric] = []
+    for mode in ("text", "voice"):
+        own = [e for e in turns if e.payload.get("mode") == mode]
+        out.append(Metric(f"conversation.{mode}.turns", len(own), len(own), f"{mode} turns recorded", "turns",
+                          f"conversation_turn events with mode {mode} in the window."))
+        for moment, why in (("total", "the turn's end, from hearing the question to the reply recorded"),
+                            ("context", "memory prepared for the turn"),
+                            ("first_token", "the first token of the answer"),
+                            ("first_audio", "the first audio sent to the listener")):
+            if moment == "first_audio" and mode == "text":
+                continue
+            values = sorted(number(mapping(e.payload["latency_ms"])[moment]) for e in own
+                            if isinstance(e.payload.get("latency_ms"), dict) and moment in mapping(e.payload["latency_ms"]))
+            for q, name in ((0.5, "p50"), (0.95, "p95")):
+                out.append(Metric(f"conversation.{mode}.latency_ms.{moment}.{name}", nearest_rank(values, q), len(values),
+                                  f"{mode} turns that reached {moment}", "ms",
+                                  f"Nearest-rank {name} of milliseconds from the question heard to {why}, by perf_counter.",
+                                  "Operational timing on this machine; says nothing about answer quality."))
+    return out
 
 
 def recall_metrics(recalls: list[Event]) -> list[Metric]:
