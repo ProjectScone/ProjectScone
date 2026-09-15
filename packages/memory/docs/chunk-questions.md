@@ -111,4 +111,14 @@ episode leaves no question that can find anything.
 
 ## Measured
 
-See `benchmarks/chunk-question-lane-v1.results.md`.
+On 13 of this repository's documents (233 chunks), with llama3.2-ctx8k
+writing both the lane and, by a different prompt, 43 evaluation questions,
+the lane made recall worse: R@5 0.953 off and 0.837 on, MRR 0.868 and
+0.817. The questions that moved down were overtaken by chunks the lane
+placed high for questions about something else; a fusion weight low enough not to
+do that (0.01) only ties the lane off on held-out questions. Writing the
+lane cost 100 model calls and about 1,090 s per 100 chunks. The
+evaluation questions share the chunk's words, which is not the case the
+lane is for, so this is not a verdict on questions asked in other words.
+Details, the weight sweep and the caveats:
+[`benchmarks/chunk-question-lane-v1.results.md`](../benchmarks/chunk-question-lane-v1.results.md).
