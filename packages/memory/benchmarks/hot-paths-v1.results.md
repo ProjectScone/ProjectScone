@@ -125,8 +125,9 @@ The three hot spots, and what was done to each:
    value under the old rule. `validate_vector` uses the same `map` form.
 
 Three more, smaller: the hash embedder hashes each distinct token once per text
-and remembers the bucket and sign of the last 65,536 distinct tokens (a cache,
-not a bound on output: an evicted token is hashed again to the same place);
+and remembers the bucket and sign of the last 65,536 distinct tokens of at most
+64 characters (a cache, not a bound on output: an evicted or longer token is
+hashed again to the same place);
 `byte_spans` encodes only the stretches between span ends rather than every
 character alone; and the in-memory BM25 index keeps, for every term, the
 documents holding it, and scores only documents holding a query term or family
@@ -135,7 +136,8 @@ member, since every other document scores zero and was never returned.
 Each change has a test holding it to the old formula written out the slow way:
 `tests/backends/test_vector_scoring.py`, `tests/ingestion/test_declaration_walk.py`,
 `tests/ingestion/test_vector_value_checks.py`,
-`tests/ingestion/test_byte_span_conversion.py` and
+`tests/ingestion/test_byte_span_conversion.py`,
+`tests/ingestion/test_hash_slot_cache.py` and
 `tests/retrieval/test_lexical_candidates.py`, several of them over this
 package's own files. `tests/benchmarks/test_hot_paths.py` holds the benchmark
 to asking the same queries and recalling the same way twice.
@@ -154,6 +156,18 @@ would be smaller than sets but make removing a document cost the length of every
 posting it appears in; that trade was not measured.
 
 The in-memory vector index's kept norms took 848,012 bytes for 10,635 points.
+
+The hash embedder's slot cache belongs to the process: every `HashEmbedder`
+shares it, and it is freed only by `_slot.cache_clear()`. On this corpus it
+holds 10,414 entries. Full, `tracemalloc` measured 18.4 MB for 65,536 entries of
+16-character tokens and 21.6 MB at 64 characters. A token has no length limit of
+its own, so the first version of the cache had no worst case: after embedding a
+hex dump cut into default chunks (800-character tokens) and dropping the texts,
+it still held 46.2 MB. Tokens longer than 64 characters are now hashed each time
+and never remembered; the same hex dump leaves 0.0 MB and an empty cache. No
+token in this corpus is longer than 64 characters, and embedding its 10,635
+chunk texts took a median 1.234 s CPU before the length check and 1.235 s after
+(five interleaved passes each, cache cleared per pass, identical vectors).
 
 ## Where the time goes now
 

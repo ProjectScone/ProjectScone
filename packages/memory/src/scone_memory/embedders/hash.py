@@ -40,7 +40,10 @@ class HashEmbedder:
         # Each distinct token once, with its count: every bucket holds a
         # whole number, which a float keeps exactly in any order of adding.
         for token, count in Counter(tokenize(text)).items():
-            bucket, sign = _slot(token, self.dim)
+            if len(token) <= _LONGEST_REMEMBERED_TOKEN:
+                bucket, sign = _slot(token, self.dim)
+            else:
+                bucket, sign = _slot.__wrapped__(token, self.dim)
             vec[bucket] += sign * count
         norm = math.sqrt(sum(map(mul, vec, vec)))
         if norm == 0:
@@ -51,8 +54,20 @@ class HashEmbedder:
 #: How many distinct tokens' buckets and signs are remembered, most recent
 #: first. This sizes a cache, not a result: a token that has fallen out is
 #: hashed again, which costs time and never changes a vector, and
-#: ``_slot.cache_info()`` says how full it is.
+#: ``_slot.cache_info()`` says how full it is. The cache belongs to the
+#: process, not to an embedder: every HashEmbedder shares it and it is freed
+#: only by ``_slot.cache_clear()``. Full of 64-character tokens it held
+#: 21.6 MB under tracemalloc (18.4 MB at 16 characters); on the hot-paths
+#: benchmark's 10,635 chunks it holds 10,414 entries.
 _SLOT_CACHE_SIZE = 65_536
+
+#: The longest token whose slot is remembered, in characters. A token has no
+#: length limit of its own (a hex dump or minified line is one token as long
+#: as its chunk), so without this the cache's worst case grows with its
+#: tokens: 46 MB after embedding a hex dump of 800-character tokens. A longer
+#: token is hashed each time, which gives the same slot. No token on the
+#: hot-paths benchmark is longer than 64 characters.
+_LONGEST_REMEMBERED_TOKEN = 64
 
 
 @lru_cache(maxsize=_SLOT_CACHE_SIZE)
