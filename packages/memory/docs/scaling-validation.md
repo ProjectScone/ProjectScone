@@ -143,7 +143,9 @@ from 561 ms to 168 ms (in-memory) and from 524 ms to 378 ms (SQLite); ingestion
 CPU time fell by about a third on both. Every recall's output was byte-identical
 before and after. The in-memory vector index now keeps each point's norm, and
 the in-memory text lane keeps a posting set per term, which grew its memory from
-31.1 MB to 57.0 MB on that corpus. SQLite's wall-clock recall p95 did not improve
+31.1 MB to 57.0 MB on that corpus. The hash embedder remembers the slots of up
+to 65,536 tokens of at most 64 characters in one cache shared by the process,
+which held 21.6 MB when full. SQLite's wall-clock recall p95 did not improve
 on the loaded machine that ran it. Methods, per-run numbers, profiles and what
 was left alone are in the [results](../benchmarks/hot-paths-v1.results.md).
 Hash embeddings exercise chunking, storage and fusion, not semantic quality.
