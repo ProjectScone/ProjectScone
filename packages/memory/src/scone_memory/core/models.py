@@ -600,14 +600,20 @@ class RecallResult(BaseModel):
     #: With ``expand_summaries``: what was expanded, refused and cut
     #: (``summary_expand.Expanded.record``). None otherwise.
     expanded: Optional[dict[str, object]] = None
+    #: With a feedback weight set: what recorded feedback added in fusion, what the read took,
+    #: and whether its bounds bit (see retrieval/feedback_prior.py). Left out otherwise.
+    feedback_prior: Optional[dict[str, object]] = None
 
     @model_serializer(mode="wrap")
     def omit_unasked_lessons_read(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # A recall that asked for neither answers exactly as it did before they existed.
         value: dict[str, object] = handler(self)
         if self.lessons_read is None:
             value.pop("lessons_read", None)
         if self.expanded is None:
             value.pop("expanded", None)
+        if self.feedback_prior is None:
+            value.pop("feedback_prior", None)
         return value
 
     @property
