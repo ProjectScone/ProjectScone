@@ -851,6 +851,8 @@ def create_app(
         route: Optional[str] = Query(default=None,
                                      description="Insist on temporal, graph, recall or synthesize instead of the rule."),
         whole: bool = Query(False, description="Show each passage whole instead of its first 200 characters."),
+        synthesis_mode: Optional[str] = Query(default=None,
+                                              description="With route=synthesize: evidence (default), refine or accumulate."),
         space: str = Depends(space_for),
     ) -> dict:
         """One question answered by whichever machinery suits it, saying
@@ -860,13 +862,15 @@ def create_app(
         ordinary search. Naming a route overrides it, and the answer says
         the route was asked for. The synthesize route, which the rule never
         chooses, reads up to ``limit`` passages and has the server's model
-        write cited sentences; it is refused when the server has no model."""
+        write cited sentences; it is refused when the server has no model.
+        ``synthesis_mode`` chooses how it reads them: evidence, refine or
+        accumulate, each keeping only sentences with a checked quote."""
         from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
         synthesis = synthesis_factory() if route == "synthesize" and synthesis_factory is not None else None
         return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
                                       max_item_chars=0 if whole else DEFAULT_ITEM_CHARS,
-                                      synthesis=synthesis)).record(space)
+                                      synthesis=synthesis, synthesis_mode=synthesis_mode)).record(space)
 
     @app.get("/v1/recall/parts")
     async def get_recall_parts(
