@@ -41,6 +41,33 @@ receipt.stored, receipt.duplicates, receipt.sessions   # 412, 0, 37
 `read_transcript` reads without storing, for a caller that wants to look
 first; `import_transcript` stores a transcript it was given.
 
+Over HTTP the export is uploaded first, as a document is, then imported by
+its attachment id with a small JSON body; the receipt is the same one the
+command prints, plus `episodes`, `attachment_id` and `filename`. The server
+advertises the route as the `chats.imports` capability, and the client has a
+typed namespace for it:
+
+```bash
+curl -X POST $SCONE/v1/attachments -H "authorization: Bearer $KEY" -H "x-filename: Family chat.txt" --data-binary @"Family chat.txt"
+curl -X POST $SCONE/v1/chat-imports -H "authorization: Bearer $KEY" -H "content-type: application/json" \
+     -d '{"attachment_id": "<sha256 from the upload>", "time_zone": "Europe/London", "metadata": {"user_id": "mark"}}'
+```
+
+```python
+chats = client.chat_imports(expected_space="chats")
+stored = chats.upload(open("Family chat.txt", "rb").read(), filename="Family chat.txt")
+receipt = chats.import_export(stored.attachment_id, time_zone="Europe/London", metadata={"user_id": "mark"})
+receipt.stored, receipt.duplicates, receipt.sessions
+```
+
+A WhatsApp file no line of which decides the date order is refused with 422
+until `date_order` says, as every refusal from the reader is (400 is a
+malformed request body); `gap_seconds` is at most 36 hours; the caller's
+metadata is at most nine keys. The export's name decides how it is read:
+give it at upload (`x-filename`, or the client's `filename=`) or in the
+request. The uploaded export stays retained as an attachment in the space
+until it is forgotten.
+
 A file is at most 25 MB, and an archive at most 10,000 members: a Slack
 workspace export of many channels over years can exceed both, and is
 refused whole, naming the number. Export a narrower range.

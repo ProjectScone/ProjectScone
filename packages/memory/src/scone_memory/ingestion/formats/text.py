@@ -95,9 +95,118 @@ def _decode(data: bytes) -> str:
     return text
 
 
-def _lines(text: str, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None) -> None:
+def _lines(text: str, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None, *,
+           first_line: int = 1) -> None:
     for line, value in enumerate(StringIO(text, newline=None), 1):
-        out.add(value.removesuffix('\n'), f'{prefix}line:{line}', metadata)
+        if line >= first_line:
+            out.add(value.removesuffix('\n'), f'{prefix}line:{line}', metadata)
+
+
+#: Lines a note's front matter may run to before it is not front matter.
+MAX_FRONTMATTER_LINES = 200
+#: Keys promoted to document metadata; past this the rest are counted.
+MAX_FRONTMATTER_KEYS = 16
+MAX_FRONTMATTER_VALUE = 256
+_FRONTMATTER_KEY = re.compile(r'^([A-Za-z_][A-Za-z0-9_-]{0,63}):(?:\s+(.*))?$')
+_FRONTMATTER_ITEM = re.compile(r'^\s*-\s+(.*)$')
+_FRONTMATTER_BLOCK_SCALAR = frozenset({'>', '|', '>-', '|-', '>+', '|+'})
+#: Keys a note vault agrees on, kept under their own names; the rest are
+#: prefixed so a note's `source:` cannot be read as the engine's, and the
+#: reader's own two counters are kept from a note that names them.
+_FRONTMATTER_OWN = frozenset({'title', 'tags', 'aliases'})
+_FRONTMATTER_RESERVED = frozenset({'frontmatter_keys', 'frontmatter_skipped'})
+
+
+def _frontmatter_scalar(value: str) -> str:
+    """A plain scalar as YAML reads it far enough for a note: quotes
+    removed from a quoted one, a trailing ` #` comment cut from a bare one."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+        return value[1:-1].strip()
+    comment = value.find(' #')
+    if comment >= 0:
+        value = value[:comment]
+    return value.strip()
+
+
+def _frontmatter(text: str) -> tuple[dict[str, str], int]:
+    """A note's front matter (Obsidian, Jekyll, Hugo, Zettlr: the YAML
+    between a first line `---` and the next `---` or `...`), read without a
+    YAML parser: `key: scalar`, `key: [a, b]`, and `key:` followed by
+    `- item` lines, indented or not. Returns the metadata and the first
+    line after the block (1 when there is none), counting lines as the
+    line reader does. `title`, `tags` and `aliases` keep their names;
+    other keys are `frontmatter_<key>`; lists join with commas. What is
+    data and cannot be kept -- a nested mapping, a list of mappings, a
+    block scalar, a value over MAX_FRONTMATTER_VALUE, a key past the bound
+    or repeated, a key that names one of the reader's own counters -- is
+    counted in `frontmatter_skipped`, never guessed at; a blank line, a
+    comment and an empty value are not data and are not counted."""
+    lines = [value.removesuffix('\n') for value in StringIO(text, newline=None)]
+    if not lines or lines[0].strip() != '---':
+        return {}, 1
+    end = next((index for index in range(1, min(len(lines), MAX_FRONTMATTER_LINES + 1))
+                if lines[index].strip() in ('---', '...')), None)
+    if end is None:
+        return {}, 1
+    found: dict[str, str] = {}
+    skipped = 0
+    index = 1
+    while index < end:
+        line = lines[index]
+        match = _FRONTMATTER_KEY.match(line)
+        if match is None:
+            if line.strip() and not line.lstrip().startswith('#'):
+                skipped += 1  # a line that is neither a key, a comment nor blank: a continuation nobody read
+            index += 1
+            continue
+        key = match.group(1).lower().replace('-', '_')
+        raw = (match.group(2) or '').strip()
+        index += 1
+        value: str | None
+        if raw in _FRONTMATTER_BLOCK_SCALAR:
+            value = None  # a folded or literal block: its lines are not a scalar the reader takes
+            while index < end and (lines[index][:1].isspace() or not lines[index].strip()):
+                index += 1
+        elif not raw:
+            items: list[str] = []
+            nested = False
+            while index < end:
+                item = _FRONTMATTER_ITEM.match(lines[index])
+                if item is not None:
+                    if _FRONTMATTER_KEY.match(item.group(1).strip()):
+                        nested = True  # a list of mappings
+                    items.append(_frontmatter_scalar(item.group(1)))
+                    index += 1
+                elif lines[index][:1].isspace() and lines[index].strip():
+                    nested = True  # an indented mapping under the key
+                    index += 1
+                elif not lines[index].strip():
+                    index += 1
+                else:
+                    break
+            if nested:
+                value = None
+            elif not items:
+                continue  # an empty key holds nothing: not data, not counted
+            else:
+                value = ','.join(item for item in items if item)
+        elif raw.startswith('[') and raw.endswith(']'):
+            value = ','.join(part for part in (_frontmatter_scalar(p) for p in raw[1:-1].split(',')) if part)
+        else:
+            value = _frontmatter_scalar(raw)
+        name = key if key in _FRONTMATTER_OWN else f'frontmatter_{key}'
+        if value is None or name in _FRONTMATTER_RESERVED or name in found or len(value) > MAX_FRONTMATTER_VALUE \
+                or len(found) >= MAX_FRONTMATTER_KEYS:
+            skipped += 1
+            continue
+        if value:
+            found[name] = value
+    if found or skipped:
+        found['frontmatter_keys'] = str(len(found))
+    if skipped:
+        found['frontmatter_skipped'] = str(skipped)
+    return found, end + 2
 
 
 def _table(text: str, delimiter: str, out: _Collector) -> None:
@@ -251,6 +360,9 @@ _SCOPE_BOUNDARIES = frozenset({'applet', 'caption', 'html', 'table', 'td', 'th',
                               'marquee', 'object', 'template'})
 
 
+_HEADINGS = frozenset({'h1', 'h2', 'h3', 'h4', 'h5', 'h6'})
+
+
 class _HTML(HTMLParser):
     def __init__(self, out: _Collector, prefix: str = '', metadata: dict[str, str] | None = None) -> None:
         super().__init__(convert_charrefs=True)
@@ -270,7 +382,9 @@ class _HTML(HTMLParser):
             text = re.sub(r'[ \t\r\f]+', ' ', text).strip(' \t\r\n\f')
         self.parts.clear()
         self.has_content = False
-        self.out.add(text, f'{self.prefix}line:{self.line}', self.metadata)
+        level = next((tag[1] for tag, _ in reversed(self.stack) if tag in _HEADINGS), None)
+        metadata = {**(self.metadata or {}), 'heading_level': level} if level else self.metadata
+        self.out.add(text, f'{self.prefix}line:{self.line}', metadata)
 
     def preformatted(self) -> bool:
         return any(tag == 'pre' for tag, _ in self.stack)
@@ -525,6 +639,12 @@ def parse_text(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDocu
             metadata['title'] = _html(text, out)
         elif suffix == '.xml':
             _xml(text, out)
+        elif suffix in {'.md', '.markdown', '.mdx'}:
+            metadata, first_line = _frontmatter(text)
+            _lines(text, out, first_line=first_line)
+            if not out.segments:
+                # A note that is only front matter: the block is the document.
+                _lines(text, out)
         else:
             _lines(text, out)
     if not out.segments:
