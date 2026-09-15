@@ -52,7 +52,7 @@ from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, SummaryExpander, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
-from ..retrieval.image_lane import ImageLane, remove_forgotten, writer_block
+from ..retrieval.image_lane import ImageLane, records_writer, remove_forgotten, writer_block
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
 from ..retrieval.synonyms import Synonyms
@@ -268,6 +268,12 @@ class MemoryEngine:
         #: Its vectors, one per stored image, checked against its writer like the text vectors.
         self.image_vectors = (None if image_vectors is None else vector_identity.guard(
             image_vectors, lambda: cast(ImageEmbedder, image_embedder).id))
+        #: How the lane keeps other image embedders' vectors out: ``recorded``
+        #: when the index records its writer and refuses another (``image_block``);
+        #: ``tagged`` when it cannot, so the lane searches only the vectors tagged
+        #: with this embedder's id and ignores the rest; None without the lane.
+        self.image_writer_check: Literal["recorded", "tagged"] | None = (
+            None if self.image_vectors is None else "recorded" if records_writer(self.image_vectors) else "tagged")
         #: Why this engine's image embedder must not write to or compare with
         #: the image index, as the index recorded it when the engine opened; None otherwise.
         self.image_block: str | None = None

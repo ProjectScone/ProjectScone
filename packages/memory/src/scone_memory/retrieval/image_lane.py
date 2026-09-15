@@ -21,10 +21,14 @@ this index, and its receipt says so; an engine with the lane removes what such
 forgets left when it opens (``remove_forgotten``) and whenever a recall's
 search meets one (``search_images``).
 
-The index records which image embedder wrote it, like the text vectors. An
-engine whose image embedder is not that one is told so when it opens
-(``writer_block``) and writes nothing there, since one write would record the
-index as mixed and leave it unusable by either embedder.
+Every image vector carries the id and width of the image embedder that made
+it (``IMAGE_WRITER``, ``IMAGE_WIDTH``). An index that records its writer, like
+the text vectors' (the in-memory and SQLite ones), refuses an engine whose
+image embedder is not that one: it is told so when it opens (``writer_block``)
+and writes nothing there, since one write would record the index as mixed and
+leave it unusable by either embedder. Any other index cannot record a writer,
+so the lane there searches only the vectors tagged with its own embedder's id
+and ignores the rest (``records_writer``).
 
 LlamaIndex's multi-modal index keeps image nodes in an ``image`` vector
 store namespace and appends the image results to the text results; this lane
@@ -40,6 +44,7 @@ from ..core.errors import Gone, NotFound
 from ..core.models import Episode
 from ..core.ports import DocumentStore, ImageEmbedder, VectorIndex, VectorPoint
 from ..core.vector_writers import VectorsNotComparable, vouches
+from ..memory.vector_identity import GuardedVectors
 
 #: The lane's weight in reciprocal-rank fusion beside the text lane's 1.
 #: Not measured on any benchmark: there is no image retrieval set here and
@@ -53,6 +58,13 @@ IMAGE_WEIGHT = 1.0
 #: live images out of the lane's window. A recall still finding them on its
 #: last search ranks fewer images than it looks for, and says so.
 IMAGE_SEARCHES = 2
+
+#: Metadata on every image vector: the id of the image embedder that made it,
+#: and its width. Where the index cannot record its writer, the lane searches
+#: only vectors whose ``IMAGE_WRITER`` is its own embedder's id. The width is
+#: recorded, not searched on: an index holds vectors of one width.
+IMAGE_WRITER = "image_embedder"
+IMAGE_WIDTH = "image_embedder_dim"
 
 _PAGE = 100
 
@@ -108,7 +120,8 @@ async def index_image(documents: DocumentStore, embedder: ImageEmbedder, vectors
         raise VectorsNotComparable(blocked)
     await vectors.upsert([VectorPoint(chunk_id=chunk_id, space=space, episode_id=episode.episode_id,
                                       created_at=episode.created_at, vector=vector, tags=episode.tags,
-                                      metadata=episode.metadata)])
+                                      metadata={**episode.metadata, IMAGE_WRITER: embedder.id,
+                                                IMAGE_WIDTH: str(embedder.dim)})])
     # Forgetting deletes the chunks before it deletes the image vectors. A
     # forget that ran while the image was embedded has already deleted this
     # key, so the write above put a vector back for a chunk that is gone.
@@ -125,6 +138,12 @@ async def _forgotten(documents: DocumentStore, space: str, episode: Episode) -> 
                         "no image vector is kept")
     return Gone(f"episode {episode.episode_id} was forgotten while its image was indexed; no image vector is kept",
                 stone.forgotten_at)
+
+
+def records_writer(vectors: VectorIndex) -> bool:
+    """Whether the index records which image embedder wrote it, and so refuses
+    another; the engine checks every write and search of such an index."""
+    return isinstance(vectors, GuardedVectors)
 
 
 async def writer_block(vectors: VectorIndex, embedder_id: str) -> str | None:
@@ -154,6 +173,9 @@ async def search_images(lane: ImageLane, documents: DocumentStore, space: str, q
     image's vector: it is removed and the index searched again, up to
     ``IMAGE_SEARCHES`` times."""
     [vector] = await lane.embedder.embed_texts([query])
+    if not records_writer(lane.vectors):
+        # Nothing refuses another model's vectors here: its own tag leaves them out.
+        where = {**where, IMAGE_WRITER: lane.embedder.id}
     removed = 0
     for _ in range(IMAGE_SEARCHES):
         if conditions is not None and getattr(lane.vectors, "narrows_conditions", False):
