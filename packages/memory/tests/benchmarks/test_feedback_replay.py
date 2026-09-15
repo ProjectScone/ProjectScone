@@ -5,7 +5,9 @@ stored at one instant; half b checks it. Stored apart, recency breaks the
 ties that kept unrelated questions whole, and the weight costs them. The
 numbers are in benchmarks/feedback-replay-v1.results.md, and this test
 holds them: a change that moves the prior's cost on unrelated questions, or
-stops it helping, or stops it needing corroboration, fails here.
+stops it helping, or stops it needing corroboration, fails here. They are
+measured at the engine's defaults, where HashEmbedder's vector lane speaks at
+a hundredth of the text lane's voice.
 """
 
 from __future__ import annotations
@@ -21,58 +23,87 @@ from scone_memory.bench.feedback_replay import (CHOSEN, MAX_JUDGEMENTS, MAX_STOR
 from scone_memory.core.errors import InvalidInput
 
 SUBJECTS = Path(__file__).resolve().parents[2] / "benchmarks" / "feedback-replay-v1.json"
+#: The next weight of the grid the chosen one was picked from.
+PAST_THE_EDGE = 0.00014
+#: The judged paraphrases the chosen weight lifts, per judge and half judged, at one instant.
+LIFTED = {("kind", "a"): ["lisbon-trip"], ("kind", "b"): [],
+          ("strict", "a"): ["alice-start", "ledger-backup", "lisbon-trip"],
+          ("strict", "b"): ["riverside-hours", "inventory-backup", "parking-permits"]}
 
 
-async def test_at_one_instant_the_chosen_weight_lifts_judged_paraphrases_and_leaves_unrelated_questions_within_a_hundredth():
-    recorded = {}
+def lifted(run, weight):
+    assert all(entry.startswith("judged:") for entry in run.rose[weight]), run.rose[weight]
+    return [entry.split(":")[1] for entry in run.rose[weight]]
+
+
+async def test_at_one_instant_the_chosen_weight_lifts_judged_paraphrases_and_leaves_unrelated_questions_as_they_were():
+    """The kind judge's half b gains nothing: its answers sit a whole rank of the text lane below
+    their near misses, and a term that crosses that crosses it for unrelated questions too."""
+    recorded, measured = {}, {}
     for judge in ("kind", "strict"):
-        runs = await measure(SUBJECTS, judge=judge, weights=(CHOSEN, 0.0002))
+        runs = measured[judge] = await measure(SUBJECTS, judge=judge, weights=(CHOSEN, PAST_THE_EDGE))
         recorded[judge] = [run.feedback_events for run in runs]
         for run in runs:
-            assert run.mrr(CHOSEN, "judged") > run.mrr(0.0, "judged"), (judge, run.judged_half)
-            assert abs(run.mrr(CHOSEN, "unrelated") - run.mrr(0.0, "unrelated")) <= 0.01, (judge, run.judged_half)
+            assert lifted(run, CHOSEN) == LIFTED[(judge, run.judged_half)], (judge, run.judged_half)
+            assert run.mrr(CHOSEN, "unrelated") == run.mrr(0.0, "unrelated"), (judge, run.judged_half)
             assert run.fell[CHOSEN] == [] and run.held[CHOSEN] == 0, (judge, run.judged_half)
-            assert run.mrr(0.0002, "unrelated") < run.mrr(0.0, "unrelated") - 0.01, \
-                "twice the weight costs unrelated questions, as the results say"
+            assert run.mrr(PAST_THE_EDGE, "unrelated") < run.mrr(0.0, "unrelated") - 0.1, \
+                "the next weight of the grid costs unrelated questions a tenth, as the results say"
+        assert sum(run.mrr(CHOSEN, "judged") for run in runs) > sum(run.mrr(0.0, "judged") for run in runs), judge
         assert "unrelated" in report(runs) and "passages stored at one instant" in report(runs)
+    kind_a, strict_b = measured["kind"][0], measured["strict"][1]
+    assert kind_a.mrr(CHOSEN, "judged") == pytest.approx(0.7153, abs=5e-5) and kind_a.mrr(0.0, "judged") == pytest.approx(0.7014, abs=5e-5)
+    assert strict_b.mrr(CHOSEN, "judged") == pytest.approx(0.8194, abs=5e-5) and strict_b.mrr(0.0, "judged") == pytest.approx(0.7222, abs=5e-5)
     assert recorded["kind"] == [24, 24], "two useful judgements per judged subject"
     assert all(strict > kind for strict, kind in zip(recorded["strict"], recorded["kind"])), "and some against"
 
 
-LEDGER = "unrelated:ledger-backup:How often is the ledger database backed up?"
+CAFE = "unrelated:cafe-tier:What is the throttling threshold for calls on the cafe plan?"
+NORTHGATE = "unrelated:northgate-hours:What time can I show up at Northgate without an appointment?"
 
 
 async def test_passages_stored_apart_lose_the_ties_that_kept_unrelated_questions_whole():
-    """Stored at one instant, every passage has the same recency, so the term only settles exact ties.
-    Stored an hour apart, recency's few millionths decide which near-ties it crosses: the chosen
-    weight still lifts judged paraphrases, and it costs an unrelated question more than a hundredth."""
+    """Stored at one instant, every passage has the same recency, so the term only settles what the
+    lanes leave. Stored an hour apart, recency's few millionths decide which near-ties it crosses: the
+    chosen weight still lifts judged paraphrases, and it costs half b two unrelated questions."""
     for judge in ("kind", "strict"):
         a, b = await measure(SUBJECTS, judge=judge, weights=(CHOSEN,), stored_hours_apart=1)
         for run in (a, b):
             assert run.mrr(CHOSEN, "judged") > run.mrr(0.0, "judged"), (judge, run.judged_half)
-        assert a.fell[CHOSEN] == [] and b.fell[CHOSEN] == [LEDGER], judge
-        assert b.mrr(CHOSEN, "unrelated") == pytest.approx(0.8634, abs=5e-5) and b.mrr(0.0, "unrelated") > 0.8734
+        assert a.fell[CHOSEN] == [] and b.fell[CHOSEN] == [CAFE, NORTHGATE], judge
+        assert b.mrr(CHOSEN, "unrelated") == pytest.approx(0.8657, abs=5e-5)
+        assert b.mrr(0.0, "unrelated") == pytest.approx(0.8727, abs=5e-5)
         assert "passages stored 1 h apart, oldest first" in report([a, b])
 
 
-async def test_a_day_apart_no_weight_measured_holds_unrelated_questions_on_both_halves():
-    """The rule that chose the weight, re-applied: 0.00005 holds half a in both orders, and fails half b."""
-    newest_a, _ = await measure(SUBJECTS, judge="kind", weights=(0.00005, CHOSEN), stored_hours_apart=24, newest_first=True)
-    assert newest_a.fell[0.00005] == [] and len(newest_a.fell[CHOSEN]) == 4
-    assert newest_a.mrr(CHOSEN, "unrelated") == pytest.approx(0.7523, abs=5e-5), "0.7963 off"
+ACME = "unrelated:acme-quota:How much disk space does each Acme Robotics workspace get?"
+
+
+async def test_a_day_apart_no_weight_measured_both_lifts_a_judged_paraphrase_and_holds_unrelated_questions():
+    """The rule that chose the weight, re-applied: 0.00003 holds half a in both orders and lifts
+    nothing; 0.00005 costs it 0.07; and a day apart, oldest first, 0.00002 already costs half b one."""
+    newest_a, _ = await measure(SUBJECTS, judge="kind", weights=(0.00003, 0.00005, CHOSEN), stored_hours_apart=24,
+                                newest_first=True)
+    assert newest_a.mrr(0.00003, "unrelated") >= newest_a.mrr(0.0, "unrelated") - 0.01 and lifted(newest_a, 0.00003) == []
+    assert newest_a.mrr(0.0, "unrelated") == pytest.approx(0.7824, abs=5e-5)
+    assert newest_a.mrr(0.00005, "unrelated") == pytest.approx(0.7106, abs=5e-5) and len(newest_a.fell[0.00005]) == 6
+    assert newest_a.mrr(CHOSEN, "unrelated") == pytest.approx(0.6644, abs=5e-5) and len(newest_a.fell[CHOSEN]) == 9
     assert "passages stored 24 h apart, newest first" in report([newest_a])
-    oldest_a, oldest_b = await measure(SUBJECTS, judge="kind", weights=(0.00005,), stored_hours_apart=24)
-    assert oldest_a.mrr(0.00005, "unrelated") >= oldest_a.mrr(0.0, "unrelated") - 0.01
-    assert oldest_b.mrr(0.00005, "unrelated") == pytest.approx(0.7778, abs=5e-5) and oldest_b.mrr(0.0, "unrelated") > 0.7878
+    oldest_a, oldest_b = await measure(SUBJECTS, judge="kind", weights=(0.00002, 0.00003), stored_hours_apart=24)
+    assert oldest_a.mrr(0.00003, "unrelated") == oldest_a.mrr(0.0, "unrelated") and lifted(oldest_a, 0.00003) == []
+    assert oldest_b.rose[0.00002] == [] and oldest_b.fell[0.00002] == [ACME]
+    assert oldest_b.mrr(0.00002, "unrelated") == pytest.approx(0.7394, abs=5e-5) and oldest_b.mrr(0.0, "unrelated") == pytest.approx(0.7417, abs=5e-5)
 
 
 async def test_judgements_piled_on_a_passage_cost_unrelated_questions_no_more_than_two_do():
-    """Six judgements per subject, from six recorded questions: the term does not grow past corroboration."""
+    """Six judgements per subject, from six recorded questions: the term does not grow past corroboration,
+    so the chosen weight lifts what two judgements lift and costs nothing, where a growing term would cross
+    the edge two judgements sit under."""
     for judge in ("kind", "strict"):
         for run in await measure(SUBJECTS, judge=judge, judgements=6, weights=(CHOSEN,)):
             assert run.feedback_events >= 6 * 12 and run.held[CHOSEN] > 0, (judge, run.judged_half)
-            assert run.mrr(CHOSEN, "judged") > run.mrr(0.0, "judged"), (judge, run.judged_half)
-            assert run.mrr(CHOSEN, "unrelated") >= run.mrr(0.0, "unrelated") - 0.01, (judge, run.judged_half)
+            assert lifted(run, CHOSEN) == LIFTED[(judge, run.judged_half)], (judge, run.judged_half)
+            assert run.mrr(CHOSEN, "unrelated") == run.mrr(0.0, "unrelated"), (judge, run.judged_half)
             assert run.fell[CHOSEN] == [], (judge, run.judged_half)
 
 

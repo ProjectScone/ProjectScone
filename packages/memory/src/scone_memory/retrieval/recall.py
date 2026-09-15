@@ -40,7 +40,6 @@ from .phrases import Phrases, checked_phrases
 if TYPE_CHECKING:
     from .summary_expand import Expanded
     from .synonyms import Synonyms
-    from ..core.models import Chunk
     from .feedback_prior import PriorTerms
     from ..entities.project import EntityProjection
 from .reranking import (Reranker, RerankCandidate, candidate_is_retained,

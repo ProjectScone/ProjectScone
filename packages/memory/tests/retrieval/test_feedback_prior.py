@@ -127,7 +127,7 @@ def test_the_boost_is_cut_at_its_bound_and_says_so():
     assert cut.terms == {7: pytest.approx(0.0015)} and cut.capped == 1
     sunk = terms([judged(index, NOW, 7, False, recall=index) for index in range(1, 3)], weight=0.001, max_boost=0.0015)
     assert sunk.terms == {7: pytest.approx(-0.0015)} and sunk.capped == 1
-    assert MAX_FEEDBACK_BOOST == pytest.approx(2 * (1 / 61 - 1 / 62)), "first place over second when both lanes agree"
+    assert MAX_FEEDBACK_BOOST == pytest.approx(2 * (1 / 61 - 1 / 62)), "first place over second when both lanes agree at full voice"
 
 
 def test_only_the_candidates_asked_about_are_folded():

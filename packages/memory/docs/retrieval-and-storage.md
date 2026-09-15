@@ -260,7 +260,7 @@ one lesson cannot stand for them.
 ## Ranking by what people said
 
 ```bash
-SCONE_FEEDBACK_WEIGHT=0.0001 scone recall "what is the throttling threshold on the cafe plan"
+SCONE_FEEDBACK_WEIGHT=0.00013 scone recall "what is the throttling threshold on the cafe plan"
 ```
 
 `SCONE_FEEDBACK_WEIGHT` (`MemoryEngine(feedback_weight=…)`, default 0) adds
@@ -293,10 +293,12 @@ Four rules sit on top:
   of a candidate whose episode cannot be read now.
 
 The term is the weight times that score, cut at `MAX_FEEDBACK_BOOST` (what
-first place is worth over second under rank fusion when both lanes agree,
-0.000529). The bound is on each candidate's term, not on who it can pass: a
-leader sunk and a follower lifted close twice it, and deeper ranks sit
-closer together than first and second. A recall with the weight set carries
+first place is worth over second under rank fusion when both lanes agree at
+full voice, 0.000529; with a hashed embedder's vector lane at its default
+hundredth, a place is worth half that, so the bound is about two places). The
+bound is on each candidate's term, not on who it can pass: a leader sunk
+and a follower lifted close twice it, and deeper ranks sit closer together
+than first and second. A recall with the weight set carries
 `feedback_prior` (on `/v1/recall` too): the weight and bound, how many
 candidates were `boosted`, `demoted`, `capped` and `held`, the `stale`,
 `unverified` and `tentative` counts, the terms of the returned passages, the
@@ -312,17 +314,23 @@ The term does not know the question. With queries hashed in the event log
 judged useful rises for every question it is a candidate for, including
 one it was never judged for. On the replay in
 [`benchmarks/feedback-replay-v1.results.md`](../benchmarks/feedback-replay-v1.results.md),
-0.0001 lifted paraphrases of judged questions (MRR@10 0.7188 to 0.7743) and
-left unrelated questions where they were (0.8692) only while every passage
-was stored at the same instant. Then recency ties them all, and the term
-only has to settle exact ties. Stored an hour apart, recency's few
-millionths decide which near-ties the term crosses: one unrelated question
-of 36 fell on one half (0.8773 to 0.8634). Stored a day apart, newest
-first, four fell (0.7963 to 0.7523). No weight measured both lifted judged
-questions and kept every layout's unrelated questions within 0.01: 0.00005
-cost half b 0.0185 a day apart, and 0.00004 and below lifted judged
-questions in one layout at most. 0.0002
-cost unrelated questions 0.09 even at one instant, mostly questions about a
+at the engine's defaults (`HashEmbedder`, its vector lane at a hundredth of
+the text lane's voice), 0.00013 lifted paraphrases of judged questions
+(MRR@10 0.7118 to 0.7188 under a judge who marks only the answer useful,
+0.7118 to 0.8090 under one who also marks what sat above it not useful) and
+left unrelated questions where they were (0.8669) only while every passage
+was stored at the same instant. With the vector lane that quiet, fused
+scores sit a whole text-lane place apart, and a term either stays under a
+place or crosses it for every question: 0.00014 cost unrelated questions
+0.11, and the weight chosen at the previous vector voice of 0.25, 0.0001,
+lifts nothing under the first judge now. Stored an hour apart, recency's
+few millionths decide which near-ties the term crosses: two unrelated
+questions of 36 fell on one half (0.8727 to 0.8657). Stored a day apart,
+newest first, nine fell (0.7824 to 0.6644). No weight measured both lifted
+judged questions and kept every layout's unrelated questions within 0.01:
+0.00003 kept them and lifted nothing, 0.00004 cost one half 0.044 a day
+apart, and 0.00002 already cost one question. 0.0002
+cost unrelated questions 0.12 even at one instant, questions about a
 sibling subject worded like a judged one (another rate tier, another
 clinic). A question-unaware term crosses whichever near-ties a store's
 creation times leave, so it trades unrelated questions for judged ones at
