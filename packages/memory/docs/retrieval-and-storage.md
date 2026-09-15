@@ -2349,12 +2349,17 @@ the same `status` and `as_of`:
   The resolution is never raised to force a split. A community a guard
   looked at and kept whole (one piece, or a weak split of a large one) is
   counted in `unsplittable`, and splits in `split_oversized` and
-  `split_nested`. Finer communities often score lower on modularity over
-  the whole graph, so `modularity_before_guards` gives the modularity
-  before any split beside the final `modularity`. On this project's
-  retrieval, entities, API and ingestion code (2,712 entities) the guards
-  split 17 communities: 28 communities became 148, the largest 337
-  entities became 62, and modularity went from 0.701 to 0.589.
+  `split_nested`. The pieces of a split are looked at again, like any
+  community, until none splits: a community's own partition can leave a
+  piece that still holds two. Finer communities often score lower on
+  modularity, so `modularity_before_guards` gives the modularity before
+  any split beside the final `modularity`, both over the graph's own
+  entities (externals left out, detached hubs rejoined). Measured on an
+  earlier base, before externals were kept out of the partition, on this
+  project's retrieval, entities, API and ingestion code (2,713 entities):
+  28 communities became 158, the largest three (341, 205 and 199 entities)
+  became 62, 48 and 42, and modularity went from 0.702 to 0.584, with 19
+  nested splits and one community kept whole.
 - **Central entities**: by PageRank, with degree, fact weight,
   betweenness (exact up to 500 entities, from 64 evenly spaced sources
   beyond) and participation across communities.
