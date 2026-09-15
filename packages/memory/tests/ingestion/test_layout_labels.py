@@ -135,3 +135,20 @@ def test_two_columns_on_one_grid_row_are_two_lines():
     labels, _ = infer_labels(rows, sized=False)
     assert [label for label in labels] == ["list", "paragraph", "list", "paragraph", "list", "paragraph"], \
         "the left column's bullets are not the right column's"
+
+
+def test_a_definition_list_s_dotted_numbers_are_list_items():
+    page = [
+        *words("Some prose that introduces the definitions of the plan below here.", 0.20, key=1),
+        *words("2.1. “Administrator” means the committee appointed by the board", 0.30, key=2),
+        *words("2.2. “Affiliate” means a parent or subsidiary of the company", 0.325, key=3),
+        *words("2.3. “Board” means the board of directors of the company", 0.35, key=4),
+        *words("(i) designed such controls to ensure that material information", 0.45, key=5),
+        *words("(ii) evaluated the effectiveness of the controls and procedures", 0.475, key=6),
+        *words("(iii) disclosed in this report any change in internal control", 0.50, key=7),
+    ]
+    labels, _ = infer_labels(page, first_page=False, running=set())
+    by_key = {}
+    for region, label in zip(page, labels):
+        by_key.setdefault(region.line, set()).add(label)
+    assert by_key == {1: {"paragraph"}, 2: {"list"}, 3: {"list"}, 4: {"list"}, 5: {"list"}, 6: {"list"}, 7: {"list"}}, by_key

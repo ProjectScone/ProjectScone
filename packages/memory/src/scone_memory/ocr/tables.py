@@ -24,6 +24,19 @@ from .types import OcrRegion
 MAX_REGIONS = 5000
 #: A footnote's mark opening a row's first cell.
 _NOTE_MARK = re.compile(r'^[*†‡§¹²³⁴⁵⁶⁷⁸⁹]')
+#: The glyphs a bulleted list sets before its items; a dash or an
+#: asterisk opens an item too, and stands for none or a note in a
+#: table's first column as well.
+_BULLET_GLYPHS = '•·◦▪▫‣●○■□'
+_BULLETS = _BULLET_GLYPHS + '-–—*'
+#: An enumerator with its closing punctuation: numbers with dotted
+#: sub-numbers, a letter or a roman numeral, in parentheses or before a
+#: dot, a parenthesis or an asterisk ("1.", "(a)", "(ii)", "2.1.",
+#: "32.1*") -- without it, "4A" and "n" are a table's first column. The
+#: label rules read the same spelling (``ocr.labels.LIST_ITEM``).
+ENUMERATOR = r'\(?(?:\d{1,3}(?:\.\d{1,3})*|[a-zA-Z]|[ivxIVX]{2,4})[.)*]+'
+#: A list's mark on its own.
+_LIST_MARK = re.compile(rf'^(?:[{re.escape(_BULLETS)}]|{ENUMERATOR})$')
 #: What a sentence ends with, and a title does not.
 _SENTENCE_END = ('.', '!', '?', ';', ':', ',')
 #: A citation closing a sentence, as in "history.[28]".
@@ -98,7 +111,9 @@ class TableLayout(BaseModel):
     region_count: int = Field(ge=0, le=MAX_REGIONS)
     tables: tuple[TableCandidate, ...] = Field(max_length=64)
     unassigned: tuple[RegionIndex, ...] = Field(max_length=MAX_REGIONS)
-    notes: tuple[Literal['geometry_only', 'unassigned_regions', 'no_aligned_grid'], ...]
+    #: ``header_rows_limit``: a grid's rows above its first full row were
+    #: read up to ``MAX_HEADER_ROWS`` and a row above them was not.
+    notes: tuple[Literal['geometry_only', 'unassigned_regions', 'no_aligned_grid', 'header_rows_limit'], ...]
 
 
 @dataclass(frozen=True)
@@ -267,10 +282,22 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
         if text_bytes > 2_000_000:
             raise InvalidInput('OCR table analysis exceeds its text limit')
         # Two columns of prose side by side align as a grid of two does; a
-        # table's first column is narrow or ragged. Neither column is.
-        if len(group[full[0]].cells) == 2 and all(
-                _reads_as_prose([_box(regions, group[position].cells[column]) for position in full]) for column in (0, 1)):
-            return
+        # table's first column is narrow or ragged. Neither column is. And
+        # a list aligns as a grid of two: its marks in one column, its
+        # items in the other. A column of one bullet glyph on every row
+        # says nothing but that (a dash or an asterisk does: none, or a
+        # note, in a table's first column); a column of enumerators, or
+        # of dashes, beside lines of prose is a list, while beside short
+        # labels it is a table's first column (a notation list's symbols
+        # are words, not marks).
+        if len(group[full[0]].cells) == 2:
+            columns = [[_box(regions, group[position].cells[column]) for position in full] for column in (0, 1)]
+            if all(_reads_as_prose(boxes) for boxes in columns):
+                return
+            marks = [_text(group[position].cells[0]) for position in full]
+            if all(_LIST_MARK.match(mark) for mark in marks) and (
+                    (len(set(marks)) == 1 and marks[0] in _BULLET_GLYPHS) or _reads_as_prose(columns[1])):
+                return
         cells: list[TableCell] = []
         for row, band in enumerate(group):
             places = spanning.get(row) or tuple((column, 1) for column in range(len(band.cells)))
@@ -284,9 +311,12 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
     #: header rows -- the rows just above it that joined no grid, and the
     #: rows of a run too short to be one -- the nearest last.
     pending: list[_Row] = []
+    #: Whether the cap on pending rows dropped one since the last grid.
+    capped = False
+    limited = False
 
     def close() -> None:
-        nonlocal group, spanning, pending
+        nonlocal group, spanning, pending, capped, limited
         if not group:
             return
         # At the foot of the grid, a row of fewer cells that opens with a
@@ -307,6 +337,7 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
         full = [position for position in range(len(group)) if position not in spanning]
         if len(full) >= 3:
             columns = len(group[full[0]].cells)
+            placed_rows = 0
             for row in reversed(pending):
                 spans = placed(row) if len(row.cells) < columns else None
                 if len(row.cells) == 1 and len(row.cells) < columns:
@@ -320,10 +351,16 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
                 group.insert(0, row)
                 spanning = {position + 1: places for position, places in spanning.items()}
                 spanning[0] = spans
-            pending = []
+                placed_rows += 1
+            # Every held row placed after the cap dropped one: the bound
+            # bit, and the layout says so rather than leaving the dropped
+            # row to read as no title.
+            limited = limited or (capped and placed_rows == len(pending))
+            pending, capped = [], False
         else:
             # A run too short to be a grid may be the header rows of the
             # grid below it: two years over a blank label column.
+            capped = capped or len(pending) + len(group) > MAX_HEADER_ROWS
             pending = (pending + group)[-MAX_HEADER_ROWS:]
         emit()
         group, spanning = [], {}
@@ -363,14 +400,17 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
                 group.append(row)
             elif len(row.cells) == 1:
                 # A row of one cell may be the title of the grid below.
+                capped = capped or len(pending) >= MAX_HEADER_ROWS
                 pending = (pending + [row])[-MAX_HEADER_ROWS:]
             else:
-                pending = []
+                pending, capped = [], False
     close()
     unassigned = tuple(i for i in range(len(regions)) if i not in assigned)
-    notes: list[Literal['geometry_only', 'unassigned_regions', 'no_aligned_grid']] = ['geometry_only']
+    notes: list[Literal['geometry_only', 'unassigned_regions', 'no_aligned_grid', 'header_rows_limit']] = ['geometry_only']
     if unassigned:
         notes.append('unassigned_regions')
     if not tables:
         notes.append('no_aligned_grid')
+    if limited:
+        notes.append('header_rows_limit')
     return TableLayout(region_count=len(regions), tables=tuple(tables), unassigned=unassigned, notes=tuple(notes))
