@@ -15,7 +15,9 @@ The walk:
   the scope's kind, source prefix, dates and tags fit the document. Each
   starts at the highest level of summaries written from its present
   content. The trees are found by one walk over the space's episodes, as
-  listing a document's summaries is; more than ``MAX_DOCUMENTS`` in scope
+  listing a document's summaries is, and episodes the listing left out (a
+  store's cap on what it lists, or episodes stored meanwhile) are counted in
+  ``unlisted``; more than ``MAX_DOCUMENTS`` in scope
   is refused rather than cut to some of them, and so is a step with more
   than ``MAX_CANDIDATES`` candidates (a wide unjoined top, or a forged account).
 - **How it descends.** Every candidate at a step is scored against the
@@ -40,7 +42,8 @@ The walk:
   the document's is ``missing``; a node named that is not stored from this
   content, or whose account cannot be read, is ``unresolved``. A document
   forgotten is refused (``source_gone``), and so is one that could not be
-  read (``unread``) or was never stored (``source_unknown``). The walk
+  read (``unread``) or was never stored (``source_unknown``), and one the
+  listing left out is refused as ``unlisted``. The walk
   awaits reads, and a document can be forgotten during any of them, so the
   chunks about to be returned are read again after the last one, with
   nothing awaited between that read and the answer; a document whose chunks
@@ -97,6 +100,7 @@ _REASONS = {
     "unread": "their document could not be read, which is not a finding that it is gone",
     "content_changed": "every summary they hold was written from other content than their document's",
     "changed_while_read": "their document's chunks changed while the tree was read",
+    "unlisted": "their document was not in the space's listing, so their tree was not seen whole",
 }
 
 
@@ -137,8 +141,9 @@ class Traversal:
     vectors: dict[str, int] = field(default_factory=lambda: {"index": 0, "embedded": 0})
     embed_calls: int = 0
     embedded_texts: int = 0
-    #: Episodes walked to find the trees.
+    #: Episodes walked to find the trees, and episodes the space holds that the listing did not return.
     walked: int = 0
+    unlisted: int = 0
     why: str = ""
 
     def record(self) -> dict[str, object]:
@@ -149,7 +154,7 @@ class Traversal:
                 "leaves": self.leaves, "cut_by_limit": self.cut_by_limit, "cut_by_depth": self.cut_by_depth,
                 "stale": self.stale, "missing": self.missing, "unresolved": self.unresolved, "uncovered": self.uncovered,
                 "vectors": dict(self.vectors), "embed_calls": self.embed_calls, "embedded_texts": self.embedded_texts,
-                "walked": self.walked, "why": self.why}
+                "walked": self.walked, "unlisted": self.unlisted, "why": self.why}
 
 
 @dataclass(frozen=True)
@@ -310,8 +315,10 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
     since_at = normalise_time(since) if since else None
     until_at = normalise_time(until) if until else None
 
-    counts = await engine.documents.counts(space)
-    listed = await engine.documents.recent_episodes(space, counts.episodes)
+    listed = await engine.documents.recent_episodes(space, (await engine.documents.counts(space)).episodes)
+    # Counted again after the listing: a store that caps what it lists, or episodes stored while it listed,
+    # leave episodes out -- the oldest ones -- and a tree among them was not found.
+    unlisted = max(0, (await engine.documents.counts(space)).episodes - len(listed))
     living = {episode.episode_id: episode for episode in listed}
     trees: dict[int, list[StoredSummary]] = {}
     for episode in listed:
@@ -343,8 +350,8 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
     for document in absent:
         try:
             await walk.source(document)
-            # Not there when the space was walked, and there now: its tree was not seen whole.
-            refused.append({"episode_id": document, "reason": "changed_while_read"})
+            # Not in the listing, and there now: its tree was not seen whole.
+            refused.append({"episode_id": document, "reason": "unlisted"})
         except _Refused as stopped:
             refused.append({"episode_id": document, "reason": stopped.reason})
 
@@ -464,6 +471,9 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
                 f"could not be read, and were not descended")
     if uncovered:
         why += f"; {uncovered} chunk(s) are under no summary the descent starts from, so no descent reaches them"
+    if unlisted:
+        why += (f"; the store listed {len(listed)} episode(s) and holds {len(listed) + unlisted}, so a tree among the "
+                f"{unlisted} it left out was not found")
     if untreed:
         why += f"; {len(untreed)} document(s) named have no summary tree"
     if out_of_scope:
@@ -477,4 +487,4 @@ async def traverse_summaries(engine: "MemoryEngine", space: str, query: str, *, 
                      steps=tuple(steps), leaves=reached, cut_by_limit=cut_by_limit, cut_by_depth=cut_by_depth,
                      stale=stale, missing=missing, unresolved=unresolved, uncovered=uncovered,
                      vectors=dict(scorer.vectors), embed_calls=scorer.embed_calls,
-                     embedded_texts=scorer.embedded_texts, walked=len(listed), why=why)
+                     embedded_texts=scorer.embedded_texts, walked=len(listed), unlisted=unlisted, why=why)
