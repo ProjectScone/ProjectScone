@@ -25,6 +25,7 @@ def test_template_parses_as_actual_local_settings():
     assert settings.embedder == "hash" and settings.host == "127.0.0.1"
     assert settings.keys == {} and not settings.chat_url and not settings.derive
     assert settings.distill_accept_at is None and settings.retention == {}
+    assert settings.voice_keypad == "off"
     assert values["LANGSMITH_TRACING"] == "false" and values["OPENAI_AGENTS_DISABLE_TRACING"] == "true"
 
 

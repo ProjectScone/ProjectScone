@@ -255,7 +255,10 @@ Measured on synthesized calls companded to mu-law
 33.1 ms of CPU per second of audio against 3.3 ms off. The signals are synthesized;
 real lines, codecs other than G.711 and recorded speech were not measured.
 
-`scone serve` does not accept phone calls; nothing it serves yields keys yet.
+`scone serve` does not accept phone calls. Its browser audio socket takes keys
+when `SCONE_VOICE_KEYPAD=append` or `collect` (default `off`): the client sends
+`{"type": "keypad", "key": "5"}` and the served session uses that mode with the
+defaults above; `GET /v1/conversations/capabilities` reports `voice_keypad`.
 
 ## Personas and independent provider selection
 

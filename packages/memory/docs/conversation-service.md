@@ -66,7 +66,13 @@ interruption; `{"type": "end"}` or closing the socket ends the input and the
 session (`ended`), a provider or format failure fails it, and `POST /stop` works
 while it runs. Both sides are captured to memory and read back through the
 transcript route. `GET /v1/conversations/capabilities` reports `"voice": true`
-and the catalog reports `voice_ready` on such a host.
+and the catalog reports `voice_ready` on such a host. With `SCONE_VOICE_KEYPAD`
+set to `append` or `collect` (default `off`, reported as `voice_keypad`), the
+client may also send `{"type": "keypad", "key": "5"}`, one of `0-9 * # A-D`, for a
+dial pad: the key reaches the session among the audio and is given to the user's
+turn under that mode ([Keys from the phone](voice-conversations.md#keys-from-the-phone-dtmf)).
+Off, or with any other field or value, the message is refused as an unsupported
+control and the session fails.
 
 On a composed host the pages carry no baked key even with a single configured
 key (the tab asks for one), `GET /v1/capabilities` reports

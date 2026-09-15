@@ -15,13 +15,14 @@ from fastapi.testclient import TestClient
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.realtime.audio import AudioChunk, ReplyCompleted, SpeechStarted, TextDelta, Transcript
+from scone_memory.realtime.keypad import Keypress
 from scone_memory.realtime.voice import VoiceSession
 from scone_memory.realtime.websocket import WebSocketAudioTransport, frame, parse_frame
 
 PCM = b"\x01\x00" * 160
 
 
-def app_running(script):
+def app_running(script, **options):
     """A socket route that hands the accepted socket to ``script`` as a transport."""
     app = FastAPI()
     outcome = {}
@@ -29,7 +30,7 @@ def app_running(script):
     @app.websocket("/audio")
     async def audio(websocket: WebSocket):
         await websocket.accept()
-        transport = WebSocketAudioTransport(websocket, sample_rate=16000, channels=1)
+        transport = WebSocketAudioTransport(websocket, sample_rate=16000, channels=1, **options)
         try:
             outcome["result"] = await script(transport)
         except Exception as error:  # the test reads what the session would have seen
@@ -83,6 +84,48 @@ def test_a_frame_the_format_does_not_admit_fails_the_session_instead_of_being_re
         # the socket close, so a regression fails instead of waiting forever.
         socket.send_text(json.dumps({"type": "end"}))
         assert json.loads(socket.receive_text())["type"] == "error"
+    assert isinstance(outcome["error"], ValueError)
+
+
+def test_with_the_keypad_on_a_client_key_arrives_among_the_audio_in_order():
+    async def script(transport):
+        return [item async for item in transport.receive()]
+
+    app, outcome = app_running(script, keypad=True)
+    with TestClient(app).websocket_connect("/audio") as socket:
+        socket.send_bytes(PCM)
+        socket.send_text(json.dumps({"type": "keypad", "key": "#"}))
+        socket.send_bytes(PCM)
+        socket.send_text(json.dumps({"type": "end"}))
+    assert "error" not in outcome, repr(outcome.get("error"))
+    first, key, second = outcome["result"]
+    assert isinstance(first, AudioChunk) and isinstance(second, AudioChunk)
+    assert key == Keypress("#", "event"), "the client's own message, placed nowhere in the audio"
+
+
+@pytest.mark.parametrize("bad", [{"type": "keypad", "key": "55"}, {"type": "keypad"}, {"type": "keypad", "key": 5},
+                                 {"type": "keypad", "key": "a"}, {"type": "keypad", "key": "5", "at": 1}])
+def test_a_keypad_message_that_is_not_exactly_one_key_fails_the_session(bad):
+    async def script(transport):
+        return [item async for item in transport.receive()]
+
+    app, outcome = app_running(script, keypad=True)
+    with TestClient(app).websocket_connect("/audio") as socket:
+        socket.send_text(json.dumps(bad))
+        socket.send_text(json.dumps({"type": "end"}))
+        assert json.loads(socket.receive_text())["type"] == "error"
+    assert isinstance(outcome["error"], ValueError)
+
+
+def test_without_the_keypad_a_keypad_message_is_not_a_control_the_socket_takes():
+    async def script(transport):
+        return [item async for item in transport.receive()]
+
+    app, outcome = app_running(script)
+    with TestClient(app).websocket_connect("/audio") as socket:
+        socket.send_text(json.dumps({"type": "keypad", "key": "5"}))
+        socket.send_text(json.dumps({"type": "end"}))
+        assert json.loads(socket.receive_text()) == {"type": "error", "reason": "unsupported control message"}
     assert isinstance(outcome["error"], ValueError)
 
 

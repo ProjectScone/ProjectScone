@@ -100,6 +100,11 @@
                                    recognizer's error, which ends the session with a held turn
                                    stored, not answered (default 0; no model; `scone serve` voice
                                    personas only)
+    SCONE_VOICE_KEYPAD off | append | collect   served voice sessions take keys the client sends as
+                                   {"type": "keypad", "key": "5"} on the audio socket: each key
+                                   finishes the user's turn (append), or keys are collected until
+                                   #, 3 s without a key or 32 keys into one turn (collect). Off by
+                                   default, when the socket refuses a keypad message
 
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)
@@ -326,6 +331,8 @@ class Settings:
     followup_timeout: float = REWRITE_TIMEOUT_S
     #: SCONE_SEMANTIC_TURN: voice turns end on what was said as well as the pause.
     semantic_turn: bool = False
+    #: SCONE_VOICE_KEYPAD: off, append (each key finishes the turn) or collect (keys until #).
+    voice_keypad: str = "off"
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
@@ -603,6 +610,7 @@ class Settings:
             followup_api_key=env.get("SCONE_FOLLOWUP_API_KEY") or None,
             followup_timeout=parse_seconds("SCONE_FOLLOWUP_TIMEOUT", env.get("SCONE_FOLLOWUP_TIMEOUT"), REWRITE_TIMEOUT_S),
             semantic_turn=parse_flag("SCONE_SEMANTIC_TURN", env.get("SCONE_SEMANTIC_TURN")),
+            voice_keypad=_voice_keypad(env.get("SCONE_VOICE_KEYPAD")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
@@ -1077,6 +1085,17 @@ def parse_flag(name: str, raw: Optional[str]) -> bool:
     if value in ("1", "true", "yes", "on"):
         return True
     raise InvalidInput(f"{name} must be 1 or 0, got {raw!r}")
+
+
+#: What a served voice session does with a key the client sends: nothing, or a realtime.keypad mode.
+VOICE_KEYPAD_MODES = ("off", "append", "collect")
+
+
+def _voice_keypad(raw: Optional[str]) -> str:
+    value = (raw or "off").strip().lower()
+    if value not in VOICE_KEYPAD_MODES:
+        raise InvalidInput(f"SCONE_VOICE_KEYPAD must be off, append or collect, got {raw!r}")
+    return value
 
 
 def parse_retention(raw: str) -> dict[str, float]:
