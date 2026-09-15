@@ -14,7 +14,8 @@ retained context the caption was made from) like any other result for it.
 The index is separate because a cosine between an image and a query means
 something only when one model made both: vectors from the text embedder and
 the image embedder never meet. Forgetting an episode removes its image
-vector with its text vectors, since both are keyed by its chunk ids.
+vector with its text vectors, since both are keyed by its chunk ids; a vector
+written while that forget ran is taken out again (``index_image``).
 
 LlamaIndex's multi-modal index keeps image nodes in an ``image`` vector
 store namespace and appends the image results to the text results; this lane
@@ -26,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Optional, Protocol, Sequence, cast
 
+from ..core.errors import Gone, NotFound
 from ..core.models import Episode
 from ..core.ports import DocumentStore, ImageEmbedder, VectorIndex, VectorPoint
 
@@ -55,14 +57,34 @@ async def index_image(documents: DocumentStore, embedder: ImageEmbedder, vectors
     """Write one vector for the image ``data`` that ``episode`` carries; return the chunk id it is keyed by.
 
     Written again for the same episode it replaces the one before, so an
-    exact retry repairs a vector a failed write left out."""
-    # A context episode always has text, so it always has a first chunk.
+    exact retry repairs a vector a failed write left out. When the episode is
+    forgotten before the vector lands, no vector is left and it raises ``Gone``,
+    or ``NotFound`` while that forget has not yet recorded its tombstone."""
+    # A context episode always has text, so a live one always has a first chunk.
     chunks = await documents.chunks_of(space, episode.episode_id)
+    if not chunks:
+        raise await _forgotten(documents, space, episode)
+    chunk_id = chunks[0].chunk_id
     [vector] = await embedder.embed_images([data])
-    await vectors.upsert([VectorPoint(chunk_id=chunks[0].chunk_id, space=space, episode_id=episode.episode_id,
+    await vectors.upsert([VectorPoint(chunk_id=chunk_id, space=space, episode_id=episode.episode_id,
                                       created_at=episode.created_at, vector=vector, tags=episode.tags,
                                       metadata=episode.metadata)])
-    return chunks[0].chunk_id
+    # Forgetting deletes the chunks before it deletes the image vectors. A
+    # forget that ran while the image was embedded has already deleted this
+    # key, so the write above put a vector back for a chunk that is gone.
+    if not await documents.get_chunks(space, [chunk_id]):
+        await vectors.delete([chunk_id])
+        raise await _forgotten(documents, space, episode)
+    return chunk_id
+
+
+async def _forgotten(documents: DocumentStore, space: str, episode: Episode) -> NotFound:
+    stone = await documents.tombstone(space, episode.episode_id)
+    if stone is None:
+        return NotFound(f"episode {episode.episode_id} is being forgotten while its image was indexed; "
+                        "no image vector is kept")
+    return Gone(f"episode {episode.episode_id} was forgotten while its image was indexed; no image vector is kept",
+                stone.forgotten_at)
 
 
 async def search_images(lane: ImageLane, space: str, query: str, depth: int, as_of: Optional[str],

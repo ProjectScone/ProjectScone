@@ -458,6 +458,11 @@ class Narrowing(BaseModel):
     vector_returned: int
     postfiltered_out: int
     window_exhausted: bool
+    #: The image lane (``retrieval.image_lane``), ``off`` unless the recall ran
+    #: it. Its index answers for itself whether it narrows by conditions.
+    image_lane: Literal["in_store", "postfiltered", "off"] = "off"
+    image_window: int = 0
+    image_returned: int = 0
 
 
 class PhraseTrace(BaseModel):

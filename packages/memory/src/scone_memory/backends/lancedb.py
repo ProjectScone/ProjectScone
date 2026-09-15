@@ -39,8 +39,15 @@ class LanceDBVectorIndex:
             raise ImportError("LanceDBVectorIndex needs lancedb: pip install 'scone-memory[lancedb]'") from e
         self.db = connection if connection is not None else lancedb.connect(path)
         self.table_name = table
+        #: The database as configured, or the injected connection itself when it chose the database.
+        self._endpoint: object = path if connection is None else id(connection)
         self.table: Table | None = None
         self.dim: Optional[int] = None
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self._endpoint, self.table_name)
 
     async def ensure(self, dim: int) -> None:
         import pyarrow as pa

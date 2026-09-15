@@ -22,6 +22,7 @@ from scone_memory.core.ports import ImageEmbedder
 from scone_memory.embedders import HashImageEmbedder
 from scone_memory.ingestion.images import ImageAttribute, ImageContext, image_provenance, ingest_image, recall_images
 from scone_memory.retrieval.image_lane import IMAGE_WEIGHT
+from scone_memory.retrieval.recall import LANE_DEPTH, UNFILTERED_DEPTH
 
 
 def picture(color: str) -> bytes:
@@ -366,3 +367,153 @@ async def test_a_condition_reaches_an_image_index_only_when_it_narrows_by_condit
                for item in found.items)
     await engine.close()
     assert images.closed, "closing the engine closes the image index it holds"
+
+
+async def test_a_forget_that_lands_while_the_image_is_embedded_leaves_no_vector(stores):
+    """Forgetting removes image vectors by chunk id; a vector written after
+    that, for a chunk already gone, would outlive the forgotten image."""
+    import asyncio
+
+    from scone_memory.core.errors import Gone
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Held(HashImageEmbedder):
+        async def embed_images(self, images):
+            entered.set()
+            await release.wait()
+            return await super().embed_images(images)
+
+    engine = await lane_engine(stores, Held(dim=64))
+    documents, _, images, _ = stores
+    try:
+        note = await engine.remember("s", FILLER[0])
+        saving = asyncio.create_task(ingest_image(engine, "s", picture("red"), media_type="image/png",
+                                                  context=context(CAPTIONS[0], "album/0")))
+        await entered.wait()
+        [held] = [e for e in await documents.page_episodes("s", None, 10, None) if e.episode_id != note.episode_id]
+        await engine.forget("s", held.episode_id)
+        release.set()
+        with pytest.raises(Gone, match="forgotten while its image was indexed"):
+            await saving
+        assert await images.ids("s") == [], "no vector is left for the forgotten image"
+    finally:
+        await engine.close()
+
+
+async def test_a_forgotten_episode_is_not_indexed():
+    from scone_memory.core.errors import Gone
+    from scone_memory.retrieval.image_lane import index_image
+
+    images = InMemoryVectorIndex()
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                image_embedder=embedder(), image_vectors=images).open()
+    saved = await ingest_image(engine, "s", picture("red"), media_type="image/png", context=context(CAPTIONS[0], "album/0"))
+    episode = await engine.episode("s", saved.added.episode_id)
+    await engine.forget("s", saved.added.episode_id)
+    with pytest.raises(Gone, match="forgotten while its image was indexed") as gone:
+        await index_image(engine.documents, embedder(), images, "s", episode, picture("red"))
+    stone = await engine.tombstone("s", episode.episode_id)
+    assert stone is not None and gone.value.forgotten_at == stone.forgotten_at
+    assert await images.ids("s") == []
+
+    class Forgetting:
+        """A store caught mid-forget: the chunks are gone, the tombstone not yet written."""
+
+        async def chunks_of(self, space, episode_id):
+            return []
+
+        async def tombstone(self, space, episode_id):
+            return None
+
+    from scone_memory.core.errors import NotFound
+    with pytest.raises(NotFound, match="being forgotten") as missing:
+        await index_image(Forgetting(), embedder(), images, "s", episode, picture("red"))  # type: ignore[arg-type]
+    assert not isinstance(missing.value, Gone)
+
+
+def _conditioned_engine(narrows: bool, reds: int):
+    async def build() -> tuple[MemoryEngine, str]:
+        engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                    image_embedder=embedder(), image_vectors=_Spy(narrows)).open()
+        for n in range(reds):
+            await ingest_image(engine, "s", picture("red"), media_type="image/png",
+                               context=context(f"{CAPTIONS[n % len(CAPTIONS)]} {n}", f"album/{n}"))
+        target = await ingest_image(engine, "s", picture("blue"), media_type="image/png",
+                                    context=context("Ticket stub, drawer", "album/blue"))
+        return engine, target.image.attachment_id
+    return build()
+
+
+@pytest.mark.parametrize("narrows", [True, False])
+async def test_an_image_index_that_cannot_narrow_is_searched_deeper(narrows):
+    """The text index narrowing by conditions does not make the image index
+    do so: an image lane post-filtered looks as deep as a post-filtered vector lane."""
+    engine, blue = await _conditioned_engine(narrows, reds=6)
+    try:
+        found = await engine.recall("s", "red bicycle", limit=1, image_lane=True,
+                                    conditions={"field": "image_original", "is": blue})
+        assert [item.metadata["image_original"] for item in found.items] == [blue]
+        assert "image" in found.items[0].lanes, "the lane still finds the image the condition names"
+        report = found.narrowing
+        assert report is not None and report.image_lane == ("in_store" if narrows else "postfiltered")
+        assert report.image_window == (LANE_DEPTH if narrows else LANE_DEPTH * UNFILTERED_DEPTH)
+        assert report.image_returned == (1 if narrows else 7) and report.window_exhausted is False
+        # A source bound lives on the episode, which no image vector carries: post-filtered either way.
+        bound = await engine.recall("s", "red bicycle", limit=1, image_lane=True, source_prefix="album/blue")
+        assert bound.narrowing is not None and bound.narrowing.image_lane == "postfiltered"
+        assert bound.narrowing.image_window == LANE_DEPTH * UNFILTERED_DEPTH
+    finally:
+        await engine.close()
+
+
+async def test_a_full_post_filtered_image_window_says_the_bound_bit():
+    # candidate_limit sets every lane's window, so five red images fill the image lane's.
+    engine, blue = await _conditioned_engine(False, reds=5)
+    try:
+        found = await engine.recall("s", "red bicycle", limit=1, candidate_limit=5, image_lane=True,
+                                    conditions={"field": "image_original", "is": blue})
+        report = found.narrowing
+        assert report is not None and report.image_lane == "postfiltered"
+        assert report.image_returned == report.image_window == 5
+        assert report.vector_lane == "in_store", "only the image lane's window can have bitten"
+        assert report.text_lane == "in_store"
+        assert report.window_exhausted is True
+        quiet = await engine.recall("s", "red bicycle", limit=1, candidate_limit=5,
+                                    conditions={"field": "image_original", "is": blue})
+        assert quiet.narrowing is not None and quiet.narrowing.image_lane == "off"
+        assert quiet.narrowing.image_window == 0 and quiet.narrowing.window_exhausted is False
+    finally:
+        await engine.close()
+
+
+async def test_a_full_image_window_makes_a_phrase_short_answer_say_so():
+    engine, _ = await _conditioned_engine(False, reds=5)
+    try:
+        # Only the image lane and the text lane run; the text lane finds no caption saying "red bicycle".
+        found = await engine.recall("s", "red bicycle", limit=2, candidate_limit=5, lanes=["text"], image_lane=True,
+                                    require=["Ticket stub"])
+        assert found.phrases is not None and found.phrases.dropped_required == 5
+        assert found.phrases.short is True, "the image lane's full window left passages unchecked"
+    finally:
+        await engine.close()
+
+
+async def test_a_full_image_window_narrowed_in_the_index_is_not_a_bound_that_bit():
+    """Every row the image index holds was eligible, so its full window hides
+    nothing, even when another lane's post-filter removed candidates."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), _Spy(False), HashEmbedder(),
+                                image_embedder=embedder(), image_vectors=_Spy(True)).open()
+    try:
+        await engine.remember("s", FILLER[0])
+        for n in range(LANE_DEPTH):
+            await ingest_image(engine, "s", picture("red"), media_type="image/png", context=context(CAPTIONS[n], f"album/{n}"))
+        found = await engine.recall("s", "red bicycle budget", limit=1, image_lane=True,
+                                    conditions={"field": "document_format", "is": "image"})
+        report = found.narrowing
+        assert report is not None and report.image_lane == "in_store" and report.vector_lane == "postfiltered"
+        assert report.image_returned == report.image_window == LANE_DEPTH
+        assert report.vector_returned < report.vector_window and report.postfiltered_out >= 1
+        assert report.window_exhausted is False
+    finally:
+        await engine.close()

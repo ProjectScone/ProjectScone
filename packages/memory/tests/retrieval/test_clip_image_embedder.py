@@ -11,9 +11,12 @@ against a stand-in module that records what it was given.
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 import types
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -31,10 +34,14 @@ def picture(color: str) -> bytes:
 
 
 def test_importing_the_embedders_does_not_import_the_model_package():
-    import scone_memory.embedders  # noqa: F401 - the import itself is what is checked
-
-    assert "scone_memory.embedders.clip" not in sys.modules or INSTALLED
-    assert "sentence_transformers" not in sys.modules or INSTALLED
+    # A fresh interpreter: this process may already hold either module, imported by another test.
+    script = ("import sys, scone_memory.embedders; "
+              "print(sorted(m for m in ('scone_memory.embedders.clip', 'sentence_transformers') if m in sys.modules))")
+    source = str(Path(__file__).resolve().parents[2] / "src")
+    run = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120,
+                         env={**os.environ, "PYTHONPATH": source})
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "[]"
 
 
 @pytest.mark.skipif(INSTALLED, reason="sentence-transformers is installed; the refusal cannot be observed")

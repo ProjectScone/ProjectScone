@@ -12,7 +12,6 @@ import math
 import hashlib
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from functools import partial
 from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Literal, Mapping, Optional,
                     Sequence, TypedDict, cast)
@@ -1693,13 +1692,13 @@ class MemoryEngine:
 
 
 def _same_index(vectors: object, image_vectors: object) -> bool:
-    """Whether two indexes are one: the same object, or two handles on one database file."""
+    """Whether two indexes write the same rows: the same object, or two handles
+    whose ``location`` is equal. An index that names no location (the in-memory
+    one, a custom one) is recognised only as the same object."""
     if vectors is image_vectors:
         return True
-    left, right = getattr(vectors, "path", None), getattr(image_vectors, "path", None)
-    if not isinstance(left, (str, Path)) or not isinstance(right, (str, Path)) or ":memory:" in (str(left), str(right)):
-        return False
-    return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    left = getattr(vectors, "location", None)
+    return left is not None and left == getattr(image_vectors, "location", None)
 
 
 def _ms(since: float) -> float:
