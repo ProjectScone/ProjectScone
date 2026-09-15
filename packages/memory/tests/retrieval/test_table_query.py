@@ -210,10 +210,15 @@ async def test_a_json_document_queries_like_a_spreadsheet():
 
 
 def test_an_empty_or_double_signed_cell_is_no_number_not_a_crash():
-    from scone_memory.retrieval.table_query import number
+    from scone_memory.retrieval.table_query import NUMERIC_FORM, number
 
     assert number("") is None and number("   ") is None and number("--5") is None and number("- -5") is None
     assert number("-5") == -5 and number("$1,270.50") == Fraction("1270.5") and number("+") is None and number("$") is None
+    # A statement's loss in parentheses is a negative; a dash is no number,
+    # and a sign inside or before the parentheses is one sign too many.
+    assert number("(1,133)") == -1133 and number("$ (1,133)") == -1133 and number(" (0.06) ") == Fraction("-0.06")
+    assert number("—") is None and number("()") is None and number("(-5)") is None and number("-(5)") is None
+    assert 'parentheses' in NUMERIC_FORM
 
 
 async def test_rows_without_the_column_are_counted_and_duplicate_headers_stay_two_columns():

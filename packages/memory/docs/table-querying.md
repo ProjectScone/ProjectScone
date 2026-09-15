@@ -52,8 +52,10 @@ cell against the episode's bytes.
 - **Numbers by a written rule.** A cell is a number when, after removing
   surrounding whitespace, a leading currency sign (`$ € £ ¥`) and
   thousands separators, it is digits with an optional sign and decimal
-  part (`numeric_form` says so). Anything else — `n/a`, `12%`, `1.2e3` —
-  is not a number, and an aggregate that meets one is refused with
+  part, or such digits in parentheses, which is a negative as a
+  statement shows a loss (`numeric_form` says so). Anything else — `n/a`,
+  `12%`, `1.2e3`, a dash where a statement has no amount — is not a
+  number, and an aggregate that meets one is refused with
   `non_numeric_cell`, quoting the cell, rather than skipping it.
 - **Totals rows set aside.** A row the source marked as totals (an xlsx
   table's `totalsRowCount`) is never a data row, so a sheet's own sum
