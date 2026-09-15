@@ -20,6 +20,8 @@ false on every record, as it is on the synthesis this rests on.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
@@ -197,3 +199,129 @@ class ReportCache:
             self._kept.pop(next(iter(self._kept)))
         self._kept[(space, community_id)] = fresh
         return fresh, False
+
+
+#: Communities one naming pass may ask about; more is refused, not cut.
+MAX_NAMES = 50
+DEFAULT_NAMES = 20
+#: What a name may be: one line, a few words. Longer is an explanation.
+MAX_NAME_CHARS = 60
+MAX_NAME_WORDS = 8
+#: One deadline over a whole naming pass, every model round inside it.
+DEFAULT_NAMING_TIMEOUT_S = 120.0
+MAX_NAMING_TIMEOUT_S = 600.0
+_NAMING_SYSTEM = ("You name groups of related things for a person reading a knowledge graph. Answer with the name "
+                  "alone: one line, at most eight words, no quotes and no explanation. Name what the group is about, "
+                  "as a person would call it, not the list of its members.")
+
+
+@dataclass(frozen=True)
+class CommunityName:
+    community_id: str
+    #: The deterministic label the analysis gave the community.
+    label: str
+    #: The model's name for it, or None when its answer was not a name.
+    name: Optional[str]
+    why: str
+    #: The members the model was shown, by label.
+    shown: tuple[str, ...]
+
+    def record(self) -> dict[str, object]:
+        return {"community_id": self.community_id, "label": self.label, "name": self.name, "why": self.why,
+                "shown": list(self.shown)}
+
+
+@dataclass(frozen=True)
+class CommunityNames:
+    space: str
+    projection_digest: str
+    revision: int
+    names: tuple[CommunityName, ...]
+    communities_total: int
+    #: The deadline the pass ran under, how many communities the model was
+    #: asked about inside it, how many the deadline left unnamed, and how
+    #: many the model failed on.
+    timeout_s: float
+    asked: int
+    timed_out: int
+    failed: int
+
+    def record(self) -> dict[str, object]:
+        return {"schema_version": 1, "space": self.space, "projection_digest": self.projection_digest,
+                "revision": self.revision, "names": [name.record() for name in self.names],
+                "communities_total": self.communities_total, "communities_asked": self.asked,
+                "communities_named": sum(1 for name in self.names if name.name is not None),
+                "communities_timed_out": self.timed_out, "communities_failed": self.failed,
+                "timeout_s": self.timeout_s,
+                "note": "names are a model's reading of recorded data, not facts; the label beside each is computed",
+                "verified_accuracy": False}
+
+
+def as_community_name(answer: str) -> tuple[Optional[str], str]:
+    """The model's answer as a name, or None and why not: a name is one
+    line, a few words, and not an explanation."""
+    text = (answer or "").strip()
+    if not text:
+        return None, "the model answered nothing"
+    if len(text.splitlines()) > 1:
+        return None, "the model answered more than one line"
+    text = text.strip("\"'`“”‘’").strip().rstrip(".")
+    if not text:
+        return None, "the model answered nothing"
+    words = len(text.split())
+    if words > MAX_NAME_WORDS:
+        return None, f"the model answered {words} words, longer than a name"
+    if len(text) > MAX_NAME_CHARS:
+        return None, f"the model answered {len(text)} characters, longer than a name"
+    return text, "named"
+
+
+async def name_communities(engine: "MemoryEngine", model: ChatModel, space: str, *, max_names: int = DEFAULT_NAMES,
+                           timeout_s: float = DEFAULT_NAMING_TIMEOUT_S, status: str = "current",
+                           as_of: Optional[str] = None) -> CommunityNames:
+    """A model's name for each of the largest communities, beside the label
+    the analysis computed. The model sees a community's central members,
+    its kinds and its predicates, and answers with a name alone; an
+    answer that is not a name is recorded as none, with why. Opt-in and
+    bounded: at most ``max_names`` communities, one model round each,
+    all inside one ``timeout_s`` deadline. A round the deadline cuts, or
+    the model fails, leaves that community unnamed with why, and the
+    pass goes on to record the rest; nothing already named is lost."""
+    if type(max_names) is not int or not 1 <= max_names <= MAX_NAMES:
+        raise InvalidInput(f"max_names must be from 1 to {MAX_NAMES}")
+    if type(timeout_s) not in (int, float) or not 0.1 <= timeout_s <= MAX_NAMING_TIMEOUT_S:
+        raise InvalidInput(f"timeout_s must be from 0.1 to {MAX_NAMING_TIMEOUT_S}")
+    when = as_of if as_of is not None else engine.clock()
+    projection, _ = await load_projection(engine, space, mode=status, as_of=when)  # type: ignore[arg-type]
+    analysis = cached_analysis(projection)
+    entities = {entity.entity_id: entity for entity in projection.entities}
+    ordered = sorted(analysis.communities, key=lambda c: (-len(c.members), c.community_id))[:max_names]
+    names: list[CommunityName] = []
+    deadline = time.monotonic() + timeout_s
+    asked = timed_out = failed = 0
+    for community in ordered:
+        shown = tuple(entities[member].label for member in community.top_entities[:5] if member in entities)
+        kinds = ", ".join(f"{kind} {count}" for kind, count in community.kinds[:4]) or "unknown"
+        predicates = ", ".join(f"{predicate} {count}" for predicate, count in community.predicates[:4]) or "none"
+        user = (f"A group of {len(community.members)} things. Its most central members: "
+                + "; ".join(shown) + f". Kinds of its members: {kinds}. Relations inside it: {predicates}.\n"
+                "Name the group.")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            name, why = None, f"timeout: the {timeout_s}s deadline passed before the model was asked"
+            timed_out += 1
+        else:
+            asked += 1
+            try:
+                answer = await asyncio.wait_for(model.complete(_NAMING_SYSTEM, user), remaining)
+            except TimeoutError:
+                name, why = None, f"timeout: the {timeout_s}s deadline passed while the model was asked"
+                timed_out += 1
+            except Exception as error:
+                name, why = None, f"the model failed: {type(error).__name__}"
+                failed += 1
+            else:
+                name, why = as_community_name(answer if isinstance(answer, str) else "")
+        names.append(CommunityName(community.community_id, community.label, name, why, shown))
+    return CommunityNames(space, projection.digest, projection.revision, tuple(names), len(analysis.communities),
+                          float(timeout_s), asked, timed_out, failed)

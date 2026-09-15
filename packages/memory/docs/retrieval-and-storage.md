@@ -2992,6 +2992,22 @@ the same `status` and `as_of`:
   28 communities became 158, the largest three (341, 205 and 199 entities)
   became 62, 48 and 42, and modularity went from 0.702 to 0.584, with 19
   nested splits and one community kept whole.
+
+  A person's name for a community of people
+  or things ("Acme's Lisbon team") needs a reader: `GET
+  /v1/graph/communities/names` (`limit`, 1 to 50, largest first) asks the
+  server's model for one, showing it the community's central members,
+  kinds and predicates and taking its answer only when it is a name (one
+  line, at most eight words; otherwise `name` is null and `why` says what
+  came back). The computed `label` stays beside every name, the record
+  carries the projection digest and `verified_accuracy: false`, and the
+  route is refused without a model. Opt-in, one model round per
+  community, all inside one deadline (`timeout_s`, 0.1 to 600 seconds,
+  120 by default): a community the deadline or a model failure leaves
+  unnamed says so in its `why`, the names already made stand, and the
+  record counts `communities_asked`, `communities_named`,
+  `communities_timed_out` and `communities_failed`. Never read by the
+  analysis itself.
 - **Central entities**: by PageRank, with degree, fact weight,
   betweenness (exact up to 500 entities, from 64 evenly spaced sources
   beyond) and participation across communities.
