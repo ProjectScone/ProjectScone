@@ -62,16 +62,16 @@ unmeasured, and its threshold fails.
 | Path false positives | 0 | at most 0 |
 | Fragmentation | 1.2 | at most 1.2 |
 | Alias B-cubed F1 | 0.935 | at least 0.9 |
-| View bytes (knowledge, report, context) | 9,366, 5,509, 684 | recorded |
+| View bytes (knowledge, report, context) | 9,366, 5,586, 684 | recorded |
 | Build time per 10,000 facts | about 0.5 s | recorded |
 
-Artefact: `74c9275f6284e383077a826b84279a13fd1c66e2d2b34f9aa1bc09ed8efa32a3`. The scores
-match the first recording (`44ceae91…`). The hash has moved three times
+Artefact: `60f8be688577a19d50f42f9e44b734e2c3c48b02c72a24cbdacb6145932444f3`. The scores
+match the first recording (`44ceae91…`). The hash has moved four times
 since, and no score has changed on any of them: when the
 missing-evidence and out-of-view counts joined the report
 (`daceac58…`); when the knowledge view began saying when things held
-(`e92a2920…`); and now that it says where its relation vocabulary came
-from.
+(`e92a2920…`); when it said where its relation vocabulary came from
+(`74c9275f…`); and now that the report counts externals.
 
 The second move added 465 bytes, both of them the view saying what it
 used to leave a reader to assume: every relation now lists the stretches
@@ -102,6 +102,16 @@ several commits — which is the test doing precisely its job. It went
 unseen because the two gate runs that reached it were both interrupted
 before pytest printed its summary, and the only signal in the meantime
 was a single `F` in the progress stream.
+
+The fourth move adds **77 bytes to the report** and nothing to the
+knowledge view or the context packet. The external-dependency work
+(#38) gave the report `external_entities` in its summary and its
+analysis and an `external_dependencies` list; this fixture names no
+external, so the three fields are `0`, `0` and `[]`. Checked by
+diffing the report the fixture gives before and after that merge:
+those three lines are the whole difference. It was late the same way
+the third was: #38 merged without re-recording, and main's suite
+failed this test until now.
 
 ## What the numbers say
 
