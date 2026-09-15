@@ -14,9 +14,10 @@ top:
 - a judgement against the passage outweighs every useful one older than it:
   those no longer count, and the passage must be corroborated again after it;
 - a judgement counts only while the passage says what it said when it was
-  judged. ``feedback`` records a fingerprint of the chunk's text, its
-  episode and the episode's content hash; a candidate whose fingerprint now
-  differs (a rebuilt store handing the same id to other text) has those
+  judged. ``feedback`` records a fingerprint of the chunk's text and its
+  episode's content hash; a candidate whose fingerprint now differs (a
+  rebuilt store handing the same id to other text, to a span of an episode
+  whose content changed, or to a span chunked differently) has those
   judgements dropped as ``stale``, and one recorded without a fingerprint is
   dropped as ``unverified`` -- it cannot be checked, so it is not trusted.
 
@@ -69,9 +70,10 @@ def validate_feedback_weight(weight: object) -> None:
         raise InvalidInput(f"feedback_weight must be a finite number from 0 to {MAX_FEEDBACK_WEIGHT}")
 
 
-def fingerprint(episode_id: int, content_hash: str, text: str) -> str:
-    """What a judged passage said, and where: its episode, that episode's content hash, and its text."""
-    return hashlib.sha256(f"{episode_id}\x00{content_hash}\x00{text}".encode()).hexdigest()
+def fingerprint(content_hash: str, text: str) -> str:
+    """What a judged passage said: its text, and the content hash of the episode it is a span of.
+    Not the episode's id: the same content stored again under another id still says the same thing."""
+    return hashlib.sha256(f"{content_hash}\x00{text}".encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -156,7 +158,7 @@ async def read_prior(events: "Optional[EventLog]", documents: "DocumentStore", s
         episode = await documents.get_episode(space, episode_id)
         if episode is not None:
             episodes[episode_id] = episode
-    fingerprints = {chunk: fingerprint(candidates[chunk].episode_id, episodes[candidates[chunk].episode_id].content_hash,
+    fingerprints = {chunk: fingerprint(episodes[candidates[chunk].episode_id].content_hash,
                                        candidates[chunk].text)
                     for chunk in judged if candidates[chunk].episode_id in episodes}
     terms = prior_terms(kept, fingerprints, now=now, weight=weight, max_boost=MAX_FEEDBACK_BOOST)
