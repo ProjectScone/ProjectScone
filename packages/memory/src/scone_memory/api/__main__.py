@@ -183,7 +183,8 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                                    model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory,
                                    synthesis_factory=synthesis_factory, url_import=url_import,
                                    answer_review=answer_review, adaptive_retriever=adaptive_retriever,
-                                   tool_retrieval=conversation_tools, followup=build_followup(settings)))
+                                   tool_retrieval=conversation_tools, followup=build_followup(settings),
+                                   semantic_turn=settings.semantic_turn))
 
 
 def build_server(settings: Settings, app):

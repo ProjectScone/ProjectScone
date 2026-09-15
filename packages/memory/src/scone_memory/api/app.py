@@ -38,6 +38,7 @@ from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..retrieval.recall import LANES
 from ..retrieval.receipts import staged
+from ..retrieval.summary_expand import MAX_CHUNKS as SUMMARY_EXPANSION_MAX_CHUNKS
 from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
 from . import chat_imports, file_documents, pdf_documents
@@ -120,6 +121,9 @@ class EpisodeBody(BaseModel):
     created_at: Optional[str] = None
     #: How this record is cut; unset keeps the server's rule.
     chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
+    #: The genre whose boundaries structure chunking cuts at; an unknown
+    #: name is refused by the engine, which owns the list.
+    chunking_profile: Optional[str] = Field(default=None, max_length=64)
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
@@ -504,10 +508,12 @@ def create_app(
             "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.export_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
-            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "recall.graph_boost": True, "recall.lessons": True, "graph.knowledge_paging": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "graph.stats": True, "graph.hubs": True, "recall.graph_boost": True, "recall.lessons": True, "recall.expand_summaries": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
+            # The route is served; without a configured model it refuses.
+            "chat.openai_compatible": True,
         }
         if agent_catalog is not None and agent_plan_store is not None:
             features["agents.catalog"] = True
@@ -577,6 +583,9 @@ def create_app(
         mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
     mount_entity_routes(app, engine, space_for, actor_for, synthesis_factory=synthesis_factory)
+    from .openai_proxy import mount_openai_proxy_routes
+    mount_openai_proxy_routes(app, engine, space_for, synthesis_factory,
+                              assert_current_space=assert_current_space)
     from .filesystem_routes import mount_filesystem_routes
     mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)
 
@@ -640,6 +649,7 @@ def create_app(
             dedup_key=body.dedup_key,
             replace=body.replace,
             chunking=body.chunking,
+            chunking_profile=body.chunking_profile,
         )
         return added.model_dump()
 
@@ -665,7 +675,7 @@ def create_app(
                         "job": job_json(replayed), "replayed": True}
         records = [
             Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
-                   chunking=r.chunking)
+                   chunking=r.chunking, chunking_profile=r.chunking_profile)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
@@ -777,6 +787,25 @@ def create_app(
                                         store=True, model_name=getattr(model, "model", type(model).__name__))
         return JSONResponse(tree.record())
 
+    @app.post("/v1/chunk-questions")
+    async def post_chunk_questions(per_chunk: int = Query(default=3, ge=1, le=5),
+                                   max_chunks: int = Query(default=2000, ge=1, le=2000),
+                                   after_chunk: Optional[int] = Query(default=None, ge=0),
+                                   episode_id: Optional[list[int]] = Query(default=None),
+                                   space: str = Depends(space_for)) -> JSONResponse:
+        """Write the question lane with the synthesis model: questions each
+        chunk answers, kept only with a sentence quoted from the chunk, indexed
+        apart from its context. Refused while SCONE_QUESTION_LANE is off; a store
+        without the question index answers with a report that says so."""
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            return JSONResponse({"error": "no synthesis model configured to write questions with (SCONE_CHAT_URL and "
+                                          "SCONE_CHAT_MODEL)"}, status_code=501)
+        report = await engine.build_chunk_questions(space, model, per_chunk=per_chunk, max_chunks=max_chunks,
+                                                    after_chunk=after_chunk, episode_ids=episode_id,
+                                                    model_name=getattr(model, "model", type(model).__name__))
+        return JSONResponse(report.record())
+
     @app.get("/v1/episodes/{episode_id}/summaries")
     async def get_episode_summaries(episode_id: int, space: str = Depends(space_for)) -> dict:
         """The summaries stored for the episode, top level first, each saying whether the document has changed since."""
@@ -852,6 +881,8 @@ def create_app(
         route: Optional[str] = Query(default=None,
                                      description="Insist on temporal, graph, recall or synthesize instead of the rule."),
         whole: bool = Query(False, description="Show each passage whole instead of its first 200 characters."),
+        synthesis_mode: Optional[str] = Query(default=None,
+                                              description="With route=synthesize: evidence (default), refine or accumulate."),
         space: str = Depends(space_for),
     ) -> dict:
         """One question answered by whichever machinery suits it, saying
@@ -861,13 +892,15 @@ def create_app(
         ordinary search. Naming a route overrides it, and the answer says
         the route was asked for. The synthesize route, which the rule never
         chooses, reads up to ``limit`` passages and has the server's model
-        write cited sentences; it is refused when the server has no model."""
+        write cited sentences; it is refused when the server has no model.
+        ``synthesis_mode`` chooses how it reads them: evidence, refine or
+        accumulate, each keeping only sentences with a checked quote."""
         from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
         synthesis = synthesis_factory() if route == "synthesize" and synthesis_factory is not None else None
         return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
                                       max_item_chars=0 if whole else DEFAULT_ITEM_CHARS,
-                                      synthesis=synthesis)).record(space)
+                                      synthesis=synthesis, synthesis_mode=synthesis_mode)).record(space)
 
     @app.get("/v1/recall/parts")
     async def get_recall_parts(
@@ -1033,6 +1066,14 @@ def create_app(
                                                         "was set by hand; the answer says what was read and applied."),
         lessons: bool = Query(default=False, description="Put beside each passage what people said about it in "
                                                           "feedback. The order is not changed."),
+        expand_summaries: Optional[Literal["replace", "follow"]] = Query(
+            default=None,
+            description="Follow each stored summary among the passages with the chunks its citations rest on, or "
+                        "replace it with them: only those, never a forgotten document's, each saying which summary "
+                        "it came through. The answer can hold more than limit; expanded says what was added, "
+                        "refused and cut."),
+        expand_max_chunks: Optional[int] = Query(default=None, ge=1, le=SUMMARY_EXPANSION_MAX_CHUNKS,
+                                                 description="The most chunks expand_summaries adds (20 unless set)."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
@@ -1092,6 +1133,13 @@ def create_app(
             # their lessons would vanish, or a judged-useless neighbour would ride under a good one.
             raise InvalidInput("lessons cannot be combined with merge: a merged passage joins chunks judged "
                                "separately, and one lesson cannot stand for them; ask for one or the other")
+        if expand_summaries is not None and (merge or window or window_unit == "sentences"):
+            # A merge reads the text between the fragments it joins and reports it under one chunk's
+            # fields, and a window rewrites a passage's text and start, so either would return a cited
+            # chunk holding text it does not rest on, with via_summary's spans indexing text not returned.
+            raise InvalidInput("expand_summaries cannot be combined with merge or a window: a merged or widened "
+                               "passage holds text the summary does not rest on, and the spans in via_summary "
+                               "would no longer index the text returned; ask for one or the other")
         if merge and compress is not None:
             # A merged passage is reported under its best chunk, so the
             # other retrieved chunks inside it would not be pinned, and
@@ -1109,7 +1157,7 @@ def create_app(
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
-            lessons=lessons,
+            lessons=lessons, expand_summaries=expand_summaries, expand_max_chunks=expand_max_chunks,
             lanes=[lane.strip() for lane in lanes.split(",") if lane.strip()] if lanes is not None else LANES,
             require=require, exclude=exclude, diversity=diversity,
         )
@@ -1192,6 +1240,11 @@ def create_app(
             response["widened"] = staged(opened.record())
         if result.lessons_read is not None:
             response["lessons_read"] = result.lessons_read
+        if result.expanded is not None:
+            response["expanded"] = result.expanded
+        if result.feedback_prior is not None:
+            # A re-ranked answer carries what moved it, and where the prior's bounds bit.
+            response["feedback_prior"] = result.feedback_prior
         if joined is not None:
             response["merged"] = staged(joined.record())
         if cut is not None:
@@ -1578,7 +1631,7 @@ class Unauthorized(Exception):
 MAX_IDS = 100
 
 
-async def read_bounded(request: Request, limit: int) -> bytes:
+async def read_bounded(request: Request, limit: int, noun: str = "an attachment") -> bytes:
     """The request body, refused as soon as it passes ``limit``.
 
     Reading it whole and then measuring it lets the caller decide how much
@@ -1587,12 +1640,12 @@ async def read_bounded(request: Request, limit: int) -> bytes:
     """
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > limit:
-        raise InvalidInput(f"an attachment takes at most {limit} bytes, got {declared}")
+        raise InvalidInput(f"{noun} takes at most {limit} bytes, got {declared}")
     read, total = [], 0
     async for chunk in request.stream():
         total += len(chunk)
         if total > limit:
-            raise InvalidInput(f"an attachment takes at most {limit} bytes")
+            raise InvalidInput(f"{noun} takes at most {limit} bytes")
         read.append(chunk)
     return b"".join(read)
 
@@ -1645,6 +1698,8 @@ def item_json(item: RecallItem) -> dict:
         result["rerank_score"] = item.rerank_score
     if item.lessons is not None:
         result["lessons"] = item.lessons
+    if item.via_summary is not None:
+        result["via_summary"] = item.via_summary
     return result
 
 

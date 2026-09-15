@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+import re
 from pathlib import Path
 import random
 from typing import Optional, Sequence, TYPE_CHECKING
@@ -131,21 +132,29 @@ def _normal(text: str) -> str:
     return " ".join(text.split())
 
 
-def _parse(reply: str) -> Optional[list[tuple[str, str]]]:
+_LIST_OF_OBJECTS = re.compile(r"\[\s*(?=\{)")
+_EMPTY_LIST = re.compile(r"\[\s*\]")
+
+
+def parse_pairs(reply: str) -> Optional[list[tuple[str, str]]]:
     """The (question, quote) pairs in a reply, or None when it is not a
-    list of them. A fence or a sentence around the JSON is tolerated --
-    the first bracket that opens a JSON list is the one read, so a
-    bracket in the prose around it is not -- and anything else is the
-    model not writing what was asked."""
-    decoder = json.JSONDecoder()
-    parsed: object = None
-    start = reply.find("[")
-    while start >= 0:
-        try:
-            parsed, _ = decoder.raw_decode(reply, start)
-            break
-        except ValueError:
-            start = reply.find("[", start + 1)
+    list of them. A fence or a sentence around the JSON is tolerated: the
+    list read is the first that opens with an object, decoded whole, so a
+    bracket in the prose is not it and neither is one quoted inside a
+    question of a list that does not decode. A reply that opens no such
+    list and holds no object is an empty list when it says ``[]``;
+    anything else is the model not writing what was asked."""
+    opened = _LIST_OF_OBJECTS.search(reply)
+    if opened is None:
+        return [] if "{" not in reply and _EMPTY_LIST.search(reply) else None
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(reply, opened.start())
+    except ValueError:
+        return None
+    return _pairs_in(parsed)
+
+
+def _pairs_in(parsed: object) -> Optional[list[tuple[str, str]]]:
     if not isinstance(parsed, list):
         return None
     pairs: list[tuple[str, str]] = []
@@ -157,6 +166,93 @@ def _parse(reply: str) -> Optional[list[tuple[str, str]]]:
             return None
         pairs.append((question.strip(), quote.strip()))
     return pairs
+
+
+_NEXT_OBJECT = re.compile(r"\{\s*\"")
+
+
+@dataclass(frozen=True)
+class LooseRead:
+    """The pairs read one object at a time from a list that is not valid as a whole."""
+
+    pairs: tuple[tuple[str, str], ...]
+    #: Objects the reader could not take a pair from: one that does not
+    #: decode (cut off, or a quote mark left unescaped) or an item that is
+    #: not a question and a quote. Text between objects that is not one
+    #: (a comment, a closing fence) is passed over and not counted.
+    unread: int
+
+
+def loose_pairs(reply: str) -> Optional[LooseRead]:
+    """The pairs of the first list of objects the reply opens, read object
+    by object, for a reply ``parse_pairs`` refuses. A small model often
+    writes every object and stops before the closing bracket, leaves out
+    the commas, or copies a quote mark from the passage unescaped: each
+    object that reads is kept, each that does not is counted in
+    ``unread`` and passed over to the next, and reading stops at the
+    closing bracket or the end of the reply. None when no list of objects
+    is opened or no pair is read. Not used by ``write_questions``, whose
+    sets stay strict."""
+    opened = _LIST_OF_OBJECTS.search(reply)
+    if opened is None:
+        return None
+    decoder = json.JSONDecoder()
+    pairs: list[tuple[str, str]] = []
+    unread = 0
+    position = opened.end()
+    while True:
+        while position < len(reply) and (reply[position].isspace() or reply[position] == ","):
+            position += 1
+        if position >= len(reply) or reply[position] == "]":
+            break
+        try:
+            item, end = decoder.raw_decode(reply, position)
+        except ValueError:
+            if reply[position] == "{":
+                unread += 1
+            following = _NEXT_OBJECT.search(reply, position + 1)
+            if following is None:
+                break
+            position = following.start()
+            continue
+        read = _pairs_in([item])
+        if read:
+            pairs.extend(read)
+        else:
+            unread += 1
+        position = end
+    return LooseRead(tuple(pairs), unread) if pairs else None
+
+
+@dataclass(frozen=True)
+class Anchored:
+    """The pairs of one reply that a question can rest on, and what was dropped."""
+
+    #: (question, quote) with the quote's whitespace settled as it stands in the chunk.
+    pairs: tuple[tuple[str, str], ...]
+    #: No question, or one over MAX_QUESTION_CHARS.
+    unasked: int
+    #: A quote under MIN_QUOTE_WORDS or not in the chunk.
+    unquoted: int
+    #: Pairs past the number asked for, not looked at.
+    extra: int
+
+
+def anchored(pairs: Sequence[tuple[str, str]], text: str, per_chunk: int) -> Anchored:
+    """The first ``per_chunk`` pairs whose question was asked and whose quote
+    is in ``text`` verbatim, whitespace aside; every other pair counted."""
+    normal_text = _normal(text)
+    kept: list[tuple[str, str]] = []
+    unasked = unquoted = 0
+    for question, quote in pairs[:per_chunk]:
+        if not question or len(question) > MAX_QUESTION_CHARS:
+            unasked += 1
+            continue
+        if len(quote.split()) < MIN_QUOTE_WORDS or _normal(quote) not in normal_text:
+            unquoted += 1
+            continue
+        kept.append((question, _normal(quote)))
+    return Anchored(tuple(kept), unasked, unquoted, max(0, len(pairs) - per_chunk))
 
 
 async def chunks_in(engine: "MemoryEngine", space: str) -> list[tuple[int, Optional[str], int, str]]:
@@ -202,23 +298,19 @@ async def write_questions(engine: "MemoryEngine", space: str, model: ChatModel, 
         except ChatError:
             failed += 1
             continue
-        pairs = _parse(reply)
+        pairs = parse_pairs(reply)
         if pairs is None:
             unparsed += 1
             continue
-        normal_text = _normal(text)
-        for question, quote in pairs[:per_chunk]:
-            if not question or len(question) > MAX_QUESTION_CHARS:
-                unasked += 1
-                continue
-            if len(quote.split()) < MIN_QUOTE_WORDS or _normal(quote) not in normal_text:
-                unquoted += 1
-                continue
+        found = anchored(pairs, text, per_chunk)
+        unasked += found.unasked
+        unquoted += found.unquoted
+        for question, quote in found.pairs:
             key = _normal(question).lower()
             if key in seen:
                 continue
             seen.add(key)
-            kept.append(Question(question, _normal(quote), source, episode_id))
+            kept.append(Question(question, quote, source, episode_id))
     return QuestionSet(corpus=corpus, model=model_name or type(model).__name__, questions=tuple(kept),
                        chunks_total=len(rows), chunks_asked=len(chosen), per_chunk=per_chunk, seed=seed,
                        dropped_unparsed=unparsed, dropped_unquoted=unquoted, skipped_long=skipped_long,

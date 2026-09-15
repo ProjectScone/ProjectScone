@@ -42,9 +42,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
     from ..entities.vocabulary_store import VocabularyStore
+    from ..core.models import Chunk
+    from ..retrieval.feedback_prior import PriorTerms
     from ..retrieval.lessons import Lessons
+    from ..ingestion.chunk_questions import QuestionLaneReport
+    from ..providers.llm import ChatModel
 from ..retrieval.abstention import AbstentionPolicy
-from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
+from ..retrieval.recall import (RecallRuntime, SummaryExpander, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.image_lane import ImageLane, remove_forgotten, writer_block
@@ -53,7 +57,7 @@ from ..retrieval.overview import OverviewResult
 from ..retrieval.synonyms import Synonyms
 
 #: The vector lane's default voice when the embedder is a hash of tokens (see MemoryEngine).
-HASHED_VECTOR_WEIGHT = 0.25
+HASHED_VECTOR_WEIGHT = 0.01
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core import extracted
@@ -98,6 +102,7 @@ from ..core.models import (
     Tombstone,
     DEPENDENCY_KINDS,
     LINK_KINDS,
+    RecallItem,
     RecallResult,
     Status,
 )
@@ -210,6 +215,9 @@ class MemoryEngine:
         #: break near-ties only; zero weight turns the term off.
         recency_weight: float = fusion.W_RECENCY,
         recency_half_life_days: float = fusion.RECENCY_HALF_LIFE_DAYS,
+        #: How much recorded feedback moves a candidate in fusion (see
+        #: retrieval/feedback_prior.py). Zero, the default, reads no feedback.
+        feedback_weight: float = 0.0,
         demote_restated: bool = True,
         demote_superseded: bool = True,
         blobs: Optional[BlobStore] = None,
@@ -233,6 +241,9 @@ class MemoryEngine:
         context_lane: bool = False,
         lexical_stems: bool = True,
         vector_weight: Optional[float] = None,
+        chunk_tokens: int | None = None,
+        chunk_overlap_tokens: int = 0,
+        question_lane: bool = False,
         #: The image lane: an embedder putting images and text queries into
         #: one space, and a vector index of its own for its vectors. Both or
         #: neither; without them a recall asking for the lane is told so.
@@ -262,10 +273,16 @@ class MemoryEngine:
         self.image_vectors_removed: int | None = None
         if vector_weight is None:
             # A hashed-token embedder ranks by word overlap, badly: a weak
-            # echo of the text lane. Measured on LongMemEval-S, giving it a
-            # quarter voice moved the fused ranking from behind the text lane
-            # alone to level with the reference's best; a real embedder knows
-            # things the text lane does not and keeps its full voice.
+            # echo of the text lane. Measured on LongMemEval-S (the frozen
+            # 50 and 100 items outside them), every voice it had in the order
+            # cost the fused ranking; at a hundredth it still runs -- the
+            # confidence signal, passages the text lane did not find, and at
+            # full voice when the text lane brings nothing (recall applies
+            # that) -- and on both samples the fused ranking scored as
+            # the text lane alone did (benchmarks/northstar-defaults-2026-09-14.results.md;
+            # SCONE_VECTOR_WEIGHT=0.25 is the previous default). A real
+            # embedder knows things the text lane does not and keeps its
+            # full voice.
             vector_weight = HASHED_VECTOR_WEIGHT if embedder.id.startswith("hash-") else 1.0
         if isinstance(vector_weight, bool) or not isinstance(vector_weight, (int, float)) or not 0 < vector_weight <= 4:
             raise InvalidInput("vector_weight must be a number above 0 and at most 4")
@@ -283,6 +300,11 @@ class MemoryEngine:
         #: Whether what each chunk is under is indexed beside its text and
         #: searched as a lane of its own. Stored text never changes.
         self.context_lane = context_lane
+        if type(question_lane) is not bool:
+            raise InvalidInput("question_lane must be a boolean")
+        #: Whether recall searches the questions ``build_chunk_questions``
+        #: wrote into the context index, and whether that pass may run.
+        self.question_lane = question_lane
         if type(table_context_embeddings) is not bool:
             raise InvalidInput('table_context_embeddings must be a boolean')
         self._table_context_embeddings = table_context_embeddings
@@ -330,15 +352,30 @@ class MemoryEngine:
             if isinstance(window, bool) or not isinstance(window, int) or window < 1:
                 raise InvalidInput("embedding_budget needs an embedder that declares its input window "
                                    "(max_input_tokens); this one declares none")
-            counter = getattr(embedder, "count_tokens", None)
-            if callable(counter):
-                # Tried now: the vector writer's name says the tokenizer counted, so it must be able to.
-                try:
-                    counter("")
-                except Exception as error:  # noqa: BLE001 - any failure to count refuses the setting, with its reason
-                    raise InvalidInput(f"embedding_budget counts with the embedder's tokenizer, which failed: "
-                                       f"{type(error).__name__}: {error}") from error
+        if chunk_tokens is not None or chunk_overlap_tokens:
+            from ..ingestion.token_chunks import refused
+
+            reason = (refused(chunk_tokens, chunk_overlap_tokens) if chunk_tokens is not None
+                      else "chunk_overlap_tokens needs chunk_tokens: an overlap in tokens is of a target in tokens")
+            if reason is not None:
+                raise InvalidInput(reason)
+        counter = getattr(embedder, "count_tokens", None)
+        if (embedding_budget or chunk_tokens is not None) and callable(counter):
+            # Tried now: the vector writer's name and the chunk receipt say
+            # the tokenizer counted, so it must be able to.
+            setting = "embedding_budget" if embedding_budget else "chunk_tokens"
+            try:
+                counter("")
+            except Exception as error:  # noqa: BLE001 - any failure to count refuses the setting, with its reason
+                raise InvalidInput(f"{setting} counts with the embedder's tokenizer, which failed: "
+                                   f"{type(error).__name__}: {error}") from error
         self.embedding_budget = embedding_budget
+        #: The length chunker's target in tokens, packed from whole sentences
+        #: (ingestion/token_chunks.py); None cuts at chunk_target characters.
+        #: Code, structure, semantic and unit cuts keep the character target.
+        self.chunk_tokens = chunk_tokens
+        #: Tokens of the chunk before that a token-measured chunk starts with.
+        self.chunk_overlap_tokens = chunk_overlap_tokens
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -418,16 +455,24 @@ class MemoryEngine:
         fusion.validate_recency(recency_weight, recency_half_life_days)
         self.recency_weight = float(recency_weight)
         self.recency_half_life_days = float(recency_half_life_days)
+        from ..retrieval.feedback_prior import validate_feedback_weight
+
+        validate_feedback_weight(feedback_weight)
+        self.feedback_weight = float(feedback_weight)
 
     async def _emit(self, space: str, kind: str, payload: dict, dedup_key: Optional[str] = None) -> Optional[Event]:
         if self.events is None:
             return None
         return await self.events.append(NewEvent(ts=self.clock(), space=space, kind=kind, payload=payload, dedup_key=dedup_key))
 
+    @staticmethod
+    def _query_hash(query: str) -> str:
+        return hashlib.sha256(query.encode()).hexdigest()[:16]
+
     def _query_for_evidence(self, query: str) -> dict:
         if self.record_queries:
             return {"query": query, "query_hashed": False}
-        return {"query": hashlib.sha256(query.encode()).hexdigest()[:16], "query_hashed": True}
+        return {"query": self._query_hash(query), "query_hashed": True}
 
     async def open(self) -> "MemoryEngine":
         from . import space_cleanup
@@ -574,17 +619,19 @@ class MemoryEngine:
         replace: bool = False,
         *, embedding_checkpoint: EmbeddingCheckpoint | None = None,
         chunking: Optional[str] = None,
+        chunking_profile: Optional[str] = None,
     ) -> Added:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
         ``replace``) instead of a duplicate. ``chunking`` names how this
         record is cut (length, code, structure, semantic); None keeps the
-        engine's rule."""
+        engine's rule. ``chunking_profile`` names a genre (statute, paper,
+        manual, qa, resume) whose boundaries structure chunking cuts at."""
         await self._living(space)
         if replace and embedding_checkpoint is not None:
             raise InvalidInput('embedding checkpoints apply to append ingestion, not replacement')
         record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key,
-                        chunking=chunking)
+                        chunking=chunking, chunking_profile=chunking_profile)
         if replace:
             added = (await self.replace(space, record)).added
         else:
@@ -620,7 +667,7 @@ class MemoryEngine:
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
                          self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context,
-                         self.embedding_budget)
+                         self.embedding_budget, self.chunk_tokens, self.chunk_overlap_tokens)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -638,7 +685,8 @@ class MemoryEngine:
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
                         self.code_aware, self.code_graph, self.structure_aware,
-                        self.semantic_aware, self.heading_context, self.embedding_budget) != configuration):
+                        self.semantic_aware, self.heading_context, self.embedding_budget,
+                        self.chunk_tokens, self.chunk_overlap_tokens) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -778,7 +826,9 @@ class MemoryEngine:
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware, heading_context=self.heading_context,
             embedding_budget=cast(int, getattr(self.embedder, "max_input_tokens")) if self.embedding_budget else None,
-            count_tokens=getattr(self.embedder, "count_tokens", None) if self.embedding_budget else None,
+            count_tokens=(getattr(self.embedder, "count_tokens", None)
+                          if self.embedding_budget or self.chunk_tokens is not None else None),
+            chunk_tokens=self.chunk_tokens, chunk_overlap_tokens=self.chunk_overlap_tokens,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
             context_lane=self.context_lane,
             document_outline=partial(document_outline, blobs=self.blobs),
@@ -1093,6 +1143,8 @@ class MemoryEngine:
         exclude: Sequence[str] = (),
         diversity: Optional[float] = None,
         lessons: bool = False,
+        expand_summaries: Optional[str] = None,
+        expand_max_chunks: Optional[int] = None,
         image_lane: bool = False,
     ) -> RecallResult:
         """``image_lane`` adds the image lane: stored images nearest the query
@@ -1102,6 +1154,14 @@ class MemoryEngine:
 
         ``lessons`` puts beside each returned passage what people said about it
         (``engine.lessons``), leaving the order as it was.
+
+        ``expand_summaries`` (``follow`` or ``replace``) puts after each stored
+        summary among the returned passages, or in its place, the chunks its
+        citations rest on -- only those, never a forgotten document's -- each
+        saying in ``via_summary`` which summary it came through; at most
+        ``expand_max_chunks`` are added (``summary_expand``), so the answer can
+        hold more than ``limit``, and ``expanded`` says what was added, refused
+        and cut.
 
         ``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -1175,19 +1235,41 @@ class MemoryEngine:
             vector_block=self.vector_block,
             synonyms=self.synonyms,
             context_lane=self.context_lane,
+            question_lane=self.question_lane,
             lexical_stems=self.lexical_stems,
             vector_weight=self.vector_weight,
+            feedback_prior=self._feedback_prior if self.feedback_weight > 0 else None,
             image=None if self.image_vectors is None else ImageLane(cast(ImageEmbedder, self.image_embedder),
                                                                    self.image_vectors),
         )
         if type(lessons) is not bool:
             raise InvalidInput("lessons must be a boolean")
+        summaries: Optional[SummaryExpander] = None
+        if expand_summaries is not None:
+            from ..retrieval.summary_expand import DEFAULT_MAX_CHUNKS, Expanded, check_expansion, expand_summaries as expand
+
+            # Before the search, so a mistaken request spends no work and logs no recall.
+            cap = DEFAULT_MAX_CHUNKS if expand_max_chunks is None else expand_max_chunks
+            check_expansion(expand_summaries, cap)
+            mode = cast("Literal['replace', 'follow']", expand_summaries)
+
+            async def expand_found(items: Sequence[RecallItem], required: Sequence[str], excluded: Sequence[str],
+                                   scope: TextFilter) -> Expanded:
+                return await expand(self, space, items, mode=mode, max_chunks=cap, require=required, exclude=excluded,
+                                    scope=scope)
+
+            # Run inside recall, before its event is written and before lessons,
+            # so the event lists the chunks a summary brought and they are read for lessons too.
+            summaries = expand_found
+        elif expand_max_chunks is not None:
+            raise InvalidInput("expand_max_chunks is a cap on expand_summaries; ask for expand_summaries with it")
         result = await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
                             entity_notes=notes, lanes=lanes,
-                            require=require, exclude=exclude, diversity=diversity, image_lane=image_lane)
+                            require=require, exclude=exclude, diversity=diversity, summaries=summaries,
+                            image_lane=image_lane)
         if lessons:
             from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons, read_summary
 
@@ -1302,6 +1384,19 @@ class MemoryEngine:
         except DuplicateEvent as e:
             raise InvalidInput(f"source_event_id {source_event_id!r} was already recorded with a different payload (event {e.existing.event_id})") from e
 
+    async def build_chunk_questions(self, space: str, chat: "ChatModel", *, per_chunk: int = 3,
+                                    max_chunks: int = 2_000, after_chunk: Optional[int] = None,
+                                    episode_ids: Optional[Sequence[int]] = None,
+                                    model_name: str = "") -> "QuestionLaneReport":
+        """Write the question lane for the space's chunks with ``chat``: up to
+        ``per_chunk`` questions a chunk answers, kept only with a sentence
+        quoted from it, in an index of their own (ingestion.chunk_questions).
+        Refused while ``question_lane`` is off."""
+        from ..ingestion.chunk_questions import build_chunk_questions
+
+        return await build_chunk_questions(self, space, chat, per_chunk=per_chunk, max_chunks=max_chunks,
+                                           after_chunk=after_chunk, episode_ids=episode_ids, model_name=model_name)
+
     async def graph(
         self,
         space: str,
@@ -1335,6 +1430,11 @@ class MemoryEngine:
                                   min_corroboration=min_corroboration,
                                   max_events=MAX_FEEDBACK_EVENTS if max_events is None else max_events)
 
+    async def _feedback_prior(self, space: str, candidates: Mapping[int, "Chunk"], now: str) -> "PriorTerms":
+        from ..retrieval.feedback_prior import read_prior
+
+        return await read_prior(self.events, self.documents, space, candidates, now=now, weight=self.feedback_weight)
+
     async def feedback(
         self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None
     ) -> Event:
@@ -1353,8 +1453,22 @@ class MemoryEngine:
             raise InvalidInput(f"chunk {chunk_id} was not returned by recall {recall_event_id}")
         if note is not None and len(note) > 500:
             raise InvalidInput("note must be at most 500 chars")
+        from ..retrieval.feedback_prior import fingerprint, question
+
+        # What the passage said when it was judged, so a ranking prior can tell
+        # when the id now names other text. A passage already gone gets none.
+        # And which question it was judged for, so asking again is not corroboration.
+        # A query kept in the clear is hashed as a hashed recall's is, so the same words are one question either way.
+        asked = recall.payload.get("query")
+        if recall.payload.get("query_hashed") is False:
+            asked = self._query_hash(str(asked))
+        marked: dict[str, object] = {"question": question(asked)}
+        for chunk in await self.documents.get_chunks(space, [chunk_id]):
+            episode = await self.documents.get_episode(space, chunk.episode_id)
+            if episode is not None:
+                marked["fingerprint"] = fingerprint(episode.content, chunk.text)
         return await self._emit(space, "feedback", {
-            "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note,
+            "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note, **marked,
         })  # type: ignore[return-value]
 
     async def _fact_fits_scope(self, space: str, fact: Fact, scope: TextFilter | None) -> bool:

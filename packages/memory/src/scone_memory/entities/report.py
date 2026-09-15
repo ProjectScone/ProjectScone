@@ -28,7 +28,7 @@ def _name(entities: Mapping[str, object], entity_id: str) -> dict[str, object]:
     return {"id": entity_id, "label": getattr(entity, "label"), "key": getattr(entity, "key")}
 
 
-def _hubs(analysis: GraphAnalysis, percentile: float | None) -> set[str]:
+def hubs_above(analysis: GraphAnalysis, percentile: float | None) -> set[str]:
     """The graph's own entities whose number of neighbours is above the
     given percentile of the graph's own (nearest rank): utility hubs a
     ranking by centrality would otherwise always lead with. An analysis
@@ -57,7 +57,7 @@ def build_report(projection: EntityProjection, analysis: GraphAnalysis, *, meta:
     returned most, and the central ones none of them reached."""
     entities = {entity.entity_id: entity for entity in projection.entities}
     communities = {community.community_id: community for community in analysis.communities}
-    hubs = _hubs(analysis, exclude_hubs)
+    hubs = hubs_above(analysis, exclude_hubs)
     # The graph's own things lead; what it only names (`typing`, a package,
     # a cited record) is listed apart, by how much names it.
     ranked = [item for item in analysis.importance if item.entity_id not in hubs and not item.external][:central]

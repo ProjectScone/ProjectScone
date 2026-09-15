@@ -771,6 +771,34 @@ async def test_the_map_can_show_how_often_recalls_returned_each_part():
     assert report["recall_usage"]["recalls_read"] == 1 and "## What recall uses" in markdown
 
 
+async def test_the_drawn_graph_can_show_what_recalls_returned():
+    import json as jsonlib
+    import xml.etree.ElementTree as ElementTree
+
+    from scone_memory.observability.events import InMemoryEventLog
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await engine.assert_fact("alpha", "alice chen", "works_at", "Acme Robotics", valid_from="2024-01-01T00:00:00Z")
+    await engine.assert_fact("alpha", "bob stone", "lives_in", "Porto", valid_from="2024-01-01T00:00:00Z")
+    await engine.recall("alpha", "alice chen")
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        drawn = client.get("/v1/graph/export", params={"format": "svg", "usage": "true"}, headers=auth())
+        page = client.get("/v1/graph/export", params={"format": "html", "usage": "true"}, headers=auth())
+        plain = client.get("/v1/graph/export", params={"format": "svg"}, headers=auth())
+        assert client.get("/v1/graph/export", params={"format": "svg", "usage_since": "soon"},
+                          headers=auth()).status_code == 422
+        features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    svg = "{http://www.w3.org/2000/svg}"
+    titles = [circle.find(f"{svg}title").text for circle in ElementTree.fromstring(drawn.content).iter(f"{svg}circle")]
+    assert any(title.startswith("alice chen") and title.endswith("returned by 1 of the 1 recall read") for title in titles)
+    assert any(title.startswith("bob stone") and title.endswith("returned by 0 of the 1 recall read") for title in titles)
+    assert b"returned by" not in plain.content
+    block = page.text.split('<script id="graph-data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    assert jsonlib.loads(block)["usage"]["recalls_read"] == 1
+    assert features["graph.export_usage"] is True
+
+
 async def test_a_recall_event_that_holds_no_ids_is_counted_not_answered_with_a_fault():
     from scone_memory.core.ports import NewEvent
     from scone_memory.observability.events import InMemoryEventLog
@@ -868,6 +896,16 @@ def test_the_graph_exports_as_the_whole_graph_on_one_page(seeded):
     assert body.count("<script") == 2 and "Content-Security-Policy" in body and "graph-data" in body
     assert "projection " + page.headers["X-Scone-Projection-Digest"][:12] in body, "the page says which projection it holds"
 
+
+def test_the_graph_exports_as_a_map_of_its_communities(seeded):
+    import xml.etree.ElementTree as ElementTree
+
+    client, _ = seeded
+    mapped = client.get("/v1/graph/export", params={"format": "communities"}, headers=auth())
+    assert mapped.status_code == 200 and mapped.headers["content-type"].startswith("image/svg+xml")
+    assert 'filename="graph-communities.svg"' in mapped.headers["content-disposition"]
+    desc = ElementTree.fromstring(mapped.content).find("{http://www.w3.org/2000/svg}desc").text
+    assert desc.startswith(f"projection {mapped.headers['x-scone-projection-digest'][:12]} ")
 
 
 def test_the_graph_says_what_changed_between_two_moments(seeded):
@@ -1048,3 +1086,23 @@ def test_a_structured_question_can_ask_for_what_follows_over_http(meant):
     assert found["status"] == "matched" and found["filters"]["follows"] is True
     [row] = found["rows"]
     assert row["follows"] == ["inverse"] and row["fact_ids"] == [1]
+
+
+async def test_stats_and_hubs_count_the_graph_and_rank_its_most_linked(seeded):
+    client, _ = seeded
+    counted = client.get("/v1/graph/stats", headers=auth()).json()
+    assert counted["space"] == "alpha" and counted["totals"]["entities"] >= 2 and counted["totals"]["facts"] >= 1
+    assert set(counted["facts"]) == {"origin", "grounding", "standing"} and counted["text"].startswith("stats: space alpha")
+    assert sum(counted["facts"]["origin"].values()) == counted["totals"]["facts"]
+    ranked = client.get("/v1/graph/hubs", params={"limit": 2}, headers=auth()).json()
+    assert ranked["space"] == "alpha" and 1 <= len(ranked["hubs"]) <= 2 and ranked["hubs"][0]["degree"] >= 1
+    assert ranked["hubs"][0]["degree"] >= ranked["hubs"][-1]["degree"], "most linked first"
+    held = client.get("/v1/graph/hubs", params={"above": 90}, headers=auth()).json()
+    # Three own entities have nothing above their 90th percentile of degree.
+    assert held["totals"]["above"] == 90.0 and held["hubs"] == [] and "no hub above the 90th" in held["text"]
+    assert client.get("/v1/graph/hubs", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/hubs", params={"above": 10}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/stats", params={"max_bytes": 100}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/stats", headers=auth("key-b")).json()["totals"]["entities"] >= 0
+    features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    assert features["graph.stats"] is True and features["graph.hubs"] is True

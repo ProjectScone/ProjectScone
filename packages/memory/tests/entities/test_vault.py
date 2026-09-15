@@ -24,6 +24,15 @@ def projection_of(*rows):
 ABOUT = {"status": "current", "as_of": "2025-06-01T00:00:00.000Z"}
 
 
+def hubs_gone(before, after) -> int:
+    """Community hub notes that one write leaves and the next does not: a
+    hub is named for its community's members, so a change in membership
+    renames it and the old note goes as stale."""
+    def hubs(projection):
+        return {name.casefold() for name in obsidian_files(projection, ABOUT) if name.startswith("communities/")}
+    return len(hubs(before) - hubs(after))
+
+
 def test_every_note_carries_the_signature_and_the_zip_still_holds_the_same_files():
     projection = projection_of(fact(1, "alice chen", "works_at", "Acme"), fact(2, "acme", "based_in", "Lisbon"))
     files = obsidian_files(projection, ABOUT)
@@ -49,19 +58,23 @@ def test_writing_into_a_vault_keeps_their_notes_updates_ours_and_removes_what_we
     first = projection_of(fact(1, "alice chen", "works_at", "Acme"), fact(2, "acme", "based_in", "Lisbon"),
                           fact(3, "bob", "knows", "Alice Chen"))
     alice = next(name for name in obsidian_files(first, ABOUT) if name.lower() == "entities/alice chen.md")
+    # The note's name keeps the entity's own spelling ("bob"); CI's filesystem
+    # tells cases apart where a Mac's does not.
+    bob = next(name for name in obsidian_files(first, ABOUT) if name.lower() == "entities/bob.md")
     (vault / DEFAULT_FOLDER / alice).write_text("# Alice, as I know her\n\nmine\n", encoding="utf-8")
     receipt = write_vault(obsidian_files(first, ABOUT, root="scone/"), vault, projection=first.digest)
     assert receipt.kept_theirs == (alice,), "a note this did not write is never written over"
     assert (vault / DEFAULT_FOLDER / alice).read_text(encoding="utf-8") == "# Alice, as I know her\n\nmine\n"
-    assert receipt.written == len(obsidian_files(first, ABOUT)) - 1 and receipt.updated == receipt.unchanged == receipt.removed == 0
-    assert signed(home / "Bob.md") and not signed(vault / DEFAULT_FOLDER / alice) and (vault / DEFAULT_FOLDER / MANIFEST).exists()
+    assert receipt.written == len(obsidian_files(first, ABOUT, root="scone/")) - 1 and receipt.updated == receipt.unchanged == receipt.removed == 0
+    assert signed(vault / DEFAULT_FOLDER / bob) and not signed(vault / DEFAULT_FOLDER / alice) and (vault / DEFAULT_FOLDER / MANIFEST).exists()
     assert (vault / ".obsidian" / "app.json").read_text(encoding="utf-8") == '{"theme": "moonstone"}' and (vault / "Daily.md").exists()
     again = write_vault(obsidian_files(first, ABOUT, root="scone/"), vault, projection=first.digest)
     assert (again.written, again.updated, again.removed) == (0, 0, 0) and again.unchanged == receipt.written, "the same notes are left as they are"
     later = projection_of(fact(1, "alice chen", "works_at", "Acme"), fact(2, "acme", "based_in", "Porto"))
     third = write_vault(obsidian_files(later, ABOUT, root="scone/"), vault, projection=later.digest)
-    assert not any(name.lower() == "bob.md" for name in (n.name for n in home.iterdir())) and third.removed == 2, \
-        "the notes written earlier for Bob and Lisbon, forgotten since, are removed"
+    assert not any(name.lower() == "bob.md" for name in (n.name for n in home.iterdir())) and \
+        third.removed == 2 + hubs_gone(first, later), \
+        "the notes written earlier for Bob and Lisbon, forgotten since, are removed, and so are renamed hubs"
     assert third.updated >= 1 and "mine" in (vault / DEFAULT_FOLDER / alice).read_text(encoding="utf-8")
     manifest = json.loads((vault / DEFAULT_FOLDER / MANIFEST).read_text(encoding="utf-8"))
     assert manifest["projection"] == later.digest and alice not in manifest["files"]
@@ -78,14 +91,16 @@ def test_a_note_unchanged_by_a_change_elsewhere_stays_unchanged_and_a_recased_no
     later = projection_of(fact(1, "alice chen", "works_at", "Acme"), fact(2, "bob", "knows", "Cho"), fact(3, "cho", "lives_in", "Porto"))
     receipt = write_vault(obsidian_files(later, ABOUT, root="scone/"), vault, projection=later.digest)
     names = {name.lower(): name for name in obsidian_files(later, ABOUT)}
-    assert receipt.unchanged >= 3 and receipt.removed == 0, "Alice's note has nothing to do with Porto and is left as it was"
+    assert receipt.unchanged >= 3 and receipt.removed == hubs_gone(first, later), \
+        "Alice's note has nothing to do with Porto and is left as it was; only a renamed hub goes"
     assert receipt.updated >= 2, "the index, the canvas and Cho's note changed"
     recased = projection_of(fact(1, "alice chen", "works_at", "Acme"), fact(2, "bob", "knows", "Alice Chen"),
                             fact(3, "cho", "lives_in", "Porto"))
     spelled = {name.lower(): name for name in obsidian_files(recased, ABOUT)}
     assert spelled["entities/alice chen.md"] != names["entities/alice chen.md"], "the fixture recases the note's name"
     third = write_vault(obsidian_files(recased, ABOUT, root="scone/"), vault, projection=recased.digest)
-    assert third.removed == 0 and third.kept_theirs == (), "a note whose spelling changed case is one note, not a stale one and a new one"
+    assert third.removed == hubs_gone(later, recased) and third.kept_theirs == (), \
+        "a note whose spelling changed case is one note, not a stale one and a new one"
     assert any(name.lower() == "alice chen.md" for name in (n.name for n in (vault / DEFAULT_FOLDER / "entities").iterdir()))
 
 
@@ -101,8 +116,10 @@ def test_a_note_whose_signature_was_taken_out_is_the_persons_again(tmp_path):
         "listed in the manifest or not, a note without the signature is the person's"
     manifest = json.loads((vault / DEFAULT_FOLDER / MANIFEST).read_text(encoding="utf-8"))
     assert acme not in manifest["files"]
-    gone = write_vault(obsidian_files(projection_of(fact(1, "bob", "knows", "Cho")), ABOUT, root="scone/"), vault, projection="p")
-    assert (vault / DEFAULT_FOLDER / acme).exists() and gone.removed == 1, "Lisbon's note goes as stale; the reclaimed note never does"
+    elsewhere = projection_of(fact(1, "bob", "knows", "Cho"))
+    gone = write_vault(obsidian_files(elsewhere, ABOUT, root="scone/"), vault, projection="p")
+    assert (vault / DEFAULT_FOLDER / acme).exists() and gone.removed == 1 + hubs_gone(projection, elsewhere), \
+        "Lisbon's note and its community's hub go as stale; the reclaimed note never does"
 
 
 def test_the_manifest_is_written_before_the_notes_so_a_crash_orphans_nothing(tmp_path, monkeypatch):

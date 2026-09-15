@@ -227,6 +227,28 @@ def context_index(store: object) -> Optional[ContextIndex]:
     return store if getattr(store, "context_lane", False) and isinstance(store, ContextIndex) else None
 
 
+@runtime_checkable
+class QuestionIndex(Protocol):
+    """A document store that keeps, beside each chunk's text, the questions a
+    model wrote that the chunk answers (ingestion.chunk_questions), apart
+    from the context index so neither lane's words rank in the other.
+    Optional: ``question_index(store)`` says whether a store has it."""
+
+    question_lane: bool
+
+    async def index_questions(self, space: str, chunk_id: int, questions: Sequence[str]) -> bool:
+        """Replace the chunk's questions; no questions removes them. False,
+        writing nothing, when the space holds no such chunk (it was forgotten)."""
+        ...
+
+    async def search_questions(self, space: str, query: str, limit: int, filter: "TextFilter") -> list[tuple[int, float]]: ...
+
+
+def question_index(store: object) -> Optional[QuestionIndex]:
+    """``store`` as a question index when it keeps one, else None."""
+    return store if getattr(store, "question_lane", False) and isinstance(store, QuestionIndex) else None
+
+
 class DocumentStore(Protocol):
     """Truth: episodes, their chunks, and facts. Also the lexical lane,
     because full-text search wants to live next to the text."""

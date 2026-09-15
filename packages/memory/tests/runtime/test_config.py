@@ -190,6 +190,50 @@ def test_recency_settings_come_from_the_environment_reach_the_engine_and_refuse_
     assert (blank.recency_weight, blank.recency_half_life_days) == (W_RECENCY, RECENCY_HALF_LIFE_DAYS), "an empty value is unset, as the neighbours treat it"
 
 
+def test_the_feedback_weight_comes_from_the_environment_is_off_by_default_and_refuses_bad_values(tmp_path):
+    import asyncio
+
+    import pytest
+
+    from scone_memory.core.errors import InvalidInput
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    base = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
+    assert Settings.from_env(base).feedback_weight == 0.0, "recorded feedback moves nothing unless asked"
+    assert Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": ""}).feedback_weight == 0.0
+    tuned = Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.004"})
+    assert tuned.feedback_weight == 0.004 and "feedback_weight" in ENGINE_SETTINGS
+    engine = asyncio.run(build_engine(tuned))
+    try:
+        assert engine.feedback_weight == 0.004
+    finally:
+        asyncio.run(engine.close())
+    from scone_memory import HashEmbedder
+
+    bench = asyncio.run(build_in_process_engine(tuned, HashEmbedder()))
+    try:
+        assert bench.feedback_weight == 0.004
+    finally:
+        asyncio.run(bench.close())
+    for value in ("-0.1", "two", "inf", "1.5"):
+        with pytest.raises(InvalidInput, match="SCONE_FEEDBACK_WEIGHT"):
+            Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": value})
+
+
+def test_a_feedback_weight_with_no_event_log_is_refused(tmp_path):
+    """The prior reads judgements from the event log: with none, the setting would move nothing and say so nowhere."""
+    import pytest
+
+    from scone_memory.core.errors import InvalidInput
+
+    base = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
+    with pytest.raises(InvalidInput, match="SCONE_FEEDBACK_WEIGHT.*SCONE_EVENTS=none"):
+        Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.0001", "SCONE_EVENTS": "none"})
+    assert Settings.from_env(base | {"SCONE_EVENTS": "none"}).events == "none", "off, it needs no log"
+    assert Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.0001", "SCONE_EVENTS": "memory"}).feedback_weight == 0.0001
+    assert Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.0001"}).events is None, "the default log is read"
+
+
 async def test_a_synonym_file_is_read_at_build_time_and_reaches_every_engine(tmp_path):
     from scone_memory import HashEmbedder
     from scone_memory.runtime.config import FILE_SETTINGS, build_in_process_engine, build_synonyms
@@ -227,13 +271,30 @@ async def test_the_context_lane_is_a_flag_that_reaches_every_engine():
         Settings.from_env({"SCONE_CONTEXT_LANE": "maybe"})
 
 
+async def test_the_question_lane_is_a_flag_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_QUESTION_LANE": "1"})
+    assert settings.question_lane is True and Settings.from_env({}).question_lane is False
+    assert "question_lane" in ENGINE_SETTINGS
+    engine = await build_engine(settings)
+    try:
+        assert engine.question_lane is True
+    finally:
+        await engine.close()
+    assert (await build_in_process_engine(settings, HashEmbedder())).question_lane is True
+    with pytest.raises(InvalidInput, match="SCONE_QUESTION_LANE"):
+        Settings.from_env({"SCONE_QUESTION_LANE": "maybe"})
+
+
 async def test_the_vector_weight_is_a_number_that_reaches_every_engine():
     from scone_memory import HashEmbedder
     from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
 
     settings = Settings.from_env({"SCONE_VECTOR_WEIGHT": "0.5"})
     assert settings.vector_weight == 0.5 and Settings.from_env({}).vector_weight is None and "vector_weight" in ENGINE_SETTINGS
-    assert (await build_in_process_engine(Settings.from_env({}), HashEmbedder())).vector_weight == 0.25, "unset follows the embedder"
+    assert (await build_in_process_engine(Settings.from_env({}), HashEmbedder())).vector_weight == 0.01, "unset follows the embedder"
     engine = await build_engine(settings)
     try:
         assert engine.vector_weight == 0.5
@@ -243,3 +304,37 @@ async def test_the_vector_weight_is_a_number_that_reaches_every_engine():
     for bad in ("0", "5", "many", "nan"):
         with pytest.raises(InvalidInput, match="SCONE_VECTOR_WEIGHT"):
             Settings.from_env({"SCONE_VECTOR_WEIGHT": bad})
+
+
+async def test_a_token_chunk_target_is_a_number_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_CHUNK_TOKENS": " 512 ", "SCONE_CHUNK_OVERLAP_TOKENS": "32"})
+    assert (settings.chunk_tokens, settings.chunk_overlap_tokens) == (512, 32)
+    assert (Settings.from_env({}).chunk_tokens, Settings.from_env({}).chunk_overlap_tokens) == (None, 0)
+    unset = Settings.from_env({"SCONE_CHUNK_TOKENS": "", "SCONE_CHUNK_OVERLAP_TOKENS": " "})
+    assert (unset.chunk_tokens, unset.chunk_overlap_tokens) == (None, 0), "an empty value is unset, as elsewhere"
+    assert {"chunk_tokens", "chunk_overlap_tokens"} <= set(ENGINE_SETTINGS)
+    engine = await build_engine(settings)
+    try:
+        assert (engine.chunk_tokens, engine.chunk_overlap_tokens) == (512, 32)
+    finally:
+        await engine.close()
+    in_process = await build_in_process_engine(settings, HashEmbedder())
+    assert (in_process.chunk_tokens, in_process.chunk_overlap_tokens) == (512, 32)
+
+
+@pytest.mark.parametrize("env, match", [
+    ({"SCONE_CHUNK_TOKENS": "0"}, "SCONE_CHUNK_TOKENS/SCONE_CHUNK_OVERLAP_TOKENS: chunk_tokens must be"),
+    ({"SCONE_CHUNK_TOKENS": "8"}, "SCONE_CHUNK_TOKENS/SCONE_CHUNK_OVERLAP_TOKENS: chunk_tokens must be"),
+    ({"SCONE_CHUNK_TOKENS": "many"}, "SCONE_CHUNK_TOKENS must be a whole number of tokens, got 'many'"),
+    ({"SCONE_CHUNK_TOKENS": "512.5"}, "SCONE_CHUNK_TOKENS must be a whole number"),
+    ({"SCONE_CHUNK_TOKENS": "64", "SCONE_CHUNK_OVERLAP_TOKENS": "64"}, "chunk_overlap_tokens must be"),
+    ({"SCONE_CHUNK_TOKENS": "64", "SCONE_CHUNK_OVERLAP_TOKENS": "-1"}, "chunk_overlap_tokens must be"),
+    ({"SCONE_CHUNK_TOKENS": "64", "SCONE_CHUNK_OVERLAP_TOKENS": "some"}, "SCONE_CHUNK_OVERLAP_TOKENS must be a whole number"),
+    ({"SCONE_CHUNK_OVERLAP_TOKENS": "16"}, "SCONE_CHUNK_OVERLAP_TOKENS needs SCONE_CHUNK_TOKENS"),
+])
+def test_a_token_chunk_target_that_cannot_work_is_refused_by_name(env, match):
+    with pytest.raises(InvalidInput, match=match):
+        Settings.from_env(env)
