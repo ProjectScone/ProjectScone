@@ -607,6 +607,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start after this chunk id: the resume_after a pass cut by --max-chunks reported")
     p.add_argument("--episode", type=int, action="append", dest="episodes", default=None,
                    help="only this episode's chunks; repeat for more")
+    p = sub.add_parser("dynamic-schema", help="propose graph triples with the configured chat model (SCONE_CHAT_URL, "
+                                              "SCONE_CHAT_MODEL) under a suggested vocabulary, each quoting its chunk; "
+                                              "they wait for review as proposals")
+    p.add_argument("--kind", action="append", dest="kinds", default=[], help="a suggested entity kind; repeat for more")
+    p.add_argument("--predicate", action="append", dest="predicates", default=[],
+                   help="a suggested predicate; repeat for more")
+    p.add_argument("--no-new-types", action="store_true",
+                   help="refuse triples whose kinds or predicate are not suggested (a fixed schema)")
+    p.add_argument("--max-calls", type=int, default=200, help="chunks one pass asks about (1 to 2000, default 200)")
+    p.add_argument("--max-triples", type=int, default=10, help="entries read from one reply (1 to 50, default 10)")
+    p.add_argument("--max-new-predicates", type=int, default=20,
+                   help="new predicates one pass may propose (0 to 200, default 20)")
+    p.add_argument("--max-new-kinds", type=int, default=10, help="new kinds one pass may propose (0 to 200, default 10)")
+    p.add_argument("--after-chunk", type=int, default=None,
+                   help="start after this chunk id: the resume_after a pass cut by --max-calls reported")
+    p.add_argument("--episode", type=int, action="append", dest="episodes", default=None,
+                   help="only this episode's chunks; repeat for more")
     p = sub.add_parser("bench-questions",
                        help="write questions a corpus answers with the local model, anchored to quotes, "
                             "or measure retrieval on the corpus with a set written before")
@@ -1892,6 +1909,24 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             emit(written.record())
         else:
             print(written.text(), file=out)
+        return 0
+
+    if args.command == "dynamic-schema":
+        from .config import build_chat
+        from ..ingestion.dynamic_schema import extract_dynamic_schema
+
+        model = build_chat(settings) if settings is not None else None
+        if model is None:
+            raise InvalidInput("dynamic-schema needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+        schema_report = await extract_dynamic_schema(
+            engine, space, model, entity_kinds=args.kinds, predicates=args.predicates,
+            allow_new_types=not args.no_new_types, max_calls=args.max_calls, max_triples_per_chunk=args.max_triples,
+            max_new_predicates=args.max_new_predicates, max_new_kinds=args.max_new_kinds,
+            after_chunk=args.after_chunk, episode_ids=args.episodes, model_name=settings.chat_model or "")
+        if args.json:
+            emit(schema_report.record())
+        else:
+            print(schema_report.text(), file=out)
         return 0
 
     if args.command == "sync-directory":
