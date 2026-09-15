@@ -10,11 +10,11 @@ import asyncio
 
 import pytest
 
-from scone_memory.realtime.audio import ReplyCompleted, SpeechStarted, TextDelta, Transcript
+from scone_memory.realtime.audio import SpeechStarted, TextDelta, Transcript
 from scone_memory.realtime.keypad import KeypadPolicy, Keypress
 from scone_memory.realtime.turn_end import LexicalEndOfTurn
 
-from .test_voice_turn_end import PCM, SID, SPACE, Model, Resource, Rig, memory  # noqa: F401 - memory is a fixture
+from .test_voice_turn_end import PCM, Model, Resource, Rig, memory  # noqa: F401 - memory is a fixture
 
 
 async def keys(rig, *presses):
