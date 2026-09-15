@@ -21,6 +21,7 @@ from ...core.errors import InvalidInput
 from .archive import SafeArchive
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 from .table_types import DocumentTableCell
+from .word_structure import WordStructure
 from .word_tables import word_children, word_table
 from .xlsx_tables import cell_position, spreadsheet_tables, spreadsheet_text_supported
 
@@ -102,6 +103,9 @@ class _Output:
         self.segments: list[DocumentSegment] = []
         self.text_bytes = 0
         self.deadline = monotonic() + limits.timeout_seconds
+        #: Parts the reader could not use and read around, named once each
+        #: in the document's ``structure_notes``.
+        self.notes: set[str] = set()
 
     def check(self) -> None:
         if monotonic() > self.deadline:
@@ -266,7 +270,15 @@ def _row_text(row: Element, output: _Output) -> str:
 
 def _word_content(
     root: Element, output: _Output, prefix: str, metadata: dict[str, str],
+    structure: WordStructure, declared: dict[Element, dict[str, str]],
 ) -> Iterator[tuple[Element, str, list[Element]]]:
+    # Paragraph properties are run metadata to the text reader and are pruned
+    # below, so what each paragraph declares is read first. A text box is
+    # detached from a paragraph already pruned, and read again declares
+    # nothing: only a role found is kept, so the body's reading stands.
+    for element in root.iter():
+        if _local(element.tag) == 'p' and (role := structure.role(element, output.check)):
+            declared[element] = role
     _prune_run_metadata(root, output)
     paragraphs = tables = 0
     for block in _blocks(root, {'p', 'tbl'}, include_tags=frozenset(_WORD_REFERENCES)):
@@ -290,7 +302,7 @@ def _word_content(
             paragraphs += 1
             locator = f'{prefix}paragraph:{paragraphs}'
             boxes = _detach_textboxes(block, output)
-            output.add(_run_text(block, output), locator, metadata)
+            output.add(_run_text(block, output), locator, {**metadata, **declared.get(block, {})})
             yield block, locator, boxes
 
 
@@ -352,6 +364,20 @@ def _word_note_part(
     return path, entries
 
 
+def _word_structure_part(bundle: SafeArchive, source: str, relations: dict[str, tuple[str, str]],
+                         kind: str, output: _Output) -> Element | None:
+    """The styles or numbering part, or None. One the reader cannot open is
+    noted and read around: it names roles, and the text does not depend on it."""
+    identifier = next((key for key, (_, relationship_kind) in relations.items() if relationship_kind == kind), None)
+    if identifier is None:
+        return None
+    try:
+        return bundle.xml(_related(source, relations, identifier, kind), supported_namespaces=_WORD_TEXT_NAMESPACES)
+    except InvalidInput:
+        output.notes.add(f'{kind}_unreadable')
+        return None
+
+
 def _docx(bundle: SafeArchive, output: _Output) -> None:
     source = _main_part(bundle)
     root = bundle.xml(source, supported_namespaces=_WORD_TEXT_NAMESPACES)
@@ -359,12 +385,15 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
     if _local(root.tag) != 'document' or body is None:
         raise InvalidInput('DOCX is missing its document body')
     relations = _relationships(bundle, source)
+    structure = WordStructure(_word_structure_part(bundle, source, relations, 'styles', output),
+                              _word_structure_part(bundle, source, relations, 'numbering', output))
+    declared: dict[Element, dict[str, str]] = {}
     parts: dict[str, tuple[str, dict[str, Element]]] = {}
     emitted: set[tuple[str, str]] = set()
     pending = deque([(body, '', {'member': source})])
     while pending:
         content, prefix, metadata = pending.popleft()
-        for block, locator, boxes in _word_content(content, output, prefix, metadata):
+        for block, locator, boxes in _word_content(content, output, prefix, metadata, structure, declared):
             for number, box in enumerate(boxes, 1):
                 details = {'member': metadata['member'], 'content_role': 'textbox', 'parent_locator': locator}
                 pending.append((box, _word_prefix(locator, f'/textbox:{number}/'), details))
@@ -391,6 +420,7 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
                             details[key] = value
                 suffix = f'/{kind}:{identifier}/'
                 pending.append((note, _word_prefix(locator, suffix), details))
+    output.notes.update(structure.notes)
 
 
 def _xlsx(bundle: SafeArchive, output: _Output) -> None:
@@ -748,8 +778,10 @@ def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDo
             'table_status' in segment.metadata for segment in output.segments) else 'native-xml'
         if family == 'sheet' and any('table_status' in segment.metadata for segment in output.segments):
             parser = 'native-xml-xlsx-tables-v1'
-        parsed = ParsedDocument(format=extension, parser=parser, segments=tuple(output.segments),
-                                metadata={'macros': 'present, not read'} if macros else {})
+        metadata = {'macros': 'present, not read'} if macros else {}
+        if output.notes:
+            metadata['structure_notes'] = ','.join(sorted(output.notes))
+        parsed = ParsedDocument(format=extension, parser=parser, segments=tuple(output.segments), metadata=metadata)
         validate_document(parsed, limits)
         return parsed
     except (ValidationError, ValueError, OverflowError, RecursionError):
