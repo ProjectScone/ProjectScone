@@ -1274,7 +1274,23 @@ and writes nothing — until interrupted or `--rounds` passes are done. Each
 pass prints its own receipt under a timestamp (under `--json`, a
 `{"pass": n, "at": …}` line before each receipt, so the output stays a JSON
 stream `jq` can read), so what the graph reflects at any moment is what the
-last pass said. A file that did not change is not recorded again, but what
+last pass said.
+
+**A pass that suddenly sees far less refuses to forget it.** A directory
+that cannot be read this minute — a permission changed, a volume not
+mounted, a checkout half done — looks from here exactly like a directory
+whose files were deleted, and only one of those should forget a memory.
+So when more than half the files the last pass saw are missing
+(`--shrink-share`, over 0 to 1, 0.5 by default), and at least five of them
+are (below that a share says nothing: two files of three is an ordinary
+morning), the pass writes what it did read and forgets none of them. The
+receipt says so in words and, under `--json`, as `shrink_refused` with
+`would_forget`, `seen_before`, the `share` in force, and the first twenty
+`files` with `files_truncated` when there were more. What it kept stays
+under watch, so a file that really was deleted during the outage is
+forgotten by the first pass that can see the tree again. `--allow-shrink`
+forgets whatever is missing, however much that is, for a caller who knows
+the files are gone. A file that did not change is not recorded again, but what
 it declares still counts: a call in a changed file binds to a declaration
 in an unchanged one. This is the reference graph
 tool's watch mode without a file-system event library: polling, bounded,
