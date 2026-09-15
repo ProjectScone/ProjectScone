@@ -254,6 +254,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-embed every stored chunk with this embedder and record it as the writer")
     action.add_argument("--adopt", action="store_true",
                         help="vouch that vectors stored before writers were recorded came from this embedder")
+    p = sub.add_parser("reembed-images", help="embed the space's stored images again with the image lane's embedder, "
+                                              "newest first (bounded); an engine without the lane refuses")
+    p.add_argument("--limit", type=int, default=100, help="file episodes one pass reads (1 to 1000, default 100)")
+    p.add_argument("--before", type=int, metavar="EPISODE_ID", help="walk on from a previous pass's resume point")
     p = sub.add_parser("forget-due", help="forget what each memory's own --forget-after says is due, "
                                           "most overdue first (bounded)")
     p.add_argument("--limit", type=int, default=100, help="episodes one pass forgets (1 to 1000, default 100)")
@@ -2499,6 +2503,32 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                       f"removed {reembedded.orphans_removed} orphan vector(s)", file=out)
             if vector_state["blocked"]:
                 print(f"  vector lane off: {vector_state['blocked']}", file=out)
+        return 0
+
+    if args.command == "reembed-images":
+        rebuilt = await engine.reembed_images(space, limit=args.limit, before=args.before)
+        if args.json:
+            emit(rebuilt.model_dump())
+            return 0
+        print(f"re-embedded {rebuilt.reembedded} image(s) of {rebuilt.scanned} file episode(s) with {rebuilt.embedder}; "
+              f"{len(rebuilt.forgotten)} forgotten meanwhile, {len(rebuilt.failed)} failed", file=out)
+        if rebuilt.failed:
+            print(f"  failed: {', '.join(map(str, rebuilt.failed))} (first: {rebuilt.error})", file=out)
+        if not rebuilt.scan_complete:
+            print(f"  stopped at --limit {rebuilt.limit}: run again with --before {rebuilt.resume_before}", file=out)
+        elif rebuilt.orphans_removed is None:
+            print("  walk complete; the image index cannot list its vectors, so vectors of forgotten images "
+                  "were not looked for", file=out)
+        else:
+            print(f"  walk complete; removed {rebuilt.orphans_removed} vector(s) of forgotten images", file=out)
+        print("  image index: " + {
+            "recorded": f"records {rebuilt.embedder} as its writer; the image lane is on",
+            "rebuilding": "rebuild in progress; the image lane is off until a pass completes with no space pending",
+            "refused": "records another image embedder as its writer; the image lane is refused",
+            "tagged": "cannot record a writer; the image lane ignores vectors another image embedder tagged",
+        }[rebuilt.writer], file=out)
+        if rebuilt.spaces_pending:
+            print(f"  spaces still holding another image embedder's vectors: {', '.join(rebuilt.spaces_pending)}", file=out)
         return 0
 
     if args.command == "forget-due":

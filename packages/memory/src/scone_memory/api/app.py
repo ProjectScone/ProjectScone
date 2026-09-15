@@ -520,6 +520,8 @@ def create_app(
             "facts.reconsider": True, "facts.reopen": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
+            # Served always; an engine without the image lane, or a store that cannot list episodes, refuses.
+            "images.reembed": engine.image_vectors is not None and callable(getattr(engine.documents, "page_episodes", None)),
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
             "documents.files": True, "documents.provenance": True, "documents.ocr.tables": True,
             "chats.imports": True,
