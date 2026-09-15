@@ -127,7 +127,7 @@ ATTACHMENT_TYPES = (
     "application/pdf", "application/json", "text/plain", "text/markdown", "text/csv",
     "audio/mpeg", "audio/wav", "audio/webm", "video/mp4", "video/webm",
     "application/octet-stream", "text/html", "application/xml", "text/xml", "application/x-ndjson",
-    "text/tab-separated-values", "message/rfc822", "application/rtf", "application/vnd.ms-outlook",
+    "text/tab-separated-values", "message/rfc822", "application/mbox", "application/rtf", "application/vnd.ms-outlook",
     "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
     "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
