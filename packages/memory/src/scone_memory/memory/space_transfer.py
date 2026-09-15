@@ -110,19 +110,26 @@ def episode_record(row: dict, space: str) -> Record:
     return record
 
 
-async def selected_episodes(memory: MemoryEngine, snapshot: Snapshot, into: str) -> dict[int, Record]:
+async def selected_episodes(memory: MemoryEngine, snapshot: Snapshot, into: str) -> tuple[dict[int, Record], int]:
+    """The episodes the import will store, and how many it will leave because
+    their own schedule has come -- judged in the order the import judges."""
     selected: dict[int, Record] = {}
+    overdue = 0
     for row in snapshot.transfer.records:
         if row['type'] != 'episode':
             continue
         record = episode_record(row, into)
         digest = record.content_hash or content_hash(into, record.content, record.dedup_key)
-        if await memory.documents.tombstone_by_hash(into, digest) is None:
-            selected[row['episode_id']] = record
-    return selected
+        if await memory.documents.tombstone_by_hash(into, digest) is not None:
+            continue
+        if archive.overdue(record, memory.clock()):
+            overdue += 1
+            continue
+        selected[row['episode_id']] = record
+    return selected, overdue
 
 
-def receipt(space: str, into: str, snapshot: Snapshot, selected: dict[int, Record]) -> archive.MergeReceipt:
+def receipt(space: str, into: str, snapshot: Snapshot, selected: dict[int, Record], overdue: int = 0) -> archive.MergeReceipt:
     requested = {identity for episode_id in selected for identity in snapshot.transfer.links[episode_id]}
     skipped = set(snapshot.transfer.blobs) - requested
     moved = requested | set(snapshot.unlinked)
@@ -131,7 +138,8 @@ def receipt(space: str, into: str, snapshot: Snapshot, selected: dict[int, Recor
         space=space, into=into, episodes=len(selected),
         facts=sum(row['type'] == 'fact' for row in snapshot.rows),
         attachments=len(moved), attachment_bytes=sum(blobs[identity][0].bytes for identity in moved),
-        unlinked_attachments=len(snapshot.unlinked), tombstoned=len(snapshot.transfer.links) - len(selected),
+        unlinked_attachments=len(snapshot.unlinked), tombstoned=len(snapshot.transfer.links) - len(selected) - overdue,
+        past_forget_after=overdue,
         attachments_skipped=len(skipped), forgotten_source_references=snapshot.forgotten_source_references)
 
 
@@ -139,8 +147,10 @@ async def verify_destination(memory: MemoryEngine, snapshot: Snapshot, into: str
                              selected: dict[int, Record]) -> None:
     wanted = dict(snapshot.unlinked)
     for old_id, record in selected.items():
+        # Re-deriving a stored record's identity, not writing it: a schedule
+        # that came due since the import is not a reason to refuse the check.
         expected = validated_record(into, record, memory.clock(),
-                                    verified_visual=isinstance(record, RetainedVideoRecord))
+                                    verified_visual=isinstance(record, RetainedVideoRecord), past_schedule=True)
         current = await memory.documents.episode_by_hash(into, expected.content_hash)
         if current is None or attachment_archive._episode_signature(current) != attachment_archive._episode_signature(expected):
             raise InvalidInput('destination source evidence changed during space transfer')
@@ -168,8 +178,8 @@ async def merge(memory: MemoryEngine, space: str, into: str, *, preview: bool,
     check()
     snapshot = await capture(memory, space)
     check()
-    selected = await selected_episodes(memory, snapshot, into)
-    result = receipt(space, into, snapshot, selected)
+    selected, overdue = await selected_episodes(memory, snapshot, into)
+    result = receipt(space, into, snapshot, selected, overdue)
     check()
     if preview:
         return result
@@ -179,6 +189,8 @@ async def merge(memory: MemoryEngine, space: str, into: str, *, preview: bool,
     check()
     if imported.tombstoned != result.tombstoned:
         raise InvalidInput('destination tombstone policy changed during space transfer')
+    if imported.past_forget_after != result.past_forget_after:
+        raise InvalidInput('a source came due to be forgotten during space transfer; source remains open, merge again')
     await attachment_archive.stage_blobs(memory.blobs, into, snapshot.unlinked)
     check()
     await verify_destination(memory, snapshot, into, selected)

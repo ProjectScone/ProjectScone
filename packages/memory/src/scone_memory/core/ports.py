@@ -189,6 +189,8 @@ class SourcePage:
     episodes: list[Episode]
     has_more: bool
     next_before: Optional[int]
+    #: Sources the walk passed over because their ``forget_after`` had come.
+    past_forget_after: int = 0
 
 
 @runtime_checkable

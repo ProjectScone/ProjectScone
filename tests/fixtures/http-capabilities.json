@@ -66,6 +66,7 @@
       "documents.sync": false,
       "documents.provenance": true,
       "episodes.forget": true,
+      "episodes.forget_after": true,
       "facts.reconsider": true,
       "facts.reopen": true,
       "filesystem.read": true,

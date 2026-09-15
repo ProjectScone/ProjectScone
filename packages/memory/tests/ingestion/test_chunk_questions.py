@@ -453,3 +453,21 @@ async def test_the_route_and_the_command_need_a_model_and_the_lane():
     with TestClient(create_app(off, {"key-a": "s"}, synthesis_factory=lambda: FakeChat())) as client:
         refused = client.post("/v1/chunk-questions", headers={"Authorization": "Bearer key-a"})
         assert refused.status_code == 422 and "SCONE_QUESTION_LANE" in refused.text
+
+
+async def test_a_memory_past_its_forget_after_is_not_shown_to_the_question_model():
+    from scone_memory.testing import Clock
+
+    clock = Clock("2026-09-15T12:00:00.000Z")
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=4000,
+                                question_lane=True, events=InMemoryEventLog(), clock=clock).open()
+    await engine.remember("s", HARBOUR, kind="file", source="harbour.md", forget_after="1h")
+    await engine.remember("s", ORCHARD, kind="file", source="orchard.md")
+    clock.now = "2026-09-15T13:00:00.000Z"
+    model = FakeChat([reply(("When does picking start?", "Picking starts in the last week of September"
+                                                         " and ends before the first frost."))])
+    report = await engine.build_chunk_questions("s", model)
+    shown = " ".join(user for _, user in model.calls)
+    assert "Vellmar" not in shown and "Bramley" in shown and report.model_calls == 1
+    assert report.episodes_past_forget_after == 1 and report.record()["episodes_past_forget_after"] == 1
+    assert "1 episode(s) past their forget_after not read" in report.text()
