@@ -113,6 +113,7 @@ storage ports, source validation and resource ownership.
 | Constrain, review or quote an answer | [Answer review and output contracts](docs/answer-review.md) |
 | Add voice, personas and provider adapters | [Voice conversations](docs/voice-conversations.md) |
 | Expose authenticated sessions and retain their lifecycle | [Conversation service](docs/conversation-service.md) |
+| Give an OpenAI-compatible app memory by changing its base URL | [OpenAI-compatible chat](docs/openai-compatible-chat.md) |
 | Measure retrieval, generation and capacity | [QA experiments](benchmarks/README.md), [scaling validation](docs/scaling-validation.md) |
 
 The repository [.env.example](../../.env.example) lists supported configuration.

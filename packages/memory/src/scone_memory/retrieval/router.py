@@ -29,14 +29,14 @@ Nothing here calls a model.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional, cast
 
 from ..core.errors import InvalidInput
 from ..core.validation import check_space
 
 if TYPE_CHECKING:
     from ..providers.llm import ChatModel
-    from .synthesis import SynthesisLimits
+    from .synthesis import Mode, SynthesisLimits
     from ..memory.engine import MemoryEngine
 
 #: The ways a question can be answered, in the order they are tried.
@@ -78,7 +78,8 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
                           now: Optional[str] = None, limit: int = DEFAULT_LIMIT,
                           route: Optional[str] = None, max_item_chars: int = DEFAULT_ITEM_CHARS,
                           synthesis: Optional["ChatModel"] = None,
-                          synthesis_limits: Optional["SynthesisLimits"] = None) -> Answered:
+                          synthesis_limits: Optional["SynthesisLimits"] = None,
+                          synthesis_mode: Optional[str] = None) -> Answered:
     """Answer a question with whichever machinery suits it, and say which.
 
     ``max_item_chars`` bounds each passage shown in an ordinary answer's
@@ -87,7 +88,10 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
 
     ``route="synthesize"`` is the one route the rule never chooses: it
     reads up to ``limit`` passages and has ``synthesis``, a model, write
-    cited sentences about them. Without a model it is refused."""
+    cited sentences about them. Without a model it is refused.
+    ``synthesis_mode`` -- ``evidence`` (the default), ``refine`` or
+    ``accumulate`` -- is how the synthesis reads its passages, and is
+    refused on any other route."""
     check_space(space)
     if not isinstance(max_item_chars, int) or isinstance(max_item_chars, bool) or max_item_chars < 0:
         raise InvalidInput(f"max_item_chars must be a whole number of characters (0 for whole passages), not {max_item_chars!r}")
@@ -97,11 +101,16 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
         raise InvalidInput(f"limit must be from 1 to {MAX_LIMIT}")
     if route is not None and route not in NAMED_ROUTES:
         raise InvalidInput(f"route must be one of {', '.join(NAMED_ROUTES)}, not {route!r}")
+    # A mode's name is checked by the synthesis itself, before any model call.
+    if synthesis_mode is not None and route != "synthesize":
+        raise InvalidInput("synthesis_mode applies to the synthesize route only; ask for route=synthesize")
     if route == "synthesize":
         if synthesis is None:
             raise InvalidInput("the synthesize route needs a model; none is configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
         return await _synthesize(engine, space, question, synthesis, limit, synthesis_limits,
-                                 why="the synthesize route was asked for")
+                                 why="the synthesize route was asked for",
+                                 # Any name given, the empty one too, is checked there; only no name is the default.
+                                 mode=cast("Mode", "evidence" if synthesis_mode is None else synthesis_mode))
     when = now or engine.clock()
     if route is not None:
         return await _by(engine, space, question, route, when, limit,
@@ -183,16 +192,20 @@ def _labels(text: str) -> list[str]:
 
 
 async def _synthesize(engine: "MemoryEngine", space: str, question: str, model: "ChatModel", limit: int,
-                      limits: Optional["SynthesisLimits"], why: str) -> Answered:
+                      limits: Optional["SynthesisLimits"], why: str, mode: "Mode" = "evidence") -> Answered:
     """Many passages read, a few cited sentences written; only ever asked for by name."""
     from .synthesis import SynthesisLimits, synthesize
 
-    made = await synthesize(engine, model, space, question, limits=limits or SynthesisLimits(max_passages=limit))
+    made = await synthesize(engine, model, space, question, limits=limits or SynthesisLimits(max_passages=limit),
+                            mode=mode)
     text = made.text()
     if not text:
         text = f"nothing to say: {made.status.replace('_', ' ')}"
         if made.reasons:
             text += f" ({'; '.join(made.reasons)})"
+    elif made.status == "partial":
+        # The text is all the command line prints: an answer that left passages unread or cut says so there.
+        text += f"\npartial: {'; '.join(made.reasons)}"
     return Answered(question, "synthesize", why, text, made.record())
 
 

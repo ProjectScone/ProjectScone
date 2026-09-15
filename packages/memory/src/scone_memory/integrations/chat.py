@@ -22,6 +22,7 @@ from ..core.models import Added
 from ..memory.engine import MemoryEngine
 from ..providers.llm import ChatModel
 from ..retrieval.followup import MODES, REWRITE_TIMEOUT_S, fused, plan_followup
+from ..retrieval.listwise import one_listwise_budget
 from ..retrieval.query_formulation import formulate_query
 
 #: What the injected message says before the recalled lines.
@@ -116,13 +117,15 @@ async def recall_context(
     query = formulate_query(query).text
 
     options: dict[str, Any] = dict(limit=limit, tags=tuple(tags), where=dict(where or {}))
-    found = await engine.recall(space, query, **options)
     planned = None
-    if followup != "off":
-        planned = await plan_followup(messages, followup, model=followup_model, question=query, timeout_s=followup_timeout)
-        if planned.query is not None:
-            found, facts_dropped = fused(found, await engine.recall(space, planned.query, **options), limit=limit)
-            planned = replace(planned, facts_dropped=facts_dropped)
+    # A listwise model reranker's passes share one timeout across both searches.
+    with one_listwise_budget():
+        found = await engine.recall(space, query, **options)
+        if followup != "off":
+            planned = await plan_followup(messages, followup, model=followup_model, question=query, timeout_s=followup_timeout)
+            if planned.query is not None:
+                found, facts_dropped = fused(found, await engine.recall(space, planned.query, **options), limit=limit)
+                planned = replace(planned, facts_dropped=facts_dropped)
     record = planned.record() if planned is not None else None
     texts, episodes, facts = _lines(found, floor)
     # The budget is the whole injected message, header included: a caller

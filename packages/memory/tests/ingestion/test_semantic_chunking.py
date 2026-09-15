@@ -191,10 +191,10 @@ async def test_a_stop_inside_a_name_or_an_abbreviation_is_not_a_boundary():
     """Every cut this module makes lands on a sentence boundary, so a
     wrong boundary is a wrong cut. A title, an initial, and a stop
     followed by a lower-case word are all mid-sentence."""
-    from scone_memory.ingestion.semantic_chunks import _sentences
+    from scone_memory.ingestion.semantic_chunks import sentence_spans
 
     text = "Dr. J. Anderson joined in May. Revenue rose, i.e. it grew. Fine."
-    assert [text[s.start:s.end] for s in _sentences(text)] == [
+    assert [text[s.start:s.end] for s in sentence_spans(text)] == [
         "Dr. J. Anderson joined in May. ",
         "Revenue rose, i.e. it grew. ",
         "Fine.",

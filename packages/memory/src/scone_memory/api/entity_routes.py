@@ -31,6 +31,8 @@ from ..entities.grounding import checked_facts
 from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
                                     likely_duplicates)
 from ..entities.cycles import DEFAULT_LIMIT as CYCLES_LIMIT, MAX_BYTES as CYCLES_BYTES, MAX_LIMIT as CYCLES_MAX, graph_cycles
+from ..entities.stats import (DEFAULT_HUBS, MAX_BYTES as STATS_BYTES, MAX_HUBS, MAX_PERCENTILE, MIN_PERCENTILE, graph_hubs,
+                              graph_stats)
 from ..entities.health import (DEFAULT_EXAMPLES as HEALTH_EXAMPLES, MAX_BYTES as HEALTH_BYTES, MAX_EXAMPLES,
                                graph_health)
 from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
@@ -484,20 +486,25 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     @app.get("/v1/graph/export", response_model=None)
     async def get_export(
         format: ExportFormat = "json", status: StatusMode = "current", as_of: Optional[str] = None,
-        space: str = Depends(space_for),
+        usage: bool = False, usage_since: Optional[str] = None, space: str = Depends(space_for),
     ) -> Response:
         """The view's whole graph as a file another tool reads: node-link JSON,
         GraphML, dynamic GEXF, Cypher, CSV, JSON-LD, an Obsidian vault (with a
         canvas of its notes), a wiki an agent can crawl, a Mermaid chart, an
         SVG drawing, an Obsidian canvas, one interactive page of the busiest
-        entities (`html`) or the whole graph on one page (`explorer`). The
-        file says which projection it holds and, when the read was capped,
-        that it is partial."""
+        entities (`html`), the whole graph on one page (`explorer`) or a map by
+        community (`communities`). The file says which projection it holds and,
+        when the read was capped, that it is partial. With ``usage`` (or
+        ``usage_since``) the SVG and the `html` page say on each entity how many
+        recent recalls returned it, and over which recalls; other formats ignore
+        it."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
         reasons = coverage.get("reasons") or []
         about = {"status": status, "as_of": when, "coverage": {**coverage, "truncated": bool(reasons)}}
-        exported = export_graph(projection, format, about=about)
+        recalls = (await recall_usage(engine, space, since=None if usage_since is None else _moment(engine, usage_since))
+                   if usage or usage_since is not None else None)
+        exported = export_graph(projection, format, about=about, usage=recalls)
         return Response(exported.body, media_type=exported.media_type, headers={
             "Content-Disposition": f'attachment; filename="{exported.filename}"',
             "X-Scone-Projection-Digest": projection.digest, "X-Scone-Truncated": "true" if reasons else "false",
@@ -614,6 +621,29 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         made = await space_report(engine, model, space, max_reports=reports, facts_each=facts, status=status, as_of=when)  # type: ignore[arg-type]
         return made.record()
 
+    @app.get("/v1/graph/communities/names")
+    async def get_community_names(
+        limit: int = Query(default=20, ge=1, le=50, description="Communities named, largest first."),
+        timeout_s: float = Query(default=120.0, ge=0.1, le=600.0,
+                                 description="One deadline over the whole pass, every model round inside it."),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """A name for each of the largest communities from the server's model,
+        beside the label the analysis computed: the model sees a community's
+        central members, kinds and predicates and answers with a name alone;
+        an answer that is not a name is recorded as none, with why, as is a
+        community the deadline or a model failure left unnamed. Refused
+        without a model."""
+        from ..entities.reports import name_communities
+
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            raise InvalidInput("community names need a model; none is configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
+        when = _moment(engine, as_of)
+        named = await name_communities(engine, model, space, max_names=limit, timeout_s=timeout_s,  # type: ignore[arg-type]
+                                       status=status, as_of=when)
+        return named.record()
+
     @app.get("/v1/graph/changes")
     async def get_changes(
         since: str = Query(min_length=1, max_length=64), until: Optional[str] = Query(default=None, max_length=64),
@@ -684,6 +714,36 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         imports that run when called or never. It reads and changes nothing."""
         when = _moment(engine, as_of)
         found = await graph_cycles(engine, space, limit=limit, status=status, as_of=when, max_bytes=max_bytes)
+        return found.record(space, status=status, as_of=when)
+
+    @app.get("/v1/graph/stats")
+    async def get_stats(
+        max_bytes: int = Query(default=STATS_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """The graph counted: entities, relations, attributes, communities and
+        modularity, isolated and external entities, kinds, predicates, and
+        the facts by origin, grounding and standing. Counts over recorded
+        data; it reads and changes nothing."""
+        when = _moment(engine, as_of)
+        found = await graph_stats(engine, space, status=status, as_of=when, max_bytes=max_bytes)
+        return found.record(space, status=status, as_of=when)
+
+    @app.get("/v1/graph/hubs")
+    async def get_hubs(
+        limit: int = Query(default=DEFAULT_HUBS, ge=1, le=MAX_HUBS, description="Hubs shown, most linked first."),
+        above: Optional[float] = Query(default=None, ge=MIN_PERCENTILE, le=MAX_PERCENTILE,
+                                       description="Only the hubs above this degree percentile, as the report "
+                                                   "holds them apart."),
+        max_bytes: int = Query(default=STATS_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """The graph's own entities with the most neighbours, each with its
+        degree, fact weight, PageRank and community; the graph's core
+        abstractions, or its utility hubs. It reads and changes nothing."""
+        when = _moment(engine, as_of)
+        found = await graph_hubs(engine, space, limit=limit, above=above, status=status, as_of=when,
+                                 max_bytes=max_bytes)
         return found.record(space, status=status, as_of=when)
 
     @app.get("/v1/entities/duplicates")

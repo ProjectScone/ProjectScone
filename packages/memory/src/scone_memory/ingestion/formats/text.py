@@ -358,9 +358,8 @@ _HIDDEN = frozenset({'script', 'style', 'template', 'noscript'})
 _P_CLOSERS = _BLOCKS - {'li', 'tr', 'thead', 'tbody', 'tfoot', 'title', 'body'}
 _SCOPE_BOUNDARIES = frozenset({'applet', 'caption', 'html', 'table', 'td', 'th',
                               'marquee', 'object', 'template'})
-
-
 _HEADINGS = frozenset({'h1', 'h2', 'h3', 'h4', 'h5', 'h6'})
+_LISTS = frozenset({'ul', 'ol', 'menu'})
 
 
 class _HTML(HTMLParser):
@@ -375,6 +374,17 @@ class _HTML(HTMLParser):
         self.has_content = False
         self.title_parts: list[str] = []
         self.tables = HtmlTables(out, prefix, metadata)
+        #: What the element holding the pending text declares it to be.
+        self.role: dict[str, str] = {}
+        #: Outermost lists opened so far; an item names the one it is in.
+        self.lists = 0
+        #: The ordinal of the list item last opened at each stack position, so
+        #: a paragraph after a nested list names the item it still belongs to.
+        self.items: dict[int, str] = {}
+        self.item_count = 0
+        #: The start an <ol> at each stack position declares, where it is a
+        #: number a Markdown list can begin at.
+        self.starts: dict[int, str | None] = {}
 
     def flush(self) -> None:
         text = ''.join(self.parts)
@@ -382,9 +392,42 @@ class _HTML(HTMLParser):
             text = re.sub(r'[ \t\r\f]+', ' ', text).strip(' \t\r\n\f')
         self.parts.clear()
         self.has_content = False
-        level = next((tag[1] for tag, _ in reversed(self.stack) if tag in _HEADINGS), None)
-        metadata = {**(self.metadata or {}), 'heading_level': level} if level else self.metadata
-        self.out.add(text, f'{self.prefix}line:{self.line}', metadata)
+        role, self.role = self.role, {}
+        self.out.add(text, f'{self.prefix}line:{self.line}', {**(self.metadata or {}), **role} if role else self.metadata)
+
+    def declared_role(self) -> dict[str, str]:
+        """The innermost heading, list item, figure caption or preformatted
+        element around the text, and the list item it sits in; outside all of
+        them, nothing."""
+        for index in range(len(self.stack) - 1, -1, -1):
+            tag = self.stack[index][0]
+            if tag in _HEADINGS:
+                role = {'block_role': 'heading', 'heading_level': tag[1]}
+            elif tag == 'pre':
+                role = {'block_role': 'code'}
+            elif tag == 'figcaption':
+                role = {'block_role': 'caption'}
+            elif tag == 'li':
+                role = {'block_role': 'list_item'}
+            else:
+                continue
+            return {**role, **self.enclosing_item()}
+        return {}
+
+    def enclosing_item(self) -> dict[str, str]:
+        """The innermost list item open: its depth, its ordinal and the list it
+        is in. Ids carry the MIME part's prefix, so two parts' lists stay apart."""
+        index = next((i for i in range(len(self.stack) - 1, -1, -1) if self.stack[i][0] == 'li'), None)
+        if index is None:
+            return {}
+        lists = [position for position in range(index) if self.stack[position][0] in _LISTS]
+        item = {'list_level': str(max(0, len(lists) - 1)), 'list_item_id': f'{self.prefix}{self.items[index]}'}
+        if lists:
+            item.update(list_id=f'{self.prefix}{self.lists}',
+                        list_kind='ordered' if self.stack[lists[-1]][0] == 'ol' else 'bullet')
+            if (start := self.starts.get(lists[-1])) is not None:
+                item['list_start'] = start
+        return item
 
     def preformatted(self) -> bool:
         return any(tag == 'pre' for tag, _ in self.stack)
@@ -401,11 +444,21 @@ class _HTML(HTMLParser):
             if not hidden:
                 self.tables.boundary()
         self.tables.start(tag, values, hidden)
+        if tag in _LISTS:
+            if not any(name in _LISTS for name, _ in self.stack):
+                self.lists += 1
+            start = values.get('start') or ''
+            self.starts[len(self.stack)] = start if tag == 'ol' and re.fullmatch(r'[0-9]{1,9}', start) else None
+        if tag == 'table' and self.tables.table is not None:
+            self.tables.table.context = self.enclosing_item()
         if tag == 'br' and not hidden:
             self.parts.append('\n')
             self.tables.data('\n')
         if tag in {'td', 'th'} and self.parts and not hidden:
             self.parts.append(' ')
+        if tag == 'li':
+            self.item_count += 1
+            self.items[len(self.stack)] = str(self.item_count)
         if tag not in _VOID:
             self.stack.append((tag, hidden))
 
@@ -462,6 +515,9 @@ class _HTML(HTMLParser):
         if any(item[0] == 'title' for item in self.stack):
             self.title_parts.append(data)
         if not self.has_content:
+            # Read where the text starts: an implied end tag (a second <li>)
+            # has already closed the element by the time the text is flushed.
+            self.role = self.declared_role()
             self.line = self.getpos()[0]
             if not self.preformatted() and (first := re.search(r'[^ \t\r\n\f]', data)):
                 self.line += data[:first.start()].count('\n')

@@ -35,6 +35,7 @@ from ..core.errors import InvalidInput, NotFound, SconeError
 from ..retrieval.filters import read_conditions
 from ..retrieval.recall import LANES
 from ..ingestion.chunker import DEFAULT_TARGET as DEFAULT_CHUNK_TARGET
+from ..ingestion.chunking_profiles import PROFILES as CHUNKING_PROFILES
 
 CLI_DEFAULTS = {"SCONE_DOCUMENTS": "sqlite", "SCONE_VECTORS": "sqlite"}
 
@@ -81,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
     p.add_argument("--chunking", choices=("length", "code", "structure", "semantic", "unit"),
                    help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
+    p.add_argument("--chunking-profile", choices=tuple(CHUNKING_PROFILES),
+                   help="cut at this genre's boundaries (implies --chunking structure)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
     p = sub.add_parser("import-chat", help="a WhatsApp, Telegram, Discord or Slack export, one conversation memory per message")
@@ -131,6 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fuse the lanes by rank (default), by each lane's scores scaled to its own range (score), or by each lane's mean and spread (distribution)")
     p.add_argument("--lessons", action="store_true",
                    help="show beside each passage what people said about it in feedback; the order is unchanged")
+    p.add_argument("--expand-summaries", choices=("replace", "follow"),
+                   help="follow each stored summary among the passages with the chunks its citations rest on, or "
+                        "replace it with them; only those, never a forgotten document's, each saying which summary "
+                        "it came through")
+    p.add_argument("--expand-max-chunks", type=int, metavar="COUNT",
+                   help="the most chunks --expand-summaries adds (20 unless set)")
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each and what share of it they cover")
@@ -289,6 +298,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import-url", help="fetch a page by URL and read it as the document its media type says it is "
                                           "(needs SCONE_URL_IMPORT=1; private hosts need SCONE_URL_IMPORT_PRIVATE=1)")
     p.add_argument("url", help="an http or https URL")
+    from .document_markdown import add_document_markdown_parser
+    add_document_markdown_parser(sub)
 
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
@@ -403,6 +414,14 @@ def build_parser() -> argparse.ArgumentParser:
                                         "and the loops held apart only by imports that run when called or never")
     g.add_argument("--limit", type=int, default=None, help="groups shown of each kind (1 to 100; default 20)")
     g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
+    g = graph.add_parser("stats", help="the graph counted: entities, relations, communities, kinds, predicates, "
+                                       "and the facts by origin, grounding and standing")
+    g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
+    g = graph.add_parser("hubs", help="the entities with the most neighbours, with degree, facts, pagerank and community")
+    g.add_argument("--limit", type=int, default=None, help="hubs shown (1 to 100; default 10)")
+    g.add_argument("--above", type=float, default=None,
+                   help="only the hubs above this degree percentile (50 to 100), as the report holds them apart")
+    g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
 
     g = graph.add_parser("duplicates", help="entities that may be one thing under two names, and why (nothing merged)")
     g.add_argument("--limit", type=int, default=50, help="pairs to suggest (1 to 500)")
@@ -418,8 +437,10 @@ def build_parser() -> argparse.ArgumentParser:
     graph.add_parser("merges", help="the merges the current graph applies, and any it refused")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
-                                                               "mermaid", "svg", "canvas", "html", "explorer"])
+                                                               "mermaid", "svg", "canvas", "html", "explorer", "communities", "tree"])
     g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
+    g.add_argument("--usage", action="store_true",
+                   help="on the svg and html drawings, say how many recent recalls returned each entity")
     g.add_argument("--into", metavar="VAULT", help="obsidian only: write the notes into this vault directory under scone/, "
                                                   "keeping the vault's own notes and removing notes written earlier for "
                                                   "entities since forgotten")
@@ -462,6 +483,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="insist on one route instead of letting the rule choose; synthesize is never chosen "
                         "by the rule and needs a model (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
     p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with, or a synthesis reads")
+    p.add_argument("--synthesis-mode", choices=("evidence", "refine", "accumulate"),
+                   help="with --route synthesize: notes folded into a summary (evidence, the default), one answer "
+                        "refined round by round (refine), or one answer per passage joined (accumulate); every "
+                        "mode shows only sentences with a quote found in a passage")
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
     p.add_argument("--whole", action="store_true",
                    help="show each passage whole instead of its first 200 characters")
@@ -479,6 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only files with this suffix, repeatable (plus package manifests when any suffix is code); "
                         "defaults to code and prose")
     p.add_argument("--apply", action="store_true", help="actually write; without it this is a plan")
+    p.add_argument("--repo", default=None, metavar="NAME",
+                   help="name this repository: every file is held as NAME/path (see map --repo)")
     p.add_argument("--remove", action="store_true",
                    help="also forget memories whose file is gone from disk (destructive; needs --apply)")
     p.add_argument("--limit", type=int, default=100_000, help="files to read (1 to 100000)")
@@ -503,6 +530,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "changed, until interrupted or --rounds passes are done")
     p.add_argument("--every", type=float, default=5.0, help="seconds between passes under --watch (default 5)")
     p.add_argument("--rounds", type=int, default=0, help="passes to make under --watch, 0 for until interrupted (default 0)")
+    p.add_argument("--repo", default=None, metavar="NAME",
+                   help="name this repository: every file is held as NAME/path, so several repositories mapped "
+                        "into one space keep their files apart, and an import of a package another one "
+                        "publishes reaches that repository's file")
 
     p = sub.add_parser("fs", help="the space as a tree: ls, cat, find and write a note")
     tree = p.add_subparsers(dest="fs_command", required=True)
@@ -541,6 +572,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fan-in", type=int, default=6, help="nodes one summary is written from (2 to 24, default 6)")
     p.add_argument("--max-levels", type=int, default=5, help="levels above the chunks (1 to 5, default 5)")
     p.add_argument("--dry-run", action="store_true", help="write the tree and print it without storing it")
+    p = sub.add_parser("chunk-questions", help="write the question lane with the configured chat model (SCONE_CHAT_URL, "
+                                               "SCONE_CHAT_MODEL): questions each chunk answers, kept only with a quote "
+                                               "from the chunk; needs SCONE_QUESTION_LANE=1")
+    p.add_argument("--per-chunk", type=int, default=3, help="questions asked of one chunk (1 to 5, default 3)")
+    p.add_argument("--max-chunks", type=int, default=2000, help="chunks one pass asks about (1 to 2000, default 2000)")
+    p.add_argument("--after-chunk", type=int, default=None,
+                   help="start after this chunk id: the resume_after a pass cut by --max-chunks reported")
+    p.add_argument("--episode", type=int, action="append", dest="episodes", default=None,
+                   help="only this episode's chunks; repeat for more")
     p = sub.add_parser("bench-questions",
                        help="write questions a corpus answers with the local model, anchored to quotes, "
                             "or measure retrieval on the corpus with a set written before")
@@ -808,7 +848,7 @@ async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> i
     chosen = {"suffixes": tuple(args.suffix)} if args.suffix else {}
     done = await sync_directory(engine, args.space, args.directory, marker=args.marker,
                                 apply=args.apply, remove=args.remove, limit=args.limit,
-                                max_bytes=args.max_bytes, ignore=not args.no_ignore, **chosen)
+                                max_bytes=args.max_bytes, ignore=not args.no_ignore, repo=args.repo, **chosen)
     if args.json:
         print(json.dumps(done.record()), file=out)
         return 0
@@ -872,10 +912,16 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     from ..ingestion.doc_graph import doc_links, is_document
     from ..ingestion.sensitive import screen
     from ..ingestion.code_resolution import REACHABLE_DEPTH, unmistakable, resolve_across_files
+    from ..ingestion.manifests import manifest_claims
+    from ..ingestion.repositories import published_by, repository_prefix, space_publishes
 
     root = pathlib.Path(args.directory)
     if not root.is_dir():
         raise InvalidInput(f"{args.directory} is not a directory to map")
+    try:
+        prefix = repository_prefix(getattr(args, "repo", None))
+    except ValueError as refused:
+        raise InvalidInput(str(refused)) from None
     if not 1 <= args.limit <= 100_000:
         raise InvalidInput("--limit must be from 1 to 100000 files")
     if not 1 <= args.max_bytes <= 50_000_000:
@@ -889,14 +935,35 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     from ..ingestion.ignore import Ignore, walk_files
 
     rules = None if args.no_ignore else Ignore.load(root)
-    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES, *DOC_SUFFIXES)
+    from ..ingestion.code_tree import TREE_SUFFIXES
+
+    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES, *TREE_SUFFIXES,
+                                                                *DOC_SUFFIXES)
                         or is_manifest(path.relative_to(root).as_posix()) or is_schema(path.name), ignore=rules)
     found = list(walked.files)
     # Resolution belongs here, because this is what knows which files
     # exist: a relative import is followed only to a file actually read,
     # and one that leads anywhere else is left out rather than guessed at.
-    seen = {str(path.relative_to(root)) for path in found[: args.limit]}
-    resolve = file_resolver(seen)
+    seen = {prefix + str(path.relative_to(root)) for path in found[: args.limit]}
+    # What the space's other repositories publish and mapped, so an import
+    # of their package reaches their file; and what this tree's own
+    # manifests publish, read first so an import inside it reaches its own
+    # source the same way.
+    published, known = ({}, set()) if not args.graph else await space_publishes(engine, args.space, prefix)
+    if args.graph:
+        for path in found[: args.limit]:
+            relative = str(path.relative_to(root))
+            if is_manifest(relative):
+                try:
+                    spoken = manifest_claims(path.read_bytes()[: args.max_bytes].decode("utf-8", errors="replace"),
+                                             prefix + relative)
+                except OSError:
+                    continue
+                published.update(published_by((c.subject, c.predicate, c.object) for c in spoken))
+    resolve = file_resolver(seen, published, known)
+    # A Go import reaches a directory of another repository's files.
+    known_directories = {posixpath.dirname(key) for key in known}
+    crossed = 0
 
     read, again, claims, quiet, unread, cut = 0, 0, 0, 0, 0, 0
     updated, closed, unread_claims = 0, 0, False
@@ -931,7 +998,7 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
         text = raw[: args.max_bytes].decode("utf-8", errors="replace")
         if not text.strip():
             continue
-        where = str(path.relative_to(root))
+        where = prefix + str(path.relative_to(root))
         if not args.include_sensitive:
             # Not `found`: that is this function's list of files, and the
             # receipt counts it.
@@ -975,6 +1042,8 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
                                        content=text, path=where, when=engine.clock(),
                                        resolve=resolve, _recorded=recorded, _facts=facts)
             claims += said
+            crossed += sum(1 for claim in recorded if claim.predicate == "imports"
+                           and (claim.object in known or claim.object in known_directories))
             if done.replaced is not None:
                 # Read here, with the resolver, rather than by the engine:
                 # so the claims kept are exactly the ones just recorded.
@@ -1072,6 +1141,8 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
             parts.append(f"{unread} could not be read")
         if unbound:
             parts.append(f"{len(unbound)} call(s) left unbound")
+        if crossed:
+            parts.append(f"{crossed} import(s) reach another repository's file")
         if unresolved_links or ambiguous_links or outside_links:
             parts.append(f"documents: {len(unresolved_links)} link(s) to files not read, {len(ambiguous_links)} that "
                          f"two files would answer, {outside_links} outside the tree")
@@ -1095,6 +1166,8 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
                             "embeddings_reused": reused_vectors, "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
+                            "repository": getattr(args, "repo", None), "cross_repository_imports": crossed,
+                            "published": sorted(published),
                             "ignored": walked.ignored_files, "ignored_directories": walked.ignored_directories,
                             "ignore_files": list(rules.files) if rules is not None else [],
                             "ignore_truncated": rules.truncated if rules is not None else False,
@@ -1527,6 +1600,21 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
               if getattr(args, "json", False) else found_cycles.text, file=out)
         return 0
 
+    if command in ("stats", "hubs"):
+        from ..entities.stats import DEFAULT_HUBS, MAX_BYTES as STATS_BYTES, StatsError, graph_hubs, graph_stats
+
+        when = engine.clock()
+        max_bytes = args.max_bytes if args.max_bytes is not None else STATS_BYTES
+        try:
+            found_stats = (await graph_stats(engine, space, as_of=when, max_bytes=max_bytes) if command == "stats"
+                           else await graph_hubs(engine, space, as_of=when, max_bytes=max_bytes, above=args.above,
+                                                 limit=args.limit if args.limit is not None else DEFAULT_HUBS))
+        except StatsError as refused:
+            raise InvalidInput(str(refused)) from None
+        print(_ledger_json(found_stats.record(space, status="current", as_of=when))
+              if getattr(args, "json", False) else found_stats.text, file=out)
+        return 0
+
     if command == "meanings":
         meanings = engine.relation_meanings
         if getattr(args, "json", False):
@@ -1691,7 +1779,12 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
                               projection=projection.digest)
         print(json.dumps(receipt.record()), file=out)
         return 0
-    exported = export_graph(projection, args.format, about=about)
+    recalls = None
+    if args.usage:
+        from ..entities.usage import recall_usage
+
+        recalls = await recall_usage(engine, space)
+    exported = export_graph(projection, args.format, about=about, usage=recalls)
     if args.out:
         with open(args.out, "wb") as file:
             file.write(exported.body)
@@ -1743,6 +1836,21 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(tree.root.text, file=out)
         return 0
 
+    if args.command == "chunk-questions":
+        from .config import build_chat
+
+        model = build_chat(settings) if settings is not None else None
+        if model is None:
+            raise InvalidInput("chunk-questions needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+        written = await engine.build_chunk_questions(space, model, model_name=settings.chat_model or "",
+                                                     max_chunks=args.max_chunks, per_chunk=args.per_chunk,
+                                                     after_chunk=args.after_chunk, episode_ids=args.episodes)
+        if args.json:
+            emit(written.record())
+        else:
+            print(written.text(), file=out)
+        return 0
+
     if args.command == "sync-directory":
         from .directory_cli import run_directory_sync
         return await run_directory_sync(args, engine, out)
@@ -1782,6 +1890,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "remember":
         if args.image is not None and args.jsonl:
             raise InvalidInput("--image cannot be combined with --jsonl; select a single source note")
+        if args.jsonl and (args.chunking or args.chunking_profile):
+            raise InvalidInput("--chunking and --chunking-profile are not applied to --jsonl; set them per record")
         raw = read_source(args.file, stdin)
         attachment = None
         if args.jsonl:
@@ -1807,6 +1917,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     created_at=args.created_at, metadata=metadata,
                     attachment_ids=[attachment.attachment_id] if attachment else [],
                     dedup_key=args.dedup_key, replace=args.replace, chunking=args.chunking,
+                    chunking_profile=args.chunking_profile,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)
@@ -1849,6 +1960,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             # lessons would vanish, or a judged-useless neighbour would ride under a good lesson.
             raise InvalidInput("--lessons cannot be combined with --merge: a merged passage joins chunks "
                                "judged separately, and one lesson cannot stand for them; ask for one or the other")
+        if args.expand_summaries and (args.merge or args.parts or args.window or args.window_unit == "sentences"):
+            # A merge or a window returns a cited chunk holding text it does not rest on, with the spans in
+            # via_summary indexing text not returned; --parts answers without recall's expansion at all.
+            raise InvalidInput("--expand-summaries cannot be combined with --merge, a window or --parts: a merged "
+                               "or widened passage holds text a summary does not rest on, and --parts answers "
+                               "without expansion; ask for one or the other")
         policy: tuple[str, ...] = ()
         names_read = None
         if args.merge_min_share is not None and not args.merge:
@@ -1925,7 +2042,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
-            lessons=args.lessons,
+            lessons=args.lessons, expand_summaries=args.expand_summaries, expand_max_chunks=args.expand_max_chunks,
             lanes=[lane.strip() for lane in args.lanes.split(",") if lane.strip()] if args.lanes else LANES,
             require=args.require, exclude=args.exclude, diversity=args.diversity,
         )
@@ -2003,6 +2120,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 print(f"withheld: {row}", file=out)
         if kept is not None:
             print(kept.why, file=out)
+        if result.expanded is not None:
+            print(result.expanded["why"], file=out)
         if opened is not None:
             print(opened.why, file=out)
         if shortened is not None:
@@ -2042,6 +2161,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 words = list(dict.fromkeys(item.text[span.start:span.end] for span in marked[position].spans))
                 more = " and more" if marked[position].truncated else ""
                 print(f"      matched: {', '.join(words) or 'no word of the question'}{more}", file=out)
+            if item.via_summary is not None:
+                via = item.via_summary
+                print(f"      via summary #{via['episode_id']} (level {via['level']} of #{via['summary_of']})", file=out)
             if item.lessons is not None:
                 said = item.lessons
                 print(f"      lesson {said['state']} ({said['useful']} useful, {said['not_useful']} not; "
@@ -2055,6 +2177,13 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         if result.lessons_read is not None and result.lessons_read.get("events_cut"):
             print(f"lessons were read from the newest {result.lessons_read['events_read']} judgement(s) only; "
                   f"older ones in the window were left out", file=out)
+        prior = result.feedback_prior
+        if prior is not None and prior.get("events_cut"):
+            print(f"feedback was read from the newest {prior['events_read']} judgement(s) only; "
+                  f"older ones in the window were left out", file=out)
+        if prior is not None and prior.get("capped"):
+            print(f"feedback's term was cut at its bound of {prior['max_boost']} for {prior['capped']} candidate(s)",
+                  file=out)
         if result.low_confidence:
             top = "nothing found" if result.top_similarity is None else f"top similarity {result.top_similarity:.2f}"
             print(f"low confidence: {top}, floor {engine.similarity_floor:.2f}; the evidence above is weak", file=out)
@@ -2227,7 +2356,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 return 2
         routed = await answer_question(engine, space, args.question, now=args.now, limit=args.limit,
                                        route=args.route, max_item_chars=0 if args.whole else DEFAULT_ITEM_CHARS,
-                                       synthesis=synthesis)
+                                       synthesis=synthesis, synthesis_mode=args.synthesis_mode)
         if getattr(args, "json", False):
             print(_ledger_json(routed.record(space)), file=out)
             return 0
@@ -2502,6 +2631,9 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
                                    model_factory=args.model_factory)
     if args.command == "bench-graph":
         return graph_bench_command(args, out or sys.stdout)
+    if args.command == "doc-markdown":
+        from .document_markdown import document_markdown_command
+        return document_markdown_command(args, out or sys.stdout)
     settings = settings_for_cli(env)
     if args.command == "serve":
         from ..api.__main__ import main as serve

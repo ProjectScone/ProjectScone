@@ -83,6 +83,14 @@ async def test_export_writes_any_format_to_a_file(engine, tmp_path):
     assert ElementTree.fromstring(target.read_bytes()).tag.endswith("graphml")
 
 
+async def test_export_writes_the_community_map(engine, tmp_path):
+    target = tmp_path / "graph-communities.svg"
+    code, text = await graph(engine, "export", "--format", "communities", "--out", str(target))
+    root = ElementTree.fromstring(target.read_bytes())
+    assert code == 0 and root.tag == "{http://www.w3.org/2000/svg}svg"
+    assert root.find("{http://www.w3.org/2000/svg}title").text.startswith("Communities of ")
+
+
 @pytest.mark.parametrize("arguments, code", [(("path", "alice chen", "lisbon"), 0),
                                              (("context", "alice chen"), 0),
                                              (("entity", "alice chen"), 0),
@@ -280,6 +288,20 @@ async def test_report_can_say_what_recall_uses():
     assert code == 0 and "## What recall uses" in text and "Alice Chen (1)" in text.replace("alice chen (1)", "Alice Chen (1)")
 
 
+async def test_export_can_draw_what_recall_returned():
+    from scone_memory.observability.events import InMemoryEventLog
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await memory.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    await memory.recall("default", "alice chen")
+    code, text = await graph(memory, "export", "--format", "svg", "--usage")
+    plain_code, plain = await graph(memory, "export", "--format", "svg")
+    await memory.close()
+    assert code == 0 and "returned by 1 of the 1 recall read" in text
+    assert plain_code == 0 and "returned by" not in plain
+
+
 async def test_match_answers_a_structured_question_and_exits_zero_on_a_row(engine):
     code, text = await graph(engine, "match", "--pattern", "?who", "works_at", "?org",
                              "--pattern", "?org", "based_in", "Lisbon", "--returns", "?who")
@@ -364,6 +386,21 @@ async def test_cycles_prints_the_loops_and_what_holds_one_apart(engine):
     code, shown = await graph(engine, "cycles", "--json")
     report = json.loads(shown)
     assert code == 0 and report["status"] == "cycles" and (report["totals"]["cycles"], report["totals"]["held_apart"]) == (1, 1)
+
+
+async def test_stats_and_hubs_print_the_graph_counted_and_its_most_linked(engine):
+    code, text = await graph(engine, "stats")
+    assert code == 0 and "stats: space default" in text and "facts by origin:" in text
+    code, shown = await graph(engine, "stats", "--json")
+    counted = json.loads(shown)
+    assert code == 0 and counted["totals"]["entities"] >= 2 and counted["facts"]["origin"]
+    code, text = await graph(engine, "hubs", "--limit", "1")
+    assert code == 0 and "hubs: space default" in text and "1. " in text and "neighbours" in text
+    code, shown = await graph(engine, "hubs", "--json", "--above", "90")
+    ranked = json.loads(shown)
+    assert code == 0 and ranked["totals"]["above"] == 90.0 and len(ranked["hubs"]) <= ranked["totals"]["own"]
+    with pytest.raises(InvalidInput, match="1 to 100"):
+        await graph(engine, "hubs", "--limit", "0")
 
 
 async def temporal(engine, *arguments: str) -> tuple[int, str]:

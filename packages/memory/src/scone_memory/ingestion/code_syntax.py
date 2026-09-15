@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .code_graph import CALLS, DEFINES, CodeClaim, _named
+from .code_graph import CALLS, DEFINES, CodeClaim, _named, _published
 
 try:  # pragma: no cover - exercised by whether the extra is installed
     from tree_sitter import Language, Node, Parser
@@ -153,12 +153,15 @@ def _line(node: "Node", source: bytes) -> int:
     return source[:node.start_byte].count(b"\n") + 1
 
 
-def _imports(tree: "Node", source: bytes, path: str) -> dict[str, str]:
+def _imports(tree: "Node", source: bytes, path: str, resolve=None) -> dict[str, str]:
     """What each imported name is, as ``local name -> file:name``.
 
     Only a named import is followed. A default or namespace binding names
     a value whose members are reached through it, and a call through one
-    of those is a call through a receiver.
+    of those is a call through a receiver. A relative source is named by
+    arithmetic on this file's path; a package another repository in the
+    space publishes is followed to its file when ``resolve`` knows the
+    space's manifests, and any other package binds nothing.
     """
     found: dict[str, str] = {}
     for node in tree.children:
@@ -168,12 +171,14 @@ def _imports(tree: "Node", source: bytes, path: str) -> dict[str, str]:
         if source_node is None:
             continue
         written = _text(source_node, source).strip("\"'")
-        # Relative, and nothing else. `motion/react-mini` contains a
-        # slash and is not a path, so testing for one admitted every
-        # scoped package subpath as a file of this graph.
-        if not written.startswith("."):
-            continue
-        where = _named(written, path, None)
+        # Relative, or a package the space publishes, and nothing else.
+        # `motion/react-mini` contains a slash and is not a path, so
+        # testing for one admitted every scoped package subpath as a file
+        # of this graph.
+        if written.startswith("."):
+            where = _named(written, path, None)
+        else:
+            where = _published(resolve, written, "js")
         if where is None:
             continue
         for clause in (one for one in node.children if one.type == "import_clause"):
@@ -345,7 +350,7 @@ def _walk(node: "Node", source: bytes, path: str, stack: list[dict[str, Optional
         stack.pop()
 
 
-def syntax_claims(content: str, path: str) -> tuple[CodeClaim, ...]:
+def syntax_claims(content: str, path: str, resolve=None) -> tuple[CodeClaim, ...]:
     """Declarations and calls this file's syntax settles, or nothing.
 
     Returns an empty tuple when the extra is absent or the file's
@@ -367,6 +372,6 @@ def syntax_claims(content: str, path: str) -> tuple[CodeClaim, ...]:
                                begins + len(lines[number - 1].encode())))
 
     tree = Parser(_TSX if GRAMMARS[suffix] == "tsx" else _TS).parse(source)
-    _walk(tree.root_node, source, path, [], _imports(tree.root_node, source, path),
+    _walk(tree.root_node, source, path, [], _imports(tree.root_node, source, path, resolve),
           None, set(), say)
     return tuple(found)
