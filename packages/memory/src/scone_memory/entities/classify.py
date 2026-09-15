@@ -242,6 +242,20 @@ def _code_shaped(text: str) -> bool:
     return bool(_EXTENSION.search(segment)) and not segment.rstrip().endswith(" ")
 
 
+def is_code_name(text: str) -> bool:
+    """Whether a name is a code reader's: a path whose last segment carries
+    a file extension, or such a path, a colon and a declaration
+    (`pkg/store.py`, `pkg/store.py:Store.open`). A URL, a time, a ratio or
+    a sentence with a slash in it is not, whatever marks it holds."""
+    if not text:
+        return False
+    cut = text.rfind(":")
+    head = text[:cut] if cut > 0 and _declaration(text[cut + 1:]) else text
+    if not head or any(c.isspace() for c in head) or "://" in head or ":" in head:
+        return False
+    return bool(_EXTENSION.search(head.rsplit("/", 1)[-1]))
+
+
 def _uncased_name(text: str) -> bool:
     letters = [character for character in text if character.isalpha()]
     return (bool(letters) and len(text) <= 12 and len(text.split()) <= 3
