@@ -456,7 +456,14 @@ def _file_names(items: list[tuple[str, str]], *, fallback: str) -> dict[str, str
     return names
 
 
-def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+def obsidian_files(projection: EntityProjection, about: Mapping[str, object], *, root: str = "") -> dict[str, str]:
+    """The notes of the Obsidian export, path -> text: one note per entity
+    under ``entities/``, ``index.md`` and ``graph.canvas``. Every note
+    opens with ``scone_note: 1`` in its frontmatter, so a later write into
+    a vault can tell these notes from a person's own; the index carries
+    the projection digest as well.
+    ``root`` is the vault-relative folder the files will sit in, which
+    the canvas needs to name its cards' notes."""
     names = _note_names(projection.entities)
     outgoing: dict[str, list[str]] = defaultdict(list)
     incoming: dict[str, list[str]] = defaultdict(list)
@@ -476,21 +483,30 @@ def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Expo
         values[attribute.entity_id].append(
             f"- {literal(attribute.predicate)}: {literal(attribute.value)} ({cited(attribute.fact_ids)})")
     files: dict[str, str] = {}
+    # A note carries a signature that says whose it is and nothing that
+    # changes when the rest of the graph does; the projection digest is
+    # the index's.
+    signature = "scone_note: 1"
     for entity in projection.entities:
         body = ["---", f"id: {entity.entity_id}", f"key: {json.dumps(entity.key, ensure_ascii=False)}",
-                f"kind: {entity.kind or 'unknown'}", "---", "", f"# {literal(entity.label)}", ""]
+                f"kind: {entity.kind or 'unknown'}", signature, "---", "", f"# {literal(entity.label)}", ""]
         for title, lines in (("Relations", outgoing[entity.entity_id]), ("Referenced by", incoming[entity.entity_id]),
                              ("Values", values[entity.entity_id])):
             if lines:
                 body += [f"## {title}", "", *sorted(lines), ""]
         files[f"entities/{names[entity.entity_id]}.md"] = "\n".join(body)
-    files["index.md"] = "\n".join([f"# Knowledge graph: {literal(projection.space)}", "",
+    files["index.md"] = "\n".join(["---", signature, f"scone_projection: {projection.digest}", "---", "",
+                                   f"# Knowledge graph: {literal(projection.space)}", "",
                                    f"Projection `{projection.digest[:12]}`, {len(projection.entities)} entities.",
                                    *_about_lines(about), "",
                                    *sorted(f"- [[{name}]]" for name in names.values())]) + "\n"
     # The same graph drawn as a canvas of the vault's own notes.
-    files["graph.canvas"] = _canvas_text(projection, about, lambda entity_id: f"entities/{names[entity_id]}.md")
-    return Export(_zip(files), "application/zip", "graph-obsidian.zip")
+    files["graph.canvas"] = _canvas_text(projection, about, lambda entity_id: f"{root}entities/{names[entity_id]}.md")
+    return files
+
+
+def _obsidian(projection: EntityProjection, about: Mapping[str, object]) -> Export:
+    return Export(_zip(obsidian_files(projection, about)), "application/zip", "graph-obsidian.zip")
 
 
 #: Lines listed per section of a wiki article; the rest are counted.

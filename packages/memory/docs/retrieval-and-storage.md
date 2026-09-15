@@ -3023,7 +3023,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `cypher` | one idempotent `MERGE` per line | Neo4j, Memgraph |
 | `csv` | zip of `entities.csv`, `relations.csv`, `attributes.csv`, `about.json` | spreadsheets, bulk loaders |
 | `jsonld` | JSON-LD linked data | RDF tooling |
-| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` and `graph.canvas`, a canvas of the notes | Obsidian and other note tools |
+| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` and `graph.canvas`, a canvas of the notes; or written into a vault a person already keeps with `scone graph export --format obsidian --into VAULT` | Obsidian and other note tools |
 | `wiki` | zip of `index.md`, one article per topic and one per entity, in plain Markdown links | agents reading instead of the raw ledger |
 | `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them | GitHub, Markdown viewers, docs |
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
@@ -3055,6 +3055,21 @@ How each format places values and escapes its own syntax:
   every name reaches the page as text through one JSON block, and the
   page's content security policy allows only its own style and code,
   pinned by hash.
+- **Into a vault.** `scone graph export --format obsidian --into VAULT`
+  writes the same notes under `VAULT/scone/` instead of a zip, by three
+  rules. A file this did not write is never written over: every note it
+  writes opens with `scone_projection: <digest>` in its frontmatter and
+  a folder manifest (`scone/.scone-vault.json`) lists what the last write
+  left, so a file at a target path that is neither listed nor signed is
+  the person's, kept, and counted under `kept_theirs` (the wiki links to
+  that name reach their note, which is about the same thing). What it
+  wrote last time and does not write now is removed, so a forgotten
+  entity keeps no note; a person's file is never removed, and nothing
+  outside `scone/` is read or touched, `.obsidian/` least of all. The
+  receipt says what happened: `written`, `updated`, `unchanged`,
+  `removed`, `kept_theirs` and the projection the notes carry. Writes are
+  atomic per file. The canvas names its cards' notes by their path under
+  the vault (`scone/entities/...`), so it opens where it is written.
 - **The drawings** (`svg`, `canvas`, and the canvas in the vault) are laid
   out by construction, not simulated, so the same graph always draws
   the same way.
