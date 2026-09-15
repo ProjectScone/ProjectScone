@@ -16,6 +16,7 @@ from typing import Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..memory.catalog import ProfilePolicy
+    from ..memory.profile_buckets import BucketBounds
 from uuid import uuid4
 
 from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
@@ -196,7 +197,8 @@ class TextConversation:
                  summary_timeout: float = DEFAULT_SUMMARY_TIMEOUT,
                  standing_profile: "ProfilePolicy | None" = None, profile_limit: int = 10,
                  max_profile_bytes: int = 1000, followup_queries: str = "off",
-                 followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S):
+                 followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S,
+                 profile_buckets: "BucketBounds | None" = None):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
@@ -305,7 +307,7 @@ class TextConversation:
                                       standing_profile=standing_profile,
                                       profile_limit=profile_limit, max_profile_bytes=max_profile_bytes,
                                       followup_queries=followup_queries, followup_model=followup_model,
-                                      followup_timeout=followup_timeout)
+                                      followup_timeout=followup_timeout, profile_buckets=profile_buckets)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task[dict] | None = None
         self._closed = False

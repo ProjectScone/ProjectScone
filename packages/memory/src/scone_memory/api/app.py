@@ -1581,10 +1581,23 @@ def create_app(
         return {"closed": closed.fact_id, "reason": closed.closed_reason}
 
     @app.get("/v1/profile")
-    async def get_profile(limit: int = 10, space: str = Depends(space_for)) -> dict:
-        profile = await engine.profile(space, limit)
-        return {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
+    async def get_profile(limit: int = 10, buckets: Optional[str] = None, static_limit: Optional[int] = None,
+                          dynamic_limit: Optional[int] = None, static_max_bytes: Optional[int] = None,
+                          dynamic_max_bytes: Optional[int] = None, space: str = Depends(space_for)) -> dict:
+        """With ``buckets`` (static, dynamic or both), the claims also come
+        in static and dynamic buckets, each with its own bounds."""
+        from ..memory.profile_buckets import requested
+
+        bounds = requested(buckets, static_limit=static_limit, dynamic_limit=dynamic_limit,
+                           static_max_bytes=static_max_bytes, dynamic_max_bytes=dynamic_max_bytes)
+        profile = await engine.profile(space, limit, buckets=bounds)
+        body = {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
                 "recent": [asdict(r) for r in profile.recent], "coverage": profile.coverage}
+        if profile.buckets is not None:
+            body["buckets"] = {"static": [fact_json(f) for f in profile.buckets.static],
+                               "dynamic": [fact_json(f) for f in profile.buckets.dynamic],
+                               "coverage": profile.buckets.coverage}
+        return body
 
     @app.get("/v1/tags")
     async def get_tags(space: str = Depends(space_for)) -> dict:

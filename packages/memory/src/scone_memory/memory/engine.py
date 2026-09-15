@@ -237,6 +237,7 @@ class MemoryEngine:
         vocabulary_spaces: "Sequence[str] | None" = None,
         abstention: AbstentionPolicy | None = None,
         profile_policy: "catalog.ProfilePolicy | None" = None,
+        profile_bucket_rules: "catalog.BucketRules | None" = None,
         table_context_embeddings: bool = False,
         embedding_cache: "EmbeddingCache | None" = None,
         synonyms: "Synonyms | None" = None,
@@ -409,6 +410,8 @@ class MemoryEngine:
         self.abstention = abstention
         #: Which claims a profile is made of; by default, all of them.
         self.profile_policy = profile_policy or catalog.ProfilePolicy()
+        #: How a profile read in buckets places each claim as static or dynamic.
+        self.profile_bucket_rules = profile_bucket_rules or catalog.BucketRules()
         similarity_floor = abstention.floor if abstention is not None else similarity_floor
         self.candidate_limit = validate_candidate_limit(candidate_limit)
         validate_rerank_options(rerank_limit, rerank_max_bytes, rerank_timeout)
@@ -1769,8 +1772,11 @@ class MemoryEngine:
 
     # -- overviews --------------------------------------------------------
 
-    async def profile(self, space: str, limit: int = 10) -> Profile:
-        return await catalog.profile(self, space, limit, policy=self.profile_policy)
+    async def profile(self, space: str, limit: int = 10, *, buckets: "catalog.BucketBounds | None" = None) -> Profile:
+        """The space's profile; with ``buckets``, its claims in static and
+        dynamic buckets too, placed by ``profile_bucket_rules``."""
+        return await catalog.profile(self, space, limit, policy=self.profile_policy, buckets=buckets,
+                                     rules=self.profile_bucket_rules)
 
     async def tags(self, space: str) -> dict[str, int]:
         return await catalog.tags(self.documents, space)
