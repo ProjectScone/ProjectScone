@@ -29,33 +29,44 @@ Everything else is dropped and counted in the report: `dropped_unquoted`,
 `dropped_unparsed` for a reply that is not such a list. A call that fails
 is counted in `calls_failed` and the pass goes on to the next chunk.
 
-A small model often writes every object of the list and stops before the
-closing bracket (llama3.2-ctx8k did on the documents measured below). Such
-a reply is read object by object up to the first that is not whole
-(`bench.questions.partial_pairs`) and counted in `read_partial`; each pair
-read that way still has to pass every check above. The bench's own
-question sets keep the strict reader.
+The list read is the first in the reply that opens with an object, so a
+bracket in the prose around it is not the list, and neither is a `[]`
+quoted inside one of its questions. A reply with no object in it that
+says `[]` has no questions.
+
+A small model often writes a list that is not valid JSON as a whole: it
+stops before the closing bracket (llama3.2-ctx8k often did on the
+documents measured below), leaves out the commas, or copies a quote mark
+from the passage without escaping it. Such a reply is read object by
+object (`bench.questions.loose_pairs`) and counted in `read_loosely`: an
+object that does not decode, or an item that is not a question and a
+quote, is passed over to the next object and counted in
+`dropped_unread`, and reading stops at the closing bracket or the end of
+the reply. Each pair read that way still has to pass every check above.
+The bench's own question sets keep the strict reader.
 
 ## Where the questions go
 
-Into the context index (`core.ports.ContextIndex`), the one the context
-lane searches — never into the chunk's text, its vectors or its offsets.
-The passage a recall returns is always the chunk's own text. The index
-keeps one text per chunk and replaces it on write, so when the context
-lane is also on, the words the chunk is under (headings, title, source
-name) are derived again and written back beside the questions. A chunk
-with no kept question is not written at all, so its context words stay
-as ingestion left them.
+Into a question index of their own (`core.ports.QuestionIndex`) — never
+into the chunk's text, its vectors, its offsets or the context index
+that holds the words the chunk is under. The passage a recall returns is
+always the chunk's own text, and the context lane's words are exactly as
+ingestion left them, whichever lanes the engine running the pass has on.
 
-At recall the index is searched when `SCONE_QUESTION_LANE` or
-`SCONE_CONTEXT_LANE` is on, with the query the text lane got, and fused
-by rank at the context lane's weight (`retrieval.recall.CONTEXT_WEIGHT`,
-2.0). An item the lane placed says so in `lanes.context`; the recall
-event carries `question_lane` beside `context_lane`. Because the two
-lanes share one index, a space whose questions were written stays
-searchable through them while `SCONE_CONTEXT_LANE` is on even if
-`SCONE_QUESTION_LANE` is later turned off; forget the episodes, or write
-the lane again, to take them out.
+At recall the question index is searched only when `SCONE_QUESTION_LANE`
+is on, with the query the text lane got, and fused by rank at
+`retrieval.recall.QUESTION_WEIGHT` (2.0, the context lane's). An item
+the lane placed says so in `lanes.question`; the recall event carries
+`question_lane` beside `context_lane`, and each says whether its own
+index was searched. Turning `SCONE_QUESTION_LANE` off stops the
+questions ranking anything; they stay stored until their episode is
+forgotten.
+
+Writing the lane again replaces a chunk's questions with those the new
+pass kept, whenever the chunk's reply was read — none included: a chunk
+whose reply kept no question holds none afterwards and is counted in
+`chunks_kept_none`. A chunk whose call failed, whose reply could not be
+read, or that was too long to show keeps what an earlier pass wrote.
 
 This differs from the references on purpose. RAGFlow writes questions
 per chunk at ingestion, searches them at many times the content's weight
@@ -97,17 +108,21 @@ report (`--json` for the command).
 | `MAX_CHUNK_BYTES` | 8000 | a longer chunk is not shown to the model and is counted in `skipped_long` |
 
 `episode_ids` (`--episode`, `episode_id`) limits a pass to named
-episodes. A store without the context index gets no model calls: the
+episodes. A store without the question index gets no model calls: the
 report has `kept_lane: false` and a reason, and a recall with the lane on
 over that store says `question lane: not kept by …` in `degraded` and
 answers from the other lanes. The SQLite and in-memory stores keep it.
 
 ## Forgetting
 
-The questions live in the chunk's row of the context index, which goes
+The questions live in the chunk's row of the question index, which goes
 with the chunk: SQLite by cascade (and its full-text index by trigger),
-the in-memory store when it deletes the episode's chunks. Forgetting an
-episode leaves no question that can find anything.
+the in-memory store when it deletes the episode's chunks or the space.
+The pass reads the chunks up front and then waits on the model for each;
+the store writes a chunk's questions only if the chunk is still there
+when the reply comes back, so an episode forgotten or replaced meanwhile
+gets none, and the report counts those chunks in `chunks_gone`.
+Forgetting an episode leaves no question that can find anything.
 
 ## Measured
 
@@ -118,6 +133,9 @@ the lane made recall worse: R@5 0.953 off and 0.837 on, MRR 0.868 and
 placed high for questions about something else; a fusion weight low enough not to
 do that (0.01) only ties the lane off on held-out questions. Writing the
 lane cost 100 model calls and about 1,090 s per 100 chunks. The
+questions were then kept in the context index; moved into their own
+index, the same questions give the same scores for every question and
+every weight. The
 evaluation questions share the chunk's words, which is not the case the
 lane is for, so this is not a verdict on questions asked in other words.
 Details, the weight sweep and the caveats:

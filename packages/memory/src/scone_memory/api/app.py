@@ -784,8 +784,8 @@ def create_app(
                                    space: str = Depends(space_for)) -> JSONResponse:
         """Write the question lane with the synthesis model: questions each
         chunk answers, kept only with a sentence quoted from the chunk, indexed
-        beside its context. Refused while SCONE_QUESTION_LANE is off; a store
-        without the context index answers with a report that says so."""
+        apart from its context. Refused while SCONE_QUESTION_LANE is off; a store
+        without the question index answers with a report that says so."""
         model = synthesis_factory() if synthesis_factory is not None else None
         if model is None:
             return JSONResponse({"error": "no synthesis model configured to write questions with (SCONE_CHAT_URL and "

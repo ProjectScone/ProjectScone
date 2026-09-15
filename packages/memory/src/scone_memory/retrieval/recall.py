@@ -15,7 +15,7 @@ from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
 from ..core.models import DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
-from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search
+from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search, question_index
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
 from . import fact_recall, fusion, supersession
@@ -30,6 +30,10 @@ from .entity_lane import ENTITY_WEIGHT, entity_lane
 #: same choice for the same reason. The cost is on the record too: a
 #: passage under the words can now come before one that merely says them.
 CONTEXT_WEIGHT = 2.0
+#: The question lane's share (ingestion.chunk_questions): the context lane's,
+#: which is what it was measured at (benchmarks/chunk-question-lane-v1.results.md,
+#: where no lower weight beat the lane off on held-out questions either).
+QUESTION_WEIGHT = 2.0
 from .episode_scope import episode_fits
 from .filters import Filter, parse_filter
 from .phrases import Phrases, checked_phrases
@@ -91,7 +95,7 @@ class RecallRuntime:
     synonyms: "Synonyms | None" = None
     #: Whether the words a chunk is under are searched as a lane of their own.
     context_lane: bool = False
-    #: Whether the questions each chunk answers, kept in the same index, are searched.
+    #: Whether the questions each chunk answers, kept in an index of their own, are searched.
     question_lane: bool = False
     #: Whether a query term's family is searched by stem prefix in the text lane.
     lexical_stems: bool = False
@@ -389,15 +393,11 @@ async def recall(
     # The context lane: what each passage is under, searched with the same
     # query the text lane got, fused at CONTEXT_WEIGHT -- twice the text
     # lane's, so a passage only under the words can come before one that says them.
-    # The question lane is kept in the same index (ingestion.chunk_questions),
-    # so either flag searches it, and a store without it is named by the lane asked for.
     context_hits: list[tuple[int, float]] = []
-    context_searched = runtime.context_lane or runtime.question_lane
-    if context_searched:
+    if runtime.context_lane:
         keeper = context_index(runtime.documents)
         if keeper is None:
-            asked_for = "context lane" if runtime.context_lane else "question lane"
-            degraded.append(f"{asked_for}: not kept by the {runtime.documents.name} document store")
+            degraded.append(f"context lane: not kept by the {runtime.documents.name} document store")
         else:
             try:
                 t0 = time.perf_counter()
@@ -409,6 +409,26 @@ async def recall(
                 latency["context"] = _ms(t0)
             except Exception as e:  # noqa: BLE001
                 degraded.append(f"context lane: {type(e).__name__}: {e}")
+
+    # The question lane: the questions a model wrote that each passage
+    # answers (ingestion.chunk_questions), in an index of their own so the
+    # flag that searches them searches nothing else.
+    question_hits: list[tuple[int, float]] = []
+    if runtime.question_lane:
+        asked_index = question_index(runtime.documents)
+        if asked_index is None:
+            degraded.append(f"question lane: not kept by the {runtime.documents.name} document store")
+        else:
+            try:
+                t0 = time.perf_counter()
+                question_hits = await asked_index.search_questions(
+                    space, text_query, depth,
+                    TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                               kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
+                )
+                latency["question"] = _ms(t0)
+            except Exception as e:  # noqa: BLE001
+                degraded.append(f"question lane: {type(e).__name__}: {e}")
 
     if candidate_limit is not None or active_reranker is not None:
         text_lane = text_lane[:depth]
@@ -466,10 +486,14 @@ async def recall(
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
         lane_hits.append(entity_hits)
         weights.append(ENTITY_WEIGHT)
-    if context_searched:
+    if runtime.context_lane:
         ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
         lane_hits.append(context_hits)
         weights.append(CONTEXT_WEIGHT)
+    if runtime.question_lane:
+        ranks["question"] = {cid: i + 1 for i, (cid, _) in enumerate(question_hits)}
+        lane_hits.append(question_hits)
+        weights.append(QUESTION_WEIGHT)
     fuse = {"score": fusion.relative_scores, "distribution": fusion.distribution_scores}.get(fusion_mode, fusion.rrf)
     fused = fuse(lane_hits, weights=weights)
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}

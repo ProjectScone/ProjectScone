@@ -1276,7 +1276,7 @@ class MemoryEngine:
                                     model_name: str = "") -> "QuestionLaneReport":
         """Write the question lane for the space's chunks with ``chat``: up to
         ``per_chunk`` questions a chunk answers, kept only with a sentence
-        quoted from it, indexed beside its context (ingestion.chunk_questions).
+        quoted from it, in an index of their own (ingestion.chunk_questions).
         Refused while ``question_lane`` is off."""
         from ..ingestion.chunk_questions import build_chunk_questions
 
