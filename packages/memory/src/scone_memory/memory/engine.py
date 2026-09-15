@@ -149,6 +149,7 @@ ATTACHMENT_TYPES = (
     "application/vnd.ms-powerpoint.slideshow.macroEnabled.12",
     "application/vnd.oasis.opendocument.text", "application/vnd.oasis.opendocument.spreadsheet",
     "application/vnd.oasis.opendocument.presentation", "application/epub+zip",
+    "application/hwp+zip",
 )
 #: Bytes one attachment may carry. Evidence, not a file share.
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
