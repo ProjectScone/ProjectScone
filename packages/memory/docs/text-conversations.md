@@ -112,9 +112,11 @@ direct `recall`, HTTP, MCP and CLI calls still refuse over-long queries.
 `TextConversation(..., reading_order="ends")` render the chosen passages with
 the best at both ends of the block and the weakest in the middle (rank 1
 first, rank 2 last, rank 3 second, inward), for a model that attends least to
-the middle of a long context; the receipt's `reading_order` says which order
-was used and each reference keeps its rank. Passages are still chosen in rank
-order under the byte budget; only their order in the block changes. Off by
+the middle of a long context; the receipt's `reading_order` names the
+arrangement, and `scone_memory.retrieval.reading_order.ranked(references,
+"ends")` restores the ranked order from the references, which follow the
+block. Passages are still chosen in rank order under the byte budget; only
+their order in the block changes. Off by
 default (`"ranked"`): the benefit is the literature's ("lost in the middle"),
 not yet measured on this engine.
 

@@ -398,9 +398,9 @@ class Settings:
             profile_without=tuple(item.strip() for item in env.get("SCONE_PROFILE_WITHOUT", "").split(",")
                                   if item.strip()),
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
-            recency_weight=_environment_float("SCONE_RECENCY_WEIGHT", env.get("SCONE_RECENCY_WEIGHT", str(W_RECENCY))),
+            recency_weight=_environment_float("SCONE_RECENCY_WEIGHT", env.get("SCONE_RECENCY_WEIGHT") or str(W_RECENCY)),
             recency_half_life_days=_environment_float("SCONE_RECENCY_HALF_LIFE_DAYS",
-                                                      env.get("SCONE_RECENCY_HALF_LIFE_DAYS", str(RECENCY_HALF_LIFE_DAYS))),
+                                                      env.get("SCONE_RECENCY_HALF_LIFE_DAYS") or str(RECENCY_HALF_LIFE_DAYS)),
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),
             reranker_factory=env.get("SCONE_RERANKER_FACTORY") or None,

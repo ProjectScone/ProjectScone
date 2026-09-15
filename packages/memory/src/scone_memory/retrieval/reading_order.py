@@ -5,8 +5,10 @@ a list in. A model reading a long context attends least to its middle
 ("lost in the middle", Liu et al. 2023): what sits first and last is
 used, what sits between is skimmed. Arranging the best passages at both
 ends and the weakest in the middle is LlamaIndex's `LongContextReorder`;
-here it is a choice a context assembler makes, off by default, with the
-ranked order still recoverable from each passage's rank.
+here it is a choice a context assembler makes, off by default. The
+receipt names the arrangement, and `ranked` undoes it: the passages
+carry no rank of their own, so the ranked order is recovered by
+inverting the named arrangement, not read off each passage.
 
 The arrangement is fixed and reversible: rank 1 first, rank 2 last,
 rank 3 second, rank 4 second to last, and so on inward. Nothing is
@@ -42,3 +44,16 @@ def ends_first(ranked: Sequence[T]) -> list[T]:
 def arranged(ranked: Sequence[T], order: ReadingOrder) -> list[T]:
     """``ranked`` in the requested reading order."""
     return ends_first(ranked) if order == "ends" else list(ranked)
+
+
+def ranked(items: Sequence[T], order: ReadingOrder) -> list[T]:
+    """The ranked order back from a block in the named reading order:
+    the inverse of ``arranged``."""
+    if order != "ends":
+        return list(items)
+    front_count = (len(items) + 1) // 2
+    front, back = list(items[:front_count]), list(items[front_count:])[::-1]
+    restored: list[T] = []
+    for index in range(len(items)):
+        restored.append(front[index // 2] if index % 2 == 0 else back[index // 2])
+    return restored

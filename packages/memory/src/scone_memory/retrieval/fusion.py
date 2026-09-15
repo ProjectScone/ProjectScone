@@ -61,7 +61,10 @@ def recency_boost(created_at: str, now: str, *, weight: float = W_RECENCY,
     if weight == 0:
         return 0.0
     age_days = max(0.0, (parse_rfc3339(now) - parse_rfc3339(created_at)).total_seconds() / 86400)
-    return weight * math.exp(-age_days / half_life_days)
+    # A half-life halves: at age half_life_days the term is weight / 2.
+    # (The constant this replaced was a 1/e time constant under the same
+    # name, which halved at 0.69 of the days it named.)
+    return weight * 2.0 ** (-age_days / half_life_days)
 
 
 def order(items: list[Fused]) -> list[Fused]:

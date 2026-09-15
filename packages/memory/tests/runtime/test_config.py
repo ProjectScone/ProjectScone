@@ -182,6 +182,9 @@ def test_recency_settings_come_from_the_environment_reach_the_engine_and_refuse_
     finally:
         asyncio.run(off.close())
     for env, named in (({"SCONE_RECENCY_WEIGHT": "-1"}, "SCONE_RECENCY_WEIGHT"), ({"SCONE_RECENCY_WEIGHT": "two"}, "SCONE_RECENCY_WEIGHT"),
-                       ({"SCONE_RECENCY_HALF_LIFE_DAYS": "0"}, "SCONE_RECENCY_HALF_LIFE_DAYS"), ({"SCONE_RECENCY_HALF_LIFE_DAYS": "inf"}, "SCONE_RECENCY_HALF_LIFE_DAYS")):
+                       ({"SCONE_RECENCY_HALF_LIFE_DAYS": "0"}, "SCONE_RECENCY_HALF_LIFE_DAYS"), ({"SCONE_RECENCY_HALF_LIFE_DAYS": "inf"}, "SCONE_RECENCY_HALF_LIFE_DAYS"),
+                       ({"SCONE_RECENCY_HALF_LIFE_DAYS": "36501"}, "SCONE_RECENCY_HALF_LIFE_DAYS")):
         with pytest.raises(InvalidInput, match=named):
             Settings.from_env(base | env)
+    blank = Settings.from_env(base | {"SCONE_RECENCY_WEIGHT": "", "SCONE_RECENCY_HALF_LIFE_DAYS": ""})
+    assert (blank.recency_weight, blank.recency_half_life_days) == (W_RECENCY, RECENCY_HALF_LIFE_DAYS), "an empty value is unset, as the neighbours treat it"

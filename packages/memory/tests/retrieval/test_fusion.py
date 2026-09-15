@@ -35,11 +35,15 @@ def test_the_recency_term_is_a_weight_that_halves_every_half_life_and_zero_favou
     now = "2024-03-31T00:00:00Z"
     fresh, old = "2024-03-31T00:00:00Z", "2024-03-01T00:00:00Z"
     assert recency_boost(fresh, now, weight=0.2, half_life_days=30.0) == pytest.approx(0.2)
-    assert recency_boost(old, now, weight=0.2, half_life_days=30.0) == pytest.approx(0.2 * math.exp(-1.0))
+    assert recency_boost(old, now, weight=0.2, half_life_days=30.0) == pytest.approx(0.1), "a half-life halves"
+    assert recency_boost("2024-03-31T00:00:00Z", "2024-05-30T00:00:00Z", weight=0.2, half_life_days=30.0) == pytest.approx(0.05), "and halves again"
     assert recency_boost(old, now, weight=0.2, half_life_days=3.0) < recency_boost(old, now, weight=0.2, half_life_days=300.0), \
         "a shorter half-life forgets faster"
     assert recency_boost(old, now, weight=0.0, half_life_days=30.0) == 0.0 == recency_boost(fresh, now, weight=0.0)
     assert recency_boost(old, now) == recency_boost(old, now, weight=0.005, half_life_days=30.0), "the defaults are the constants"
-    for weight, half_life in ((-0.1, 30.0), (MAX_RECENCY_WEIGHT + 1, 30.0), (float("nan"), 30.0), (0.1, 0.0), (0.1, -1.0), (0.1, float("inf")), (True, 30.0)):
+    from scone_memory.retrieval.fusion import MAX_RECENCY_HALF_LIFE_DAYS
+
+    for weight, half_life in ((-0.1, 30.0), (MAX_RECENCY_WEIGHT + 1, 30.0), (float("nan"), 30.0), (0.1, 0.0), (0.1, -1.0), (0.1, float("inf")),
+                              (0.1, MAX_RECENCY_HALF_LIFE_DAYS + 1), (True, 30.0)):
         with pytest.raises(InvalidInput, match="recency_"):
             validate_recency(weight, half_life)
