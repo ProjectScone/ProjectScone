@@ -301,6 +301,13 @@ async def recall(
     depth = candidate_limit if candidate_limit is not None else limit * LANE_DEPTH * (1 if in_store else UNFILTERED_DEPTH)
     vector_depth = (candidate_limit if candidate_limit is not None
                     else limit * LANE_DEPTH * (UNFILTERED_DEPTH if vector_postfiltered else 1))
+    # The image lane's index is another index: whether it evaluates a
+    # condition is its own answer, not the text vectors' index's.
+    image_postfiltered = episode_bound or (
+        narrow_by is not None and not (runtime.image is not None
+                                       and getattr(runtime.image.vectors, "narrows_conditions", False)))
+    image_depth = (candidate_limit if candidate_limit is not None
+                   else limit * LANE_DEPTH * (UNFILTERED_DEPTH if image_postfiltered else 1))
     degraded: list[str] = []
     started = time.perf_counter()
     latency: dict[str, float] = {}
@@ -446,17 +453,19 @@ async def recall(
 
     # The image lane, only when asked for: stored images nearest the query in
     # the image embedder's space, from an index the text embedder never
-    # writes, under the vector lane's filters and depth.
+    # writes, under the vector lane's filters, as deep as its own index needs.
     image_hits: list[tuple[int, float]] = []
+    image_ran = False
     if image_lane:
         if runtime.image is None:
             degraded.append("image lane: this engine has no image embedder and image index")
         else:
             try:
                 t0 = time.perf_counter()
-                image_hits = await search_images(runtime.image, space, query, vector_depth, boundary, clean_tags,
+                image_hits = await search_images(runtime.image, space, query, image_depth, boundary, clean_tags,
                                                  clean_where, narrow_by)
                 latency["image"] = _ms(t0)
+                image_ran = True
             except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
                 degraded.append(f"image lane: {type(e).__name__}: {e}")
 
@@ -671,13 +680,15 @@ async def recall(
             conditions=narrow_by is not None, kind_or_source_or_dates=episode_bound,
             text_lane="off" if not text_ran else ("in_store" if in_store else "postfiltered"),
             vector_lane="off" if not vector_ran else ("postfiltered" if vector_postfiltered else "in_store"),
-            text_window=depth, vector_window=vector_depth,
-            text_returned=len(text_lane), vector_returned=len(vector_lane),
+            image_lane="off" if not image_ran else ("postfiltered" if image_postfiltered else "in_store"),
+            text_window=depth, vector_window=vector_depth, image_window=image_depth if image_ran else 0,
+            text_returned=len(text_lane), vector_returned=len(vector_lane), image_returned=len(image_hits),
             postfiltered_out=postfiltered_out,
             # The bound bit: the filter removed candidates and a lane that
             # is post-filtered had returned its whole window.
             window_exhausted=postfiltered_out > 0 and (
                 (vector_ran and vector_postfiltered and len(vector_lane) >= vector_depth)
+                or (image_postfiltered and len(image_hits) >= image_depth)
                 or (text_ran and not in_store and len(text_lane) >= depth)),
         )
         # Beside the request's own `narrow`, never merged into it: that
@@ -694,7 +705,8 @@ async def recall(
         lanes=answered,
         diversity=diversity_trace,
         phrases=_finished(phrase_trace, len(result_items), limit,
-                          window_full=len(vector_lane) >= vector_depth or len(text_lane) >= depth),
+                          window_full=(len(vector_lane) >= vector_depth or len(text_lane) >= depth
+                                       or len(image_hits) >= image_depth)),
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,

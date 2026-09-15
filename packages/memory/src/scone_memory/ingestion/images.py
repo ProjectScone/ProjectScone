@@ -91,6 +91,8 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
 
     Writes use existing primitives, not a transaction. Exact retries repair links.
     Same bytes in different source occurrences share a blob, not their descriptions.
+    With the image lane configured, an episode forgotten while its image is
+    embedded raises ``Gone`` (``NotFound`` mid-forget) and keeps no image vector.
     """
     check_space(space)
     if not isinstance(data, bytes) or not 0 < len(data) <= min(10_000_000, memory.max_attachment_bytes):

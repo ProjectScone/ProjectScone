@@ -37,9 +37,30 @@ for item in result.items:
   vector a failed write left out and never adds a second one.
 - **An index of its own.** `image_vectors` must not be the text vectors' index:
   a cosine between an image and a query means something only when one model
-  made both, and an index holds one width. The engine refuses the same object,
-  and two SQLite handles on one database file. With SQLite, give the image lane
-  its own file: `SqliteVectorIndex("~/.scone-memory/image-vectors.db")`. The
+  made both, and an index holds one width. Every first-party index defaults to
+  one namespace, so a second handle built with the same arguments is the same
+  storage: its image vectors would overwrite the captions' text vectors, which
+  have the same chunk ids. Each index names where its rows live (`location`),
+  and the engine refuses an image index equal to the text index there. Give it
+  its own namespace:
+
+  | Index | The image lane's own storage |
+  | --- | --- |
+  | `SqliteVectorIndex` | another file: `SqliteVectorIndex("~/.scone-memory/image-vectors.db")` |
+  | `PostgresVectorIndex` | another schema: `PostgresVectorIndex(url, schema="scone_images")` |
+  | `ElasticsearchVectorIndex` | another prefix: `prefix="scone_images"` |
+  | `OpenSearchVectorIndex` | another index: `index="scone_image_vectors"` |
+  | `QdrantVectorIndex`, `MilvusVectorIndex` | another collection: `collection="scone_images"` |
+  | `ChromaVectorIndex` | another collection; in-process clients on one path, or in memory, share a store |
+  | `LanceDBVectorIndex` | another table: `table="scone_images"` |
+  | `RedisVectorIndex`, `ElastiCacheVectorIndex` | another prefix: `prefix="scone_images"` |
+
+  The comparison is of the configuration as written (a URL, a path, a schema)
+  or of an injected client's identity. Two spellings of one server
+  (`localhost` and `127.0.0.1`), or two client objects on one server, are not
+  recognised; neither is an index that names no location (the in-memory index,
+  a custom one), except as the same object, nor a `LangChainVectorIndex` whose
+  store is bound after the engine is built. The
   index records which image embedder wrote it, as the text index does; a recall
   through a different image embedder is refused by the lane and named in
   `degraded` (`image lane: VectorsNotComparable: ...`), and the other lanes answer.
@@ -47,8 +68,13 @@ for item in result.items:
   and `as_of` narrow the lane in the index. `conditions` narrow it in the index
   when the index evaluates conditions itself (the in-memory and SQLite indexes
   do); otherwise, and for `kind`, `source_prefix`, `since` and `until`, recall
-  post-filters what the lane found, over the vector lane's window, as it does for
-  the vector lane. The narrowing report describes the text and vector lanes only.
+  post-filters what the lane found. Whether a condition narrows in the index is
+  asked of the image index itself, not of the text index: a post-filtered image
+  lane looks as deep as a post-filtered vector lane (twenty-five times an
+  unnarrowed recall's window). The narrowing report says what the lane did
+  (`image_lane`: `in_store`, `postfiltered` or `off`; `image_window`;
+  `image_returned`), and a full post-filtered image window sets
+  `window_exhausted`, as a full image window sets `phrases.short`.
 
 
 ## What a recall gets
@@ -80,6 +106,13 @@ not tuned: there is no image retrieval benchmark here and no model to run one.
 Forgetting an episode deletes its image vector with its text vectors, by the same
 chunk ids, including a forget resumed by `recover()`, an expiry, `forget_matching`
 and a keyed `replace`. Deleting a space sweeps the image index too.
+
+The image vector is written after the episode is stored, so a forget can land
+while `ingest_image` is still embedding the image. Forgetting deletes the chunks
+before the vectors; after writing the vector, `ingest_image` reads the chunk
+again, and when it is gone it deletes the vector it just wrote and raises `Gone`
+(or `NotFound` while that forget has not yet written its tombstone). No vector
+outlives the forgotten image, and no result says `indexed` for it.
 
 ## Embedders
 
@@ -118,7 +151,8 @@ proves the lane's plumbing (the separate index, fusion, provenance, filters and
 forgetting), not retrieval quality. **How well a real image model retrieves images
 here is unmeasured.**
 
-Known limits: the image index is not covered by `doctor`, `check_vectors` or
+Known limits: the lane is configured and asked for from Python only; no `SCONE_*`
+setting, CLI flag or HTTP parameter builds or runs it. The image index is not covered by `doctor`, `check_vectors` or
 `reembed_vectors`; a space merge or an archive import stores the image episodes
 again but does not write their image vectors; a crash between storing an image's
 episode and writing its vector leaves the image without a vector until

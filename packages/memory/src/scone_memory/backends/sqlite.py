@@ -1040,6 +1040,13 @@ class SqliteVectorIndex:
     async def close(self) -> None:
         self.conn.close()
 
+    @property
+    def location(self) -> tuple[object, ...] | None:
+        """Where the rows live: the database file, or None for an in-memory database, which no other handle reaches."""
+        if ":memory:" in str(self.path):
+            return None
+        return (Path(self.path).expanduser().resolve(),)
+
     async def ensure(self, dim: int) -> None:
         if self.dim is not None and self.dim != dim:
             raise ValueError(f"index holds {self.dim}-d vectors, embedder makes {dim}-d")
