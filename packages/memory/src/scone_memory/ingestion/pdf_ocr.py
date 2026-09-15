@@ -128,7 +128,7 @@ def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], lim
         offset = end
     suffix = '' if reading_order == 'provider' else f'+{reading_order}-v1'
     output = ParsedPdf(text='\n\n'.join(texts), parser=f'{parsed.parser}+scone-ocr-v2{suffix}', pages=tuple(pages),
-                       outline=parsed.outline)
+                       outline=parsed.outline, encryption=parsed.encryption)
     validate_pdf(output, limits)
     return output
 

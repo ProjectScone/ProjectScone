@@ -56,6 +56,51 @@ def test_a_title_across_the_table_is_its_first_row_and_a_footer_stays_unassigned
     assert table.rows==4 and found.unassigned==(12,13,14)
 
 
+def test_prose_between_or_beside_grids_is_not_their_rows():
+    from scone_memory.ocr.tables import infer_tables
+    def line(text,row,left=.1,right=.85):
+        return OcrRegion(text=text,box=(left,.15+row*.06,right,.175+row*.06))
+    # Three lines of prose between two grids of the same columns: the
+    # first grid ends before them, and they are no one's rows.
+    two=[*grid(top=.15,rows=3),*(line(f'Prose line {n} of the passage',3+n) for n in range(3)),*grid(top=.51,rows=3)]
+    found=infer_tables(two)
+    assert [t.rows for t in found.tables]==[3,3] and found.unassigned==(9,10,11)
+    # A sentence closed by a citation is prose, not the title of the grid below.
+    cited=[line('Guatemala had a billionaire for the first time in its history.[28]',0),*grid(top=.21,rows=3)]
+    found=infer_tables(cited)
+    assert found.tables[0].rows==3 and found.unassigned==(0,)
+    # A wrapped word over a later column, above the grid, is not its title.
+    wrapped=[OcrRegion(text='States',box=(.7,.09,.8,.115)),*grid(top=.15,rows=3)]
+    found=infer_tables(wrapped)
+    assert found.tables[0].rows==3 and found.unassigned==(0,)
+    # A prose line at the foot with a cell across columns is not a row either.
+    tail=[*grid(top=.15,rows=3),OcrRegion(text='Spanx founder',box=(.1,.33,.25,.355)),
+          OcrRegion(text='Sara Blakely became the youngest self-made',box=(.4,.33,.85,.355))]
+    found=infer_tables(tail)
+    assert found.tables[0].rows==3 and found.unassigned==(9,10)
+    # A subtotal across the number columns at the foot, and a label's
+    # wrapped word below its row, are rows of the table.
+    subtotal=[*grid(top=.15,rows=3),OcrRegion(text='Subtotal',box=(.1,.33,.22,.355)),OcrRegion(text='36',box=(.4,.33,.85,.355))]
+    found=infer_tables(subtotal)
+    assert found.tables[0].rows==4 and found.unassigned==() and [c.column_span for c in found.tables[0].cells if c.row==3]==[1,2]
+    wrapped_label=[*grid(top=.15,rows=3),OcrRegion(text='development',box=(.1,.33,.22,.355))]
+    found=infer_tables(wrapped_label)
+    assert found.tables[0].rows==4 and found.unassigned==()
+
+
+def test_two_columns_of_prose_are_not_a_table_but_a_notation_list_is():
+    from scone_memory.ocr.tables import infer_tables
+    def cell(text,row,left,right):
+        return OcrRegion(text=text,box=(left,.1+row*.05,right,.13+row*.05))
+    prose=[c for row in range(4) for c in (cell(f'Figure 2 shows the phase portrait {row}',row,.1,.45),
+                                           cell(f'Our method finds both modes {row}',row,.55,.9))]
+    assert infer_tables(prose).tables==() and len(infer_tables(prose).unassigned)==8
+    notation=[c for row,(symbol,width) in enumerate((('RR',.13),('IPD',.14),('EVec, EVal',.2),('L : Rn -> R',.22)))
+              for c in (cell(symbol,row,.1,width),cell(f'What the symbol {symbol} stands for here',row,.35,.8))]
+    [table]=infer_tables(notation).tables
+    assert (table.rows,table.columns)==(4,2), "a narrow, ragged first column is a table's"
+
+
 def test_separated_grids_remain_separate_candidates():
     from scone_memory.ocr.tables import infer_tables
     found=infer_tables(grid(top=.05,rows=3)+grid(top=.65,rows=3))
@@ -134,14 +179,15 @@ def test_a_row_of_fewer_cells_spans_the_grid_s_columns_and_a_narrow_one_is_not_w
     regions = [cell("Quarterly figures", 0, 0.1, 0.75),  # a title over three columns
                cell("Item", 1, 0.1, 0.25), cell("Q1", 1, 0.4, 0.5), cell("Q2", 1, 0.65, 0.75),
                cell("Widgets", 2, 0.1, 0.28), cell("10", 2, 0.4, 0.48), cell("12", 2, 0.65, 0.73),
-               cell("Gadgets", 3, 0.1, 0.28), cell("7", 3, 0.4, 0.45), cell("9", 3, 0.65, 0.7),
-               cell("Total", 4, 0.1, 0.22), cell("38", 4, 0.4, 0.75)]  # a total across the two number columns
+               cell("Subtotal", 3, 0.1, 0.24), cell("22", 3, 0.4, 0.75),  # a subtotal across the two number columns
+               cell("Gadgets", 4, 0.1, 0.28), cell("7", 4, 0.4, 0.45), cell("9", 4, 0.65, 0.7),
+               cell("Total", 5, 0.1, 0.22), cell("17", 5, 0.4, 0.45), cell("21", 5, 0.65, 0.7)]
     layout = infer_tables(regions)
     assert layout.strategy == 'aligned-rows-v2' and len(layout.tables) == 1
     [table] = layout.tables
-    assert table.rows == 5 and table.columns == 3
+    assert table.rows == 6 and table.columns == 3
     spans = {(c.row, c.column): c.column_span for c in table.cells}
-    assert spans[(0, 0)] == 3 and spans[(4, 1)] == 2 and spans[(4, 0)] == 1 and spans[(2, 1)] == 1
+    assert spans[(0, 0)] == 3 and spans[(3, 1)] == 2 and spans[(3, 0)] == 1 and spans[(2, 1)] == 1
     assert {c.text for c in table.cells if c.row == 0} == {"Quarterly figures"}
     assert 'column_span' not in [c for c in table.cells if c.row == 2][0].model_dump(), "a cell of one column serializes as before"
     assert not layout.unassigned, "every region sits in a cell"

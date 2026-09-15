@@ -5,11 +5,14 @@ from io import BytesIO
 import json
 import logging
 import sys
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from ..core.errors import InvalidInput
-from .pdf import ParsedPdf, PdfLimits, PdfPage
+from .pdf import ParsedPdf, PdfEncryption, PdfLimits, PdfPage, Restriction
 from .pdf_layout import lay_out_page, running_rows
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; the worker imports pypdf when it runs
+    import pypdf
 
 #: Bookmarks read from one PDF; past it the outline is read to here and said to be capped.
 MAX_OUTLINE_ITEMS = 2_000
@@ -82,8 +85,7 @@ def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metada
 
     try:
         reader = pypdf.PdfReader(BytesIO(data), strict=True)
-        if reader.is_encrypted:
-            raise InvalidInput('encrypted PDFs are unsupported; provide a decrypted original')
+        encryption = _open_encrypted(reader) if reader.is_encrypted else None
         count = len(reader.pages)
         if count < 1 or count > limits.max_pages:
             raise InvalidInput('PDF exceeds its page limit or has no pages')
@@ -98,6 +100,10 @@ def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metada
                                              layout_mode_strip_rotated=False).rstrip()
                 except (InvalidInput, MemoryError, RecursionError, pypdf.errors.LimitReachedError):
                     raise
+                except pypdf.errors.DependencyError as error:
+                    # An AES-128 file opens without the cipher and needs it
+                    # for its pages: a missing package is not a broken page.
+                    raise InvalidInput(NEEDS_CRYPTOGRAPHY) from error
                 except Exception:
                     if not allow_text_errors:
                         raise
@@ -140,11 +146,48 @@ def extract(data: bytes, limits: PdfLimits, *, allow_empty: bool = False, metada
         # An extraction carrying bookmark sections names that, so its manifest is told apart from one before them.
         marked = '+outline-v1' if outline != 'none' else ''
         return ParsedPdf(text='\n\n'.join(texts), parser=f'pypdf/{pypdf.__version__}:{strategy}{marked}',
-                         pages=tuple(pages), outline=outline)
+                         pages=tuple(pages), outline=outline, encryption=encryption)
     except InvalidInput:
         raise
+    except pypdf.errors.DependencyError as error:
+        # Reading an AES-256 file tries the empty password as it opens, and
+        # its page tree, streams and pages all need the cipher: a missing
+        # package is named, not reported as a broken file.
+        raise InvalidInput(NEEDS_CRYPTOGRAPHY) from error
     except Exception as error:
         raise InvalidInput('PDF is corrupt or uses unsupported text/layout encoding') from error
+
+
+NEEDS_CRYPTOGRAPHY = 'decrypting this PDF needs the cryptography package'
+#: The PDF's user access permission bits, by what each lets a reader do.
+_PERMISSIONS: tuple[tuple[str, Restriction], ...] = (
+    ('PRINT', 'print'), ('MODIFY', 'modify'), ('EXTRACT', 'extract'), ('ADD_OR_MODIFY', 'annotate'),
+    ('FILL_FORM_FIELDS', 'fill_forms'), ('EXTRACT_TEXT_AND_GRAPHICS', 'extract_for_accessibility'),
+    ('ASSEMBLE_DOC', 'assemble'), ('PRINT_TO_REPRESENTATION', 'print_high_quality'))
+
+
+def _open_encrypted(reader: pypdf.PdfReader) -> PdfEncryption:
+    """Open an encrypted file with the empty password -- an owner password
+    alone restricts what a reader may do and hides nothing -- and say what
+    was restricted; a file that needs a user password is refused."""
+    import pypdf
+    from pypdf.constants import UserAccessPermissions
+
+    try:
+        matched = reader.decrypt('')
+    except pypdf.errors.DependencyError as error:
+        raise InvalidInput(NEEDS_CRYPTOGRAPHY) from error
+    if matched == pypdf.PasswordType.NOT_DECRYPTED:
+        raise InvalidInput('encrypted PDFs need their user password; provide a decrypted original')
+    allowed = reader.user_access_permissions
+    if allowed is None or not reader.are_permissions_valid:
+        # Permissions the file cannot vouch for (a tampered AES-256 record)
+        # are all reported restricted, so a caller honouring them errs safe.
+        restricted = tuple(name for _, name in _PERMISSIONS)
+    else:
+        restricted = tuple(name for flag, name in _PERMISSIONS if UserAccessPermissions[flag] not in allowed)
+    return PdfEncryption(matched='owner' if matched == pypdf.PasswordType.OWNER_PASSWORD else 'user',
+                         restricted=restricted)
 
 
 def main() -> None:
