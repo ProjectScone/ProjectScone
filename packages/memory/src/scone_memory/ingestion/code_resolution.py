@@ -62,6 +62,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 
+#: The spellings a module stem is tried with, the older languages first so
+#: a stem two languages share (`store.py` beside `store.ts`) keeps the
+#: answer it had; `index.*` and Rust's `mod.rs` are tried for a directory.
+_SUFFIXES = ("py", "ts", "tsx", "js", "jsx", "go", "rs", "mts", "cts", "mjs", "cjs", "java", "kt", "kts", "scala",
+             "cs", "swift", "dart", "zig", "php", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "m", "mm")
+
+
 @dataclass(frozen=True)
 class Resolution:
     """What a corpus could and could not settle.
@@ -165,12 +172,18 @@ class _FileResolver:
         stem = posixpath.join(here, *module.split(".")) if module else here
         stems = [stem, posixpath.normpath(posixpath.join(posixpath.dirname(path), module))
                  if module.startswith(".") else stem]
+        # An import that names a file outright (`./lib/x.h`, `./page.css`)
+        # is that file when the walk saw it.
+        if module.startswith(".") and stems[1] in seen:
+            return stems[1]
         for base in dict.fromkeys(stems):
-            for suffix in ("py", "ts", "tsx", "js", "jsx", "go", "rs"):
+            for suffix in _SUFFIXES:
                 if f"{base}.{suffix}" in seen:
                     return f"{base}.{suffix}"
                 if f"{base}/index.{suffix}" in seen:
                     return f"{base}/index.{suffix}"
+            if f"{base}/mod.rs" in seen:
+                return f"{base}/mod.rs"
         for candidate in (f"{stem}.py", f"{stem}/__init__.py"):
             if candidate in seen:
                 return candidate

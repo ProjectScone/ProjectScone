@@ -98,3 +98,13 @@ def test_edges_come_back_in_a_settled_order():
 def test_nothing_in_gives_nothing_out():
     found = resolve_across_files([], {"rank": ("app/shelf.py:Shelf.rank",)})
     assert found.edges == () and found.ambiguous == 0 and found.unknown == 0
+
+
+def test_the_walk_names_a_file_written_outright_a_rust_mod_file_and_the_newer_suffixes():
+    from scone_memory.ingestion.code_resolution import file_resolver
+
+    walked = file_resolver(["src/lib/x.h", "src/util/mod.rs", "web/a.mjs", "lib/b.dart", "src/store.rs"])
+    assert walked("src/main.c", 1, "./lib/x.h") == "src/lib/x.h", "a header named outright is that file"
+    assert walked("src/main.c", 1, "./lib/y.h") is None
+    assert walked("src/main.rs", 1, "util") == "src/util/mod.rs" and walked("src/main.rs", 1, "store") == "src/store.rs"
+    assert walked("web/app.js", 1, "./a") == "web/a.mjs" and walked("lib/main.dart", 1, "./b") == "lib/b.dart"
