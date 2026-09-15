@@ -505,7 +505,7 @@ def create_app(
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
-            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "recall.graph_boost": True, "recall.lessons": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
         }
         if agent_catalog is not None and agent_plan_store is not None:
@@ -1030,6 +1030,8 @@ def create_app(
         infer: bool = Query(default=False, description="Read the question's own words for a scope -- a date, a kind "
                                                         "of memory, tags, a place -- and search with it where no filter "
                                                         "was set by hand; the answer says what was read and applied."),
+        lessons: bool = Query(default=False, description="Put beside each passage what people said about it in "
+                                                          "feedback. The order is not changed."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
@@ -1082,6 +1084,11 @@ def create_app(
                     "ask for one or the other")
         if merge_min_share is not None and not merge:
             raise InvalidInput("merge_min_share is a floor under a merge; ask for merge with it")
+        if lessons and merge:
+            # A merged passage keeps its best-scored chunk's fields and drops its neighbours', so
+            # their lessons would vanish, or a judged-useless neighbour would ride under a good one.
+            raise InvalidInput("lessons cannot be combined with merge: a merged passage joins chunks judged "
+                               "separately, and one lesson cannot stand for them; ask for one or the other")
         if merge and compress is not None:
             # A merged passage is reported under its best chunk, so the
             # other retrieved chunks inside it would not be pinned, and
@@ -1099,6 +1106,7 @@ def create_app(
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
+            lessons=lessons,
             **({"lanes": [lane.strip() for lane in lanes.split(",") if lane.strip()]} if lanes is not None else {}),
             require=require, exclude=exclude, diversity=diversity,
         )
@@ -1177,6 +1185,8 @@ def create_app(
                                     "surfaces": list(kept.surfaces), "why": kept.why}
         if opened is not None:
             response["widened"] = staged(opened.record())
+        if result.lessons_read is not None:
+            response["lessons_read"] = result.lessons_read
         if joined is not None:
             response["merged"] = staged(joined.record())
         if cut is not None:
@@ -1482,6 +1492,19 @@ def create_app(
         event = await engine.feedback(space, body.recall_event_id, body.chunk_id, body.useful, body.note)
         return {"recorded": event.event_id}
 
+    @app.get("/v1/lessons")
+    async def get_lessons(
+        window_days: int = Query(default=90, ge=1, le=3650), half_life_days: float = Query(default=30, gt=0, le=3650),
+        min_corroboration: int = Query(default=2, ge=1, le=100), max_events: int = Query(default=5000, ge=1, le=20000),
+        space: str = Depends(space_for),
+    ) -> dict:
+        """What people said about the space's passages over the last ``window_days``: per
+        passage, the latest judgement of each recall weighed by age, and stated as preferred,
+        tentative, contested or dead end, with whether the passage can still be read."""
+        found = await engine.lessons(space, window_days=window_days, half_life_days=half_life_days,
+                                     min_corroboration=min_corroboration, max_events=max_events)
+        return found.record()
+
     @app.get("/v1/metrics")
     async def get_metrics(
         since: Optional[str] = None, until: Optional[str] = None, limit: int = 5000, space: str = Depends(space_for)
@@ -1615,6 +1638,8 @@ def item_json(item: RecallItem) -> dict:
     }
     if item.rerank_score is not None:
         result["rerank_score"] = item.rerank_score
+    if item.lessons is not None:
+        result["lessons"] = item.lessons
     return result
 
 

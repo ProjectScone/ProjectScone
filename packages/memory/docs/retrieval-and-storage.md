@@ -220,6 +220,40 @@ the claims that hold, then the space's recent activity. `GET /v1/profile`
   says which revision the answer is of.
 - Closed, excluded and proposed claims are never profiled, as before.
 
+## What people said about a passage
+
+```bash
+scone lessons --window-days 90 --half-life-days 30 --min-corroboration 2
+scone recall "when was the crane survey booked" --lessons
+```
+
+A person can mark a returned passage useful or not (`POST /v1/feedback`),
+and that judgement is kept as an event. `lessons` reads those events back.
+For each passage, the latest judgement of each recall counts. Each one
+weighs 1, positive when useful and negative when not, and the weight halves
+every `half_life_days`. Each passage gets a state:
+
+- `preferred` needs at least `min_corroboration` useful judgements and none against, because one person's word is not a preference;
+- `dead_end` means judged and never useful;
+- `contested` means judged both ways;
+- `tentative` means useful but not yet corroborated.
+
+Each lesson says whether its passage can still be read (`present` or `gone`).
+The read covers `window_days` and at most `max_events` judgements; past that
+the oldest are left out and `events_cut` says so. Judgements are counted
+per space, since no per-person identity is recorded yet.
+
+`recall(lessons=True)` (`lessons=true` on `/v1/recall`, `--lessons`) puts
+each passage's lesson beside it, and `GET /v1/lessons` lists them all.
+Lessons never change the order: nothing has measured that ranking by them
+answers better, so they are information beside the score, not part of it.
+A recall asked for lessons also carries `lessons_read`: the window,
+half-life and corroboration used, and how many judgements were read and
+whether that read was cut. A recall not asked answers exactly as before,
+with no `lessons` or `lessons_read` field. `--lessons` is refused with
+`--merge`: a merged passage joins chunks that were judged separately, and
+one lesson cannot stand for them.
+
 ## Abstaining, by a floor that was measured
 
 A similarity is a number one embedder produces under one set of settings.
