@@ -2,7 +2,7 @@
 
 No macros, formulas, external relationships, embedded objects or scripts execute.
 Spreadsheet values are stored values; layout, images and chart rendering are not
-interpreted. A DOCX or PPTX chart gives the values cached in its part, never recalculated. Repeated ODS cells/rows carry repeat metadata rather than expanding.
+interpreted. A Word or PowerPoint chart gives the values cached in its part, never recalculated. Repeated ODS cells/rows carry repeat metadata rather than expanding.
 """
 from __future__ import annotations
 
