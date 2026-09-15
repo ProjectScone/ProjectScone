@@ -3449,6 +3449,51 @@ answer. It reads and changes nothing.
   moving is said (`ledger_moved_during_read`) rather than answered from
   two different moments.
 
+#### `GET /v1/graph/stats`
+
+The graph counted, for a reader who wants a number rather than a
+report: how many entities, relations (and how many of those are
+implied rather than stated), attributes and facts the projection holds;
+how many communities the analysis found and their modularity; how many
+entities stand alone or are only named by the graph (external); the
+entity kinds and the relation predicates, each with its count (the
+twenty most common listed, the rest counted); and the facts by origin
+(`stated`, `extracted`, `inferred`), by grounding (`quoted`,
+`unquoted`, `unsourced`) and by standing (`active`, `proposed`,
+`closed`). Every number is a count over recorded data; nothing is
+sampled and no model is called. Advertised as `graph.stats`; `scone
+graph stats`, the MCP tool `memory_graph_stats`, the MCP resources
+`scone://graph/stats` and `scone://{space}/graph/stats`, and the ToolBox
+tool `graph_stats` give the same answer. It reads and changes nothing.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
+`coverage.reasons` says when the analysis was truncated, when more
+kinds or predicates exist than are listed, and when the ledger moved
+during the read.
+
+#### `GET /v1/graph/hubs`
+
+The graph's own entities with the most neighbours, most linked first:
+its core abstractions, or its utility hubs (a logger every file
+imports). Each hub carries its label, key and kind, its degree (distinct
+neighbours), fact weight, PageRank, betweenness and community. What the
+graph only names (a library, a cited record) is counted as external and
+not ranked; the report lists those apart. Advertised as `graph.hubs`;
+`scone graph hubs`, the MCP tool `memory_graph_hubs`, the MCP resources
+`scone://graph/hubs` and `scone://{space}/graph/hubs`, and the ToolBox
+tool `graph_hubs` give the same answer. It reads and changes nothing.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `limit` | 10 (1–100) | Hubs shown; the rest are counted |
+| `above` | none (50–100) | Only the hubs above this degree percentile, by the rule the report's `exclude_hubs` uses to hold them apart |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
 #### `GET /v1/graph/cycles`
 
 The dependency cycles a space's code graph holds. A cycle is the one
