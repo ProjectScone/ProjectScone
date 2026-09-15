@@ -52,7 +52,7 @@ from typing import Any, Optional, Sequence
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.bench.comparative import (CachedEmbedder, OneThreadCache, VectorCache, _scores, bench_embedder, compare,
-                                            distinct_sessions, llamaindex_session_ranking)
+                                            distinct_sessions, llamaindex_session_ranking, reference_tokenizer)
 from scone_memory.bench.runner import BenchItem, load_items, stratified_sample
 from scone_memory.core.ports import Embedder
 from scone_memory.ingestion.embedding_cache import SqliteEmbeddingCache
@@ -204,6 +204,7 @@ async def sweep(items: list[BenchItem], *, chunkings: Sequence[Chunking], fusion
             for name, per_item in rankings.items()}
     return {"rows": rows, "rankings": rankings, "engine_default_vector_weight": default_weight,
             "engine_default_exact_forms": default_exact, "embedding": _costs(ours, embedder, cache),
+            "llamaindex_tokenizer": reference_tokenizer(embedder),
             "question_ids": [item.question_id for item in items]}
 
 

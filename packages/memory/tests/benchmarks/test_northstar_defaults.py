@@ -20,7 +20,7 @@ from scone_memory.bench.comparative import CachedEmbedder
 from scone_memory.ingestion.embedding_cache import InMemoryEmbeddingCache
 
 from ..paths import PACKAGE_ROOT
-from .test_comparative import ITEMS, Counting
+from .test_comparative import ITEMS, Worded
 
 #: As the script samples them: an item with no evidence session is not scored.
 SCORED = [item for item in ITEMS if item.has_evidence]
@@ -62,7 +62,7 @@ async def test_a_sweep_on_a_cached_model_embeds_each_text_once_and_says_what_eac
     pytest.importorskip("llama_index.core")
     pytest.importorskip("llama_index.retrievers.bm25")
     cache = InMemoryEmbeddingCache(10_000)
-    model = Counting()
+    model = Worded()
 
     async def run():
         return await northstar.sweep(SCORED, chunkings=[northstar.Chunking(700, None), northstar.Chunking(None, 16)],
@@ -75,6 +75,9 @@ async def test_a_sweep_on_a_cached_model_embeds_each_text_once_and_says_what_eac
     assert first["embedding"]["embedder"] == "counting-model-v1"
     assert first["embedding"]["scone"]["embedded"] > 0 and first["embedding"]["llamaindex"]["embedded"] > 0
     assert first["embedding"]["cache"]["evicted"] == 0, "a cache that dropped vectors would embed a text twice"
+    assert first["llamaindex_tokenizer"] == "counting-model-v1, a chunk's markers included"
+    assert first["embedding"]["llamaindex"]["over_window"] == first["embedding"]["scone"]["over_window"] == 0, (
+        "the model counts the reference's nodes, so none runs past its window")
     asked = sum(len(call) for call in model.calls)
     again = await run()
     assert sum(len(call) for call in model.calls) == asked, "the second run reads every vector it needs"
@@ -103,6 +106,7 @@ async def test_the_hashed_sweep_names_its_embedder_and_carries_no_embedding_cost
     result = await northstar.sweep(ITEMS[:1], chunkings=[northstar.Chunking(700, None)], fusions=["rank"], weights=[0.01],
                                    diversities=[None], log=io.StringIO())
     assert result["engine_default_vector_weight"] == 0.01 and result["embedding"] == {"embedder": HashEmbedder().id}
+    assert result["llamaindex_tokenizer"] == "tiktoken gpt-3.5-turbo (LlamaIndex's default)"
 
 
 async def test_the_vector_cache_file_answers_the_reference_embedding_from_its_worker_thread(tmp_path):

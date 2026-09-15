@@ -296,3 +296,74 @@ def test_the_bench_embedder_is_hash_or_a_local_model_and_anything_else_is_refuse
     assert made == [("bge-small-en-v1.5", "/models")]
     with pytest.raises(ValueError, match="bge-small-en-v1.5"):
         bench_embedder("bge-smol")
+
+
+class Worded(Counting):
+    """A model that reads a word as two tokens, more than tiktoken counts, puts
+    a marker at each end and reads only ``max_input_tokens``, as BGE does."""
+
+    max_input_tokens = 64
+
+    def count_tokens(self, text: str) -> int:
+        return 2 * len(text.split()) + 2
+
+
+async def test_the_reference_splits_in_the_tokens_the_model_reads_markers_included(reference):
+    """A model's window drops a node's tail without saying so. The reference's
+    splitter counted tiktoken's tokens, BGE reads more of its own for the
+    same text, and 40% of its 512-token nodes ran past BGE's window; ours are
+    counted by the model. Where the model can count, the reference counts
+    with it, a chunk's two markers once, as the engine's token chunks do."""
+    from scone_memory.bench.comparative import reference_splitter, reference_tokenizer
+
+    model = Worded()
+    text = " ".join(["apple"] * 40)  # one tiktoken token a word, two of the model's
+    chunks = reference_splitter(model, chunk_size=10, chunk_overlap=0).split_text(text)
+    assert [model.count_tokens(chunk) for chunk in chunks] == [10] * 10, chunks
+    assert reference_tokenizer(model) == "counting-model-v1, a chunk's markers included"
+    assert reference_tokenizer(HashEmbedder()).startswith("tiktoken"), "the hashed path keeps LlamaIndex's default"
+
+
+async def test_every_reference_node_fits_the_window_of_the_model_that_embeds_it(reference):
+    from scone_memory.bench.comparative import CachedEmbedder
+    from scone_memory.ingestion.embedding_cache import InMemoryEmbeddingCache
+
+    long = item("q7", "Where are the calibration notes kept?", [
+        ["user: " + " ".join(["The calibration notes are kept in the blue binder in the lab."] * 12)],
+        ["user: " + " ".join(["The garden needs watering every other day in summer."] * 12)],
+    ], answer=[0])
+    model = Worded()
+    wrapped = CachedEmbedder(model, InMemoryEmbeddingCache(1000))
+    await llamaindex_session_ranking(long, wrapped, k=2, chunk_size=model.max_input_tokens)
+    embedded = [text for call in model.calls for text in call if text != long.question]
+    assert len(embedded) > 2 and max(map(model.count_tokens, embedded)) <= model.max_input_tokens
+    assert wrapped.record()["over_window"] == 0
+    report = await compare([long], lambda: MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(),
+                                                        HashEmbedder()).open(), wrapped, ks=(1,))
+    assert report.config["llamaindex"]["tokenizer"] == "counting-model-v1, a chunk's markers included"
+
+
+async def test_a_cached_embedder_counts_the_texts_the_model_window_cut():
+    """A window is a bound that cuts without saying so; the record says it
+    did, for texts read back as well as embedded, since a vector read back
+    was cut when it was made."""
+    from scone_memory.bench.comparative import CachedEmbedder
+    from scone_memory.ingestion.embedding_cache import InMemoryEmbeddingCache
+
+    class Narrow(Worded):
+        max_input_tokens = 4
+
+    cache = InMemoryEmbeddingCache(100)
+    first = CachedEmbedder(Narrow(), cache)
+    await first.embed(["a", "a b", "a b c d e"])
+    assert (first.record()["over_window"], first.record()["tokens_past_window"]) == (2, 10)
+    await first.embed(["a b"])
+    assert (first.record()["over_window"], first.record()["tokens_past_window"]) == (3, 12), "counts add up across calls"
+    again = CachedEmbedder(Narrow(), cache)
+    await again.embed(["a b c d e"])
+    assert again.record()["embedded"] == 0 and again.record()["over_window"] == 1
+    assert again.record()["tokens_past_window"] == 8
+    unknown = CachedEmbedder(Counting(), cache)
+    await unknown.embed(["a b c d e"])
+    assert unknown.record()["over_window"] is None and unknown.record()["tokens_past_window"] is None, (
+        "a model with no window or no tokenizer cannot say, and zero would read as a fact")
