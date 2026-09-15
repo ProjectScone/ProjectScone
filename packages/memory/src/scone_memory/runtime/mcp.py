@@ -621,6 +621,30 @@ def create_server(engine: MemoryEngine, space: str = "default",
                          + ("; raise max_hops to go further" if blast.deepest < AFFECTED_HOPS else ""))
         return ok_text("\n".join(lines))
 
+    @tool(server, "memory_graph_cycles")
+    async def memory_graph_cycles(
+        limit: Annotated[
+            Optional[StrictInt], Field(description="Groups shown of each kind (1..=100); defaults to 20")
+        ] = None,
+        max_bytes: Annotated[
+            Optional[StrictInt], Field(description="Byte budget for the answer (512..=64000); defaults to 8000")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """Dependency cycles in the code graph: files that cannot load
+        without each other, each with one shortest loop and the facts behind
+        every hop; and loops held apart only by imports that run when called
+        or never. Counts with examples; it changes nothing."""
+        from ..entities.cycles import DEFAULT_LIMIT as CYCLES_LIMIT, MAX_BYTES as CYCLES_BYTES, CyclesError, graph_cycles
+
+        try:
+            found = await graph_cycles(engine, space or default_space,
+                                       limit=limit if limit is not None else CYCLES_LIMIT,
+                                       max_bytes=max_bytes if max_bytes is not None else CYCLES_BYTES)
+        except (CyclesError, InvalidInput) as refused:
+            return tool_error(str(refused))
+        return ok_text(found.text)
+
     @tool(server, "memory_graph_health")
     async def memory_graph_health(
         limit: Annotated[
