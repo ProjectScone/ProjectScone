@@ -149,7 +149,7 @@ class FactBody(BaseModel):
 #: decisions of review belong to review and full; every other write belongs
 #: to write and full. A key with no role recorded is full.
 _REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/reconsider", "/reopen",
-                 "/v1/facts/decide")
+                 "/v1/facts/decide", "/v1/entities/merges", "/v1/entities/merges/close")
 
 
 def _is_decision(path: str) -> bool:
@@ -565,7 +565,7 @@ def create_app(
         from .directory_sync import mount_directory_sync_routes
         mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
-    mount_entity_routes(app, engine, space_for, synthesis_factory=synthesis_factory)
+    mount_entity_routes(app, engine, space_for, actor_for, synthesis_factory=synthesis_factory)
     from .filesystem_routes import mount_filesystem_routes
     mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)
 

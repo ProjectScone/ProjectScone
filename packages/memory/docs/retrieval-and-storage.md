@@ -2668,6 +2668,52 @@ that decision. Nothing is merged.
   ToolBox `find_duplicates` and `scone graph duplicates` take the same
   bounds.
 
+#### `POST /v1/entities/merges`, `POST /v1/entities/merges/close`, `GET /v1/entities/merges`
+
+Record that two names are one entity, and undo it. A duplicate suggestion
+is evidence; a merge is the decision a person makes on it, so both writes
+belong to the `review` role, beside approving and declining claims, and a
+`write` key is refused.
+
+- **The decision is a ledger claim.** `{"alias", "into", "reason"}` stores
+  `alias` under the reserved predicate `scone:same entity` with `into` as
+  its object, valid from now. The reason and the actor (the key's
+  fingerprint and `X-Scone-Actor`) go on the `entity_merge` event. No
+  assertion may use the predicate, whether stated, proposed or extracted,
+  so no document and no model can merge two entities; a document saying
+  two names are one is a claim to weigh under a predicate of its own.
+- **One target per alias.** The predicate holds one value at a time, so
+  merging an alias somewhere new closes the decision it replaces.
+- **Refused before anything is written** (422): a name that cannot name
+  one thing (prose, a quotation, a pronoun), two names that already share
+  a key, an empty reason, and a merge whose target already resolves back
+  to its alias. The loop check follows the target's decisions in force one
+  lookup at a time, at most 64, and refuses a longer chain rather than
+  guess that it has no loop.
+- **Every view applies the decisions it can see, at its own moment.** The
+  projection rewrites each alias to the entity it resolves to before
+  anything is counted: relations and roles move to that entity, the alias's
+  spellings join its surface forms, its label keeps the spelling of the
+  name merged into, and kind hints meet. Communities, PageRank, paths,
+  duplicates and exports all run on the merged graph. A chain of merges
+  ends at its last name. A name a decision covers is an entity even where
+  the identity rule would read it as a value ("MB"), which is what "only
+  a recorded identity decision may join such a value" means.
+- **Undoing is closing.** `/v1/entities/merges/close` with `{"alias",
+  "reason"}` closes the decision in force (404 when there is none). The
+  names part from that moment; a view `as_of` an earlier moment still shows
+  them joined, and `current`, `history` and `proposed` views read the
+  decisions at the view's own moment. A decision that is excluded, or
+  reopened into a loop, is not applied, and the loop is reported.
+- `GET /v1/entities/merges?status=&as_of=` lists the decisions the view
+  applies, in the order recorded, each with `outcome` `applied`, `cycle`
+  or `same_name`, beside the projection's version, digest and coverage.
+  A projection's digest changes only when it holds a decision.
+- `/v1/entities/resolve` answers a merged-away name, or the id its entity
+  had, with the entity it went into, at the `key` or `id` tier.
+- `scone graph merge ALIAS INTO --reason R`, `scone graph unmerge ALIAS
+  --reason R` and `scone graph merges` do the same from the command line.
+
 #### `GET /v1/graph/context`
 
 A graph context packet for a model: what the graph records around some
@@ -3203,6 +3249,9 @@ store:
 | `scone graph overview [--question Q] [--limit N] [--facts N] [--resolution R]` | each community digested with cited facts |
 | `scone graph changes --since T [--until T] [--limit N]` | what changed between two moments, one line per change; exits 1 when nothing did |
 | `scone graph duplicates [--limit N] [--min-score S]` | entities that may be one thing under two names, and why; nothing is merged |
+| `scone graph merge ALIAS INTO --reason R` | records that ALIAS is the entity INTO names, as `merged:` |
+| `scone graph unmerge ALIAS --reason R` | closes the merge in force for ALIAS, as `unmerged:` |
+| `scone graph merges` | the merges the current graph applies, one line each |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 
 Every command takes `--space`, and reads the clock once, so what it
@@ -3369,10 +3418,16 @@ With 20,000 facts on SQLite, a view costs:
 
 ### Limits of this first version
 
-- Identity is key identity only: two spellings of one thing ("Dr. Alice
-  Chen" and "alice chen") stay two entities until identity decisions
-  exist to record a merge. `/v1/entities/duplicates` suggests the pairs
-  worth that decision, but merges nothing.
+- Identity is key identity, plus the merges a person recorded. Two
+  spellings of one thing ("Dr. Alice Chen" and "alice chen") stay two
+  entities until someone merges them; `/v1/entities/duplicates` suggests
+  the pairs worth that decision.
+- The graph applies merges; retrieval's walk does not yet. Multi-hop
+  expansion still joins a claim's object to another claim's subject by the
+  identity rule alone, so a walk from "alice chen" does not reach claims
+  about "dr. alice chen" through a merge.
+- A merge older than the newest 50,000 facts a projection reads is not
+  seen by that projection, which already reports the read as truncated.
 - Duplicate suggestions read spellings, not meanings. "Acme Inc" and
   "Acme Corp" each keep a word the other lacks, so they are not suggested,
   and nor are spellings two edits apart ("Mohammed" and "Muhammad") or in
