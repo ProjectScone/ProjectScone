@@ -32,8 +32,11 @@ note that is missing is written next time, and the canvas stays this
 writer's. Writes are atomic per file (a temporary name in the same
 directory, then a rename, the mode kept), so a crash leaves whole notes
 or none. A note's text carries nothing that changes when the rest of
-the graph does, so a note whose entity did not change reads as
-``unchanged``; the projection digest lives in ``index.md`` alone.
+the graph does beyond its community (the tag and the hub it links to),
+so a note whose entity and community did not change reads as
+``unchanged``; the projection digest lives in ``index.md`` alone. A
+community's hub note is named for its members, so a change in them
+renames the hub and the old one is removed as stale.
 """
 
 from __future__ import annotations
