@@ -291,6 +291,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import-url", help="fetch a page by URL and read it as the document its media type says it is "
                                           "(needs SCONE_URL_IMPORT=1; private hosts need SCONE_URL_IMPORT_PRIVATE=1)")
     p.add_argument("url", help="an http or https URL")
+    from .document_markdown import add_document_markdown_parser
+    add_document_markdown_parser(sub)
 
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
@@ -2514,6 +2516,9 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
                                    model_factory=args.model_factory)
     if args.command == "bench-graph":
         return graph_bench_command(args, out or sys.stdout)
+    if args.command == "doc-markdown":
+        from .document_markdown import document_markdown_command
+        return document_markdown_command(args, out or sys.stdout)
     settings = settings_for_cli(env)
     if args.command == "serve":
         from ..api.__main__ import main as serve
