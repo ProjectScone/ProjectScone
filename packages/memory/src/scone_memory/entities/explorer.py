@@ -58,9 +58,13 @@ MAX_TREE_CHILDREN = 200
 #: declaration held deeper than this is placed under its file, so a
 #: chain of a thousand `defines` cannot exhaust the stack.
 MAX_TREE_DEPTH = 32
-#: A file: a path with a directory, or a name with a suffix; a declaration
-#: is a file, a colon and the name the file gives it.
-_FILE = re.compile(r"^(?:[^:\s]+/)?[^/:\s]+\.[A-Za-z0-9]{1,8}$")
+#: A file: a path with a directory, or a bare name whose suffix a reader
+#: knows (`top.py`, `README.md`); a dotted name that is not one
+#: (`asyncio.run`, `ast.Module`, a call into a library) is not a file. A
+#: declaration is a file, a colon and the name the file gives it.
+_FILE = re.compile(r"^[^:\s]+/[^/:\s]+$")
+_BARE_FILE = re.compile(r"^[^/:\s]+\.[A-Za-z0-9]{1,8}$")
+_TEXT_SUFFIXES = frozenset((".md", ".markdown", ".rst", ".txt", ".json", ".toml", ".yaml", ".yml", ".sql", ".cfg", ".ini"))
 #: Relations whose object may be something the graph only names.
 _NAMED_ONLY = frozenset(("imports", "depends_on", "develops_with", "cites", "uses_type", "references"))
 
@@ -80,7 +84,15 @@ def _label(text: str) -> str:
 
 
 def _is_file(label: str) -> bool:
-    return ":" not in label and bool(_FILE.match(label))
+    if ":" in label:
+        return False
+    if _FILE.match(label):
+        return True
+    if not _BARE_FILE.match(label):
+        return False
+    from ..ingestion.code import code_language
+
+    return code_language(label) is not None or label[label.rfind("."):].lower() in _TEXT_SUFFIXES
 
 
 @dataclass
@@ -308,7 +320,7 @@ aside h2 { margin: 8px 0 4px; font-size: 13px; color: #5b5b5b; text-transform: u
 aside ul { padding-left: 0; list-style: none; margin: 0; }
 aside li { margin: 3px 0; overflow-wrap: anywhere; display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .swatch { width: 12px; height: 12px; border-radius: 50%; flex: 0 0 12px; }
-.count { color: #5b5b5b; font-size: 12px; margin-left: auto; }
+.count { color: #5b5b5b; font-size: 12px; margin-left: auto; white-space: nowrap; }
 #details h3 { margin: 0 0 4px; font-size: 16px; overflow-wrap: anywhere; }
 #details ul { padding-left: 16px; list-style: disc; }
 #details li { display: list-item; }
