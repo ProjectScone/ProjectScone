@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, StrictInt, Field
 from contextlib import asynccontextmanager
 
 from ..observability import metrics
-from ..core.validation import MAX_QUERY
+from ..core.validation import MAX_LIMIT, MAX_QUERY
 from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
                                   MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT, MAX_LIMIT as TEMPORAL_MAX_LIMIT,
                                   MIN_BYTES as TEMPORAL_MIN_BYTES, temporal_answer)
@@ -38,6 +38,7 @@ from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..retrieval.receipts import staged
 from ..retrieval.summary_expand import MAX_CHUNKS as SUMMARY_EXPANSION_MAX_CHUNKS
+from ..retrieval import summary_traverse
 from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
 from . import chat_imports, file_documents, pdf_documents
@@ -509,7 +510,7 @@ def create_app(
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.export_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
-            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "graph.stats": True, "graph.hubs": True, "recall.graph_boost": True, "recall.lessons": True, "recall.expand_summaries": True, "graph.knowledge_paging": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "graph.stats": True, "graph.hubs": True, "recall.graph_boost": True, "recall.lessons": True, "recall.expand_summaries": True, "recall.tree": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
             # The route is served; without a configured model it refuses.
             "chat.openai_compatible": True,
@@ -900,6 +901,36 @@ def create_app(
         return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
                                       max_item_chars=0 if whole else DEFAULT_ITEM_CHARS,
                                       synthesis=synthesis, synthesis_mode=synthesis_mode)).record(space)
+
+    @app.get("/v1/recall/tree")
+    async def get_recall_tree(
+        q: str = Query(min_length=1, max_length=MAX_QUERY),
+        limit: int = Query(default=summary_traverse.DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+        branching: int = Query(default=summary_traverse.DEFAULT_BRANCHING, ge=1, le=summary_traverse.MAX_BRANCHING,
+                               description="Summaries kept at each step, across the documents."),
+        max_depth: int = Query(default=summary_traverse.MAX_DEPTH, ge=1, le=summary_traverse.MAX_DEPTH,
+                               description="Steps down the trees; nodes still unscored are counted."),
+        text: bool = Query(default=False, description="Score each step's candidates by BM25 too, fused by rank."),
+        episode_id: Optional[list[int]] = Query(default=None, description="The documents to descend; every document "
+                                                                          "with a stored tree when unset."),
+        kind: Optional[str] = None,
+        source_prefix: Optional[str] = None,
+        tags: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        space: str = Depends(space_for),
+    ) -> dict:
+        """The chunks a descent of the stored summary trees reaches: from each
+        document's top summaries, the best ``branching`` at every step, down
+        to chunks, each saying in ``via_tree`` the path of summaries that led
+        there. Scored by the vectors already stored, with no model; a summary
+        written from other content and a forgotten document's chunks are
+        never returned. The answer says what it refused, what the limit and
+        the depth cut, and how many embedding calls it made."""
+        traversal = await engine.tree_recall(space, q, limit=limit, branching=branching, max_depth=max_depth, text=text,
+                                             episode_ids=episode_id, kind=kind, source_prefix=source_prefix,
+                                             tags=[t for t in (tags or "").split(",") if t.strip()], since=since, until=until)
+        return traversal.record() | {"space": space}
 
     @app.get("/v1/recall/parts")
     async def get_recall_parts(

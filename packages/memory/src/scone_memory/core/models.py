@@ -410,16 +410,23 @@ class RecallItem(BaseModel):
     #: second copy of the text to miss).
     #: Left out otherwise.
     via_summary: Optional[dict[str, object]] = None
+    #: When a descent of the stored summary trees reached this chunk
+    #: (``summary_traverse``): the document, and the path of summaries kept
+    #: on the way down, top first, each with its level, index and score.
+    #: Left out otherwise.
+    via_tree: Optional[dict[str, object]] = None
 
     @model_serializer(mode="wrap")
     def omit_unasked_lessons(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        # Recall not asked for lessons, or for summaries expanded, answers
-        # exactly as it did before they existed.
+        # Recall not asked for lessons, for summaries expanded, or for a
+        # descent, answers exactly as it did before they existed.
         value: dict[str, object] = handler(self)
         if self.lessons is None:
             value.pop("lessons", None)
         if self.via_summary is None:
             value.pop("via_summary", None)
+        if self.via_tree is None:
+            value.pop("via_tree", None)
         return value
 
 

@@ -45,6 +45,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..retrieval.lessons import Lessons
     from ..ingestion.chunk_questions import QuestionLaneReport
     from ..providers.llm import ChatModel
+    from ..retrieval.summary_traverse import Traversal
 from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, SummaryExpander, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
@@ -1223,6 +1224,23 @@ class MemoryEngine:
             result.items = [item.model_copy(update={"lessons": found.lessons[item.chunk_id].record()})
                             if item.chunk_id in found.lessons else item for item in result.items]
         return result
+
+    async def tree_recall(self, space: str, query: str, *, limit: Optional[int] = None, branching: Optional[int] = None,
+                          max_depth: Optional[int] = None, text: bool = False, episode_ids: Optional[Sequence[int]] = None,
+                          kind: Optional[str] = None, source_prefix: Optional[str] = None, tags: Sequence[str] = (),
+                          since: Optional[str] = None, until: Optional[str] = None) -> "Traversal":
+        """The chunks a descent of the stored summary trees in scope reaches:
+        from each document's top summaries, the ``branching`` best at every
+        step, down to chunks, each saying in ``via_tree`` the path that led
+        there. No model is called. Unset bounds take the module's defaults;
+        see ``summary_traverse``."""
+        from ..retrieval.summary_traverse import DEFAULT_BRANCHING, DEFAULT_LIMIT, MAX_DEPTH, traverse_summaries
+
+        return await traverse_summaries(self, space, query, limit=DEFAULT_LIMIT if limit is None else limit,
+                                        branching=DEFAULT_BRANCHING if branching is None else branching,
+                                        max_depth=MAX_DEPTH if max_depth is None else max_depth, text=text,
+                                        episode_ids=episode_ids, kind=kind, source_prefix=source_prefix, tags=tags,
+                                        since=since, until=until)
 
     async def record_turn(self, space: str, *, session_id: str, turn_id: str, mode: str,
                           latency_ms: Mapping[str, float]) -> Optional[Event]:
