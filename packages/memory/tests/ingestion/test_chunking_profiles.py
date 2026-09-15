@@ -239,6 +239,13 @@ def test_a_question_line_opening_a_paragraph_is_a_question_and_one_inside_an_ans
     assert [unit.label for unit in found] == ["How do I cancel?", "Can I come back later?"]
 
 
+def test_a_heading_or_a_rule_ends_a_paragraph_so_the_next_line_may_be_a_question():
+    for content in ["## Billing\nHow do I pay?\nBy card.\n", "Billing\n=======\nHow do I pay?\nBy card.\n",
+                    "Intro text.\n\n---\nHow do I pay?\nBy card.\n"]:
+        found = units(content, reader=profile_named("qa").reader())
+        assert "How do I pay?" in [unit.label for unit in found], (content, [unit.label for unit in found])
+
+
 def test_a_long_answer_is_split_with_its_question_at_the_start():
     content = "Q: Tell me everything?\nA: " + SENTENCE * 12 + "\n\nQ: Short?\nA: Yes.\n"
     found = profiled_spans(content, profile="qa")
