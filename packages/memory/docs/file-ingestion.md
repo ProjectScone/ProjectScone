@@ -1020,7 +1020,10 @@ whose text extraction fails, or whose text layer is unreadable (mostly private-u
 code points, `(cid:N)` runs, replacement characters or control bytes). Without OCR
 such a page keeps its text, its segment carries `unreadable: true` and the
 document metadata lists it in `unreadable_pages`. `all_pages` recognizes every page, including
-those with embedded text. Reading order is `provider`, `columns_ltr` or
+those with embedded text. Every page's regions carry a `label` (title,
+heading, paragraph, list, table, footnote, header, footer, page number,
+…), inferred from the page or given by a layout engine; see
+[region labels](pdf-ocr.md#label-the-pages-regions). Reading order is `provider`, `columns_ltr` or
 `columns_rtl`; the latter two infer columns geometrically, not semantically.
 The browser Documents import queue exposes these choices per PDF when available.
 
