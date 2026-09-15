@@ -234,6 +234,8 @@ class MemoryEngine:
         context_lane: bool = False,
         lexical_stems: bool = True,
         vector_weight: Optional[float] = None,
+        chunk_tokens: int | None = None,
+        chunk_overlap_tokens: int = 0,
         question_lane: bool = False,
     ) -> None:
         if vector_weight is None:
@@ -317,15 +319,30 @@ class MemoryEngine:
             if isinstance(window, bool) or not isinstance(window, int) or window < 1:
                 raise InvalidInput("embedding_budget needs an embedder that declares its input window "
                                    "(max_input_tokens); this one declares none")
-            counter = getattr(embedder, "count_tokens", None)
-            if callable(counter):
-                # Tried now: the vector writer's name says the tokenizer counted, so it must be able to.
-                try:
-                    counter("")
-                except Exception as error:  # noqa: BLE001 - any failure to count refuses the setting, with its reason
-                    raise InvalidInput(f"embedding_budget counts with the embedder's tokenizer, which failed: "
-                                       f"{type(error).__name__}: {error}") from error
+        if chunk_tokens is not None or chunk_overlap_tokens:
+            from ..ingestion.token_chunks import refused
+
+            reason = (refused(chunk_tokens, chunk_overlap_tokens) if chunk_tokens is not None
+                      else "chunk_overlap_tokens needs chunk_tokens: an overlap in tokens is of a target in tokens")
+            if reason is not None:
+                raise InvalidInput(reason)
+        counter = getattr(embedder, "count_tokens", None)
+        if (embedding_budget or chunk_tokens is not None) and callable(counter):
+            # Tried now: the vector writer's name and the chunk receipt say
+            # the tokenizer counted, so it must be able to.
+            setting = "embedding_budget" if embedding_budget else "chunk_tokens"
+            try:
+                counter("")
+            except Exception as error:  # noqa: BLE001 - any failure to count refuses the setting, with its reason
+                raise InvalidInput(f"{setting} counts with the embedder's tokenizer, which failed: "
+                                   f"{type(error).__name__}: {error}") from error
         self.embedding_budget = embedding_budget
+        #: The length chunker's target in tokens, packed from whole sentences
+        #: (ingestion/token_chunks.py); None cuts at chunk_target characters.
+        #: Code, structure, semantic and unit cuts keep the character target.
+        self.chunk_tokens = chunk_tokens
+        #: Tokens of the chunk before that a token-measured chunk starts with.
+        self.chunk_overlap_tokens = chunk_overlap_tokens
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -604,7 +621,7 @@ class MemoryEngine:
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
                          self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context,
-                         self.embedding_budget)
+                         self.embedding_budget, self.chunk_tokens, self.chunk_overlap_tokens)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -622,7 +639,8 @@ class MemoryEngine:
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
                         self.code_aware, self.code_graph, self.structure_aware,
-                        self.semantic_aware, self.heading_context, self.embedding_budget) != configuration):
+                        self.semantic_aware, self.heading_context, self.embedding_budget,
+                        self.chunk_tokens, self.chunk_overlap_tokens) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -762,7 +780,9 @@ class MemoryEngine:
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware, heading_context=self.heading_context,
             embedding_budget=cast(int, getattr(self.embedder, "max_input_tokens")) if self.embedding_budget else None,
-            count_tokens=getattr(self.embedder, "count_tokens", None) if self.embedding_budget else None,
+            count_tokens=(getattr(self.embedder, "count_tokens", None)
+                          if self.embedding_budget or self.chunk_tokens is not None else None),
+            chunk_tokens=self.chunk_tokens, chunk_overlap_tokens=self.chunk_overlap_tokens,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
             context_lane=self.context_lane,
             document_outline=partial(document_outline, blobs=self.blobs),
