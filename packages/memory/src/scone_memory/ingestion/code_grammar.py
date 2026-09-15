@@ -322,8 +322,12 @@ def _callee(node: "Node", grammar: Grammar) -> Optional["Node"]:
 class _Types:
     """Each type's members by bare name, as its body declared them and as
     definitions outside it (`void K::s()`) added them, so a method defined
-    outside its type still sees its siblings."""
+    outside its type still sees its siblings; and the imports."""
     members: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: What the file's imports bound, by the module they sit in and the
+    #: local name, as the line reader resolved them: the target of a bare
+    #: call nothing in the file binds.
+    imports: dict[tuple[str, str], str] = field(default_factory=dict)
 
     def note(self, name: str, whole: str) -> None:
         if "." in name:
@@ -339,7 +343,7 @@ class _Types:
 
 def _walk(node: "Node", grammar: Grammar, source: bytes, path: str, stack: list[tuple[str, dict[str, Optional[str]]]],
           holder: Optional[str], seen: set[str], say: Callable[[str, str, str, int], None], depth: int,
-          types: _Types) -> None:
+          types: _Types, modules: tuple[str, ...] = ()) -> None:
     if depth > MAX_DEPTH:
         raise _Cut()
     kind = grammar.scopes.get(node.type)
@@ -383,38 +387,53 @@ def _walk(node: "Node", grammar: Grammar, source: bytes, path: str, stack: list[
         if callee is not None:
             name = _text(callee, source)
             target: Optional[str] = None
+            settled = False
             for kind_seen, one in reversed(stack):
                 # A method defined outside its type by a qualified name sees
                 # the type's other members before the file's top.
                 if kind_seen == "module" and name in types.of(holder):
-                    target = types.of(holder)[name]
+                    target, settled = types.of(holder)[name], True
                     break
                 if name in one:
-                    target = one[name]
+                    target, settled = one[name], True
                     break
+            if not settled:
+                # Nothing in the file binds the name: an import in the same
+                # module may. A Rust `mod` is a module of its own; the rest
+                # of the languages here import at the file's top.
+                target = types.imports.get((".".join(modules), name))
             if target is not None and target != holder:
                 say(holder, CALLS, target, _line(node))
 
     for child in node.children:
         mine = holder
+        inside = modules
         how = grammar.declares.get(child.type)
         if how is not None and how != "holder":
             # A declaration whose name the grammar does not give holds
             # nothing: a call inside it is nobody's, not the enclosing one's.
             name = _declared(child, how, source)
             mine = _qualified(holder, path, name) if name else None
+            if child.type == "mod_item" and name:
+                inside = (*modules, name)
         elif how == "holder":
             name = _declared(child, how, source)
             mine = _qualified(holder, path, name) if name else None
-        _walk(child, grammar, source, path, stack, mine, seen, say, depth + 1, types)
+        _walk(child, grammar, source, path, stack, mine, seen, say, depth + 1, types, inside)
     if kind is not None:
         stack.pop()
 
 
-def grammar_claims(content: str, path: str) -> tuple[CodeClaim, ...]:
+def grammar_claims(content: str, path: str,
+                   imports: Optional[Mapping[tuple[str, str], str]] = None) -> tuple[CodeClaim, ...]:
     """Declarations and calls this file's syntax settles, or nothing: an
     empty tuple when the extra is absent, the suffix has no grammar here,
-    or the file is longer than the grammar is asked to read."""
+    or the file is longer than the grammar is asked to read. ``imports``
+    is what the file's imports bound, `(module, local name) ->
+    file:Qualified`, as the line reader resolved them -- the module is
+    the inline `mod` a Rust `use` sits in, "" for the file's top -- and a
+    bare call no scope binds is an edge to the import's declaration, as
+    it is for TypeScript, when the call is in the module the import is."""
     suffix = path[path.rfind("."):].lower() if "." in path.rsplit("/", 1)[-1] else ""
     if suffix not in SUFFIXES or not available():
         return ()
@@ -439,7 +458,7 @@ def grammar_claims(content: str, path: str) -> tuple[CodeClaim, ...]:
         found.append(CodeClaim(subject, predicate, obj, quote, number, begins, begins + len(lines[number - 1].encode())))
 
     try:
-        _walk(tree.root_node, grammar, source, path, [], None, set(), say, 0, _Types())
+        _walk(tree.root_node, grammar, source, path, [], None, set(), say, 0, _Types(imports=dict(imports or {})))
     except (_Cut, RecursionError):
         # Past the depth bound the grammar has read only part of the file;
         # saying nothing leaves the line reader's whole answer standing.

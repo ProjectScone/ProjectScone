@@ -157,8 +157,8 @@ _FAMILY = {"rs": "rust", "php": "php", "java": "jvm", "kt": "jvm", "kts": "jvm",
 _RUST_USE = re.compile(r"(?:^|(?<=;))\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+?)\s*;")
 _PHP_USE = re.compile(r"(?:^|(?<=;))\s*use\s+(?:(?:function|const)\s+)?([^;]+?)\s*;")
 _PHP_REQUIRE = re.compile(r"""^\s*(?:require|include)(?:_once)?\s*\(?\s*(__DIR__\s*\.\s*)?["']([^"']+)["']""")
-_JVM_IMPORT = re.compile(r"(?:^|(?<=;))\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*(?:\.\{[^}]*\})?)(?:\.\*)?"
-                         r"(?:\s+as\s+\w+)?\s*(?:;|$)")
+_JVM_IMPORT = re.compile(r"(?:^|(?<=;))\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*(?:\.\{[^}]*\})?(?:\.\*)?"
+                         r"(?:\s+as\s+\w+)?)\s*(?:;|$)")
 _JVM_PACKAGE = re.compile(r"^\s*package\s+([A-Za-z_][\w.]*)")
 _USING = re.compile(r"^\s*(?:global\s+)?using\s+(?:static\s+)?(?:[A-Za-z_]\w*\s*=\s*)?([A-Za-z_][\w.]*)(?:\s*<[^;]*>)?\s*;")
 _SWIFT_IMPORT = re.compile(r"^\s*(?:@testable\s+)?import\s+(?:(?:class|struct|enum|protocol|typealias|func|var|let)\s+)?"
@@ -419,7 +419,10 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     if not content or content.count("\n") > MAX_LINES:
         return ()
     if language == "braces":
-        line_read = _brace_claims(content, path, resolve)
+        # What the imports bound, for the grammar binder: a bare call nothing
+        # in the file binds is a call to the import's declaration.
+        bindings: list[tuple[str, str, str]] = []
+        line_read = _brace_claims(content, path, resolve, bindings)
         # A syntax tree settles what a line cannot. It is an optional
         # extra, so this changes nothing at all where it is not
         # installed.
@@ -428,7 +431,8 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
 
         # TypeScript and JavaScript through their own grammar; the other
         # brace languages through the grammar pack, when it is installed.
-        parsed = syntax_claims(content, path) or grammar_claims(content, path)
+        parsed = syntax_claims(content, path, resolve) or grammar_claims(
+            content, path, {(within, name): target for within, name, target in bindings})
         if not parsed:
             return line_read
         # Where the grammar speaks, it **decides**, and only about what it
@@ -1024,7 +1028,8 @@ async def record_claims(engine, space: str, *, episode_id: int, content: str, pa
     return said
 
 
-def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tuple[CodeClaim, ...]:
+def _brace_claims(content: str, path: str, resolve: Optional["Resolve"],
+                  _bindings: Optional[list[tuple[str, str, str]]] = None) -> tuple[CodeClaim, ...]:
     """What a brace-language file declares and imports, and nothing else.
 
     Declarations come from the same scanner that cuts these files into
@@ -1137,7 +1142,7 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
 
     family = _FAMILY.get(posixpath.splitext(path)[1].lstrip(".").lower())
     if family is not None:
-        _unquoted_imports(_comments_blanked(content, both).split("\n"), code, path, family, resolve, say)
+        _unquoted_imports(_comments_blanked(content, both).split("\n"), code, path, family, resolve, say, _bindings)
         _meaning(content, path, "braces", say)
         return tuple(found)
     inside = False
@@ -1180,10 +1185,13 @@ MAX_STATEMENT_LINES = 64
 #: backslashes. Anything else on the line was not an import.
 _IMPORT_NAME = re.compile(r"^[A-Za-z_#][\w.:\\#]*$")
 _PHP_OPENER = re.compile(r"^\s*namespace\b")
+#: A Rust module opened inline: its `use` lines bind in it, and nowhere else.
+_RUST_MOD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*\{")
 
 
 def _unquoted_imports(raw: list[str], clean: list[str], path: str, family: str, resolve: Optional["Resolve"],
-                      say: Callable[[str, str, str, int], None]) -> None:
+                      say: Callable[[str, str, str, int], None],
+                      bindings: Optional[list[tuple[str, str, str]]] = None) -> None:
     """The imports of a brace language that writes them without quotes,
     one claim per name the statement means. Whether a line is an import
     is decided on the source with its comments and strings blanked, so a
@@ -1195,14 +1203,22 @@ def _unquoted_imports(raw: list[str], clean: list[str], path: str, family: str, 
     inside the project (`crate::a::b`, `com.acme.Store`) is resolved to
     its file when whoever walked the tree can confirm one, and named as
     written otherwise. A PHP `use` inside a class is a trait, not an
-    import, and is left alone."""
+    import, and is left alone. ``bindings`` collects what each resolved
+    import binds in this file -- the module it sits in (a Rust `use`
+    inside `mod tests` binds there and nowhere else; "" for the file's
+    top), the local name (an alias when given) and the declaration
+    `file:Qualified` it stands for -- for the grammar binder to bind bare
+    calls with; a Rust import of a module itself, and any import that
+    stayed a name, binds nothing."""
     root = _source_root(clean, path, family)
     base = _rust_base(path) if family == "rust" else None
     openers: list[str] = []
     for number, shape, text in _statements(raw, clean, family):
-        inside_class = any(opener != "namespace" for opener in openers)
+        inside_class = any(opener not in ("namespace", "mod") and not opener.startswith("mod:") for opener in openers)
+        module = _RUST_MOD.match(shape) if family == "rust" else None
         for opened in range(shape.count("{") - shape.count("}")):
-            openers.append("namespace" if _PHP_OPENER.match(shape) else "other")
+            openers.append("namespace" if _PHP_OPENER.match(shape) else f"mod:{module.group(1)}" if module and opened == 0
+                           else "other")
         for _ in range(shape.count("}") - shape.count("{")):
             if openers:
                 openers.pop()
@@ -1210,19 +1226,34 @@ def _unquoted_imports(raw: list[str], clean: list[str], path: str, family: str, 
             continue
         if family == "php" and inside_class and _PHP_USE.search(shape):
             continue
-        for target, is_path in _imports_of(text, family):
+        aliases: dict[str, str] = {}
+        for target, is_path in _imports_of(text, family, aliases):
+            item: list[str] = []
             if is_path:
                 where = _named(target, path, resolve)
             elif family == "rust" and target.split("::")[0] in ("crate", "self", "super"):
-                where = _module_file(target.split("::"), path, root, resolve, "::", base)
+                where, item = _module_file(target.split("::"), path, root, resolve, "::", base)
             elif family == "rust":
-                where = _published(resolve, target, "rust") or target
+                where, item = _published_item(resolve, target, "rust")
+                where = where or target
             elif family == "jvm" and root is not None:
-                where = _module_file(target.split("."), path, root, resolve, ".", None)
+                where, item = _module_file(target.split("."), path, root, resolve, ".", None)
             else:
                 where = target
             if where:
                 say(path, IMPORTS, where, number)
+            if bindings is not None and where and where != target and not is_path:
+                # The import reached a file: what it names there is the item
+                # left over -- for a JVM import qualified by the class the
+                # file holds (`import static lib.Text.trim` is `Text.trim`,
+                # `import lib.Store` is `Store`), for Rust the module's item.
+                parts = target.split("." if family == "jvm" else "::")
+                named = list(item)
+                if family == "jvm":
+                    named = [parts[len(parts) - len(item) - 1], *item]
+                if named:
+                    within = ".".join(opener[4:] for opener in openers if opener.startswith("mod:"))
+                    bindings.append((within, aliases.get(target, named[-1]), f"{where}:{'.'.join(named)}"))
 
 
 def _statements(raw: list[str], clean: list[str], family: str):
@@ -1248,22 +1279,23 @@ def _statements(raw: list[str], clean: list[str], family: str):
         yield first, shape, text
 
 
-def _imports_of(line: str, family: str) -> list[tuple[str, bool]]:
+def _imports_of(line: str, family: str, aliases: Optional[dict[str, str]] = None) -> list[tuple[str, bool]]:
     """What one statement imports under its family's spelling: each name
-    with whether it is a path (a file to resolve) or a name to keep."""
+    with whether it is a path (a file to resolve) or a name to keep; the
+    aliases the statement gives (`use a::b as c`) noted when asked."""
     if family == "rust":
-        return [(name, False) for group in _RUST_USE.findall(line) for name in _spread(group, "::")]
+        return [(name, False) for group in _RUST_USE.findall(line) for name in _spread(group, "::", aliases)]
     if family == "php":
         groups = _PHP_USE.findall(line)
         if groups:
-            return [(name, False) for group in groups for name in _spread(group, "\\")]
+            return [(name, False) for group in groups for name in _spread(group, "\\", aliases)]
         wanted = _PHP_REQUIRE.match(line)
         if not wanted:
             return []
         # `__DIR__ . '/x.php'` is beside this file, however the slash is written.
         return _pathed("./" + wanted.group(2).lstrip("/") if wanted.group(1) else wanted.group(2))
     if family == "jvm":
-        return [(name, False) for group in _JVM_IMPORT.findall(line) for name in _spread(group, ".")]
+        return [(name, False) for group in _JVM_IMPORT.findall(line) for name in _spread(group, ".", aliases)]
     if family == "csharp":
         used = _USING.match(line)
         return [(used.group(1), False)] if used else []
@@ -1306,7 +1338,7 @@ def _as_path(target: str) -> Optional[str]:
     return "./" + target
 
 
-def _spread(text: str, sep: str) -> list[str]:
+def _spread(text: str, sep: str, aliases: Optional[dict[str, str]] = None) -> list[str]:
     """Every path a grouped import names: `a::{b, c::{d, self}}` is
     `a::b`, `a::c::d` and `a::c`; `a::*` is `a`; a flat list `a, b` is
     each; an alias (`as x`, `=> x`) is not the name. A group that does
@@ -1314,7 +1346,7 @@ def _spread(text: str, sep: str) -> list[str]:
     text = text.strip()
     opened = text.find("{")
     if opened < 0:
-        return [name for name in (_plain_path(part, sep) for part in text.split(",")) if name]
+        return [name for name in (_plain_path(part, sep, aliases) for part in text.split(",")) if name]
     depth, closed = 0, -1
     for index, char in enumerate(text):
         if char == "{":
@@ -1325,7 +1357,7 @@ def _spread(text: str, sep: str) -> list[str]:
                 closed = index
                 break
     if closed < 0:
-        name = _plain_path(text, sep)
+        name = _plain_path(text, sep, aliases)
         return [name] if name else []
     head = text[:opened].rstrip()
     if head.endswith(sep):
@@ -1350,19 +1382,25 @@ def _spread(text: str, sep: str) -> list[str]:
             if head:
                 names.append(head)
         else:
-            names.extend(_spread(f"{head}{sep}{part}" if head else part, sep))
+            names.extend(_spread(f"{head}{sep}{part}" if head else part, sep, aliases))
     return names
 
 
-def _plain_path(text: str, sep: str) -> str:
+def _plain_path(text: str, sep: str, aliases: Optional[dict[str, str]] = None) -> str:
     """One path as written, less its alias, a trailing glob (`::*`, `.*`,
-    Scala's `._`) or `self`; empty when it is not a name."""
-    text = re.split(r"\s+as\s+|\s*=>\s*", text.strip(), maxsplit=1)[0].strip()
+    Scala's `._`) or `self`; empty when it is not a name. The alias, the
+    name the file uses for it, is noted in ``aliases`` when asked."""
+    head, *alias = re.split(r"\s+as\s+|\s*=>\s*", text.strip(), maxsplit=1)
+    text = head.strip()
     for tail in (f"{sep}*", f"{sep}_", f"{sep}self"):
         if text.endswith(tail):
             text = text[:-len(tail)]
     text = text.replace(" ", "")
-    return text if _IMPORT_NAME.match(text) else ""
+    if not _IMPORT_NAME.match(text):
+        return ""
+    if aliases is not None and alias and re.match(r"^[A-Za-z_]\w*$", alias[0].strip()):
+        aliases[text] = alias[0].strip()
+    return text
 
 
 def _source_root(lines: list[str], path: str, family: str) -> Optional[int]:
@@ -1406,13 +1444,15 @@ def _rust_base(path: str) -> _RustBase:
 
 
 def _module_file(parts: list[str], path: str, root: Optional[int], resolve: Optional["Resolve"],
-                 sep: str, base: Optional[_RustBase]) -> str:
+                 sep: str, base: Optional[_RustBase]) -> tuple[str, list[str]]:
     """A module path resolved to the file that holds it, the longest prefix
-    that is a file (`crate::a::b::Thing` is `src/a/b.rs`, item `Thing`),
-    or the path as written when nobody walked the tree or nothing is there."""
+    that is a file, with what was left over -- the item the import names in
+    that file (`crate::a::b::Thing` is `src/a/b.rs` and `Thing`) -- or the
+    path as written and nothing left when nobody walked the tree or
+    nothing is there."""
     written = sep.join(parts)
     if resolve is None or root is None:
-        return written
+        return written, []
     level, rest, prefix = root, parts, []
     if base is not None:
         head = parts[0]
@@ -1427,12 +1467,21 @@ def _module_file(parts: list[str], path: str, root: Optional[int], resolve: Opti
     if not rest:
         # `use super::*;` names the module itself, which may be this file's
         # own inline `mod tests`: nothing to claim.
-        return ""
+        return "", []
     for length in range(len(rest), 0, -1):
         found = resolve(path, level, ".".join([*prefix, *rest[:length]]))
         if found:
-            return found
-    return written
+            return found, rest[length:]
+    return written, []
+
+
+def _published_item(resolve: Optional["Resolve"], module: str, language: str) -> tuple[Optional[str], list[str]]:
+    """The file a published package's module is and the item left over."""
+    found = getattr(resolve, "package_item", None)
+    if found is None:
+        return _published(resolve, module, language), []
+    where, rest = found(module, language)
+    return (where if isinstance(where, str) and where else None), list(rest)
 
 
 def _published(resolve: Optional["Resolve"], module: str, language: str) -> Optional[str]:

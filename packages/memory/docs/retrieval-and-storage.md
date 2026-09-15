@@ -1098,8 +1098,18 @@ outside; a namespace or a package holds nothing by its own name.
 A bare call inside a Rust `impl` or `trait` or a PHP class names a
 free function, never a sibling method, since those need `Self::f` or
 `$this->f`; a C++ method defined outside its class still sees the
-class's other members. Past the reader's depth or line bound the
-grammar says nothing and the line reader's whole answer stands.
+class's other members. A bare call nothing in the file binds is a call
+to what an import brought in, when the import reached a file: `use
+crate::util::helper; helper()` is `src/util.rs:helper`, an alias (`use
+… as h`) binds the alias, a Java `import static lib.Text.trim` binds
+`Text.trim`, a TypeScript `import { tidy } from "@acme/ui"` binds
+`tidy` in the package's index -- within one repository, and across
+repositories where the import names a package another repository in
+the space publishes (see file-ingestion.md, "More than one repository
+in a space"); a glob, a module imported whole, a package nobody here
+publishes, and a name a local shadows bind nothing. Past the reader's
+depth or line bound the grammar says nothing and the line reader's
+whole answer stands.
 Measured over 2,545 files of the reference corpus: 18,128 calls bound
 in 1,389 files, and the grammar's declarations agreeing with the line
 reader's on 31,733 of the line reader's 41,819, most of the rest being
