@@ -10,6 +10,7 @@ from ...core.errors import InvalidInput
 from ...ocr.process import python_worker, run_bounded
 from ..extraction_checkpoint import CheckpointedDocumentParser, CheckpointedPdfParser, ExtractionCheckpoints, checkpoint_dispatch_allowed
 from ..pdf import PdfLimits, PdfParser, PypdfParser, validate_pdf
+from ..text_layer import unreadable
 from .types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument, validate_document
 
 
@@ -71,9 +72,12 @@ class BuiltinDocumentParser:
                 pdf = await self._pdf.parse(data, pdf_limits)
             validate_pdf(pdf, pdf_limits)
             encoded = pdf.text.encode()
+            # Kept, never dropped: named, so a reader knows the page's text is not the page.
+            unreadable_pages = [p.number for p in pdf.pages if unreadable(encoded[p.start:p.end].decode())]
             parsed = ParsedDocument(format='pdf', parser=pdf.parser, segments=tuple(
                 DocumentSegment(text=encoded[p.start:p.end].decode(), locator=f'page:{p.number}',
                     metadata={'page': str(p.number), 'extraction': p.extraction,
+                              **({'unreadable': 'true'} if p.number in unreadable_pages else {}),
                               'width_points': str(p.width_points), 'height_points': str(p.height_points),
                               'rotation': str(p.rotation),
                               **({'ocr_reading_order': p.reading_order.model_dump_json()} if p.reading_order else {}),
@@ -85,6 +89,7 @@ class BuiltinDocumentParser:
                         coordinate_space=p.region_geometry) for r in p.regions))
                 for p in pdf.pages if not p.empty),
                 metadata={'empty_pages': ','.join(str(p.number) for p in pdf.pages if p.empty),
+                          **({'unreadable_pages': ','.join(map(str, unreadable_pages))} if unreadable_pages else {}),
                           **({'outline': pdf.outline} if pdf.outline != 'none' else {})})
         else:
             raw = await run_bounded(python_worker('scone_memory.ingestion.formats.worker',
