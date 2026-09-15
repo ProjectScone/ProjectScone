@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Mapping, Optional, Sequence
 
 from ..core.ports import VectorPoint
 from ..core.timeutil import epoch_seconds
+from .location import local_identity
 from .validation import validate_vector
 
 if TYPE_CHECKING:
@@ -39,8 +40,16 @@ class LanceDBVectorIndex:
             raise ImportError("LanceDBVectorIndex needs lancedb: pip install 'scone-memory[lancedb]'") from e
         self.db = connection if connection is not None else lancedb.connect(path)
         self.table_name = table
+        #: The database as configured, compared as the directory it is when it is local,
+        #: or the injected connection itself when it chose the database.
+        self._endpoint: object = local_identity(path) if connection is None else id(connection)
         self.table: Table | None = None
         self.dim: Optional[int] = None
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self._endpoint, self.table_name)
 
     async def ensure(self, dim: int) -> None:
         import pyarrow as pa

@@ -39,7 +39,14 @@ class MilvusVectorIndex:
             raise ImportError("MilvusVectorIndex needs pymilvus: pip install 'scone-memory[milvus]'") from e
         self.client = client or (MilvusClient(uri, token=token) if token else MilvusClient(uri))
         self.collection = collection
+        #: The server as configured, or the injected client itself when it chose the server.
+        self._endpoint: object = uri if client is None else id(client)
         self.dim: Optional[int] = None
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self._endpoint, self.collection)
 
     async def ensure(self, dim: int) -> None:
         from pymilvus import DataType

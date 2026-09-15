@@ -65,6 +65,11 @@ confidence. Recall fetches small manifests and authorized blob descriptors; it
 leaves large image downloads to the consumer. Blob retrieval retains the configured
 store's integrity checks.
 
+## Image embeddings
+
+The pixels themselves can be searched too, with an image embedder and an index
+of its own: see the [image embedding lane](image-embedding-lane.md).
+
 ## Supplied HTML
 
 ```python

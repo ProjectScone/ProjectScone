@@ -36,6 +36,7 @@ from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as 
 from ..memory.engine import Record, MemoryEngine
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
+from ..retrieval.recall import LANES
 from ..retrieval.receipts import staged
 from ..retrieval.summary_expand import MAX_CHUNKS as SUMMARY_EXPANSION_MAX_CHUNKS
 from ..retrieval.window import MAX_WINDOW
@@ -1163,7 +1164,7 @@ def create_app(
             conditions=read_conditions(conditions),
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
             lessons=lessons, expand_summaries=expand_summaries, expand_max_chunks=expand_max_chunks,
-            **({"lanes": [lane.strip() for lane in lanes.split(",") if lane.strip()]} if lanes is not None else {}),
+            lanes=[lane.strip() for lane in lanes.split(",") if lane.strip()] if lanes is not None else LANES,
             require=require, exclude=exclude, diversity=diversity,
         )
         opened = None
