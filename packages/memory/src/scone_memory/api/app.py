@@ -1100,6 +1100,11 @@ def create_app(
             # their lessons would vanish, or a judged-useless neighbour would ride under a good one.
             raise InvalidInput("lessons cannot be combined with merge: a merged passage joins chunks judged "
                                "separately, and one lesson cannot stand for them; ask for one or the other")
+        if expand_summaries is not None and merge:
+            # A merge reads the text between the fragments it joins and reports it under one chunk's
+            # fields, so two cited chunks would come back holding an uncited one under their via_summary.
+            raise InvalidInput("expand_summaries cannot be combined with merge: a merged passage holds text "
+                               "between the chunks a summary cites, which it does not rest on; ask for one or the other")
         if merge and compress is not None:
             # A merged passage is reported under its best chunk, so the
             # other retrieved chunks inside it would not be pinned, and

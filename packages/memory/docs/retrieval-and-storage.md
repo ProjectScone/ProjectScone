@@ -473,7 +473,7 @@ episode and chunk, its level and index, the episode it summarizes, the mode,
 and `cited`, the character spans of the chunk's stored text where the quotes
 it rests on sit. Spans rather than the quotes themselves, so an answer holds
 no second copy of a passage's text for withholding to miss; after a window
-widens the passage they still count from the chunk's own start. A cited
+widens the passage they index the chunk's stored text, not the widened passage. A cited
 chunk already in the answer is not repeated.
 
 What it refuses, and says so in `expanded`:
@@ -503,9 +503,12 @@ What it refuses, and says so in `expanded`:
 
 The answer can hold more than `limit` items, and `returned_bytes` counts
 what is returned. Expansion runs inside recall before `lessons`, so the
-chunks a summary brings are read for lessons, and before the route's window,
-merge and withholding stages, so what it adds is widened, merged and scanned
-like any passage. The narrowing a caller set (kind, tags, source prefix,
+chunks a summary brings are read for lessons, and before the route's window
+and withholding stages, so what it adds is widened and scanned like any
+passage. It is refused with `merge` (a merged passage holds the text between
+two cited chunks, which the summary does not rest on, under one chunk's
+`via_summary`) and, on the command line, with `--parts`, which answers
+without recall's expansion. The narrowing a caller set (kind, tags, source prefix,
 dates) chose what was searched; it is not applied again to what a returned
 summary cites. The recall event records what the lanes returned, so feedback
 on a chunk a summary brought is refused as not returned by that recall.
