@@ -89,9 +89,9 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
     ``route="synthesize"`` is the one route the rule never chooses: it
     reads up to ``limit`` passages and has ``synthesis``, a model, write
     cited sentences about them. Without a model it is refused.
-    ``synthesis_mode`` -- ``evidence`` (the default), ``refine`` or
-    ``accumulate`` -- is how the synthesis reads its passages, and is
-    refused on any other route."""
+    ``synthesis_mode`` -- ``evidence`` (the default), ``refine``,
+    ``accumulate`` or ``facts`` -- is how the synthesis reads its passages,
+    and is refused on any other route."""
     check_space(space)
     if not isinstance(max_item_chars, int) or isinstance(max_item_chars, bool) or max_item_chars < 0:
         raise InvalidInput(f"max_item_chars must be a whole number of characters (0 for whole passages), not {max_item_chars!r}")

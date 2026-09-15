@@ -162,7 +162,26 @@ async def test_a_fold_sentence_citing_no_known_note_is_dropped_and_counted():
     model = FakeChat([notes(N1), notes(N2), summary(("Kept.", ["n2"]), ("Dropped.", ["n7"]), ("Also dropped.", []))])
     result = await synthesize_passages(model, QUESTION, [P1, P2], limits=ONE_EACH)
     assert [s.text for s in result.sentences] == ["Kept."]
-    assert result.fold_dropped_uncited == 2
+    assert result.fold_dropped_uncited == 2 and result.fold_dropped_malformed == 0
+
+
+async def test_a_fold_sentence_whose_note_ids_are_not_a_list_of_strings_is_counted_as_malformed():
+    reply = json.dumps({"summary": [{"sentence": "Kept.", "notes": ["n1"]}, {"sentence": "Bare.", "notes": "n1"},
+                                    {"sentence": "Named none.", "notes": ["n9"]}]})
+    result = await synthesize_passages(FakeChat([notes(N1), notes(N2), reply]), QUESTION, [P1, P2], limits=ONE_EACH)
+    assert [s.text for s in result.sentences] == ["Kept."] and result.folded is True
+    assert (result.fold_dropped_uncited, result.fold_dropped_malformed) == (1, 1)
+    assert result.record()["fold_dropped_malformed"] == 1 and result.record()["fold_dropped_uncited"] == 1
+
+
+async def test_a_fold_with_no_sentence_says_so_rather_than_that_none_cited_a_note():
+    result = await synthesize_passages(FakeChat([notes(N1), notes(N2), summary()]), QUESTION, [P1, P2], limits=ONE_EACH)
+    assert result.folded is False and [s.text for s in result.sentences] == [N1[0], N2[0]]
+    assert result.reasons == ("fold: the reply held no sentence; notes shown unmerged",)
+    bare = json.dumps({"summary": [{"sentence": "Bare.", "notes": "n1"}]})
+    result = await synthesize_passages(FakeChat([notes(N1), notes(N2), bare]), QUESTION, [P1, P2], limits=ONE_EACH)
+    assert result.reasons == ("fold: no sentence could be read (1 malformed); notes shown unmerged",)
+    assert (result.fold_dropped_uncited, result.fold_dropped_malformed) == (0, 1)
 
 
 async def test_a_fold_that_cannot_be_read_shows_the_notes_unmerged():

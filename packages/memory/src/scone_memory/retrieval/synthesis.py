@@ -49,9 +49,34 @@ can shape what a later round keeps, which is the trade against
 call left, in passage order, with no fold: a note must quote the passage
 its own call held. It spends the most calls on the passages it reads.
 
+``facts`` extracts first and writes second. Each passage is one call, as
+in ``accumulate``, that asks for the atomic facts the passage states that
+bear on the question, each a short sentence with a quote from that
+passage; the passage's id is the code's, not the model's, so a fact
+cannot name the wrong passage, and a fact whose quote is not in the
+passage its call held is dropped and counted in ``notes_dropped_unquoted``
+(a fact without a quote is malformed). When any fact survives, one more
+call writes the answer from the checked facts alone -- each fact with its
+quote, never the passages -- and every sentence must name the facts it
+uses; a sentence that names none it was given is dropped and counted in
+``fold_dropped_uncited`` (one whose ids are not a list of strings in
+``fold_dropped_malformed``), and a shown sentence carries the quotes of the
+facts it names. The call asks for at most ``max_sentences`` sentences,
+the bound that cuts what is shown. It holds at most ``max_round_bytes`` of facts, in
+the order they were found: the facts past the bound are not sent, and
+when the answer is written they are counted in ``facts_unsent`` and it
+is ``truncated``. An answer that cannot be read, fails, or has no
+sentence citing a fact, or a first fact too large to send, leaves every
+fact shown as it is: nothing shown was cut, ``facts_unsent`` and
+``facts_used`` are 0, and the synthesis is ``partial``. ``facts_used``
+counts the distinct facts the shown sentences of a written answer name
+(two facts with one quote are two), and ``folded`` says the answer was
+written.
+
 In every mode the calls are bounded by ``max_rounds`` (``evidence`` may
-add one fold), every call is counted in ``model_calls``, and the record
-says how many passages were read and how many the shown sentences cite.
+add its fold and ``facts`` its answer), every call is counted in
+``model_calls``, and the record says how many passages were read and how
+many the shown sentences cite.
 The citation check is mechanical rather than an instruction the model may
 or may not follow.
 """
@@ -81,9 +106,9 @@ MAX_SENTENCE_CHARS = 1_000
 MAX_QUOTE_CHARS = 2_000
 
 Status = Literal["synthesized", "partial", "unavailable", "no_evidence"]
-Mode = Literal["evidence", "refine", "accumulate"]
+Mode = Literal["evidence", "refine", "accumulate", "facts"]
 #: The ways a synthesis can read its rounds; ``evidence`` is the default.
-MODES: tuple[str, ...] = ("evidence", "refine", "accumulate")
+MODES: tuple[str, ...] = ("evidence", "refine", "accumulate", "facts")
 RoundStatus = Literal["noted", "unreadable", "failed", "timeout"]
 
 _NOTES_SYSTEM = (
@@ -103,6 +128,22 @@ _REFINE_SYSTEM = (
     "character, from that passage. When the new passages add nothing, return the answer so far unchanged. "
     "Reply with JSON only, of the form "
     '{"notes": [{"sentence": "...", "passage": "chunk:1", "quote": "..."}]}.'
+)
+_FACTS_SYSTEM = (
+    "You pick out the facts a passage states that bear on a question, from that passage and nothing else. "
+    "Each fact is one short sentence that says one thing the passage states, and a quote copied exactly, "
+    "character for character, from the passage that states it. Give each fact once. Write no fact about the "
+    "passage itself or about what it does not say, and leave out what does not bear on the question. Reply "
+    "with JSON only, of the form "
+    '{"facts": [{"fact": "...", "quote": "..."}]}, '
+    "and with an empty list when nothing in the passage bears on the question."
+)
+_ANSWER_SYSTEM = (
+    "You answer a question from numbered facts, each given with the quote it was taken from, and from nothing "
+    "else. Use only the facts that help answer the question and leave the others out; not every fact belongs "
+    "in the answer. Say each thing once. Each sentence lists the ids of the facts it uses, and cites no fact it "
+    "does not use. Add nothing the facts do not say. Reply with JSON only, of the form "
+    '{"answer": [{"sentence": "...", "facts": ["f1", "f2"]}]}.'
 )
 _FOLD_SYSTEM = (
     "You merge notes into a short summary that answers a question. Each summary sentence is written from one "
@@ -211,6 +252,15 @@ class Synthesis:
     refine_dropped_carried: int = 0
     #: Kept notes that repeat the answer so far, over every refine round: ``notes_kept`` counts them again.
     notes_carried: int = 0
+    #: Distinct facts the shown sentences of a written answer name, in ``facts`` mode; 0 when no answer was written
+    #: and in any other mode.
+    facts_used: int = 0
+    #: Checked facts a written answer's call left out by its byte bound, in ``facts`` mode; 0 when no answer was
+    #: written (every fact is then shown) and in any other mode.
+    facts_unsent: int = 0
+    #: Fold or answer sentences dropped because their ids were not a list of strings, or the sentence was not text;
+    #: ``fold_dropped_uncited`` counts only well-formed sentences that named nothing they were given.
+    fold_dropped_malformed: int = 0
     #: The quotes were checked against their passages; the sentences were not checked against anything.
     verified_accuracy: Literal[False] = False
 
@@ -234,6 +284,7 @@ class Synthesis:
                                          for c in sentence.citations]} for sentence in self.sentences],
             "sentences_offered": self.sentences_offered, "truncated": self.truncated,
             "folded": self.folded, "fold_dropped_uncited": self.fold_dropped_uncited,
+            "fold_dropped_malformed": self.fold_dropped_malformed,
             "passages": {"given": self.passages_given, "read": self.passages_read,
                          "unread": self.passages_unread, "oversize": self.passages_oversize,
                          "cited": self.passages_cited},
@@ -244,29 +295,32 @@ class Synthesis:
                         "notes_kept": r.notes_kept, "notes_carried": r.notes_carried, "status": r.status}
                        for r in self.rounds],
             "refine_kept_prior": self.refine_kept_prior, "refine_dropped_carried": self.refine_dropped_carried,
+            # Only a mode that extracts facts has counts of them; elsewhere zeros would read as none found.
+            "facts": ({"extracted": self.notes_kept, "used": self.facts_used, "unsent": self.facts_unsent,
+                       "sentences_dropped_uncited": self.fold_dropped_uncited,
+                       "sentences_dropped_malformed": self.fold_dropped_malformed} if self.mode == "facts" else None),
             "model_calls": self.model_calls, "reasons": list(self.reasons), "verified_accuracy": False,
         }
 
 
+_DECODER = json.JSONDecoder()
+
+
 def _object(reply: object) -> Optional[dict[str, object]]:
-    """The first JSON object in the reply, or None; a model may wrap it in prose, not omit it."""
+    """The first JSON object in the reply, or None; a model may wrap it in prose, not omit it.
+
+    Each ``{`` is decoded as JSON decodes it rather than matched by counting braces, so a brace inside a
+    string (a quoted passage of code) neither ends the object nor hides it."""
     if not isinstance(reply, str):
         return None
     start = reply.find("{")
     while start >= 0:
-        depth = 0
-        for index in range(start, len(reply)):
-            if reply[index] == "{":
-                depth += 1
-            elif reply[index] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        value = json.loads(reply[start:index + 1])
-                    except ValueError:
-                        break
-                    return value if isinstance(value, dict) else None
-        start = reply.find("{", start + 1)
+        try:
+            value: dict[str, object] = _DECODER.raw_decode(reply, start)[0]
+        except ValueError:
+            start = reply.find("{", start + 1)
+            continue
+        return value
     return None
 
 
@@ -316,6 +370,23 @@ class _Tally:
     malformed: int = 0
 
 
+def _texts(sentence: object, quote: object) -> Optional[tuple[str, str]]:
+    """A sentence and a quote, both non-empty text within their bounds; None when either is not."""
+    if (not isinstance(sentence, str) or not sentence.strip() or len(sentence) > MAX_SENTENCE_CHARS
+            or not isinstance(quote, str) or not quote.strip() or len(quote) > MAX_QUOTE_CHARS):
+        return None
+    return sentence, quote
+
+
+def _quoted(sentence: str, quote: str, passage: Passage, tally: _Tally) -> Optional[_Note]:
+    """The note, when its quote is found in the passage; otherwise counted as unquoted."""
+    start = passage.text.find(quote)
+    if start < 0:
+        tally.unquoted += 1
+        return None
+    return _Note(sentence.strip(), Citation(passage.id, quote, start, start + len(quote)))
+
+
 def _read_notes(reply: str, held: Mapping[str, Passage], tally: _Tally) -> Optional[tuple[int, list[_Note]]]:
     """The notes of a reply that survive the check, and how many the reply held; None when it is not notes."""
     body = _object(reply)
@@ -328,47 +399,85 @@ def _read_notes(reply: str, held: Mapping[str, Passage], tally: _Tally) -> Optio
         if not isinstance(row, dict):
             tally.malformed += 1
             continue
-        sentence, passage_id, quote = row.get("sentence"), row.get("passage"), row.get("quote")
-        if (not isinstance(sentence, str) or not sentence.strip() or len(sentence) > MAX_SENTENCE_CHARS
-                or not isinstance(passage_id, str) or not isinstance(quote, str) or not quote.strip()
-                or len(quote) > MAX_QUOTE_CHARS):
+        passage_id = row.get("passage")
+        texts = _texts(row.get("sentence"), row.get("quote"))
+        if texts is None or not isinstance(passage_id, str):
             tally.malformed += 1
             continue
         passage = held.get(passage_id)
         if passage is None:
             tally.unknown += 1
             continue
-        start = passage.text.find(quote)
-        if start < 0:
-            tally.unquoted += 1
-            continue
-        kept.append(_Note(sentence.strip(), Citation(passage_id, quote, start, start + len(quote))))
+        note = _quoted(*texts, passage, tally)
+        if note is not None:
+            kept.append(note)
     return len(rows), kept
 
 
-def _read_fold(reply: str, notes: Sequence[_Note]) -> Optional[tuple[list[Sentence], int]]:
-    """The summary sentences that cite known notes, and how many cited none; None when it is not a summary."""
+def _read_facts(reply: str, passage: Passage, tally: _Tally) -> Optional[tuple[int, list[_Note]]]:
+    """The facts of a reply whose quotes are found in ``passage``, and how many it held; None when it is not facts."""
     body = _object(reply)
-    if body is None or not isinstance(body.get("summary"), list):
+    if body is None or not isinstance(body.get("facts"), list):
         return None
-    by_id = {f"n{index}": note for index, note in enumerate(notes, 1)}
-    sentences: list[Sentence] = []
-    uncited = 0
-    rows = body["summary"]
+    kept: list[_Note] = []
+    rows = body["facts"]
+    assert isinstance(rows, list)
+    for row in rows:
+        texts = _texts(row.get("fact"), row.get("quote")) if isinstance(row, dict) else None
+        if texts is None:
+            tally.malformed += 1
+            continue
+        note = _quoted(*texts, passage, tally)
+        if note is not None:
+            kept.append(note)
+    return len(rows), kept
+
+
+@dataclass
+class _Cited:
+    """The sentences of a fold or an answer that cite known notes, the notes each names, and how many cited none."""
+
+    sentences: list[Sentence]
+    uses: list[frozenset[int]]
+    uncited: int
+    malformed: int = 0
+
+    def none_stood(self, kind: str) -> str:
+        """Why no sentence stands: none was written, none cited a known ``kind``, or none was well formed."""
+        if not self.uncited and not self.malformed:
+            return "the reply held no sentence"
+        if not self.uncited:
+            return f"no sentence could be read ({self.malformed} malformed)"
+        if not self.malformed:
+            return f"no sentence cited a known {kind}"
+        return f"no sentence cited a known {kind}, and {self.malformed} were malformed"
+
+
+def _read_fold(reply: str, notes: Sequence[_Note], *, rows_key: str = "summary", ids_key: str = "notes",
+               prefix: str = "n") -> Optional[_Cited]:
+    """The sentences under ``rows_key`` that cite known notes by ``prefix`` and number; None when there is no such list."""
+    body = _object(reply)
+    if body is None or not isinstance(body.get(rows_key), list):
+        return None
+    by_id = {f"{prefix}{index}": index - 1 for index in range(1, len(notes) + 1)}
+    cited = _Cited([], [], 0)
+    rows = body[rows_key]
     assert isinstance(rows, list)
     for row in rows:
         text = row.get("sentence") if isinstance(row, dict) else None
-        ids = row.get("notes") if isinstance(row, dict) else None
-        if not isinstance(text, str) or not text.strip() or len(text) > MAX_SENTENCE_CHARS or not isinstance(ids, list):
-            uncited += 1
+        ids = row.get(ids_key) if isinstance(row, dict) else None
+        if (not isinstance(text, str) or not text.strip() or len(text) > MAX_SENTENCE_CHARS or not isinstance(ids, list)
+                or not all(isinstance(i, str) for i in ids)):
+            cited.malformed += 1
             continue
-        cited = [by_id[i] for i in ids if isinstance(i, str) and i in by_id]
-        if not cited:
-            uncited += 1
+        named = [by_id[i] for i in ids if i in by_id]
+        if not named:
+            cited.uncited += 1
             continue
-        citations = tuple(dict.fromkeys(note.citation for note in cited))
-        sentences.append(Sentence(text.strip(), citations))
-    return sentences, uncited
+        citations = tuple(dict.fromkeys(notes[index].citation for index in named))
+        cited.sentences.append(Sentence(text.strip(), citations))
+        cited.uses.append(frozenset(named))
+    return cited
 
 
 def _notes_prompt(question: str, passages: Sequence[Passage]) -> str:
@@ -393,6 +502,25 @@ def _left_out(answer: Sequence[_Note], rewrite: Sequence[_Note]) -> int:
     return sum((Counter(note.citation for note in answer) - carried).values())
 
 
+def _facts_prompt(question: str, passage: Passage) -> str:
+    return f"Question: {question}\n\nPassage:\n{passage.text}"
+
+
+def _fact_lines(notes: Sequence[_Note]) -> list[str]:
+    """The facts as the answer call sees them: an id, the fact, and its quote; no passage."""
+    return [f'[f{index}] {note.sentence} Quote: "{note.citation.quote}"' for index, note in enumerate(notes, 1)]
+
+
+def _lines_within(lines: Sequence[str], room: int) -> int:
+    """How many of ``lines``, from the first, fit ``room`` bytes joined by newlines."""
+    used = 0
+    for count, line in enumerate(lines):
+        used += len(line.encode("utf-8")) + (1 if count else 0)
+        if used > room:
+            return count
+    return len(lines)
+
+
 def _fold_prompt(question: str, notes: Sequence[_Note]) -> str:
     listed = "\n".join(f"[n{index}] ({note.citation.passage_id}) {note.sentence}" for index, note in enumerate(notes, 1))
     return f"Question: {question}\n\nNotes:\n{listed}"
@@ -405,8 +533,8 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
     Passages are read in the order given, so give them ranked. Over
     ``limits.max_passages`` is refused, not cut; a passage larger than a
     round is refused on its own and the rest are read. ``mode`` is how the
-    rounds are read: ``evidence``, ``refine`` or ``accumulate`` (see the
-    module's account)."""
+    rounds are read: ``evidence``, ``refine``, ``accumulate`` or ``facts``
+    (see the module's account)."""
     limits = limits or SynthesisLimits()
     if not isinstance(question, str) or not question.strip():
         raise InvalidInput("a question must have something in it")
@@ -445,7 +573,7 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
         refining = mode == "refine" and bool(notes)
         so_far = _answer_so_far(notes) if refining else ""
         carried = len(so_far.encode("utf-8"))
-        group = _take(fitting, start, limits.max_round_bytes - carried, one_each=mode == "accumulate")
+        group = _take(fitting, start, limits.max_round_bytes - carried, one_each=mode in ("accumulate", "facts"))
         if not group:
             # Only a carried answer can leave no room: every passage here fits a round on its own.
             crowded = True
@@ -456,6 +584,8 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
         size = sum(_size(passage) for passage in group)
         if refining:
             reply, failure, reason = await calls.ask(_REFINE_SYSTEM, _refine_prompt(question, so_far, group))
+        elif mode == "facts":
+            reply, failure, reason = await calls.ask(_FACTS_SYSTEM, _facts_prompt(question, group[0]))
         else:
             reply, failure, reason = await calls.ask(_NOTES_SYSTEM, _notes_prompt(question, group))
         if reply is None:
@@ -464,12 +594,15 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
             reasons.append(reason)
             break
         held = {passage.id: passage for passage in group}
-        parsed = _read_notes(reply, {**pool, **held} if refining else held, tally)
+        if mode == "facts":
+            parsed = _read_facts(reply, group[0], tally)
+        else:
+            parsed = _read_notes(reply, {**pool, **held} if refining else held, tally)
         if parsed is None:
             rounds.append(SynthesisRound(number, len(group), size, 0, 0, "unreadable", carried))
             stands = "; the answer so far stands" if refining else ""
             kept_prior += refining
-            reasons.append(f"round {number}: the reply could not be read as notes{stands}")
+            reasons.append(f"round {number}: the reply could not be read as {'facts' if mode == 'facts' else 'notes'}{stands}")
             continue
         returned, kept = parsed
         pool.update(held)
@@ -489,9 +622,12 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
             reasons.append(f"round {number}: no refined sentence kept a checked quote; the answer so far stands")
         rounds.append(SynthesisRound(number, len(group), size, returned, len(kept), "noted", carried, repeated))
     folded = False
-    fold_uncited = 0
+    fold_uncited = fold_malformed = 0
     fold_attempted = False
     sentences: list[Sentence] = [Sentence(note.sentence, (note.citation,)) for note in notes]
+    # The notes each sentence stands on; unmerged, a sentence is its own note.
+    uses = [frozenset({index}) for index in range(len(notes))]
+    unsent = 0
     noted_rounds = sum(1 for r in rounds if r.status == "noted" and r.notes_kept)
     if mode == "evidence" and noted_rounds >= 2 and len(notes) >= 2:
         fold_attempted = True
@@ -501,30 +637,62 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
             reasons.append(f"fold {reason}; notes shown unmerged")
         elif merged is None:
             reasons.append("fold: the reply could not be read as a summary; notes shown unmerged")
-        elif not merged[0]:
-            fold_uncited = merged[1]
-            reasons.append("fold: no sentence cited a known note; notes shown unmerged")
+        elif not merged.sentences:
+            fold_uncited, fold_malformed = merged.uncited, merged.malformed
+            reasons.append(f"fold: {merged.none_stood('note')}; notes shown unmerged")
         else:
-            sentences, fold_uncited = merged
+            sentences, uses, fold_uncited, fold_malformed = merged.sentences, merged.uses, merged.uncited, merged.malformed
             folded = True
+    if mode == "facts" and notes:
+        fold_attempted = True
+        lines = _fact_lines(notes)
+        sent = _lines_within(lines, limits.max_round_bytes)
+        if not sent:
+            reasons.append(f"answer: no fact fit the answer's round of {limits.max_round_bytes} bytes; "
+                           "facts shown unmerged")
+        else:
+            prompt = (f"Question: {question}\n\nFacts:\n" + "\n".join(lines[:sent])
+                      + f"\n\nAnswer in at most {limits.max_sentences} sentence(s).")
+            reply, failure, reason = await calls.ask(_ANSWER_SYSTEM, prompt)
+            written = (_read_fold(reply, notes[:sent], rows_key="answer", ids_key="facts", prefix="f")
+                       if reply is not None else None)
+            if reply is None:
+                reasons.append(f"answer {reason}; facts shown unmerged")
+            elif written is None:
+                reasons.append("answer: the reply could not be read as an answer; facts shown unmerged")
+            elif not written.sentences:
+                fold_uncited, fold_malformed = written.uncited, written.malformed
+                reasons.append(f"answer: {written.none_stood('fact')}; facts shown unmerged")
+            else:
+                sentences, uses, fold_uncited = written.sentences, written.uses, written.uncited
+                fold_malformed = written.malformed
+                folded = True
+                # Only a written answer lacks the facts its call could not hold; unmerged, every fact is shown.
+                unsent = len(notes) - sent
+                if unsent:
+                    reasons.append(f"answer: {unsent} fact(s) left out: the facts past {limits.max_round_bytes} bytes "
+                                   "did not fit the answer's round")
+    # Unmerged facts are shown, not used: only the sentences of a written answer use facts.
+    used = len(frozenset().union(*uses[:limits.max_sentences])) if mode == "facts" and folded else 0
     return _finish(question, given, rounds, tally, calls, reasons, read, oversize, folded=folded,
                    fold_uncited=fold_uncited, fold_attempted=fold_attempted, limits=limits, refused=False,
-                   sentences=sentences, capped=capped or crowded, mode=mode, kept_prior=kept_prior,
-                   dropped_carried=dropped_carried)
+                   sentences=sentences, capped=capped or crowded or bool(unsent), mode=mode, kept_prior=kept_prior,
+                   dropped_carried=dropped_carried, facts_used=used, facts_unsent=unsent, fold_malformed=fold_malformed)
 
 
 def _finish(question: str, given: Sequence[Passage], rounds: Sequence[SynthesisRound],
             tally: _Tally, calls: _Calls, reasons: list[str], read: int, oversize: int, *, folded: bool,
             fold_uncited: int, fold_attempted: bool, limits: SynthesisLimits, refused: bool,
             sentences: Sequence[Sentence] = (), capped: bool = False, mode: Mode = "evidence",
-            kept_prior: int = 0, dropped_carried: int = 0) -> Synthesis:
+            kept_prior: int = 0, dropped_carried: int = 0, facts_used: int = 0, facts_unsent: int = 0,
+            fold_malformed: int = 0) -> Synthesis:
     offered = len(sentences)
     cut = offered > limits.max_sentences
     shown = tuple(sentences[:limits.max_sentences])
     if cut:
         reasons.append(f"{offered} sentences offered, {limits.max_sentences} shown: the sentence bound was reached")
-    # A bound of the limits cut something: rounds, a round's room beside a refine answer, or sentences. A failed
-    # round leaves passages unread too, but that is a failure, not a bound.
+    # A bound of the limits cut something: rounds, a round's room beside a refine answer, the facts an answer call
+    # could hold, or sentences. A failed round leaves passages unread too, but that is a failure, not a bound.
     truncated = capped or cut
     unread = len(given) - read - oversize
     status: Status
@@ -541,7 +709,7 @@ def _finish(question: str, given: Sequence[Passage], rounds: Sequence[SynthesisR
     return Synthesis(question, status, shown, tuple(rounds), len(given), read, unread, oversize, kept,
                      tally.unquoted, tally.unknown, tally.malformed, folded, fold_uncited, offered, truncated,
                      calls.count, tuple(reasons), mode, kept_prior, dropped_carried,
-                     sum(r.notes_carried for r in rounds))
+                     sum(r.notes_carried for r in rounds), facts_used, facts_unsent, fold_malformed)
 
 
 def passages_from_recall(items: Sequence[RecallItem]) -> tuple[Passage, ...]:
