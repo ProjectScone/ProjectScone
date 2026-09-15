@@ -126,8 +126,10 @@ each thing said once, and at most `max_sentences` sentences. The
 extraction prompt was also told to give each fact once and to write no
 fact about the passage itself or about what it does not say. On the same
 three items the revised prompts wrote an answer on 3 of 3, in 15, 15 and
-31 s. The measurement above used only the revised prompts. No prompt was
-changed after the eight items' results were seen.
+31 s. The measurement above used only the revised prompts. The smoke run
+that led to the revision was on one of the eight; the revised prompts
+were checked only on the three items outside them, and no prompt was
+changed after the measurement's results were seen.
 
 ## What it says
 
