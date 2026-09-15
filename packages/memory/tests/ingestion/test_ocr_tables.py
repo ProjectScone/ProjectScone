@@ -158,3 +158,11 @@ def test_a_row_of_fewer_cells_spans_the_grid_s_columns_and_a_narrow_one_is_not_w
                cell("Gadgets", 3, 0.1, 0.28), cell("7", 3, 0.4, 0.43), cell("9", 3, 0.65, 0.7)]
     [table] = infer_tables(grazing).tables
     assert {(c.row, c.column_span) for c in table.cells if c.row == 0} == {(0, 1)}, "a wide cell grazing a narrow band does not claim it"
+    narrow_total = [cell("Item", 1, 0.1, 0.25), cell("Net worth (USD)", 1, 0.36, 0.58), cell("Q2", 1, 0.65, 0.75),
+                    cell("Widgets", 2, 0.1, 0.28), cell("10", 2, 0.4, 0.44), cell("12", 2, 0.65, 0.73),
+                    cell("Gadgets", 3, 0.1, 0.28), cell("7", 3, 0.4, 0.43), cell("9", 3, 0.65, 0.7),
+                    cell("Total", 4, 0.1, 0.22), cell("57", 4, 0.4, 0.44)]  # a number a fifth as wide as its column's band
+    layout = infer_tables(narrow_total)
+    [table] = layout.tables
+    assert table.rows == 4 and not layout.unassigned, "a narrow number inside a wide band sits in it"
+    assert {(c.row, c.column, c.column_span) for c in table.cells if c.row == 3} == {(3, 0, 1), (3, 1, 1)}
