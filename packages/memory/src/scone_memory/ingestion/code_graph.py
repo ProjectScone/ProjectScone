@@ -20,6 +20,7 @@ import ast
 import io
 import posixpath
 import tokenize
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -59,6 +60,12 @@ MAX_QUOTE_CHARS = 2_000
 #: What a claim can say. Each is a predicate in the ledger like any other.
 DEFINES = "defines"
 IMPORTS = "imports"
+#: An import that runs only when the function holding it is called, and
+#: one that never runs (`if TYPE_CHECKING:`). A file that loads needs the
+#: modules its `imports` name; it does not need these to load, so a loop
+#: closed by one is a loop the code already works around.
+IMPORTS_WHEN_CALLED = "imports_when_called"
+IMPORTS_FOR_TYPES = "imports_for_types"
 CALLS = "calls"
 #: What a class is built on. A hierarchy is how people navigate a
 #: codebase and no call edge says anything about it.
@@ -129,6 +136,11 @@ _SPECIFIERS = frozenset("public private protected internal virtual override seal
 #: down, so it can be read; what a name in the body refers to is not, so
 #: it is not guessed at. Nothing here claims a call for these languages.
 _FROM = re.compile(r"""\bfrom\s+["']([^"']+)["']""")
+#: The start of an ECMAScript import or re-export statement, and one that
+#: brings in types alone (`import type {...} from`, `export type {...} from`),
+#: which the compiler erases: it never runs, however many lines it spans.
+_ES_STATEMENT = re.compile(r"^\s*(?:import|export)\b")
+_ES_TYPE_ONLY = re.compile(r"^\s*(?:import|export)\s+type\s")
 _BARE = re.compile(r"""^\s*import\s+["']([^"']+)["']""")
 _REQUIRE = re.compile(r"""\brequire\s*\(\s*["']([^"']+)["']""")
 _QUOTED = re.compile(r"""^\s*(?:_\s+|\w+\s+)?["']([^"']+)["']\s*$""")
@@ -392,6 +404,12 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
         decided = {claim.predicate for claim in parsed}
         kept = [claim for claim in line_read if claim.predicate not in decided]
         return (*kept, *parsed)
+    if language is not None and language.startswith("tree:"):
+        # Ruby, Lua, shell, Perl, fish: read from the grammar that already
+        # cuts them, claiming what the tree settles and nothing more.
+        from .code_tree_graph import tree_claims
+
+        return tree_claims(content, path, grammar=language[len("tree:"):])
     if language != "python":
         return ()
     try:
@@ -402,6 +420,8 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     lines = content.split("\n")
     found: list[CodeClaim] = []
     named: dict[str, str] = {}
+    #: The qualified names of the classes this file declares.
+    classes: set[str] = set()
     imported: dict[str, tuple[str, Optional[str]]] = {}
 
     def at(line: int) -> tuple[str, int, int]:
@@ -419,7 +439,7 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     # What the file holds, and what holds what: a class defines its
     # methods, and the file defines the class, so the graph has the
     # nesting people read.
-    def walk(node: ast.AST, owner: str, inside: Optional[str]) -> None:
+    def walk(node: ast.AST, owner: str, inside: Optional[str], deferred: Optional[str] = None) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 name = f"{inside}.{child.name}" if inside else child.name
@@ -427,14 +447,25 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                 named[name] = whole
                 say(owner, DEFINES, whole, child.lineno)
                 if isinstance(child, ast.ClassDef):
+                    classes.add(name)
                     for base in child.bases:
                         target = _base(base, path, named, imported)
                         if target:
                             say(whole, INHERITS, target, child.lineno)
-                walk(child, whole, name)
+                # A class body runs when the module loads; a function body
+                # runs when the function is called, so an import in it does.
+                walk(child, whole, name, deferred if isinstance(child, ast.ClassDef) else (deferred or "called"))
+            elif isinstance(child, ast.If) and _type_checking(child.test):
+                # `if TYPE_CHECKING:` never runs; what it imports is for the
+                # checker, and it is claimed as that. Its `else:` runs
+                # whenever the module does (the backport idiom puts the
+                # real import there), so it keeps the timing it is in.
+                walk(ast.Module(body=child.body, type_ignores=[]), owner, inside, "types")
+                walk(ast.Module(body=child.orelse, type_ignores=[]), owner, inside, deferred)
             elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                predicate = {None: IMPORTS, "called": IMPORTS_WHEN_CALLED, "types": IMPORTS_FOR_TYPES}[deferred]
                 for module in _imported(child, path, resolve):
-                    say(path, IMPORTS, module, child.lineno)
+                    say(path, predicate, module, child.lineno)
                 # One entry per alias, keeping the name it had in its
                 # module. Pairing every alias with every module of a
                 # multi-name import made `import json, csv` claim both
@@ -463,13 +494,19 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                         if where:
                             imported[alias.asname or alias.name] = (where, None)
             else:
-                walk(child, owner, inside)
+                walk(child, owner, inside, deferred)
 
     walk(tree, path, None)
-    _calls(tree, path, named, imported, say, _unbound)
+    _calls(tree, path, named, imported, say, _unbound, frozenset(classes))
     _type_references(tree, path, named, imported, say)
     _meaning(content, path, "python", say)
     return tuple(found)
+
+
+def _type_checking(test: ast.AST) -> bool:
+    """Whether an `if` guards on TYPE_CHECKING (bare or qualified)."""
+    return ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
+            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"))
 
 
 def _base(node: ast.AST, path: str, named: dict[str, str],
@@ -580,7 +617,7 @@ def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[st
 
 def _calls(tree: ast.AST, path: str, named: dict[str, str],
            imported: dict[str, tuple[str, Optional[str]]], say,
-           unbound: Optional[list[tuple[str, str]]] = None) -> None:
+           unbound: Optional[list[tuple[str, str]]] = None, classes: frozenset[str] = frozenset()) -> None:
     """Calls between things this file can see, and no others.
 
     A bare name is a call to this file's own declaration when it has one,
@@ -594,12 +631,14 @@ def _calls(tree: ast.AST, path: str, named: dict[str, str],
     this package could not place, 37.2% had a head the file had itself
     imported, while 59.8% were methods on values of unstated type. This
     reaches the first group and cannot reach the second."""
-    for holder, inside in _holders(tree, None):
-        whole = f"{path}:{_qualified(holder, inside)}"
-        for call in ast.walk(holder):
-            if not isinstance(call, ast.Call):
-                continue
-            target = _target(call.func, inside, named, imported)
+    holders = list(_callers(tree, None, None))
+    bound = {qualified: _bound(holder) for holder, qualified, _ in holders}
+    for holder, qualified, inside in holders:
+        # Named as `defines` names it, and holding only the calls in its own body: a call inside a
+        # function written within it is that function's call, not this one's.
+        whole = f"{path}:{qualified}"
+        for call in _own_calls(holder):
+            target = _target(call.func, inside, named, imported, classes, scope=qualified, bound=bound)
             if target is None:
                 # Collected here rather than walked again elsewhere: a
                 # second copy of the name table is the one that drifts
@@ -758,26 +797,71 @@ def _spelling(func: ast.AST) -> Optional[str]:
     return None
 
 
-def _holders(node: ast.AST, inside: Optional[str]):
-    """Every function in the file, with the class it is written in."""
+def _callers(node: ast.AST, parent: Optional[str], inside: Optional[str]):
+    """Every function in the file, qualified as ``defines`` qualifies it, with the class it
+    is most closely written in."""
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield child, inside
-            yield from _holders(child, inside)
+            qualified = f"{parent}.{child.name}" if parent else child.name
+            yield child, qualified, inside
+            yield from _callers(child, qualified, inside)
         elif isinstance(child, ast.ClassDef):
-            within = f"{inside}.{child.name}" if inside else child.name
-            yield from _holders(child, within)
+            qualified = f"{parent}.{child.name}" if parent else child.name
+            yield from _callers(child, qualified, qualified)
         else:
-            yield from _holders(child, inside)
+            yield from _callers(child, parent, inside)
 
 
-def _qualified(holder: ast.AST, inside: Optional[str]) -> str:
-    name = getattr(holder, "name", "")
-    return f"{inside}.{name}" if inside else name
+def _evaluated(function: ast.FunctionDef | ast.AsyncFunctionDef):
+    """Every node a call to the function evaluates in its own frame, each with whether it
+    sits in the body of a class written there.
+
+    Its body, but not its own decorators, defaults or annotations: those ran when the
+    statement defining it did. So of a function or class written inside it, only what that
+    statement evaluates belongs here -- decorators, default values, bases and a class's own
+    body -- and never the inner function's body."""
+    stack: list[tuple[ast.AST, bool]] = [(statement, False) for statement in function.body]
+    while stack:
+        node, in_class = stack.pop()
+        yield node, in_class
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defaults = [*node.args.defaults, *(one for one in node.args.kw_defaults if one is not None)]
+            stack.extend((one, in_class) for one in (*node.decorator_list, *defaults))
+        elif isinstance(node, ast.ClassDef):
+            stack.extend((one, in_class) for one in (*node.decorator_list, *node.bases, *node.keywords))
+            stack.extend((statement, True) for statement in node.body)
+        else:
+            stack.extend((child, in_class) for child in ast.iter_child_nodes(node))
+
+
+def _own_calls(function: ast.FunctionDef | ast.AsyncFunctionDef):
+    """The calls a function makes itself, not those of the functions written inside it."""
+    return (node for node, _ in _evaluated(function) if isinstance(node, ast.Call))
+
+
+def _bound(function: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[frozenset[str], frozenset[str]]:
+    """The names a function binds for itself: its parameters and what it assigns, then what it
+    imports. The functions and classes it defines are not needed here, since those are looked
+    up as declarations first. A name bound in a class body written inside it is that class's."""
+    arguments = function.args
+    names = {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                                 *([arguments.vararg] if arguments.vararg else []),
+                                 *([arguments.kwarg] if arguments.kwarg else []))}
+    brought: set[str] = set()
+    for node, in_class in _evaluated(function):
+        if in_class:
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            brought.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+    return frozenset(names), frozenset(brought)
 
 
 def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
-            imported: Optional[dict[str, tuple[str, Optional[str]]]] = None) -> Optional[str]:
+            imported: Optional[dict[str, tuple[str, Optional[str]]]] = None,
+            classes: frozenset[str] = frozenset(), scope: Optional[str] = None,
+            bound: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {}) -> Optional[str]:
     """What a call refers to, or nothing.
 
     The import table says which of two things a local name is, and the
@@ -789,21 +873,72 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
     declaration ``z`` in ``x``, and binding it would name something that
     need not exist -- the false-edge shape that cost the brace call graph
     its life.
+
+    A call through a class this file declares, ``Shelf.keep()`` or
+    ``Shelf.Label.print()``, is the method its whole spelling names, when
+    everything before the last name is a class declared here; ``cls`` in a
+    class is that class, as ``self`` is. An imported class is not followed
+    the same way: a file cannot tell an imported class from an imported
+    object, so ``from x import Y`` then ``Y.m()`` stays unbound, and so does
+    a call through a class declared here under a name also imported here.
+
+    A name an enclosing function binds for itself -- a parameter, an assignment -- is that
+    value and not a declaration of the same name further out, so it stays unbound; a name it
+    imports is what the import names.
+    ``self`` and ``cls`` are the class only in the method that takes them, and in functions
+    written inside that method that do not take their own.
     """
     if isinstance(func, ast.Name):
-        here = named.get(func.id)
+        brought = False
+        if scope:
+            # From the innermost enclosing function outwards. A class body is not a scope the
+            # functions inside it can see, as Python reads names.
+            parts = scope.split(".")
+            for end in range(len(parts), 0, -1):
+                prefix = ".".join(parts[:end])
+                if prefix in classes:
+                    continue
+                enclosed = named.get(f"{prefix}.{func.id}")
+                if enclosed is not None:
+                    return enclosed
+                assigned, imports = bound.get(prefix, (frozenset(), frozenset()))
+                if func.id in assigned:
+                    return None
+                if func.id in imports:
+                    brought = True
+                    break
+        here = None if brought else named.get(func.id)
         if here is not None:
             return here
         came = imported.get(func.id) if imported else None
         # `Store as Shelf` is Store: named where it was declared, which is
         # the rule `_base` already follows for an inherited name.
         return _joined(came[0], came[1]) if came is not None and came[1] is not None else None
+    if isinstance(func, ast.Attribute):
+        spelt = _spelling(func)
+        holder = spelt.rpartition(".")[0] if spelt is not None else ""
+        # A class also imported here, as a fallback beside `try: from x import Shelf`, may not be the one that runs.
+        if holder in classes and spelt in named and holder.split(".")[0] not in (imported or {}):
+            return named[spelt]
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-        if func.value.id == "self":
-            within = inside.split(".")[0] if inside else None
-            return named.get(f"{within}.{func.attr}") if within else None
+        if func.value.id in ("self", "cls"):
+            taker = _binder(func.value.id, scope, bound)
+            method = taker is not None and inside is not None and taker.rpartition(".")[0] == inside
+            return named.get(f"{inside}.{func.attr}") if method else None
         came = imported.get(func.value.id) if imported else None
         return _joined(came[0], func.attr) if came is not None and came[1] is None else None
+    return None
+
+
+def _binder(name: str, scope: Optional[str],
+            bound: Mapping[str, tuple[frozenset[str], frozenset[str]]]) -> Optional[str]:
+    """The innermost function, from ``scope`` outwards, that binds ``name`` for itself. Only
+    functions have bindings here, so a class on the way is passed over."""
+    parts = scope.split(".") if scope else []
+    for end in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:end])
+        if name in bound.get(prefix, (frozenset(), frozenset()))[0]:
+            return prefix
     return None
 
 
@@ -961,6 +1096,9 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
                 say(subject, relation, held.get(written, written), number)
 
     inside = False
+    # Whether the statement a line continues began `import type` or
+    # `export type`: a wrapped one names its module some lines later.
+    types_only = False
     for number, line in enumerate(lines, start=1):
         if _OPENS.match(line):
             inside = True
@@ -973,12 +1111,15 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
             if named:
                 say(path, IMPORTS, named.group(1), number)
             continue
+        if _ES_STATEMENT.match(line):
+            types_only = bool(_ES_TYPE_ONLY.match(line))
         for pattern in (_FROM, _BARE, _REQUIRE):
             match = pattern.search(line)
             if match:
                 where = _named(match.group(1), path, resolve)
                 if where:
-                    say(path, IMPORTS, where, number)
+                    say(path, IMPORTS_FOR_TYPES if pattern is _FROM and types_only else IMPORTS, where, number)
+                types_only = False
                 break
         else:
             used = _USE.match(line)
