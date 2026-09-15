@@ -136,6 +136,7 @@ from its first; both start after the recognizer's pause, not at the first spoken
 | `input_ended` | audio input ended while a turn was held; it is answered before the session ends |
 | `session_ended` | the session stopped (closed, timed out or failed) while a turn was held; its words are recorded and not answered. If they cannot be stored, that is the session's error, or a note on the error that stopped it |
 | `keypad` | keys from the phone joined the turn and finished it (see [Keys from the phone](#keys-from-the-phone-dtmf)) |
+| `strategy_timeout` | a turn strategy held the turn (the cue names it) and `turn_hold` ran out (see [When the bot may take its turn](#when-the-bot-may-take-its-turn)) |
 
 A turn's timing (`conversation_turn` `latency_ms`) is measured from its last final
 transcript's arrival, so a held turn's latency includes the hold and the
@@ -233,6 +234,7 @@ audio offsets and tone lengths included:
 | `keypad_started_ms` | the first key, in milliseconds from the start of the conversation |
 | `keypad_at_ms` | each key from the first, comma-separated: `0,812,1604` |
 | `keypad_waited` | only for an entry that waited for words spoken before it: `words` (given after them), `no_words` (speech, input or the session ended without them) or `timeout` (`speech_wait` cut the wait) |
+| `keypad_dropped` | only when a turn held several entries (`KeypadSubmit`) with more than 32 keys between them: how many of the earliest keys the receipt leaves out |
 
 `timeout` is at most 60 seconds and `max_digits` at most 32, so the longest entry
 still fits one metadata value (256 characters).
@@ -287,6 +289,156 @@ real lines, codecs other than G.711 and recorded speech were not measured.
 when `SCONE_VOICE_KEYPAD=append` or `collect` (default `off`): the client sends
 `{"type": "keypad", "key": "5"}` and the served session uses that mode with the
 defaults above; `GET /v1/conversations/capabilities` reports `voice_keypad`.
+
+### When the user goes quiet
+
+A caller can put the phone down, walk away from the browser, or wait for the
+assistant to speak first. Without a rule the session listens until its own
+deadline (30 minutes by default). `idle` (`scone_memory.realtime.idle.IdlePolicy`)
+counts an idle after `timeout` seconds with no speech from the user while the bot is
+not speaking, says `prompt` then, and ends the session at the `end_after`-th idle in
+a row instead. It is off by default.
+
+```python
+from scone_memory.realtime.idle import IdlePolicy
+
+session = VoiceSession(memory, "authorized-space", "call-1", ...,
+                       idle=IdlePolicy(8, prompt="Are you still there?", end_after=3))
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `timeout` | (required) | seconds the conversation waits on the user before an idle |
+| `prompt` | `Are you still there?` | what an idle says; `None` says nothing and only notes the idle |
+| `end_after` | `3` | the idle in a row that ends the session, not prompting; `None` never ends. Both `None` is refused |
+
+Only time spent waiting on the user counts:
+
+* the wait starts with the conversation, so a user who never speaks is prompted;
+* the user speaking stops it, however long they talk (the recognizer's or the
+  activity detector's speech start, or a partial transcript), and the end of that
+  speech (a final transcript with or without words, or the activity detector hearing
+  it stop), or a key when the session has a keypad policy, starts it again from then
+  and clears the count of idles in a row;
+* a reply pauses it from the moment the turn is released until the reply task ends
+  (context, model, speech, the stored reply and its timing note) and its audio is
+  expected to have played (below), and it starts again from then; an idle's prompt is
+  spoken the same way, so the next idle is a whole `timeout` after the prompt. Pauses are counted, so anything else the session runs
+  for the user holds it too; the voice session runs no tools of its own today;
+* a clause held open by the end-of-turn detector, a turn held by a strategy, or keys
+  being collected are a user in the middle of a turn: an idle that comes due then is
+  not counted, and the wait starts again.
+
+A prompt is the bot speaking: it gets its own turn ID, clears audio still queued from
+the turn before, is interrupted by speech like any reply, and is bounded by
+`turn_timeout`. Once spoken it is stored as an assistant episode with
+`idle_count`, `idle_action` (`prompt`) and `idle_silent_ms`, and is added to the
+history the model sees, so the next answer knows what was asked. A prompt the user
+talks over is cleared and not stored, and their speech clears the count. An idle
+with no prompt clears nothing. A prompt
+that would take the history past `max_history_bytes` fails the session, as a reply
+would.
+
+Every idle is a `conversation_idle` event in the engine's event log
+(`MemoryEngine.record_idle`): `session_id`, `count` (its place in the run of idles),
+`action` (`prompt`, `noted` when there is no prompt, or `end`), `silent_ms` (how long
+the user had been silent while the conversation waited on them) and, for a prompt,
+its `turn_id`. The event is written before the prompt is spoken, so an idle the user
+talks over is still in the log; the note is its own task, so neither that prompt being
+cut off nor the conversation ending cancels it, and a session that ends while a note
+is being written waits for it, up to its 2-second bound. A log that fails or takes
+longer than 2 seconds is logged as `voice_idle.failed` and the conversation goes on. `session.last_idle_receipt`
+keeps the latest idle and `session.idles` counts them.
+
+`session.end_reason` says why any session ended:
+
+| `end_reason` | `state` | Meaning |
+| --- | --- | --- |
+| `input_ended` | `ended` | the audio input ended and the last reply finished |
+| `idle` | `ended` | the `end_after`-th idle in a row ended it |
+| `closed` | `interrupted` | the host closed or cancelled it |
+| `session_timeout` | `failed` | `session_timeout` ran out |
+| `failed` | `failed` | anything else stopped it (a provider, a store, a malformed event) |
+
+Synthesis usually hands audio to the transport faster than it plays, so after a reply
+the wait starts when the audio sent is expected to have played, or when the reply task
+ended if that is later. The session assumes each piece plays at real time from when the
+transport accepted it (its length is bytes / 2 / channels / sample rate, and a piece
+accepted while earlier audio is still playing follows it); the session has no word
+from the client, so a client that buffers before playing can still be prompted early by
+that buffer. Audio that was cleared, by the user talking over it or by a later turn,
+is not waited on. The activity detector's speech start and stop are acted on in the
+order it heard them, even while the session is judging or recording a turn. A speech
+start that is never followed by a final transcript, or by the activity detector
+hearing speech stop, keeps the wait stopped; the session's own deadline still ends it.
+
+`scone serve` gives served voice sessions an idle policy when
+`SCONE_VOICE_IDLE_TIMEOUT` is more than 0 (default `0`, off), with
+`SCONE_VOICE_IDLE_PROMPT` (blank for the default) and `SCONE_VOICE_IDLE_END_AFTER`
+(default `3`, `0` for never). A served session an idle ends is journaled `ended`;
+`GET /v1/conversations/capabilities` reports `voice_idle` (`timeout_s`, `prompt` as a
+boolean, `end_after`) or `null`.
+
+### When the bot may take its turn
+
+A released user turn is answered at once. `turn_strategy`
+(`scone_memory.realtime.turn_strategy`) is asked about every final transcript after the
+end-of-turn detector, and may hold the turn instead. A held turn is joined by what the
+user says next and released by the same bounds and receipts as a clause the detector
+held (`max_duration`, `max_bytes`, `speaker_changed`, `input_ended`, `session_ended`).
+
+| Strategy | The bot takes its turn |
+| --- | --- |
+| `EndOfTurn()` (default) | when the turn ends, as before; the stored records do not change |
+| `MinSpeech(seconds=0.8)` | when the turn's speech has lasted `seconds`; a shorter turn ("mm-hm", a noise taken for words) waits up to `turn_hold` for more and is then answered as `strategy_timeout` |
+| `KeypadSubmit(key="#")` | when the caller presses `key`; needs a keypad policy |
+
+```python
+from scone_memory.realtime.keypad import KeypadPolicy
+from scone_memory.realtime.turn_strategy import KeypadSubmit, MinSpeech
+
+session = VoiceSession(memory, "authorized-space", "call-1", ...,
+                       turn_strategy=MinSpeech(0.8))
+session = VoiceSession(memory, "authorized-space", "call-2", ...,
+                       keypad=KeypadPolicy("append"), turn_strategy=KeypadSubmit())
+```
+
+`MinSpeech` times a turn's speech from its first sign (the recognizer's or activity
+detector's speech start, or a partial transcript) to the arrival of its last final
+transcript, across the fragments it joined. That time includes the recognizer's pause
+and its transcription, so set `seconds` above what those take for the shortest turn that
+should be answered. Speech that gave no words is no part of the turn: when nothing is
+held, the first sign of speech after a final transcript with no words, after the activity
+detector heard speech stop with no words since, or a recognizer speech start that follows
+its own earlier start with no words since, starts the timing again. A recognizer that
+starts twice within one utterance before giving any words therefore times it from the
+second start, and its receipt says so (`min_speech: 312 ms < 800 ms`). A recognizer that gives no sign of speech leaves the duration
+unknown: the turn is taken, and its receipt's cue ends `min_speech: speech duration
+unknown`. A turn held for being short has the verdict `incomplete` and a cue such as
+`min_speech: 312 ms < 800 ms`. A clause the detector already holds is left to it, and
+keys finish a turn as before. `seconds` is at most 30.
+
+`KeypadSubmit` holds every spoken turn, finished sentence or not, until an entry of keys
+that ends with the submit key: in `append` mode the key itself, in `collect` mode an
+entry ended by its terminator. Other entries (a key in `append` mode, a `collect` entry
+that timed out) join the turn and wait too. The turn is then answered as `keypad`, and
+its record carries one receipt for every entry it was given: all their keys, sources and
+times, from the first key, ended (and waited) as the entry that submitted it. That
+receipt keeps the latest 32 keys, and `keypad_dropped` counts the earlier ones it leaves
+out; the turn's text keeps them all. A turn a bound releases carries the receipt of the
+entries held in it the same way. A held turn waits up to
+`turn_max_duration` (default 10 seconds) from its first transcript or key, speech with
+no words does not cut that short, and it is then answered as `max_duration`.
+
+A strategy is any object with a `name`, a `submit` key or `None`, and
+`decide(judgement, speech_ms)` returning the detector's `Judgement` unchanged to take
+the turn or an `incomplete` one to hold it. One that returns anything else fails the
+session.
+
+`scone serve` takes `SCONE_VOICE_TURN_STRATEGY` = `end_of_turn` (default),
+`min_speech` (with `SCONE_VOICE_MIN_SPEECH` seconds, 0.8 when blank) or
+`keypad_submit` (needs `SCONE_VOICE_KEYPAD=append` or `collect`); capabilities
+report `voice_turn_strategy`.
 
 ## Personas and independent provider selection
 

@@ -310,3 +310,106 @@ def test_a_keypad_mode_the_service_does_not_know_is_refused(tmp_path):
     engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
     with pytest.raises(ValueError, match="voice_keypad"):
         create_conversation_app(engine, KEYS, tmp_path / "keys.db", None, catalog=catalog(), voice_keypad="loud")
+
+
+class QuietRecognizer:
+    """Takes the audio and says nothing: the caller has gone quiet."""
+
+    async def transcribe(self, audio):
+        async for chunk in audio:
+            if False:
+                yield chunk
+
+    async def aclose(self):
+        pass
+
+
+def test_idle_and_turn_strategy_are_the_hosts_choice_and_reported(tmp_path):
+    from scone_memory.realtime.idle import IdlePolicy
+    from scone_memory.realtime.turn_strategy import KeypadSubmit
+
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    off = create_conversation_app(engine, KEYS, tmp_path / "off.db", None, catalog=catalog())
+    with TestClient(off) as client:
+        client.headers.update(AUTH)
+        capabilities = client.get("/v1/conversations/capabilities").json()
+    assert (capabilities["voice_idle"], capabilities["voice_turn_strategy"]) == (None, "end_of_turn")
+    on = create_conversation_app(engine, KEYS, tmp_path / "on.db", None, catalog=catalog(), voice_keypad="collect",
+                                 voice_idle=IdlePolicy(8, prompt=None, end_after=2), voice_turn_strategy=KeypadSubmit())
+    with TestClient(on) as client:
+        client.headers.update(AUTH)
+        capabilities = client.get("/v1/conversations/capabilities").json()
+    assert capabilities["voice_idle"] == {"timeout_s": 8, "prompt": False, "end_after": 2}
+    assert capabilities["voice_turn_strategy"] == "keypad_submit"
+
+
+def test_a_served_session_whose_caller_goes_quiet_is_prompted_and_ended(tmp_path):
+    from scone_memory.realtime.idle import IdlePolicy
+
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    registry = ProviderRegistry(reply={("stub", "echo"): Model}, transcription={("stub", "ears"): QuietRecognizer},
+                                speech={("stub", "mouth", "alto"): Synthesizer})
+    app = create_conversation_app(engine, KEYS, tmp_path / "idle.db", None, public_text_streaming=True,
+                                  catalog=bind_catalog([Persona.model_validate(HELPER)], registry),
+                                  voice_idle=IdlePolicy(.1, prompt="Still with me?", end_after=2))
+    with TestClient(app) as client:
+        client.headers.update(AUTH)
+        sid = create_voice(client).json()["session_id"]
+        with client.websocket_connect(f"/v1/conversations/{sid}/audio") as socket:
+            socket.send_text(json.dumps(HELLO))
+            assert json.loads(socket.receive_text())["type"] == "ready"
+            socket.send_bytes(PCM)
+            frames = []
+            while (message := socket.receive())["type"] != "websocket.close":
+                frames.append(message)
+        state = client.get(f"/v1/conversations/{sid}").json()["state"]
+        episodes = client.get(f"/v1/conversations/{sid}/transcript").json()["episodes"]
+    assert state == "ended", "the idle ended the session; the caller did not fail it"
+    assert any(frame.get("bytes") for frame in frames), "the prompt was spoken to the caller"
+    [said] = episodes
+    assert (said["content"], said["metadata"]["idle_action"]) == ("Still with me?", "prompt")
+
+
+@pytest.mark.parametrize("strategy", [None, "min_speech"])
+def test_a_served_session_takes_its_turn_when_the_host_s_strategy_says(tmp_path, strategy):
+    from scone_memory.realtime.turn_strategy import MinSpeech
+
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    app = create_conversation_app(engine, KEYS, tmp_path / "strategy.db", None, public_text_streaming=True,
+                                  catalog=catalog(), voice_turn_strategy=MinSpeech(5) if strategy else None)
+    with TestClient(app) as client:
+        client.headers.update(AUTH)
+        sid = create_voice(client).json()["session_id"]
+        with client.websocket_connect(f"/v1/conversations/{sid}/audio") as socket:
+            socket.send_text(json.dumps(HELLO))
+            assert json.loads(socket.receive_text())["type"] == "ready"
+            socket.send_bytes(PCM)
+            socket.send_text(json.dumps({"type": "end"}))
+            while socket.receive()["type"] != "websocket.close":
+                pass
+        episodes = client.get(f"/v1/conversations/{sid}/transcript").json()["episodes"]
+    [user] = [e for e in episodes if e["metadata"]["role"] == "user"]
+    # Too short for five seconds of speech, the turn waited for more and was answered when input ended.
+    assert user["metadata"]["turn_end"] == ("input_ended" if strategy else "silence")
+
+
+@pytest.mark.parametrize("options, match", [
+    ({"voice_idle": 8}, "voice_idle"),
+    ({"voice_turn_strategy": "min_speech"}, "voice_turn_strategy"),
+    ({"voice_turn_strategy": object()}, "voice_turn_strategy"),
+    ({"voice_turn_strategy": type("Undecided", (), {"name": "undecided", "submit": None})()}, "voice_turn_strategy"),
+    ({"voice_turn_strategy": type("Nameless", (), {"decide": lambda *a: None})()}, "voice_turn_strategy"),
+])
+def test_an_idle_policy_or_turn_strategy_the_service_cannot_use_is_refused(tmp_path, options, match):
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with pytest.raises(ValueError, match=match):
+        create_conversation_app(engine, KEYS, tmp_path / "bad.db", None, catalog=catalog(), **options)
+
+
+def test_a_submit_key_strategy_needs_the_keypad_on(tmp_path):
+    from scone_memory.realtime.turn_strategy import KeypadSubmit
+
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with pytest.raises(ValueError, match="voice_keypad"):
+        create_conversation_app(engine, KEYS, tmp_path / "bad.db", None, catalog=catalog(),
+                                voice_turn_strategy=KeypadSubmit())

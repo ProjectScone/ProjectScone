@@ -108,7 +108,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             vision_available=None, vision_factory=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
                             agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None, document_video=None,
                             directory_sync_service=None, synthesis_factory=None, url_import=None, followup=None,
-                            semantic_turn=False, voice_keypad="off"):
+                            semantic_turn=False, voice_keypad="off", voice_idle=None, voice_turn_strategy=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -137,7 +137,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     a final transcript that stops mid-clause is held for the rest of the turn.
     voice_keypad (off, append or collect) lets the audio socket take the
     client's keypad messages and gives each voice session that keypad policy.
+    voice_idle (a realtime.idle.IdlePolicy) prompts a caller who has gone quiet
+    and ends the session after idles in a row; voice_turn_strategy (a
+    realtime.turn_strategy strategy) decides when the bot may take its turn.
     """
+    from ..realtime.idle import IdlePolicy
     from ..runtime.conversation_tools import ConversationTools
 
     keys = dict(keys)
@@ -168,6 +172,13 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         return (runtime_factory is not None or scoped_runtime_factory is not None) and (runtime_available is None or runtime_available())
     if voice_keypad not in ("off", "append", "collect"):
         raise ValueError("voice_keypad must be off, append or collect")
+    if voice_idle is not None and not isinstance(voice_idle, IdlePolicy):
+        raise ValueError("voice_idle must be a realtime.idle.IdlePolicy or None")
+    if voice_turn_strategy is not None and not (callable(getattr(voice_turn_strategy, "decide", None))
+                                                and isinstance(getattr(voice_turn_strategy, "name", None), str)):
+        raise ValueError("voice_turn_strategy must be a realtime.turn_strategy strategy or None")
+    if getattr(voice_turn_strategy, "submit", None) is not None and voice_keypad == "off":
+        raise ValueError("a voice_turn_strategy that waits for a submit key needs voice_keypad append or collect")
     if type(public_text_streaming) is not bool or (public_text_streaming and not configured):
         raise ValueError("public_text_streaming requires a configured compatible runtime")
     owned: dict[tuple[str, str], OwnedSession] = {}
@@ -413,6 +424,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "voice": bool(catalog and catalog.personas), "video": False, "streaming": public_text_streaming,
                 "voice_turn_end": "semantic" if semantic_turn else "silence",
                 "voice_keypad": voice_keypad,
+                "voice_idle": ({"timeout_s": voice_idle.timeout, "prompt": voice_idle.prompt is not None,
+                                "end_after": voice_idle.end_after} if voice_idle is not None else None),
+                "voice_turn_strategy": voice_turn_strategy.name if voice_turn_strategy is not None else "end_of_turn",
                 "voice_stream": ({"schema_version": 1, "transport": "websocket", "protocol": "scone-pcm-v1",
                                   "authentication": "hello", "reconnect": False, "pcm": "s16le",
                                   "input_channels": [1, 2], "min_sample_rate": 8000,
@@ -1067,6 +1081,10 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             turns: dict[str, object] = {"turn_detector_factory": LexicalEndOfTurn} if semantic_turn else {}
             if voice_keypad != "off":
                 turns["keypad"] = KeypadPolicy(voice_keypad)
+            if voice_idle is not None:
+                turns["idle"] = voice_idle
+            if voice_turn_strategy is not None:
+                turns["turn_strategy"] = voice_turn_strategy
             session = chosen.voice(engine, space, sid, transport_factory=lambda: transport, capture=True,
                                    **fixed.kwargs(), **turns)
             journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
