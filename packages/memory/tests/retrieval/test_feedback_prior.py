@@ -168,7 +168,7 @@ async def test_feedback_records_what_the_passage_said_when_it_was_judged():
     finally:
         await engine.close()
     assert episode is not None
-    assert event.payload["fingerprint"] == feedback_prior.fingerprint(item.episode_id, episode.content_hash, item.text)
+    assert event.payload["fingerprint"] == feedback_prior.fingerprint(episode.content_hash, item.text)
 
 
 async def test_recall_with_the_weight_off_is_as_it_was_and_on_moves_a_corroborated_passage():
@@ -245,6 +245,65 @@ async def test_a_prior_is_dropped_when_the_passage_under_its_id_now_says_somethi
     assert after.feedback_prior is not None
     assert after.feedback_prior["stale"] == 2 and after.feedback_prior["boosted"] == 0
     assert after.items[0].text == "The harbour crane survey is booked for June."
+
+
+async def test_a_prior_is_dropped_when_the_rest_of_its_episode_changed_though_its_own_text_did_not():
+    clock = Clock("2026-05-01T00:00:00.000Z")
+    events = InMemoryEventLog()
+
+    async def split(ending: str) -> MemoryEngine:
+        engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=clock,
+                                    events=events, feedback_weight=0.0002, chunk_target=44).open()
+        await engine.remember("default", "The harbour crane survey is booked for May.\n\n" + ending)
+        return engine
+
+    first = await split("The harbour crane was painted blue in the spring.")
+    try:
+        judged_result = await first.recall("default", QUERY, lanes=TEXT)
+        judged_item = judged_result.items[0]
+        await judge_twice(first, QUERY, judged_item.chunk_id)
+        kept = await first.recall("default", QUERY, lanes=TEXT)
+    finally:
+        await first.close()
+    rebuilt = await split("The harbour crane was sold for scrap in autumn.")
+    try:
+        after = await rebuilt.recall("default", QUERY, lanes=TEXT)
+    finally:
+        await rebuilt.close()
+    assert kept.feedback_prior is not None and kept.feedback_prior["boosted"] == 1
+    same = next(item for item in after.items if item.chunk_id == judged_item.chunk_id)
+    assert (same.episode_id, same.text) == (judged_item.episode_id, judged_item.text), "only the episode around it changed"
+    assert after.feedback_prior is not None
+    assert after.feedback_prior["stale"] == 2 and after.feedback_prior["boosted"] == 0
+
+
+async def test_a_prior_is_dropped_when_the_same_episode_was_chunked_differently():
+    clock = Clock("2026-05-01T00:00:00.000Z")
+    events = InMemoryEventLog()
+    content = "The harbour crane survey is booked for May.\n\nThe harbour crane was sold for scrap in autumn."
+
+    async def chunked(target: int) -> MemoryEngine:
+        engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), clock=clock,
+                                    events=events, feedback_weight=0.0002, chunk_target=target).open()
+        await engine.remember("default", content)
+        return engine
+
+    first = await chunked(44)
+    try:
+        judged_result = await first.recall("default", QUERY, lanes=TEXT)
+        judged_item = judged_result.items[0]
+        await judge_twice(first, QUERY, judged_item.chunk_id)
+    finally:
+        await first.close()
+    rechunked = await chunked(24)
+    try:
+        after = await rechunked.recall("default", QUERY, lanes=TEXT)
+    finally:
+        await rechunked.close()
+    same = next(item for item in after.items if item.chunk_id == judged_item.chunk_id)
+    assert same.episode_id == judged_item.episode_id and same.text != judged_item.text
+    assert after.feedback_prior is not None
+    assert after.feedback_prior["stale"] == 2 and after.feedback_prior["boosted"] == 0
 
 
 async def test_the_read_says_when_its_bound_cut_it(monkeypatch):
