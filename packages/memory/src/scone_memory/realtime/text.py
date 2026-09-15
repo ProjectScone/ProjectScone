@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from dataclasses import dataclass, field
 import logging
 import time
 import re
@@ -57,17 +58,56 @@ def _bytes(messages):
 #: conversation at the limit, as it always has. ``window`` lets whole
 #: oldest turns leave the model's context instead -- every turn is already
 #: its own episode, so nothing is lost -- and the turn receipt says which.
-HISTORY_POLICIES: tuple[str, ...] = ("refuse", "window")
+HISTORY_POLICIES: tuple[str, ...] = ("refuse", "window", "summary")
+#: Bytes the running summary may hold under the `summary` policy; that
+#: much of the history limit is reserved for it, so the window of whole
+#: turns is the limit less the reserve.
+DEFAULT_SUMMARY_BYTES = 2_000
+MAX_SUMMARY_BYTES = 32_000
+#: Seconds one fold may take; a slower summariser keeps the summary before it.
+DEFAULT_SUMMARY_TIMEOUT = 20.0
+MAX_SUMMARY_TIMEOUT = 600.0
+SUMMARY_HEADING = "Earlier in this conversation, summarised:"
+SUMMARY_SYSTEM = ("You keep a running summary of a conversation for the assistant that continues it. Fold the turns "
+                  "that are leaving the context into the summary so far: keep names, decisions, numbers and open "
+                  "questions, drop pleasantries, and write plainly in a few sentences. Answer with the new summary alone.")
 
 
-def _windowed(messages, turns, max_bytes):
+def _summary_request(summary: str, gone: list[dict]) -> str:
+    """What the summariser is shown: the summary so far, then the turns leaving."""
+    lines = [f"Summary so far:\n{summary or '(nothing yet)'}", "", "Turns leaving the context:"]
+    for message in gone:
+        role = "User" if message.get("role") == "user" else "Assistant"
+        lines.append(f"{role}: {message.get('content', '')}")
+    return "\n".join(lines)
+
+
+@dataclass
+class _Summary:
+    """The running summary as one turn works on it: committed with the
+    turn, dropped with it, so a turn that fails after a fold leaves the
+    turns it folded to be folded again, never folded twice."""
+    text: str = ""
+    status: str = "none"
+    turns: list[str] = field(default_factory=list)
+    #: The summary's cost as the history counts bytes: the system message
+    #: with it, less the system message without.
+    bytes: int = 0
+
+    def receipt(self, max_bytes: int, timeout: float) -> dict[str, object]:
+        return {"status": self.status, "bytes": self.bytes, "max_bytes": max_bytes, "timeout_s": timeout,
+                "turn_count": len(self.turns), "turn_ids": list(self.turns)}
+
+
+def _windowed(messages, turns, max_bytes, measure=_bytes):
     """Drop whole oldest turns after the system prompt until the history
     fits, keeping the newest turn whole; return what is left and the ids
     of the turns that went. The window never starts on an assistant
-    message, because a turn is a user message and its reply together."""
+    message, because a turn is a user message and its reply together.
+    ``measure`` says what the bytes of a history are."""
     kept, kept_turns = list(messages), list(turns)
     evicted: list[str] = []
-    while _bytes(kept) > max_bytes and len(kept) > 2:
+    while measure(kept) > max_bytes and len(kept) > 2:
         oldest = kept_turns[1]
         if oldest is None or oldest == kept_turns[-1]:
             break
@@ -152,6 +192,8 @@ class TextConversation:
                  tool_model_factory: Callable[[], ToolModel] | None = None,
                  tool_limits: ToolLoopLimits | None = None, tool_initial_search: bool = False,
                  tool_compute: bool = False, tool_tables: bool = False, history_policy: str = "refuse",
+                 summary_factory: Callable[[], ChatModel] | None = None, max_summary_bytes: int = DEFAULT_SUMMARY_BYTES,
+                 summary_timeout: float = DEFAULT_SUMMARY_TIMEOUT,
                  standing_profile: "ProfilePolicy | None" = None, profile_limit: int = 10,
                  max_profile_bytes: int = 1000, followup_queries: str = "off",
                  followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S):
@@ -223,7 +265,26 @@ class TextConversation:
             system_prompt += '\n\n' + self._answer_requirements.prompt()
         if history_policy not in HISTORY_POLICIES:
             raise ValueError(f"history_policy must be one of {', '.join(HISTORY_POLICIES)}, not {history_policy!r}")
+        if type(max_summary_bytes) is not int or not 200 <= max_summary_bytes <= MAX_SUMMARY_BYTES:
+            raise ValueError(f"max_summary_bytes must be from 200 to {MAX_SUMMARY_BYTES}")
+        if (type(summary_timeout) not in (int, float) or not math.isfinite(summary_timeout)
+                or not 0.1 <= summary_timeout <= MAX_SUMMARY_TIMEOUT):
+            raise ValueError(f"summary_timeout must be from 0.1 to {MAX_SUMMARY_TIMEOUT} seconds")
+        if history_policy == "summary":
+            if summary_factory is None or not callable(summary_factory):
+                raise ValueError("the summary history policy needs summary_factory, a model that writes the summary")
+            if max_summary_bytes * 2 > max_history_bytes:
+                raise ValueError("max_summary_bytes must leave at least half of max_history_bytes for the turns")
         self._history_policy = history_policy
+        self._summary_factory: Callable[[], ChatModel] | None = summary_factory
+        self._summary_timeout: float = float(summary_timeout)
+        self._max_summary: int = max_summary_bytes
+        #: The base system prompt, its bytes as the history counts them, and
+        #: the running summary folded from the turns that left the context;
+        #: the summary changes only as a turn commits.
+        self._base_prompt: str = system_prompt
+        self._base_bytes: int = _bytes([{"role": "system", "content": system_prompt}])
+        self._summary = _Summary()
         self._history = [{"role": "system", "content": system_prompt}]
         #: The turn each history message belongs to, aligned with it; the
         #: system prompt belongs to none.
@@ -231,8 +292,9 @@ class TextConversation:
         #: Turns that have left the window; same-session recall may bring
         #: them back, since the model no longer holds them.
         self._evicted_turns: set[str] = set()
-        if _bytes(self._history) > max_history_bytes:
-            raise ValueError("system prompt exceeds history byte limit")
+        if _bytes(self._history) > max_history_bytes - (max_summary_bytes if history_policy == "summary" else 0):
+            raise ValueError("system prompt exceeds history byte limit"
+                             + (" left once the summary's reserve is taken" if history_policy == "summary" else ""))
         self._memory, self._space, self._session_id = memory, space, session_id
         self._factory = model_factory
         scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
@@ -266,14 +328,15 @@ class TextConversation:
         messages = [*self._history, {"role": "user", "content": text}]
         turns = [*self._turns, None]
         evicted: list[str] = []
-        if _bytes(messages) > self._max_history:
-            if self._history_policy != "window":
+        gone: list[dict] = []
+        if self._held(messages) > self._room():
+            if self._history_policy == "refuse":
                 raise ValueError("conversation history byte limit reached; start a new conversation")
-            messages, turns, evicted = _windowed(messages, turns, self._max_history)
-            if _bytes(messages) > self._max_history:
+            messages, turns, evicted, gone = self._evict(messages, turns)
+            if self._held(messages) > self._room():
                 raise ValueError("one message exceeds the conversation history byte limit on its own")
         self._cancel_reusable = False
-        active = self._active = asyncio.create_task(self._reply(messages, turns, evicted, on_text))
+        active = self._active = asyncio.create_task(self._reply(messages, turns, evicted, on_text, gone))
         try:
             return await asyncio.shield(active)
         except asyncio.CancelledError:
@@ -332,7 +395,62 @@ class TextConversation:
             raise asyncio.CancelledError()
         return added.episode_id
 
-    async def _reply(self, messages, turns, evicted, on_text):
+    def _room(self) -> int:
+        """Bytes the system prompt and the turns may hold: the history limit,
+        less what the summary policy reserves for its summary."""
+        return self._max_history - (self._max_summary if self._history_policy == "summary" else 0)
+
+    def _held(self, messages) -> int:
+        """The history's bytes with the summary set aside: the system prompt
+        as given, then the turns. The room bounds this; the summary's own
+        bytes are bounded by its reserve when it is written, so the two
+        together never pass the history limit."""
+        if self._history_policy != "summary" or not messages:
+            return _bytes(messages)
+        return _bytes([{"role": "system", "content": self._base_prompt}, *messages[1:]])
+
+    def _evict(self, messages, turns):
+        """Whole oldest turns out until the rest fits the room, as the window
+        policy does; also the messages that went, for a summary to fold."""
+        kept, kept_turns, gone_ids = _windowed(messages, turns, self._room(), self._held)
+        gone_set = set(gone_ids)
+        gone = [message for message, turn in zip(messages, turns) if turn in gone_set]
+        return kept, kept_turns, gone_ids, gone
+
+    async def _fold(self, messages, gone, gone_ids, pending: _Summary):
+        """Fold the turns that left into the running summary with the summary
+        model, and carry the summary in the system message. A summary too
+        long for its reserve (as the history counts bytes), empty, or not
+        written (the model failed, or took longer than the summary timeout)
+        keeps the summary before it, and the receipt says which; the turns
+        are gone either way, as under the window policy, and captured
+        already. The turn's own deadline runs on through the fold."""
+        if self._history_policy != "summary" or not gone:
+            return messages
+        try:
+            model = self._summary_factory()  # type: ignore[misc]
+            answer = await asyncio.wait_for(model.complete(SUMMARY_SYSTEM, _summary_request(pending.text, gone)),
+                                            self._summary_timeout)
+        except TimeoutError:
+            pending.status = "timed_out"
+            return messages
+        except Exception as error:
+            pending.status = f"failed: {type(error).__name__}"
+            return messages
+        text = answer.strip() if isinstance(answer, str) else ""
+        if not text:
+            pending.status = "empty"
+            return messages
+        content = f"{self._base_prompt}\n\n{SUMMARY_HEADING}\n{text}"
+        cost = _bytes([{"role": "system", "content": content}]) - self._base_bytes
+        if cost > self._max_summary:
+            pending.status = "too_long"
+            return messages
+        pending.text, pending.status, pending.bytes = text, "summarised", cost
+        pending.turns.extend(gone_ids)
+        return [{"role": "system", "content": content}, *messages[1:]]
+
+    async def _reply(self, messages, turns, evicted, on_text, gone=()):
         token = _OWNER.set(self)
         timing = TurnTiming()
 
@@ -346,20 +464,25 @@ class TextConversation:
             async with asyncio.timeout(self._timeout) as budget:
                 turn_id = uuid4().hex
                 turns = [*turns[:-1], turn_id]
-                self._evicted_turns.update(evicted)
+                # The summary and the evicted turns are the turn's until it
+                # commits; what this turn evicted is admitted to its own recall.
+                pending = _Summary(self._summary.text, self._summary.status, list(self._summary.turns),
+                                   self._summary.bytes)
+                messages = await self._fold(messages, list(gone), list(evicted), pending)
                 user_id = await self._record(turn_id, "user", messages[-1]["content"])
                 text, receipt, answer_review, evidence_answer = await self._execute(
-                    messages, seen if on_text is not None else None, budget.when(), timing=timing)
+                    messages, seen if on_text is not None else None, budget.when(), timing=timing,
+                    admitted=frozenset(self._evicted_turns | set(evicted)))
                 complete = [*messages, {"role": "assistant", "content": text}]
                 complete_turns = [*turns, turn_id]
-                if _bytes(complete) > self._max_history:
-                    if self._history_policy == "window":
-                        complete, complete_turns, more = _windowed(complete, complete_turns, self._max_history)
+                if self._held(complete) > self._room():
+                    if self._history_policy != "refuse":
+                        complete, complete_turns, more, gone_now = self._evict(complete, complete_turns)
                         evicted = [*evicted, *more]
-                        self._evicted_turns.update(more)
+                        complete = await self._fold(complete, gone_now, more, pending)
                     # The tool path refuses an unfittable reply in `_emit_final`
                     # before capture; the streaming path reaches only this check.
-                    if _bytes(complete) > self._max_history:
+                    if self._held(complete) > self._room():
                         raise RuntimeError("model reply exceeded the conversation history byte limit")
                 if self._closed or asyncio.current_task().cancelling():
                     raise asyncio.CancelledError()
@@ -371,13 +494,17 @@ class TextConversation:
                     tool_source_status=receipt.get('tool_retrieval', {}).get('source_status'))
                 self._history = complete
                 self._turns = complete_turns
+                self._summary = pending
+                self._evicted_turns.update(evicted)
                 timing.mark("done")
                 result = dict(turn_id=turn_id, text=text, provider_completion="unverified",
                             user_episode_id=user_id, assistant_episode_id=assistant_id,
                             memory_context=receipt,
                             history={"policy": self._history_policy, "max_bytes": self._max_history,
                                      "bytes": _bytes(complete), "evicted_turn_count": len(evicted),
-                                     "evicted_turn_ids": list(evicted)})
+                                     "evicted_turn_ids": list(evicted),
+                                     **({"summary": pending.receipt(self._max_summary, self._summary_timeout)}
+                                        if self._history_policy == "summary" else {})})
                 if answer_review is not None:
                     result["answer_review"] = answer_review
                 if evidence_answer is not None:
@@ -405,12 +532,15 @@ class TextConversation:
                 "event": "turn_timing.failed", "session_id": self._session_id, "turn_id": turn_id,
                 "exception_type": type(error).__name__})
 
-    async def _execute(self, messages, on_text, deadline=None, timing=None):
+    async def _execute(self, messages, on_text, deadline=None, timing=None, admitted=None):
         if self._tool_factory is not None:
             return await self._execute_tools(messages, on_text, deadline)
         # Only a windowed conversation has turns to admit; every other one calls
         # `prepare` exactly as before, so hosts that substitute it keep working.
-        admitted = {'admit_turn_ids': frozenset(self._evicted_turns)} if self._evicted_turns else {}
+        # ``admitted`` is the turn's own view: the turns evicted before it and
+        # by it, which it may recall though the conversation has not committed.
+        evicted = self._evicted_turns if admitted is None else admitted
+        admitted = {'admit_turn_ids': frozenset(evicted)} if evicted else {}
         request, receipt = await self._context.prepare(messages, **admitted)
         if timing is not None:
             timing.mark("context")
@@ -506,16 +636,16 @@ class TextConversation:
         """Whether the reply can be kept: within the limit as it stands, or,
         under the window policy, once whole oldest turns have left."""
         complete = [*messages, {"role": "assistant", "content": text}]
-        if _bytes(complete) <= self._max_history:
+        if self._held(complete) <= self._room():
             return True
-        if self._history_policy != "window":
+        if self._history_policy == "refuse":
             return False
         # Turn ids are not to hand here; a turn after the system prompt is a
         # user message and its reply, so the window drops pairs from the front.
         kept = list(complete)
-        while _bytes(kept) > self._max_history and len(kept) > 3:
+        while self._held(kept) > self._room() and len(kept) > 3:
             del kept[1:3]
-        return _bytes(kept) <= self._max_history
+        return self._held(kept) <= self._room()
 
     async def _emit_final(self, messages, text, on_text):
         if self._answer_requirements is not None and not self._answer_requirements.accepts(text):
