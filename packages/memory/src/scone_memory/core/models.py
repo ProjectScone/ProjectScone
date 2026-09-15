@@ -594,8 +594,10 @@ class RecallResult(BaseModel):
     expansion: Optional[dict[str, object]] = None
     #: With stem prefixes on: the prefixes added to the text lane's query
     #: (``added``), whether the store could take them (``applied``), and
-    #: whether a passage holding the query's own word weighed its family at
-    #: that word's idf (``exact_forms``).
+    #: whether exact forms were on (``exact_forms``: a passage holding the
+    #: query's own word weighs its family at that word's idf). That is the
+    #: setting, not an outcome: it takes effect only where ``applied`` is
+    #: true and a prefix was added.
     prefixes: Optional[dict[str, object]] = None
     #: With ``lessons``: what the lessons beside the items were read from, and whether the read was cut.
     lessons_read: Optional[dict[str, object]] = None
