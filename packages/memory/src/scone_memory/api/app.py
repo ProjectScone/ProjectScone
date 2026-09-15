@@ -507,6 +507,8 @@ def create_app(
             "recall.withhold": True,
             "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "recall.graph_boost": True, "recall.lessons": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
+            # The route is served; without a configured model it refuses.
+            "chat.openai_compatible": True,
         }
         if agent_catalog is not None and agent_plan_store is not None:
             features["agents.catalog"] = True
@@ -576,6 +578,9 @@ def create_app(
         mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
     mount_entity_routes(app, engine, space_for, actor_for, synthesis_factory=synthesis_factory)
+    from .openai_proxy import mount_openai_proxy_routes
+    mount_openai_proxy_routes(app, engine, space_for, synthesis_factory,
+                              assert_current_space=assert_current_space)
     from .filesystem_routes import mount_filesystem_routes
     mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)
 
@@ -1577,7 +1582,7 @@ class Unauthorized(Exception):
 MAX_IDS = 100
 
 
-async def read_bounded(request: Request, limit: int) -> bytes:
+async def read_bounded(request: Request, limit: int, noun: str = "an attachment") -> bytes:
     """The request body, refused as soon as it passes ``limit``.
 
     Reading it whole and then measuring it lets the caller decide how much
@@ -1586,12 +1591,12 @@ async def read_bounded(request: Request, limit: int) -> bytes:
     """
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > limit:
-        raise InvalidInput(f"an attachment takes at most {limit} bytes, got {declared}")
+        raise InvalidInput(f"{noun} takes at most {limit} bytes, got {declared}")
     read, total = [], 0
     async for chunk in request.stream():
         total += len(chunk)
         if total > limit:
-            raise InvalidInput(f"an attachment takes at most {limit} bytes")
+            raise InvalidInput(f"{noun} takes at most {limit} bytes")
         read.append(chunk)
     return b"".join(read)
 

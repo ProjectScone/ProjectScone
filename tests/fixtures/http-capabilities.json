@@ -99,6 +99,7 @@
       "recall.lessons": true,
       "graph.knowledge_paging": true,
       "graph.knowledge_seeds": true,
+      "chat.openai_compatible": true,
       "documents.ocr.tables": true
     }
   }
