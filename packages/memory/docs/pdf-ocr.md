@@ -235,7 +235,16 @@ while a total, a subtotal across its numbers or a wrapped word is; three rows of
 fewer cells in a row are prose beside the grid, which ends before them;
 and two columns of lines about as wide as each other are prose side by
 side, not a table of two columns (a notation list's first column is
-narrow and ragged). All stay unassigned. It returns `geometry_inferred` results; it does not identify
+narrow and ragged); a list aligns as a grid of two as well, and is not
+one: a column of one bullet glyph on every row beside its items, or a
+column of enumerators with their closing punctuation (`1.`, `(a)`,
+`(ii)`, `2.1.`, `32.1*`), or of dashes or asterisks, beside lines of
+prose, is a list, while enumerators, dashes (none) or asterisks (a
+note) beside short labels, or plain numbers, are a table's first
+column. All stay unassigned, and a bulleted or enumerated list is then
+labelled `list` by the label rules, which read the same marks. The layout's `notes` say `header_rows_limit`
+when the rows above a grid were read up to `MAX_HEADER_ROWS` and a row
+above them was not. It returns `geometry_inferred` results; it does not identify
 semantic headers, multi-line cells or missing values. Aligned prose can
 resemble a table, and irregular tables can remain unassigned. A layout
 stored under `aligned-rows-v1` is one read before spans were.
