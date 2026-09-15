@@ -16,10 +16,11 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine, Record
 from scone_memory.core.errors import InvalidInput
+from scone_memory.ingestion import token_chunks
 from scone_memory.ingestion.chunker import chunk_spans
-from scone_memory.ingestion.embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION, estimated_tokens
+from scone_memory.ingestion.embedding_budget import BUDGET_VERSION, PIECE, TOKENIZER_VERSION, estimated_tokens
 from scone_memory.ingestion.semantic_chunks import sentence_spans
-from scone_memory.ingestion.token_chunks import MIN_CHUNK_TOKENS, refused, token_spans
+from scone_memory.ingestion.token_chunks import MIN_CHUNK_TOKENS, _Estimate, refused, token_spans
 
 SENTENCES = [
     "The harbour crane was repainted in May.",
@@ -128,6 +129,7 @@ def test_a_word_longer_than_the_target_is_cut_inside_and_counted():
     cut = token_spans(content, 40)
     assert all(tokens(chunk) <= 40 for chunk in texts(content, cut.spans))
     record = cut.record()
+    assert record["largest"] == max(tokens(chunk) for chunk in texts(content, cut.spans))
     # Four letters a token: parts of 152 letters fit 40 less the 2 markers,
     # so 600 letters are cut three times.
     assert record["hard_cuts"] == 3 and record["sentences_over_target"] == 1, record
@@ -171,6 +173,45 @@ def test_tokens_are_counted_by_the_tokenizer_given():
     assert max(words(chunk) for chunk in texts(PROSE, cut.spans)) > 25, "packed to the target, not below it"
     assert cut.record()["method"] == TOKENIZER_VERSION
     assert [span.end for span in cut.spans] != [span.end for span in token_spans(PROSE, 30).spans]
+
+
+def test_the_estimate_of_a_range_from_one_pass_is_the_estimate_of_its_text():
+    """Without a tokenizer the text is estimated once and a range is read off
+    running totals. That is the estimate only where no piece of the text is
+    cut by the range's ends; anywhere else the text is estimated itself."""
+    content = ("The OcrPdfOptions crane, invoice 20931_b. 港口起重机 was café-grey; "
+               "iPhoneXR   NASA\nhello_world 3.14 !! ") * 3
+    estimate = _Estimate(content)
+    markers = tokens("")
+    for start in range(0, len(content) + 1, 3):
+        for end in range(start, len(content) + 1, 5):
+            assert estimate.tokens(start, end) == tokens(content[start:end]) - markers, (start, end, content[start:end])
+
+
+def test_a_range_is_estimated_again_only_when_its_ends_cut_a_piece(monkeypatch):
+    """Reading a range off the totals is the point of the one pass. A range
+    whose ends fall between pieces -- even touching one, as "crane" touches
+    the comma after it -- is never estimated again; one whose end or start
+    falls inside a piece always is."""
+    content = "The OcrPdfOptions crane,invoice 20931_b. 港口起重机 was café-grey;iPhoneXR\nhello_world 3.14 !!"
+    pieces = [(match.start(), match.end()) for match in PIECE.finditer(content)]
+    estimate = _Estimate(content)
+    calls: list[str] = []
+
+    def counted(text: str) -> int:
+        calls.append(text)
+        return estimated_tokens(text)
+
+    monkeypatch.setattr(token_chunks, "estimated_tokens", counted)
+    touching = 0
+    for start in range(len(content) + 1):
+        for end in range(start, len(content) + 1):
+            cut = any(first < at < last for first, last in pieces for at in (start, end))
+            touching += not cut and any(at in (first, last) for first, last in pieces for at in (start, end))
+            calls.clear()
+            estimate.tokens(start, end)
+            assert bool(calls) == cut, (start, end, content[start:end])
+    assert touching > 0
 
 
 def test_a_chunk_a_tokenizer_counts_over_the_target_is_counted():

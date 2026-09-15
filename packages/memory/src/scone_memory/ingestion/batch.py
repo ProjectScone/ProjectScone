@@ -465,11 +465,11 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
     if mode == "semantic":
         return Cut(list(await semantic_spans(content, runtime.embedder, runtime.chunk_target)), "semantic")
     if runtime.chunk_tokens is not None:
-        from .embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION, estimated_tokens
+        from .embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION
         from .token_chunks import token_spans
 
         counted = token_spans(content, runtime.chunk_tokens, overlap=runtime.chunk_overlap_tokens,
-                              count=runtime.count_tokens or estimated_tokens,
+                              count=runtime.count_tokens,
                               method=TOKENIZER_VERSION if runtime.count_tokens is not None else BUDGET_VERSION)
         return Cut(list(counted.spans), "length", counted.record())
     return Cut(chunk_spans(content, runtime.chunk_target), "length")

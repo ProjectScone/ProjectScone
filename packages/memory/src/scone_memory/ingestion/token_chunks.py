@@ -16,6 +16,10 @@ when it has one, and otherwise the budget's estimate (``estimated_tokens``),
 which needs no model and errs high, so a chunk it keeps within 512 fits a
 512-token window. The count of an empty text is what the counter adds to
 every input (a model's start and end markers) and is paid once a chunk.
+The estimate reads the text once (``_Estimate``): every sentence, line,
+word and chunk is then a difference of running totals. Estimating each
+one's text again took 2.6 to 3.0 times as long over the bench's
+conversations.
 
 With ``overlap`` a chunk starts with the trailing whole pieces of the one
 before it, as many as fit within that many tokens, so the stored spans of
@@ -28,11 +32,12 @@ converts them. A chunk never starts or ends with whitespace.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from typing import Callable, NamedTuple
 
 from .chunker import Span
-from .embedding_budget import BUDGET_VERSION, estimated_tokens
+from .embedding_budget import BUDGET_VERSION, MARKERS, PIECE, estimated_tokens, piece_tokens
 from .semantic_chunks import sentence_spans
 
 #: The smallest target accepted. Below it a chunk holds a few words and
@@ -83,12 +88,46 @@ def refused(tokens: object, overlap: object) -> str | None:
     return None
 
 
-def token_spans(content: str, tokens: int, *, overlap: int = 0, count: Callable[[str], int] = estimated_tokens,
+class _Estimate:
+    """The budget's estimate for any range of one text, from one reading.
+
+    A piece of the estimate never spans whitespace, so a range whose ends
+    cut no piece -- a sentence, a line, a word, a chunk of them -- holds
+    exactly the pieces its text would, and its estimate is the difference
+    of running totals. A range that cuts a piece (a hard cut inside a word)
+    is estimated from its own text."""
+
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.starts: list[int] = []
+        self.ends: list[int] = []
+        self.totals = [0]
+        for match in PIECE.finditer(content):
+            self.starts.append(match.start())
+            self.ends.append(match.end())
+            self.totals.append(self.totals[-1] + piece_tokens(match.group()))
+
+    def tokens(self, start: int, end: int) -> int:
+        """The estimate for ``content[start:end]``, less the markers."""
+        first, last = bisect_left(self.starts, start), bisect_left(self.starts, end)
+        if (first and self.ends[first - 1] > start) or (last and self.ends[last - 1] > end):
+            return estimated_tokens(self.content[start:end]) - MARKERS
+        return self.totals[last] - self.totals[first]
+
+
+def token_spans(content: str, tokens: int, *, overlap: int = 0, count: Callable[[str], int] | None = None,
                 method: str = BUDGET_VERSION) -> TokenCut:
+    """Spans of ``content`` packed to ``tokens``, counted by ``count`` or,
+    when None, by the budget's estimate."""
     reason = refused(tokens, overlap)
     if reason is not None:
         raise ValueError(reason)
-    markers = count("")
+    size: Callable[[int, int], int]
+    if count is None:
+        markers, size = MARKERS, _Estimate(content).tokens
+    else:
+        markers = count("")
+        size = _counted(content, count, markers)
     room = tokens - markers
     if room < 1:
         raise ValueError(f"a target of {tokens} tokens leaves no room past the {markers} markers this count "
@@ -98,16 +137,22 @@ def token_spans(content: str, tokens: int, *, overlap: int = 0, count: Callable[
     for sentence in sentence_spans(content):
         end = _trimmed(content, sentence.start, sentence.end)
         sentences += 1
-        size = count(content[sentence.start:end]) - markers
-        if size <= room:
-            pieces.append(_Piece(sentence.start, end, size))
+        tokens_in = size(sentence.start, end)
+        if tokens_in <= room:
+            pieces.append(_Piece(sentence.start, end, tokens_in))
             continue
         over += 1
-        hard += _inside(content, sentence.start, end, room, count, markers, pieces)
+        hard += _inside(content, sentence.start, end, room, size, pieces)
     spans, overlapped = _packed(pieces, room, overlap)
-    measured = [count(content[span.start:span.end]) for span in spans]
+    measured = [size(span.start, span.end) + markers for span in spans]
     return TokenCut(tuple(spans), tokens, overlap, method, sentences, over, hard, overlapped,
-                    sum(1 for size in measured if size > tokens), max(measured, default=0))
+                    sum(1 for whole in measured if whole > tokens), max(measured, default=0))
+
+
+def _counted(content: str, count: Callable[[str], int], markers: int) -> Callable[[int, int], int]:
+    def size(start: int, end: int) -> int:
+        return count(content[start:end]) - markers
+    return size
 
 
 def _trimmed(content: str, start: int, end: int) -> int:
@@ -116,23 +161,23 @@ def _trimmed(content: str, start: int, end: int) -> int:
     return end
 
 
-def _inside(content: str, start: int, end: int, room: int, count: Callable[[str], int], markers: int,
+def _inside(content: str, start: int, end: int, room: int, size: Callable[[int, int], int],
             pieces: list[_Piece]) -> int:
     """Append the pieces of a sentence too long for ``room``: its lines that
     fit, the words of a line that does not, and the hard-cut parts of a word
     that does not either. Returns the cuts made inside words."""
     cuts = 0
     for line_start, line_end in _parts(content, start, end, "\n"):
-        size = count(content[line_start:line_end]) - markers
-        if size <= room:
-            pieces.append(_Piece(line_start, line_end, size))
+        line = size(line_start, line_end)
+        if line <= room:
+            pieces.append(_Piece(line_start, line_end, line))
             continue
         for word_start, word_end in _parts(content, line_start, line_end, None):
-            size = count(content[word_start:word_end]) - markers
-            if size <= room:
-                pieces.append(_Piece(word_start, word_end, size))
+            word = size(word_start, word_end)
+            if word <= room:
+                pieces.append(_Piece(word_start, word_end, word))
                 continue
-            cuts += _hard(content, word_start, word_end, room, count, markers, pieces)
+            cuts += _hard(word_start, word_end, room, size, pieces)
     return cuts
 
 
@@ -153,8 +198,7 @@ def _parts(content: str, start: int, end: int, separator: str | None) -> list[tu
     return found
 
 
-def _hard(content: str, start: int, end: int, room: int, count: Callable[[str], int], markers: int,
-          pieces: list[_Piece]) -> int:
+def _hard(start: int, end: int, room: int, size: Callable[[int, int], int], pieces: list[_Piece]) -> int:
     """Cut one word into the longest parts that fit ``room``; each part holds
     at least one character, so the cut always moves. Returns the cuts made."""
     cuts = 0
@@ -165,11 +209,11 @@ def _hard(content: str, start: int, end: int, room: int, count: Callable[[str], 
         # one character that must be taken); one ending past `high` is not.
         while low < high:
             middle = (low + high + 1) // 2
-            if count(content[at:middle]) - markers <= room:
+            if size(at, middle) <= room:
                 low = middle
             else:
                 high = middle - 1
-        pieces.append(_Piece(at, low, count(content[at:low]) - markers))
+        pieces.append(_Piece(at, low, size(at, low)))
         cuts += low < end
         at = low
     return cuts

@@ -1189,12 +1189,19 @@ reference's 512 tiktoken nodes sit between our 512 and 1,024 estimated
 tokens. Nothing about answer quality.
 
 It costs time. Cutting those sessions (24.8 million characters) alone,
-the four ways interleaved, five rounds on a loaded machine: 0.97 s at
-700 characters, 41.8 s at 256 tokens, 31.7 s at 512 and 37.1 s at 1,024
-(medians); the whole bench side (ingest and recall of the 50 items,
-three interleaved rounds) took a median 37.0, 48.0, 51.3 and 67.2 s. The
-time is in the estimate, counted once for every sentence and again for
-every chunk.
+the four ways interleaved, five rounds, medians: 0.60 s at 700
+characters, 9.0 s at 256 tokens, 8.7 s at 512 and 9.0 s at 1,024. The
+estimate reads each session once and every sentence, line, word and
+chunk is a difference of running totals. The first version estimated
+every sentence's text and then every chunk's again; against it, in one
+process, interleaved, five rounds, the medians were 75.0 s against 20.0 s
+at 256 tokens, 65.8 s against 24.5 s at 512 and 23.3 s against 8.5 s at
+1,024 -- 3.0, 2.7 and 2.6 times as fast by the median of each round's
+ratio, on a machine whose load went from 15 to 68 during the run (the
+quietest rounds: 13.2 against 5.8 s, 15.1 against 7.3 s, 16.2 against
+8.0 s). Both versions cut every session into the same spans with the
+same receipt at 256, 512, 1,024, and 512 with a 64-token overlap. The
+retrieval numbers above were taken with the first version.
 
 ## Embedding a chunk with the headings above it
 
