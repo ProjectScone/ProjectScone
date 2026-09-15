@@ -120,6 +120,7 @@ module the graph's other files name.
 | XLSX, and XLSM, XLTX, XLTM | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
 | PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text and notes | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
+| HWPX | Sections and paragraphs in order; a table's cells, and the paragraphs of a header, footer, note, caption or text box, after the paragraph that holds them (`content_role`, `parent_locator`) | Hangul's XML package (KS X 6101) only; the binary HWP 5 container is not read; pictures, charts and fields are not read; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
 | DOC, PPT | Converted text locators | Explicit offline converter; macOS textutil also supports DOC; page/slide structure may be lost |
@@ -199,8 +200,8 @@ does not guarantee that every valid variant of a format is supported.
 Media readers must be registered explicitly on a `BuiltinDocumentParser`;
 the default HTTP route does not configure OCR or transcription providers.
 
-The local LlamaIndex reference also advertises an HWP reader,
-which remains a gap. Table understanding, semantic chunking, layout
+The local LlamaIndex reference also advertises an HWP reader; HWPX, the
+XML package, is read here, and the binary HWP 5 container remains a gap. Table understanding, semantic chunking, layout
 reconstruction, directory synchronization and general connector ingestion
 also remain open. The [PDF OCR guide](pdf-ocr.md) describes separate OCR
 geometry, recognition limits and model-quality caveats.
