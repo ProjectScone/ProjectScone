@@ -402,6 +402,14 @@ def build_parser() -> argparse.ArgumentParser:
                                         "and the loops held apart only by imports that run when called or never")
     g.add_argument("--limit", type=int, default=None, help="groups shown of each kind (1 to 100; default 20)")
     g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
+    g = graph.add_parser("stats", help="the graph counted: entities, relations, communities, kinds, predicates, "
+                                       "and the facts by origin, grounding and standing")
+    g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
+    g = graph.add_parser("hubs", help="the entities with the most neighbours, with degree, facts, pagerank and community")
+    g.add_argument("--limit", type=int, default=None, help="hubs shown (1 to 100; default 10)")
+    g.add_argument("--above", type=float, default=None,
+                   help="only the hubs above this degree percentile (50 to 100), as the report holds them apart")
+    g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
 
     g = graph.add_parser("duplicates", help="entities that may be one thing under two names, and why (nothing merged)")
     g.add_argument("--limit", type=int, default=50, help="pairs to suggest (1 to 500)")
@@ -1526,6 +1534,21 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
             raise InvalidInput(str(refused)) from None
         print(_ledger_json(found_cycles.record(space, status="current", as_of=when))
               if getattr(args, "json", False) else found_cycles.text, file=out)
+        return 0
+
+    if command in ("stats", "hubs"):
+        from ..entities.stats import DEFAULT_HUBS, MAX_BYTES as STATS_BYTES, StatsError, graph_hubs, graph_stats
+
+        when = engine.clock()
+        max_bytes = args.max_bytes if args.max_bytes is not None else STATS_BYTES
+        try:
+            found_stats = (await graph_stats(engine, space, as_of=when, max_bytes=max_bytes) if command == "stats"
+                           else await graph_hubs(engine, space, as_of=when, max_bytes=max_bytes, above=args.above,
+                                                 limit=args.limit if args.limit is not None else DEFAULT_HUBS))
+        except StatsError as refused:
+            raise InvalidInput(str(refused)) from None
+        print(_ledger_json(found_stats.record(space, status="current", as_of=when))
+              if getattr(args, "json", False) else found_stats.text, file=out)
         return 0
 
     if command == "meanings":
