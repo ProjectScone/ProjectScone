@@ -75,6 +75,8 @@ async def test_refine_rewrites_the_answer_with_each_round_and_a_carried_sentence
     assert record["refine_dropped_carried"] == 0, "a sentence reworded around its own quote was carried, not dropped"
     assert record["reasons"] == []
     assert record["passages"]["cited"] == 2 and record["notes"]["kept"] == 3
+    assert [r["notes_carried"] for r in record["rounds"]] == [0, 1], "the rewrite repeated one sentence and added one"
+    assert record["notes"]["carried"] == 1 and result.notes_carried == 1
     block = f'[s1] (chunk:1) {N1[0]} Quote: "{N1[2]}"'
     assert [r["answer_bytes"] for r in record["rounds"]] == [0, len(block.encode())]
 
@@ -100,6 +102,7 @@ async def test_a_refine_round_whose_sentences_all_fail_leaves_the_answer_standin
     assert [s.text for s in result.sentences] == [N1[0]]
     assert result.refine_kept_prior == 1 and result.notes_dropped_unquoted == 1
     assert any("stands" in reason for reason in result.reasons)
+    assert result.notes_carried == 0, "a rewrite that kept nothing carried nothing, though the answer stands"
     assert result.record()["refine_kept_prior"] == 1
 
 
@@ -172,10 +175,12 @@ async def test_a_rewrite_that_leaves_out_checked_sentences_counts_them_and_says_
     result = await synthesize_passages(model, QUESTION, [R1, R2], limits=ROUNDS, mode="refine")
     assert [s.text for s in result.sentences] == [N2[0]], "the rewrite is the answer"
     assert result.refine_dropped_carried == 2 and result.record()["refine_dropped_carried"] == 2
+    assert result.notes_carried == 0, "a rewrite that repeats nothing of the answer carried nothing"
     assert "round 2: 2 sentence(s) of the answer so far left out of the rewrite" in result.reasons
     kept_one = await synthesize_passages(FakeChat([notes(N1, also), notes(also, N2)]), QUESTION, [R1, R2],
                                          limits=ROUNDS, mode="refine")
     assert kept_one.refine_dropped_carried == 1 and [s.text for s in kept_one.sentences] == [also[0], N2[0]]
+    assert [r.notes_carried for r in kept_one.rounds] == [0, 1] and kept_one.notes_kept == 4
 
 
 async def test_accumulate_answers_one_passage_per_call_and_joins_without_a_fold():

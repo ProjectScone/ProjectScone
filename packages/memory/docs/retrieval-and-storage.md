@@ -377,7 +377,9 @@ unless the fourth route is asked for by name:
      left out (matched by passage and quote, so a reworded sentence is
      carried), and a reason names the round. `notes.kept` counts every
      sentence each round kept, so a carried sentence is counted once per
-     round. Rounds are packed by bytes, and a round after the first answer
+     round; `notes.carried` (and each round's `notes_carried`) counts those
+     repeats, so `notes.kept` less `notes.carried` is what the rounds
+     wrote new. Rounds are packed by bytes, and a round after the first answer
      carries that answer inside the bound: its passages get
      `max_round_bytes` less the answer's bytes, and each round's record
      gives both `bytes` and `answer_bytes`. That is the reference's
