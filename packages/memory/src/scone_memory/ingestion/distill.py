@@ -716,7 +716,9 @@ def _occurrences(source: str, quote: str) -> Iterator[int]:
 
 def _clause_around(source: str, start: int, end: int) -> str:
     left = max(source.rfind(mark, 0, start) for mark in ".?!;\n") + 1
-    boundaries = [position for mark in ".?!;\n" if (position := source.find(mark, end)) >= 0]
+    # From the quote's last character: a quote that copies its sentence's
+    # full stop ends its clause there, not at the end of the next sentence.
+    boundaries = [position for mark in ".?!;\n" if (position := source.find(mark, end - 1)) >= 0]
     right = min(boundaries) + 1 if boundaries else len(source)
     return source[left:right]
 

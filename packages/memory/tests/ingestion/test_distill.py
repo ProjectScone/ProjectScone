@@ -737,6 +737,21 @@ async def test_an_asserted_clause_is_retained_beside_a_separate_hypothetical_cla
     assert outcome.rejected == []
 
 
+async def test_a_quote_that_copies_its_full_stop_is_read_in_its_own_sentence_not_the_next(engine):
+    # A model copying a whole sentence copies its full stop. The context of
+    # the quote is that sentence; the negation in the one after it is not.
+    source = "The hook fires on prompt events. It does not fire on tool results."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    candidate = grounded("hook", "fires_on", "prompt events", "The hook fires on prompt events.")
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert [proposal.object for proposal in outcome.added] == ["prompt events"]
+    assert outcome.rejected == []
+
+
 async def test_known_capture_verification_text_produces_no_facts_from_literal_but_non_entailed_quotes(engine):
     fixture = json.loads((TESTS_ROOT / "fixtures" / "grounding_failure.json").read_text())
     added = await engine.remember(SPACE, fixture["source"], created_at="2026-09-05")
