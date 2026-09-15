@@ -81,8 +81,9 @@ TELLING_LETTERS = 4
 MAX_HISTORY_BYTES = 6_000
 #: Seconds a rewriting model is given before the fallback is taken.
 REWRITE_TIMEOUT_S = 5.0
-#: Characters a quoted phrase may hold and still be one term.
-MAX_QUOTED = 200
+#: Characters a quotation may hold and still be read as one term; a longer
+#: one is a passage, not a name, and its words are read one by one.
+QUOTED_TERM_CHARS = 200
 
 _ASKING = frozenset("""what who whom whose which where why how when do does did is are was were am be been
     have has had can could will would shall should may might must""".split())
@@ -96,7 +97,7 @@ _COMMON = STOPWORDS | _ASKING | _REFERRING | _OPENERS
 _OPENING = "\"'([{\u2018\u201c\u00ab"
 _CLOSING = ".,;:!?\"')]}\u2019\u201d\u00bb"
 _POSSESSIVE = re.compile(r"['\u2019]s$")
-_QUOTED = re.compile(f"\"([^\"\\n]{{1,{MAX_QUOTED}}})\"|\u201c([^\u201d\\n]{{1,{MAX_QUOTED}}})\u201d")
+_QUOTED = re.compile(f"\"([^\"\\n]{{1,{QUOTED_TERM_CHARS}}})\"|\u201c([^\u201d\\n]{{1,{QUOTED_TERM_CHARS}}})\u201d")
 _SYMBOL_INSIDE = re.compile(r"\w[.@#+/_]+\w")
 
 _REWRITE_SYSTEM = (
