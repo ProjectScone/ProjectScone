@@ -47,8 +47,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: containment would make every symbol's blast radius its own file.
 #: A manifest's ``depends_on`` and ``develops_with`` are dependency edges
 #: like an import: a change to the package reaches the project that
-#: declares it, and a test dependency breaking breaks the tests.
-DEPENDS_ON = ("calls", "imports", "imports_when_called", "imports_for_types", "inherits", "mixes_in", "depends_on", "develops_with", "references")
+#: declares it, and a test dependency breaking breaks the tests. An MCP
+#: server rests on its executable, the variables it needs and the origin
+#: it reaches the same way.
+DEPENDS_ON = ("calls", "imports", "imports_when_called", "imports_for_types", "inherits", "mixes_in", "depends_on",
+              "develops_with", "references", "runs_with", "requires_env", "connects_to")
 #: Hops the walk may take. Past this it is the whole component, not a
 #: blast radius.
 MAX_HOPS = 8

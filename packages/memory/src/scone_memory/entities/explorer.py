@@ -67,7 +67,7 @@ _BARE_FILE = re.compile(r"^[^/:\s]+\.[A-Za-z0-9]{1,8}$")
 _TEXT_SUFFIXES = frozenset((".md", ".markdown", ".rst", ".txt", ".json", ".toml", ".yaml", ".yml", ".sql", ".cfg", ".ini"))
 #: Relations whose object may be something the graph only names.
 _NAMED_ONLY = frozenset(("imports", "imports_when_called", "imports_for_types", "depends_on", "develops_with", "cites",
-                         "uses_type", "references"))
+                         "uses_type", "references", "runs_with", "requires_env", "connects_to"))
 
 
 def _external(projection: EntityProjection) -> frozenset[str]:
