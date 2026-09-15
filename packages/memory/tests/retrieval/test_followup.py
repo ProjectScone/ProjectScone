@@ -22,7 +22,7 @@ from scone_memory.core.models import Fact, RecallItem, RecallResult
 from scone_memory.core.validation import MAX_QUERY
 from scone_memory.providers.llm import ChatError, FakeChat
 from scone_memory.retrieval.followup import (
-    MAX_CARRIED_TERMS, MAX_LOOKBACK_TURNS, carry, fused, named_terms, plan_followup, rewrite_followup,
+    MAX_CARRIED_TERMS, MAX_LOOKBACK_TURNS, QUOTED_TERM_CHARS, carry, fused, named_terms, plan_followup, rewrite_followup,
 )
 
 ALICE = [{"role": "user", "content": "Where does Alice Chen work?"},
@@ -55,8 +55,19 @@ def test_a_name_ends_at_an_opening_mark_at_a_lone_mark_and_at_the_end_of_the_tex
     assert named_terms("ask Alice Chen") == ["Alice Chen"]
 
 
+def test_a_curly_quotation_is_one_term():
+    assert named_terms("she wrote \u201cBlue, Harbor\u201d then") == ["Blue, Harbor"]
+
+
 def test_an_empty_quotation_is_not_a_term():
     assert named_terms('he said "  " twice') == []
+
+
+def test_a_quotation_of_200_characters_is_a_term_and_a_longer_one_is_read_word_by_word():
+    words = "x" * (200 - len("met Globex "))
+    assert QUOTED_TERM_CHARS == 200
+    assert named_terms(f'she wrote "met Globex {words}"') == [f"met Globex {words}"]
+    assert named_terms(f'she wrote "met Globex {words}y"') == ["Globex"]
 
 
 def test_a_sentence_may_open_with_a_name_but_not_with_an_asking_word():
