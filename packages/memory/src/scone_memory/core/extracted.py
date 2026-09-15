@@ -22,4 +22,5 @@ from __future__ import annotations
 MANY_VALUED: frozenset[str] = frozenset({
     "defines", "imports", "calls", "inherits", "mixes_in", "notes", "flags", "cites",
     "depends_on", "develops_with", "references", "imports_when_called", "imports_for_types",
+    "runs_with", "requires_env", "connects_to",
 })
