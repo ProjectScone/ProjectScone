@@ -34,6 +34,7 @@ from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as 
                                   MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT, MAX_LIMIT as TEMPORAL_MAX_LIMIT,
                                   MIN_BYTES as TEMPORAL_MIN_BYTES, temporal_answer)
 from ..memory.engine import Record, MemoryEngine
+from ..memory.vector_identity import VectorWriterChanged
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..retrieval.recall import LANES
@@ -485,6 +486,11 @@ def create_app(
     async def _moved(_: Request, e: Conflict) -> JSONResponse:
         return JSONResponse({"error": str(e), "revision": e.revision}, status_code=409)
 
+    @app.exception_handler(VectorWriterChanged)
+    async def _writer_changed(_: Request, e: VectorWriterChanged) -> JSONResponse:
+        # Another writer moved the vectors while this request settled them: running it again is the answer.
+        return JSONResponse({"error": str(e), "code": "writer_changed"}, status_code=409)
+
     @app.exception_handler(Gone)
     async def _gone(_: Request, e: Gone) -> JSONResponse:
         return JSONResponse({"error": str(e), "forgotten_at": e.forgotten_at}, status_code=410)
@@ -520,6 +526,8 @@ def create_app(
             "facts.reconsider": True, "facts.reopen": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
+            # Served always; an engine without the image lane, or a store that cannot list episodes, refuses.
+            "images.reembed": engine.image_vectors is not None and callable(getattr(engine.documents, "page_episodes", None)),
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
             "documents.files": True, "documents.provenance": True, "documents.ocr.tables": True,
             "chats.imports": True,

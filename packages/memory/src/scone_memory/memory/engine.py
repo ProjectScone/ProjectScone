@@ -52,7 +52,8 @@ from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, SummaryExpander, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
-from ..retrieval.image_lane import ImageLane, remove_forgotten, writer_block
+from ..retrieval.image_lane import (ImageLane, records_writer, reembed_images as _reembed_images,
+                                   remove_forgotten, writer_block)
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
 from ..retrieval.synonyms import Synonyms
@@ -98,6 +99,7 @@ from ..core.models import (
     ExpiryReport,
     ForgetDueReport,
     ForgetReceipt,
+    ImageRebuildReport,
     ForgetStatus,
     IngestJob,
     SpaceReceipt,
@@ -269,6 +271,12 @@ class MemoryEngine:
         #: Its vectors, one per stored image, checked against its writer like the text vectors.
         self.image_vectors = (None if image_vectors is None else vector_identity.guard(
             image_vectors, lambda: cast(ImageEmbedder, image_embedder).id))
+        #: How the lane keeps other image embedders' vectors out: ``recorded``
+        #: when the index records its writer and refuses another (``image_block``);
+        #: ``tagged`` when it cannot, so the lane searches only the vectors tagged
+        #: with this embedder's id and ignores the rest; None without the lane.
+        self.image_writer_check: Literal["recorded", "tagged"] | None = (
+            None if self.image_vectors is None else "recorded" if records_writer(self.image_vectors) else "tagged")
         #: Why this engine's image embedder must not write to or compare with
         #: the image index, as the index recorded it when the engine opened; None otherwise.
         self.image_block: str | None = None
@@ -561,6 +569,21 @@ class MemoryEngine:
         self.vector_identity = vector_identity.VectorIdentity(
             "rebuilt", vector_identity.writer_of(self), vector_identity.writer_of(self))
         return report
+
+    async def reembed_images(self, space: str, *, limit: int = 100,
+                             before: Optional[int] = None) -> ImageRebuildReport:
+        """Embed the space's stored images again with this engine's image
+        embedder: at most ``limit`` file episodes a pass, newest first, walking
+        on from ``before``. On an index that records its writer, a rebuild
+        under a new image model refuses the lane until a pass completes with
+        no space holding another model's vectors, then records the new model.
+        See ``retrieval.image_lane.reembed_images``."""
+        try:
+            return await _reembed_images(self, space, limit=limit, before=before)
+        finally:
+            # What the pass left the record as, whether it finished or not.
+            if self.image_embedder is not None:
+                self.image_block = await writer_block(cast(VectorIndex, self.image_vectors), self.image_embedder.id)
 
     async def adopt_vector_identity(self) -> vector_identity.VectorIdentity:
         """Vouch that vectors stored before writers were recorded came from this
