@@ -111,16 +111,55 @@ def table_page(rows):
     return ops
 
 
-async def test_a_table_page_stays_whole_and_the_receipt_says_so():
+async def test_a_table_page_stays_whole_and_carries_its_grid_as_regions():
     rows = [("Revenue", "2,903", "6,854"), ("Cost of revenue", "1,650", "2,720"), ("Operations and support", "574", "718"),
             ("Sales and marketing", "1,263", "4,789"), ("Research and development", "587", "2,054"), ("Total costs", "4,074", "10,281")]
     parsed = await PypdfParser().parse(placed(table_page(rows)), PdfLimits())
     page = parsed.pages[0]
     assert page.reading_order.columns == 0 and 'tabular_kept_whole' in page.reading_order.notes
-    assert page.regions == () and page.region_geometry == 'normalized_displayed_page_top_left'
     for label, first, second in rows:
         line = next(row for row in rows_of(parsed, 1) if row.startswith(label))
         assert first in line and second in line, "a table row is still one row"
+    # The page's order is kept, and its runs come along labelled, so the
+    # grid the rules found can be carried: each run cites its own bytes.
+    assert page.regions and page.region_geometry == 'normalized_text_grid' and page.labels is not None
+    assert 'table' in page.labels.rules and {r.text for r in page.regions if r.label == 'table'} >= {"Revenue", "2,903", "Total costs", "10,281"}
+    assert [r.provider_index for r in page.regions] == list(range(len(page.regions))) and {r.reading_column for r in page.regions} == {0}
+    encoded = parsed.text.encode()
+    assert all(encoded[r.start:r.end].decode() == r.text for r in page.regions)
+    # A page of prose has nothing to carry, and stays as it was.
+    prose = await PypdfParser().parse(placed([(72, 700 - 14 * i, line, 10) for i, line in enumerate(LEFT + RIGHT)]), PdfLimits())
+    assert prose.pages[0].reading_order.columns == 0 and prose.pages[0].regions == () and prose.pages[0].labels is None
+
+
+def test_a_no_break_space_is_part_of_a_run_and_spans_count_bytes():
+    rows = ["Name             Net worth        Country",
+            "Karl Albrecht    $27.0\xa0billion    Germany, Aldi S\u00fcd",
+            "Ingvar Kamprad   $31.0\xa0billion    Sweden",
+            "Am\u00e9rica Movil    $60.0\xa0billion    Mexico"]
+    laid = lay_out_page(rows, 10)
+    assert laid.receipt.columns == 0 and laid.text == "\n".join(rows)
+    texts = [region.text for region in laid.regions]
+    assert "$27.0\xa0billion" in texts and "Germany, Aldi S\u00fcd" in texts, "a no-break space does not end a run"
+    encoded = laid.text.encode()
+    assert all(encoded[r.start - 10:r.end - 10].decode() == r.text for r in laid.regions), "offsets count bytes, past the accents"
+    assert next(r.label for r in laid.regions if r.text == "$27.0\xa0billion") == 'table'
+    # A row that ends in a no-break space, last once the page number below
+    # it is dropped, keeps it in the text as its run does; a thin space is text too.
+    rows = ["Name             Net worth        Country",
+            "Karl Albrecht    $27.0\xa0billion    Germany",
+            "Ingvar Kamprad   $31.0\xa0billion    Sweden\xa0",
+            "Carlos Slim      $1\u2009000\xa0million    Mexico\xa0",
+            "12"]
+    laid = lay_out_page(rows, 0, drop={4: "12"})
+    encoded = laid.text.encode()
+    assert laid.text.endswith("Mexico\xa0") and laid.regions[-1].end == len(encoded)
+    assert all(encoded[r.start:r.end].decode() == r.text for r in laid.regions)
+    assert "$1\u2009000\xa0million" in [r.text for r in laid.regions]
+    parsed = ParsedPdf(text=laid.text, parser='fixture', pages=(PdfPage(number=1, start=0, end=len(encoded), width_points=600.,
+                       height_points=800., rotation=0, empty=False, regions=laid.regions, reading_order=laid.receipt,
+                       region_geometry='normalized_text_grid'),))
+    validate_pdf(parsed, PdfLimits())
 
 
 async def test_a_key_value_list_is_not_two_columns():
@@ -241,3 +280,16 @@ async def test_a_small_table_inside_a_column_stays_whole_while_the_columns_are_r
     assert rows[1:7] == list(prose_left) and rows[-6:] == list(prose_right)
     assert [row for row in rows if row.startswith("Revenue")] == [next(row for row in rows if "2,903" in row)], "a table row is one row"
     assert rows.index("Left column prose that fills the line") < rows.index(next(row for row in rows if row.startswith("Revenue"))) < rows.index("Right column prose that fills its line")
+
+
+def test_a_currency_sign_after_a_space_opens_a_run_of_its_own():
+    from scone_memory.ingestion.pdf_layout import _RUN
+    def runs(line):
+        return [match.group() for match in _RUN.finditer(line)]
+    # A filing sets the next column's sign three spaces from a loss, as
+    # close as words sit: the sign is not the loss's run, while its own
+    # number, within three spaces of it, is.
+    assert runs("(108)   $   (5,930)") == ["(108)", "$   (5,930)"]
+    assert runs("(108)   $          (5,930)") == ["(108)", "$", "(5,930)"]
+    assert runs("US $ 5 each") == ["US", "$ 5 each"] and runs("$62.0\xa0billion net") == ["$62.0\xa0billion net"]
+    assert runs("Total   costs    2,903") == ["Total   costs", "2,903"]

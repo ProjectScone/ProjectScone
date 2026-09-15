@@ -221,6 +221,65 @@ the claims that hold, then the space's recent activity. `GET /v1/profile`
   says which revision the answer is of.
 - Closed, excluded and proposed claims are never profiled, as before.
 
+### Static and dynamic buckets
+
+Some of a profile is settled (a name, a role, a diet) and some is what its
+subject is in the middle of (this quarter's project, this week's city). A
+reader can ask for the same claims in two buckets: `GET
+/v1/profile?buckets=both` (or `static`, or `dynamic`), `scone profile
+--buckets both`, `engine.profile(space, buckets=BucketBounds())`, and a
+conversation's standing claims (below). Unasked, nothing changes: the
+profile's body, order and coverage are what they were.
+
+Which bucket a claim goes in is a rule the ledger can check, never a guess at
+what its words mean. The first rule that applies decides, and each shown
+claim names it in `coverage.placed` with the numbers it read:
+
+1. `override`: the predicate is named in `SCONE_PROFILE_STATIC_PREDICATES`
+   or `SCONE_PROFILE_DYNAMIC_PREDICATES` (one predicate in both is refused).
+2. `changes`: the claim's slot changed value at least
+   `SCONE_PROFILE_DYNAMIC_CHANGES` times (default 2) in the last
+   `SCONE_PROFILE_CHANGE_WINDOW_DAYS` (default 365) -- dynamic, however long
+   this value has held. A slot is the subject and predicate, with the object
+   too for a many-valued predicate, as the ledger keys it; so a many-valued
+   predicate's values never count as changes of one another. The slot's
+   first value is not a change, a change on the window's first instant is
+   outside it, and the same value stated again after a gap is not a change.
+   Closed and excluded claims count as history, including claims
+   `forget(..., with_claims="exclude")` excluded: exclusion hides a claim
+   from reading, it does not rewrite the ledger's history. Proposed and
+   declined claims never held and do not count, nor does a value closed at
+   the instant it began (the ledger closes a value that way when another
+   supersedes it at the same instant).
+3. `tenure`: the claim's value has held unbroken for at least
+   `SCONE_PROFILE_STATIC_AFTER_DAYS` (default 90): static; younger, dynamic.
+   Unbroken counts earlier rows of the same value that reach the claim's
+   start, as when a value is backfilled to an earlier day or stated again
+   from the instant it was closed; a different value or a gap breaks it.
+   `held_days` is that span.
+
+The static bucket keeps the profile's own order (most restated, then
+newest). The dynamic bucket decays: each claim weighs `stated * 0.5 **
+(days since last stated / SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS)` (default
+30 days), where `stated` counts the claim and its restatements up to now,
+and last stated is the newest of those. Each statement adds as much weight
+as the first and each half-life halves it, so a claim stated `n` times
+falls behind one stated once only after `log2(n)` more half-lives: at the
+default, six statements two months ago still lead one yesterday.
+`placed` carries `last_stated` and `weight` for dynamic claims.
+
+Each bucket is bounded on its own: `static_limit` and `dynamic_limit` (1 to
+50, default 10) claims, `static_max_bytes` and `dynamic_max_bytes` (100 to
+16,000, default 2,000) bytes of the bucket's claim records
+(`{fact_id, subject, predicate, object, valid_from, rule}`) as compact JSON.
+`coverage.static` and `coverage.dynamic` say `candidates`, `shown`,
+`omitted`, `bytes`, the bounds, and `cut`: `"count"`, `"bytes"` or null.
+`coverage.candidates_truncated` says when the profile's own candidate bound
+(the newest 200 claims) left claims unplaced. A bound given without
+`buckets` is refused rather than ignored. The change count reads the same
+bounded ledger read as the profile, so a read cut by `fact_limit` (in
+`coverage.reasons`) can undercount changes.
+
 ## What people said about a passage
 
 ```bash
@@ -3307,7 +3366,12 @@ scone sync ~/work/notes                          # a plan: nothing is written
 
 scone sync ~/work/notes --apply                  # writes the added and changed
 scone sync ~/work/notes --apply --remove         # also forgets what is gone
+scone sync ~/work/notes --apply --forget-after 30d  # every file written is forgotten in 30 days
 ```
+
+`--forget-after` is resolved once, so the run writes one instant; an unchanged
+file keeps the schedule it holds, and the receipt counts those in
+`schedule_kept` ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
 
 An unchanged file is **not a write**: the space's revision does not move,
 so a sync on a timer does not churn the store. A changed file is an

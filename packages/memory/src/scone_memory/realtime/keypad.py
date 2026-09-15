@@ -25,6 +25,7 @@ clock; the time is passed in, so a test drives it with plain numbers.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Optional
 
@@ -132,6 +133,8 @@ class KeypadEntry:
     at: tuple[float, ...]
     ended_by: str
     waited: Optional[str] = None
+    #: Earlier keys a turn's receipt leaves out (``joined``).
+    dropped: int = 0
 
     @property
     def keys(self) -> str:
@@ -150,7 +153,22 @@ class KeypadEntry:
                     "keypad_at_ms": ",".join(str(round((at - first) * 1000)) for at in self.at)}
         if self.waited is not None:
             metadata["keypad_waited"] = self.waited
+        if self.dropped:
+            metadata["keypad_dropped"] = str(self.dropped)
         return metadata
+
+
+def joined(entries: Sequence[KeypadEntry]) -> KeypadEntry:
+    """One receipt for the entries a turn was given, in order: their text,
+    keys and times, ended (and waited) as the last of them. It keeps the
+    latest ``MAX_DIGITS`` keys, so it fits a record as one entry does, and
+    ``dropped`` counts the earlier keys it leaves out."""
+    last = entries[-1]
+    presses = [press for entry in entries for press in entry.presses]
+    at = [when for entry in entries for when in entry.at]
+    dropped = max(0, len(presses) - MAX_DIGITS)
+    return KeypadEntry(" ".join(entry.text for entry in entries), tuple(presses[dropped:]), tuple(at[dropped:]),
+                       last.ended_by, last.waited, dropped)
 
 
 class KeypadCollector:
