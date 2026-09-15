@@ -60,7 +60,6 @@ HASHED_VECTOR_WEIGHT = 0.01
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core import extracted, forget_after
-from ..core.timeutil import parse_rfc3339
 from ..core.validation import (
     entity_key as entity_key,
     many_valued_predicates,
