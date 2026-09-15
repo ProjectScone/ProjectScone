@@ -6,8 +6,10 @@ and it throws away how far apart the scores were. A vector lane where the
 first hit is 0.99 and the second 0.10 says something rank fusion cannot
 hear. Relative-score fusion keeps it: each lane's scores are scaled to
 0..1 across that lane's candidates, and the scaled scores are added with
-the same weights. It is an option beside rank fusion, not a replacement,
-and the result says which one ran.
+the same weights. Distribution fusion keeps it another way: each lane's
+scores are placed by the lane's own mean and spread, so an outlier is an
+outlier and not the yardstick. Both are options beside rank fusion, not
+replacements, and the result says which one ran.
 """
 from __future__ import annotations
 
@@ -145,3 +147,68 @@ async def test_the_benchmark_can_run_either_fusion(tmp_path):
     asked.clear()
     plain = await run(make, load_items(path), ks=(1,))
     assert plain.fusion == "rank" and asked == ["rank"]
+
+
+def test_distribution_fusion_scales_a_lane_by_its_own_mean_and_spread():
+    """Three scores 0, 5, 10: mean 5, deviation ~4.08, range 5 ± 12.25; the
+    middle sits at exactly 0.5 and the ends within the range, not at 0 and 1."""
+    scores = fusion.distribution_scores([[(1, 10.0), (2, 5.0), (3, 0.0)]])
+    assert scores[2] == pytest.approx(0.5)
+    assert 0.5 < scores[1] < 1.0 and 0.0 < scores[3] < 0.5 and scores[1] - 0.5 == pytest.approx(0.5 - scores[3])
+
+
+def test_an_outlier_is_an_outlier_not_the_yardstick():
+    """Relative fusion lets one 1000 push eleven close scores to nearly
+    zero; distribution fusion keeps the eleven near the middle of their own
+    lane, and the clip bites because eleven is enough for one score to sit
+    past three deviations (a lane of ten or fewer cannot)."""
+    lane = [(0, 1000.0)] + [(i, 10.0 + i * 0.1) for i in range(1, 12)]
+    relative = fusion.relative_scores([lane])
+    distributed = fusion.distribution_scores([lane])
+    assert relative[6] < 0.01 and 0.4 < distributed[6] < 0.6, (relative[6], distributed[6])
+    assert distributed[0] == pytest.approx(1.0), "an outlier past three deviations is clipped to the top, not made the yardstick"
+    assert distributed[11] > distributed[1] > 0.4, "the close scores keep their order among themselves"
+
+
+def test_distribution_fusion_keeps_the_conventions_of_the_other_modes():
+    assert fusion.distribution_scores([[(1, 0.5), (2, 0.5)]]) == pytest.approx({1: 1.0, 2: 1.0}), "no spread: full credit"
+    assert fusion.distribution_scores([[(7, -3.0)]]) == pytest.approx({7: 1.0})
+    assert fusion.distribution_scores([[(1, math.nan), (2, math.nan), (3, math.nan)]]) == pytest.approx({1: 1.0, 2: 0.5, 3: 0.0}), "no score: the order"
+    two = fusion.distribution_scores([[(1, 2.0), (2, 1.0)], [(2, 9.0), (1, 3.0)]], weights=[1.0, 2.0])
+    assert two[2] > two[1], "weights apply after scaling"
+    assert fusion.distribution_scores([[], [(1, 1.0)]]) == pytest.approx({1: 1.0}), "an empty lane is silent"
+    assert "distribution" in fusion.FUSIONS
+
+
+async def test_distribution_fusion_is_a_choice_on_recall_and_that_choice_runs_the_distribution_scaling(memory, monkeypatch):
+    seen = []
+    original = fusion.distribution_scores
+
+    def spy(lanes, weights=None):
+        seen.append([len(lane) for lane in lanes])
+        return original(lanes, weights)
+
+    monkeypatch.setattr(fusion, "distribution_scores", spy)
+    chosen = await memory.recall("s", "crane", limit=3, fusion="distribution")
+    assert chosen.fusion == "distribution" and seen and chosen.items, "the result names the mode, and the mode's own scaling ran"
+    plain = await memory.recall("s", "crane", limit=3)
+    assert plain.fusion == "rank" and len(seen) == 1, "rank fusion does not touch it"
+    with pytest.raises(InvalidInput, match="fusion must be one of rank, score, distribution"):
+        await memory.recall("s", "crane", fusion="median")
+
+
+async def test_distribution_fusion_reaches_the_api_and_the_command_line(memory):
+    import io
+    import json
+
+    from httpx import ASGITransport, AsyncClient
+
+    from scone_memory.api import create_app
+    from scone_memory.runtime.cli import build_parser, run
+
+    async with AsyncClient(transport=ASGITransport(app=create_app(memory, {"k": "s"})), base_url="http://fixture") as client:
+        answer = await client.get("/v1/recall", params={"q": "crane", "fusion": "distribution"}, headers={"authorization": "Bearer k"})
+        assert answer.status_code == 200 and answer.json()["fusion"] == "distribution"
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--space", "s", "--json", "recall", "crane", "--fusion", "distribution"]), memory, io.StringIO(""), out)
+    assert code == 0 and json.loads(out.getvalue())["fusion"] == "distribution"
