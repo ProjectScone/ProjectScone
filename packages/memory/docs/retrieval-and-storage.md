@@ -2012,10 +2012,11 @@ With `SCONE_QUESTION_LANE=1` (`MemoryEngine(..., question_lane=True)`)
 a pass run by hand with a chat model (`engine.build_chunk_questions`,
 `scone chunk-questions`, `POST /v1/chunk-questions`) writes, per chunk,
 questions the chunk answers, keeps only those whose answering sentence
-is quoted verbatim from the chunk, and puts them in the same index as
-the context lane's words. Recall searches that index when either flag is
-on; the passage returned is the chunk's own text, and forgetting an
-episode takes its questions with it. Off by default, one model call per
+is quoted verbatim from the chunk, and puts them in an index of their
+own, apart from the context lane's words. Recall searches it only while
+the question lane is on, as the `question` lane; the passage returned is
+the chunk's own text, and forgetting an episode takes its questions with
+it. Off by default, one model call per
 chunk. See [chunk-questions.md](chunk-questions.md) for what is kept,
 the bounds and the measurement.
 

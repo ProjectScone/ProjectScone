@@ -18,8 +18,8 @@ questions moved, and how close each evaluation question is to the lane's
 questions for the chunk holding its quote -- the same model wrote both
 sets, so the prompts differ but leakage is reduced, not removed.
 
-``sweep`` (no model): the lane's fusion weight is the context lane's
-(``retrieval.recall.CONTEXT_WEIGHT``); this sets that constant for the run
+``sweep`` (no model): the lane's fusion weight
+(``retrieval.recall.QUESTION_WEIGHT``, the context lane's 2.0); this sets that constant for the run
 only, over ``--weights``, and scores the evaluation set of ``--choose-seed``
 as the set a weight would be chosen on and the questions of the others not
 in it as held out.
@@ -202,14 +202,14 @@ async def run_sweep(args: argparse.Namespace) -> None:
     engines = {"off": await engine_at(data, question_lane=False), "on": await engine_at(data, question_lane=True)}
     result: dict[str, object] = {"off": {name: _scores(await measure(engines["off"], SPACE, questions))
                                          for name, questions in splits.items()}}
-    default = recall_module.CONTEXT_WEIGHT
+    default = recall_module.QUESTION_WEIGHT
     try:
         for weight in args.weights:
-            recall_module.CONTEXT_WEIGHT = weight
+            recall_module.QUESTION_WEIGHT = weight
             result[f"on at {weight}"] = {name: _scores(await measure(engines["on"], SPACE, questions))
                                          for name, questions in splits.items()}
     finally:
-        recall_module.CONTEXT_WEIGHT = default
+        recall_module.QUESTION_WEIGHT = default
     (data / f"sweep-{chosen_on.seed}.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
     print(json.dumps(result, indent=1, ensure_ascii=False))
     for engine in engines.values():

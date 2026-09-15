@@ -12,19 +12,19 @@ Here a question is kept only with the sentence that answers it, copied
 from the chunk: the anchoring the bench's question sets use
 (``bench.questions.anchored``). A question whose sentence is not in the
 chunk, is too short to tell one passage from another, or was never asked
-is dropped and counted. The kept questions go into the context index
-(``core.ports.ContextIndex``) beside the words the chunk is under, so the
-recall's context lane finds the chunk by them. Nothing else changes: the
-stored text, the vectors and the passage a recall returns are the
-chunk's own, and forgetting an episode drops its chunks' context rows
-with the chunks.
+is dropped and counted. The kept questions go into an index of their own
+(``core.ports.QuestionIndex``), apart from the words the chunk is under,
+so the recall's question lane finds the chunk by them and nothing else.
+Nothing else changes: the stored text, the vectors, the context index and
+the passage a recall returns are as ingestion left them, and forgetting
+an episode drops its chunks' questions with the chunks.
 
 The pass is opt-in twice over. It runs only by hand
 (``engine.build_chunk_questions``, ``scone chunk-questions``, ``POST
 /v1/chunk-questions``) with a model, and only on an engine with the
 question lane on (``SCONE_QUESTION_LANE``), which is also what makes a
-recall search the index when the context lane is off. A store without
-the index gets no model calls and a report that says why.
+recall search the questions. A store without the index gets no model
+calls and a report that says why.
 """
 
 from __future__ import annotations
@@ -33,12 +33,11 @@ from dataclasses import dataclass, field
 import time
 from typing import TYPE_CHECKING, Optional, Sequence
 
-from ..bench.questions import MAX_PER_CHUNK, MAX_QUESTION_CHARS, MIN_QUOTE_WORDS, anchored, parse_pairs, partial_pairs
+from ..bench.questions import MAX_PER_CHUNK, MAX_QUESTION_CHARS, MIN_QUOTE_WORDS, anchored, loose_pairs, parse_pairs
 from ..core.errors import InvalidInput
-from ..core.ports import context_index
+from ..core.ports import question_index
 from ..core.validation import check_space
 from ..providers.llm import ChatError, ChatModel
-from .context_terms import chunk_context
 
 if TYPE_CHECKING:
     from ..core.models import Chunk, Episode
@@ -94,18 +93,25 @@ class QuestionLaneReport:
     model_calls: int = 0
     calls_failed: int = 0
     dropped_unparsed: int = 0
-    #: Replies whose list was never closed, read up to their last whole object.
-    read_partial: int = 0
+    #: Replies not valid as one list, read object by object (``bench.questions.loose_pairs``).
+    read_loosely: int = 0
+    #: Objects in those replies that could not be read as a pair, passed over.
+    dropped_unread: int = 0
     dropped_unquoted: int = 0
     dropped_unasked: int = 0
     #: Pairs past ``per_chunk`` in one reply.
     dropped_extra: int = 0
     #: A question the model wrote twice for one chunk.
     dropped_repeated: int = 0
-    #: Chunks whose context index now holds their questions.
+    #: Chunks whose question index now holds this pass's questions.
     chunks_indexed: int = 0
+    #: Chunks whose reply was read and kept no question: whatever an earlier
+    #: pass wrote for them is removed, so each holds this pass's questions only.
+    chunks_kept_none: int = 0
+    #: Chunks forgotten while the model was answering: nothing is written for them.
+    chunks_gone: int = 0
     kept: tuple[ChunkQuestions, ...] = ()
-    #: Whether the document store keeps the context index the lane is searched through.
+    #: Whether the document store keeps the question index the lane is searched through.
     kept_lane: bool = True
     seconds: float = 0.0
     reasons: tuple[str, ...] = field(default_factory=tuple)
@@ -119,10 +125,11 @@ class QuestionLaneReport:
         return {"space": self.space, "model": self.model, "per_chunk": self.per_chunk, "chunks_total": self.chunks_total,
                 "chunks_asked": self.chunks_asked, "chunks_cut": self.chunks_cut, "resume_after": self.resume_after,
                 "skipped_long": self.skipped_long, "model_calls": self.model_calls, "calls_failed": self.calls_failed,
-                "dropped_unparsed": self.dropped_unparsed, "read_partial": self.read_partial,
-                "dropped_unquoted": self.dropped_unquoted,
+                "dropped_unparsed": self.dropped_unparsed, "read_loosely": self.read_loosely,
+                "dropped_unread": self.dropped_unread, "dropped_unquoted": self.dropped_unquoted,
                 "dropped_unasked": self.dropped_unasked, "dropped_extra": self.dropped_extra,
                 "dropped_repeated": self.dropped_repeated, "chunks_indexed": self.chunks_indexed,
+                "chunks_kept_none": self.chunks_kept_none, "chunks_gone": self.chunks_gone,
                 "questions": self.questions, "kept": [kept.record() for kept in self.kept], "kept_lane": self.kept_lane,
                 "seconds": round(self.seconds, 3), "reasons": list(self.reasons), "version": self.version}
 
@@ -132,9 +139,10 @@ class QuestionLaneReport:
                 f"{self.model_calls} call(s) and {self.seconds:.1f}s; dropped {self.dropped_unquoted} whose quote was not "
                 f"in the chunk or under {MIN_QUOTE_WORDS} words, {self.dropped_unasked} with no question or one over "
                 f"{MAX_QUESTION_CHARS} characters, {self.dropped_extra} over the per-chunk limit, {self.dropped_repeated} "
-                f"repeated, and {self.dropped_unparsed} repl(ies) not written as asked; {self.read_partial} read from a list "
-                f"never closed; {self.skipped_long} chunk(s) too "
-                f"long to show, {self.calls_failed} call(s) failed")
+                f"repeated, and {self.dropped_unparsed} repl(ies) not written as asked; {self.read_loosely} read object by "
+                f"object, with {self.dropped_unread} object(s) in them that could not be read; {self.skipped_long} chunk(s) too "
+                f"long to show, {self.calls_failed} call(s) failed; {self.chunks_kept_none} chunk(s) kept no question and "
+                f"hold none now; {self.chunks_gone} chunk(s) forgotten while the model answered")
         if self.chunks_cut:
             said += f"; {self.chunks_cut} chunk(s) past max_chunks, resume after chunk {self.resume_after}"
         return "; ".join((said, *self.reasons))
@@ -161,10 +169,10 @@ async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatM
     if isinstance(max_chunks, bool) or not isinstance(max_chunks, int) or not 1 <= max_chunks <= MAX_CHUNKS:
         raise InvalidInput(f"max_chunks must be between 1 and {MAX_CHUNKS}")
     name = model_name or type(model).__name__
-    keeper = context_index(engine.documents)
+    keeper = question_index(engine.documents)
     if keeper is None:
         return QuestionLaneReport(space, name, per_chunk, kept_lane=False, reasons=(
-            f"the {engine.documents.name} document store keeps no context index, so there is nowhere to put "
+            f"the {engine.documents.name} document store keeps no question index, so there is nowhere to put "
             "questions and no model call was made",))
     started = time.perf_counter()
     rows: list[tuple["Chunk", "Episode"]] = []
@@ -172,8 +180,8 @@ async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatM
         rows.extend((chunk, episode) for chunk in await engine.documents.chunks_of(space, episode.episode_id)
                     if after_chunk is None or chunk.chunk_id > after_chunk)
     rows.sort(key=lambda row: row[0].chunk_id)
-    counts = dict.fromkeys(("asked", "skipped_long", "failed", "unparsed", "partial", "unquoted", "unasked", "extra",
-                            "repeated", "indexed"), 0)
+    counts = dict.fromkeys(("asked", "skipped_long", "failed", "unparsed", "loosely", "unread", "unquoted", "unasked",
+                            "extra", "repeated", "indexed", "kept_none", "gone"), 0)
     kept: list[ChunkQuestions] = []
     resume_after: Optional[int] = None
     examined = 0
@@ -195,11 +203,13 @@ async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatM
             continue
         pairs = parse_pairs(reply)
         if pairs is None:
-            pairs = partial_pairs(reply)
-            if pairs is None:
+            loose = loose_pairs(reply)
+            if loose is None:
                 counts["unparsed"] += 1
                 continue
-            counts["partial"] += 1
+            pairs = list(loose.pairs)
+            counts["loosely"] += 1
+            counts["unread"] += loose.unread
         found = anchored(pairs, chunk.text, per_chunk)
         counts["unasked"] += found.unasked
         counts["unquoted"] += found.unquoted
@@ -215,20 +225,21 @@ async def build_chunk_questions(engine: "MemoryEngine", space: str, model: ChatM
             seen.add(key)
             questions.append(question)
             quotes.append(quote)
-        if not questions:
+        # A reply read replaces the chunk's questions, none included; the store
+        # writes nothing for a chunk forgotten while the model answered.
+        if not await keeper.index_questions(space, chunk.chunk_id, questions):
+            counts["gone"] += 1
             continue
-        # The index keeps one text per chunk and replaces it on write, so the
-        # words the chunk is under go back in beside its questions.
-        under = ""
-        if engine.context_lane:
-            under = chunk_context(episode.content, start=chunk.start, chunk_text=chunk.text, source=episode.source).text()
-        await keeper.index_context(space, chunk.chunk_id, "\n".join((under, *questions)))
+        if not questions:
+            counts["kept_none"] += 1
+            continue
         counts["indexed"] += 1
         kept.append(ChunkQuestions(chunk.chunk_id, episode.episode_id, tuple(questions), tuple(quotes)))
     return QuestionLaneReport(
         space, name, per_chunk, chunks_total=len(rows), chunks_asked=counts["asked"],
         chunks_cut=len(rows) - examined, resume_after=resume_after, skipped_long=counts["skipped_long"],
-        model_calls=counts["asked"], calls_failed=counts["failed"], dropped_unparsed=counts["unparsed"], read_partial=counts["partial"],
-        dropped_unquoted=counts["unquoted"], dropped_unasked=counts["unasked"], dropped_extra=counts["extra"],
-        dropped_repeated=counts["repeated"], chunks_indexed=counts["indexed"], kept=tuple(kept),
+        model_calls=counts["asked"], calls_failed=counts["failed"], dropped_unparsed=counts["unparsed"],
+        read_loosely=counts["loosely"], dropped_unread=counts["unread"], dropped_unquoted=counts["unquoted"],
+        dropped_unasked=counts["unasked"], dropped_extra=counts["extra"], dropped_repeated=counts["repeated"],
+        chunks_indexed=counts["indexed"], chunks_kept_none=counts["kept_none"], chunks_gone=counts["gone"], kept=tuple(kept),
         seconds=time.perf_counter() - started)

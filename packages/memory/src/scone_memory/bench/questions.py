@@ -132,21 +132,25 @@ def _normal(text: str) -> str:
     return " ".join(text.split())
 
 
+_LIST_OF_OBJECTS = re.compile(r"\[\s*(?=\{)")
+_EMPTY_LIST = re.compile(r"\[\s*\]")
+
+
 def parse_pairs(reply: str) -> Optional[list[tuple[str, str]]]:
     """The (question, quote) pairs in a reply, or None when it is not a
-    list of them. A fence or a sentence around the JSON is tolerated --
-    the first bracket that opens a JSON list is the one read, so a
-    bracket in the prose around it is not -- and anything else is the
-    model not writing what was asked."""
-    decoder = json.JSONDecoder()
-    parsed: object = None
-    start = reply.find("[")
-    while start >= 0:
-        try:
-            parsed, _ = decoder.raw_decode(reply, start)
-            break
-        except ValueError:
-            start = reply.find("[", start + 1)
+    list of them. A fence or a sentence around the JSON is tolerated: the
+    list read is the first that opens with an object, decoded whole, so a
+    bracket in the prose is not it and neither is one quoted inside a
+    question of a list that does not decode. A reply that opens no such
+    list and holds no object is an empty list when it says ``[]``;
+    anything else is the model not writing what was asked."""
+    opened = _LIST_OF_OBJECTS.search(reply)
+    if opened is None:
+        return [] if "{" not in reply and _EMPTY_LIST.search(reply) else None
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(reply, opened.start())
+    except ValueError:
+        return None
     return _pairs_in(parsed)
 
 
@@ -164,33 +168,60 @@ def _pairs_in(parsed: object) -> Optional[list[tuple[str, str]]]:
     return pairs
 
 
-_LIST_OF_OBJECTS = re.compile(r"\[\s*(?=\{)")
-_BETWEEN_ITEMS = re.compile(r"\s*,\s*")
+_NEXT_OBJECT = re.compile(r"\{\s*\"")
 
 
-def partial_pairs(reply: str) -> Optional[list[tuple[str, str]]]:
-    """The pairs of a list of objects the reply opens and does not finish,
-    read object by object up to the first that is not whole -- a small
-    model often writes every object and stops before the closing bracket.
-    None when no whole object is read or one of them is not a pair. Not
-    used by ``write_questions``, whose sets stay as strict as before."""
+@dataclass(frozen=True)
+class LooseRead:
+    """The pairs read one object at a time from a list that is not valid as a whole."""
+
+    pairs: tuple[tuple[str, str], ...]
+    #: Objects the reader could not take a pair from: one that does not
+    #: decode (cut off, or a quote mark left unescaped) or an item that is
+    #: not a question and a quote. Text between objects that is not one
+    #: (a comment, a closing fence) is passed over and not counted.
+    unread: int
+
+
+def loose_pairs(reply: str) -> Optional[LooseRead]:
+    """The pairs of the first list of objects the reply opens, read object
+    by object, for a reply ``parse_pairs`` refuses. A small model often
+    writes every object and stops before the closing bracket, leaves out
+    the commas, or copies a quote mark from the passage unescaped: each
+    object that reads is kept, each that does not is counted in
+    ``unread`` and passed over to the next, and reading stops at the
+    closing bracket or the end of the reply. None when no list of objects
+    is opened or no pair is read. Not used by ``write_questions``, whose
+    sets stay strict."""
     opened = _LIST_OF_OBJECTS.search(reply)
     if opened is None:
         return None
     decoder = json.JSONDecoder()
-    items: list[object] = []
+    pairs: list[tuple[str, str]] = []
+    unread = 0
     position = opened.end()
     while True:
+        while position < len(reply) and (reply[position].isspace() or reply[position] == ","):
+            position += 1
+        if position >= len(reply) or reply[position] == "]":
+            break
         try:
-            item, position = decoder.raw_decode(reply, position)
+            item, end = decoder.raw_decode(reply, position)
         except ValueError:
-            break
-        items.append(item)
-        between = _BETWEEN_ITEMS.match(reply, position)
-        if between is None:
-            break
-        position = between.end()
-    return _pairs_in(items) if items else None
+            if reply[position] == "{":
+                unread += 1
+            following = _NEXT_OBJECT.search(reply, position + 1)
+            if following is None:
+                break
+            position = following.start()
+            continue
+        read = _pairs_in([item])
+        if read:
+            pairs.extend(read)
+        else:
+            unread += 1
+        position = end
+    return LooseRead(tuple(pairs), unread) if pairs else None
 
 
 @dataclass(frozen=True)

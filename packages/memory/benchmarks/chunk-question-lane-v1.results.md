@@ -2,9 +2,17 @@
 
 The question lane (`ingestion/chunk_questions.py`, [docs](../docs/chunk-questions.md))
 asks a chat model, once per chunk, for questions the chunk answers, keeps
-those whose quote is verbatim in the chunk, and searches them through the
-context index. This compares recall with the lane off and on over the same
-stores, with questions written by a different prompt than the lane's.
+those whose quote is verbatim in the chunk, and searches them as a lane.
+This compares recall with the lane off and on over the same stores, with
+questions written by a different prompt than the lane's.
+
+When this was measured the questions were kept in the context index. They
+now have an index of their own (after review: a pass could overwrite the
+words a chunk is under). The stores here were ingested with the context
+lane off, so that index held the questions and nothing else; moved into
+the question index on a copy of the stores, `measure` and both `sweep`s
+gave the same scores on every question and every weight as below (15
+September 2026).
 
 **Result: the lane made recall worse here.** Over 43 evaluation questions,
 R@5 fell from 0.953 to 0.837 and MRR from 0.868 to 0.817. Lowering the
@@ -27,7 +35,9 @@ best weight tied it. The lane stays off by default.
   the strict reader, one question per chunk) over two seeded samples of 80
   chunks each. Seed 42 kept 22 questions (45 replies unparsed, 12 quotes not
   in the chunk, 1 call timed out); seed 7 kept 30 (43 unparsed, 6 unquoted,
-  1 timed out). 43 distinct questions in all. A question is found at rank r
+  1 timed out). 43 distinct questions in all. Those counts are the strict
+  reader's as it was then; it has since changed (it no longer reads a
+  later bracket when the first list fails), and the sets were not written again. A question is found at rank r
   when the r-th passage returned holds its quote.
 - Lane: `engine.build_chunk_questions` over all 233 chunks, 3 per chunk, with
   its own prompt ("the questions a person could later ask … in their own
@@ -67,7 +77,7 @@ same model wrote both sets, so the gains are inflated by near-duplicates
 and the losses are not.
 
 **Why it lost.** Fusion is by rank (`RRF_K` 60) and the lane is fused at the
-context lane's weight, `CONTEXT_WEIGHT` 2.0, against 1.0 for text and 0.25
+context lane's weight, 2.0 (`QUESTION_WEIGHT` now), against 1.0 for text and 0.25
 for the hashed vectors. A chunk at rank r in the lane scores 2/(60+r), more
 than a chunk first in both the text and vector lanes (1.25/61) down to
 about rank 37. In the diagnostic run behind this report, each question that
@@ -79,7 +89,8 @@ lane, whose questions ask about `history_omitted`; "What is the purpose of the
 one placed sixth, whose question is "How do I upload a file to a chat?". Four
 questions went from rank 1 to out of the top 10 that way.
 
-**Weight sweep (no model).** `sweep` sets `CONTEXT_WEIGHT` for the run,
+**Weight sweep (no model).** `sweep` sets the lane's weight for the run
+(then `CONTEXT_WEIGHT`, now `QUESTION_WEIGHT`),
 scores one seed's questions as the set a weight would be chosen on and the
 other seed's remaining questions as held out.
 
@@ -103,9 +114,15 @@ held-out MRR. The weight was not changed: no value measured here is a gain.
 1,093 s per 100 chunks. 535 questions were kept for 209 chunks; 119 pairs
 were dropped because the quote was not in the chunk (or under four words),
 2 as repeats, and 9 replies could not be read. 197 of the 233 replies were
-lists the model never closed, read object by object
-(`bench.questions.partial_pairs`); without that reader those chunks would
-have kept nothing. Recall over the 43 questions took a median of 0.260 s
+not one valid list and were read object by object, each read up to its
+first object that would not decode; without that reader those chunks
+would have kept nothing. The report then called them all lists never
+closed, but it could not tell a list cut off before its bracket from a
+closed one with a bad object, and the raw replies were not kept. The
+reader now in use (`bench.questions.loose_pairs`) passes over a bad object
+and reads on, counting it, so it can only add pairs to such replies; how
+many it would have added here is not known without calling the model
+again. Recall over the 43 questions took a median of 0.260 s
 off and 0.281 s on (three alternating runs each).
 
 ## What this does not show
