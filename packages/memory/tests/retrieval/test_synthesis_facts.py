@@ -210,7 +210,7 @@ async def test_other_modes_record_no_facts():
     assert result.facts_used == 0 and result.facts_unsent == 0
 
 
-def test_the_answer_rounds_bytes_count_the_newlines_between_facts_and_every_byte_of_them():
+async def test_the_answer_rounds_bytes_count_the_newlines_between_facts_and_every_byte_of_them():
     assert module._lines_within(["ab", "cd"], 4) == 1, "two 2-byte lines and a newline are 5 bytes"
     assert module._lines_within(["ab", "cd"], 5) == 2
     assert module._lines_within(["ab"], 2) == 1, "a line of exactly the room fits"
