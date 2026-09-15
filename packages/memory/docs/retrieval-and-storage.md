@@ -1282,9 +1282,10 @@ module with three imports held one and closed two as superseded, a file
 with two functions defined the second, and every graph built on the
 ledger kept the last claim of each kind and called the rest history.
 
-The predicates the framework extracts -- `defines`, `imports`, `calls`,
-`inherits`, `mixes_in`, `notes`, `flags`, `cites`, `depends_on`,
-`develops_with` -- are many-valued by their nature, declared so in the
+The predicates the framework extracts -- `defines`, `imports`,
+`imports_when_called`, `imports_for_types`, `calls`, `inherits`,
+`mixes_in`, `notes`, `flags`, `cites`, `depends_on`, `develops_with` --
+are many-valued by their nature, declared so in the
 core (`scone_memory.core.extracted.MANY_VALUED`), and no configuration
 takes one out of that set. `SCONE_MANY_VALUED` still adds predicates a
 person names; `GET /v1/graph/schema` marks both kinds as `many`.
@@ -2371,9 +2372,10 @@ In a code graph every file imports `typing`, so `typing` was the most
 central entity of the codebase, the strongest tie between any two
 communities, a "surprising connection" from each, and the middle of
 every drawing; `pydantic.BaseModel`, `json` and a cited `ADR-12` were
-close behind. An entity that is the object of `imports`, `depends_on`,
-`develops_with`, `cites`, `uses_type` or `references` and the subject of
-nothing at all is *external*: named here, read nowhere here (a module of
+close behind. An entity that is the object of `imports`,
+`imports_when_called`, `imports_for_types`, `depends_on`, `develops_with`,
+`cites`, `uses_type` or `references` and the subject of nothing at all is
+*external*: named here, read nowhere here (a module of
 the codebase is imported too, but it also defines its own things, so it
 is the graph's own). Externals are left out of the community partition
 (so modularity is the codebase's), attached for reading to the community
@@ -2584,6 +2586,50 @@ answer. It reads and changes nothing.
   ledger that changed while it was read is read again, and one that keeps
   moving is said (`ledger_moved_during_read`) rather than answered from
   two different moments.
+
+#### `GET /v1/graph/cycles`
+
+The dependency cycles a space's code graph holds. A cycle is the one
+shape a dependency graph should not have, and the one nobody sees
+reading files one at a time; it is also the shape most codebases work
+around rather than remove, by writing an import inside a function (it
+runs when the function is called) or under `if TYPE_CHECKING:` (it never
+runs). Counting every `imports` fact would report every one of those
+workarounds as a cycle, so the Python reader records when an import runs
+-- `imports` at load, `imports_when_called` in a function body,
+`imports_for_types` under the type-checking guard -- and this route
+reads two things apart: the groups of files that cannot load without
+each other (the strongly connected parts of `imports` and `depends_on`),
+each with one shortest loop and the fact ids behind every hop; and the
+groups that join only once the deferred imports are counted, each naming
+the deferred facts that hold it open. Advertised as `graph.cycles`;
+`scone graph cycles`, the MCP tool `memory_graph_cycles` and the ToolBox
+tool `graph_cycles` give the same answer. It reads and changes nothing.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `limit` | 20 (1–100) | Groups shown of each kind; the rest are counted |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
+- `status` is `cycles` when a load-time loop exists, `held_apart` when
+  only deferred loops do, and `none` otherwise. `totals` counts both
+  kinds whole; `cycles` and `held_apart` list up to `limit` of each,
+  largest first, and `coverage` says what was cut.
+- The loop shown for a group held apart crosses one of its deferred
+  imports, so it shows what the group is about rather than a load-time
+  cycle inside it. A loop is walked up to 32 hops; a group whose loop is
+  longer is still counted and listed, its example left empty, and the
+  coverage says `loops_over_bound N`.
+- A self-import is not a cycle, and a file importing a module the space
+  has no file for (`json`) is a leaf. Other languages' readers record
+  every import as `imports`, so their function-level imports count as
+  load-time until the reader tells them apart; the answer does not guess.
+- A projection over 50,000 entities is declined with
+  `entities_over_bound` in the coverage rather than answered slowly.
+- **One answer, one revision.** The components and the loops are read at
+  one revision; a ledger that keeps moving is said
+  (`ledger_moved_during_read`) rather than answered from two moments.
 
 #### `GET /v1/entities/duplicates`
 

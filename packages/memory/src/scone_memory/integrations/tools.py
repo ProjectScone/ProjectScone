@@ -248,6 +248,18 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
         }, []),
     ),
     ToolSpec(
+        name="graph_cycles",
+        summary=("Dependency cycles in the code graph: files that cannot load without each other, each with one "
+                 "shortest loop and the facts behind every hop; and loops held apart only by imports that run "
+                 "when called or never (type checking). Counts with examples; it changes nothing."),
+        parameters=_schema({
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100,
+                      "description": "Groups shown of each kind, 1 to 100. Defaults to 20."},
+            "max_bytes": {"type": "integer", "minimum": 512, "maximum": 64_000,
+                          "description": "Byte budget for the answer text. Defaults to 8000."},
+        }, []),
+    ),
+    ToolSpec(
         name="graph_health",
         summary=("What in the knowledge graph wants attention: claims resting on nothing, kinds that disagree or "
                  "are missing, entities nothing links to, predicates used once, and names that may be one thing. "
@@ -342,7 +354,7 @@ MEMORY_TOOLS: tuple[ToolSpec, ...] = (
 )
 
 _GRAPH_TOOLS = frozenset({"graph_context", "explain_entity", "connect_entities", "graph_schema", "graph_match",
-                          "graph_overview", "graph_changes", "find_duplicates", "graph_health", "graph_affected",
+                          "graph_overview", "graph_changes", "find_duplicates", "graph_health", "graph_cycles", "graph_affected",
                           "temporal_answer"})
 #: The tree. ``write_note`` is offered only when a policy allows writing:
 #: an absent tool is a clearer refusal than an error a model may argue
@@ -588,6 +600,13 @@ class ToolBox:
                 raise InvalidInput(str(refused)) from None
             return found.record(self.space, status=status, as_of=moment, together=together, limit=limit,
                                 follows=bool(arguments.get("follows", False)))
+        if name == "graph_cycles":
+            from ..entities.cycles import DEFAULT_LIMIT as CYCLES_LIMIT, MAX_BYTES as CYCLES_BYTES, graph_cycles
+
+            cycles = await graph_cycles(self.engine, self.space, as_of=when,
+                                        limit=arguments.get("limit", CYCLES_LIMIT),
+                                        max_bytes=arguments.get("max_bytes", CYCLES_BYTES))
+            return cycles.record(self.space, status="current", as_of=when)
         if name == "graph_health":
             from ..entities.health import DEFAULT_EXAMPLES, MAX_BYTES as HEALTH_BYTES, graph_health
 

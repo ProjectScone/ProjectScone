@@ -44,7 +44,8 @@ MAX_EDGES = 20_000
 #: Characters of a label the page carries; a longer one is cut and marked.
 MAX_LABEL = 120
 #: Relations whose object may be something the graph only names.
-_NAMED_ONLY = frozenset(("imports", "depends_on", "develops_with", "cites", "uses_type", "references"))
+_NAMED_ONLY = frozenset(("imports", "imports_when_called", "imports_for_types", "depends_on", "develops_with", "cites",
+                         "uses_type", "references"))
 
 
 def _external(projection: EntityProjection) -> frozenset[str]:

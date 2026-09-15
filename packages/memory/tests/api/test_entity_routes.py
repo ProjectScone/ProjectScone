@@ -912,6 +912,24 @@ def test_health_counts_what_wants_attention(seeded):
     assert client.get("/v1/graph/health", headers=auth("key-b")).json()["totals"]["entities"] == 2
 
 
+async def test_cycles_reports_the_loops_a_space_holds(seeded):
+    client, _ = seeded
+    engine = client.app.state.engine
+    for subject, predicate, obj in (("app/a.py", "imports", "app/b.py"), ("app/b.py", "imports", "app/a.py"),
+                                    ("lib/x.py", "imports", "lib/y.py"), ("lib/y.py", "imports_for_types", "lib/x.py")):
+        await engine.assert_fact("alpha", subject, predicate, obj, valid_from="2024-01-01T00:00:00Z", origin="extracted")
+    found = client.get("/v1/graph/cycles", params={"limit": 1}, headers=auth()).json()
+    assert found["status"] == "cycles" and found["space"] == "alpha"
+    assert (found["totals"]["cycles"], found["totals"]["held_apart"]) == (1, 1)
+    [cycle] = found["cycles"]
+    assert sorted(cycle["members"]) == ["app/a.py", "app/b.py"] and len(cycle["hops"]) == 2
+    assert found["held_apart"][0]["deferred"], "the facts that hold a loop apart are named"
+    assert client.get("/v1/graph/cycles", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/cycles", params={"max_bytes": 100}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/cycles", headers=auth("key-b")).json()["status"] == "none"
+    assert client.get("/v1/capabilities", headers=auth()).json()["features"]["graph.cycles"] is True
+
+
 @pytest.fixture
 async def meant():
     """A space whose vocabulary says works_at is the other side of employs."""
