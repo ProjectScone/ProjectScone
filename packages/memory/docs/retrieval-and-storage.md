@@ -245,14 +245,62 @@ per space, since no per-person identity is recorded yet.
 
 `recall(lessons=True)` (`lessons=true` on `/v1/recall`, `--lessons`) puts
 each passage's lesson beside it, and `GET /v1/lessons` lists them all.
-Lessons never change the order: nothing has measured that ranking by them
-answers better, so they are information beside the score, not part of it.
+Asking for lessons never changes the order; ranking by the same judgements
+is a separate setting, off by default (below).
 A recall asked for lessons also carries `lessons_read`: the window,
 half-life and corroboration used, and how many judgements were read and
 whether that read was cut. A recall not asked answers exactly as before,
 with no `lessons` or `lessons_read` field. `--lessons` is refused with
 `--merge`: a merged passage joins chunks that were judged separately, and
 one lesson cannot stand for them.
+
+## Ranking by what people said
+
+```bash
+SCONE_FEEDBACK_WEIGHT=0.0001 scone recall "what is the throttling threshold on the cafe plan"
+```
+
+`SCONE_FEEDBACK_WEIGHT` (`MemoryEngine(feedback_weight=…)`, default 0) adds
+a term to each fused candidate's score, the way recency is added, from the
+judgements of the last 90 days. Zero reads no feedback and leaves recall as
+it was. Needs an event log. The judgements are weighed as lessons weigh them
+(latest per recall, halving every 30 days), with three rules on top:
+
+- useful judgements count only once two of them do. One useful judgement
+  neither lifts a passage nor offsets a judgement against it;
+- a judgement against a passage outweighs every useful one older than it,
+  so a passage people stopped finding useful has to be corroborated again;
+- `feedback` records a fingerprint of what the judged passage said (its
+  text and its episode's content hash). A judgement whose passage no
+  longer matches is dropped as `stale`: a rebuilt store can hand its id to
+  other text, to a span of an episode whose content changed, or to a span
+  chunked differently. One recorded before fingerprints existed is
+  dropped as `unverified`.
+
+The term is the weight times that score, cut at `MAX_FEEDBACK_BOOST` (what
+first place is worth over second under rank fusion when both lanes agree,
+0.000529). A recall with the weight set carries `feedback_prior`: the weight
+and bound, how many candidates were `boosted`, `demoted` and `capped`, the
+`stale`, `unverified` and `tentative` counts, the terms of the returned
+passages, and `events_read` / `events_cut` (the read takes the newest 5,000
+judgements). The same record goes into the recall event. A recall with the
+weight at 0 has no `feedback_prior` field.
+
+The term does not know the question. With queries hashed in the event log
+(the default) there is nothing to compare a new question with. A passage
+judged useful rises for every question it is a candidate for, including
+one it was never judged for. On the replay in
+[`benchmarks/feedback-replay-v1.results.md`](../benchmarks/feedback-replay-v1.results.md),
+0.0001 lifted paraphrases of judged questions (MRR@10 0.7188 to 0.7743) and
+left unrelated questions where they were (0.8692). 0.0002 already cost
+unrelated questions 0.09, mostly questions about a sibling subject worded
+like a judged one (another rate tier, another clinic). The weight is a
+near-tie breaker, and its scale is rank fusion's: `fusion="score"` and
+`"distribution"` have scores a hundred times larger, and the replay did not
+measure them. Setting the weight costs every recall a read of up to 5,000
+judgements. Over a SQLite log on a loaded machine, that measured 24.83 ms
+against 7.40 ms off with 1,000 judgements, and 79.62 ms against 5.66 ms
+with 5,000.
 
 ## Abstaining, by a floor that was measured
 
