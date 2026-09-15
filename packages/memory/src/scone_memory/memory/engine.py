@@ -42,6 +42,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # install promises pydantic alone. Importing it here would make
     # `import scone_memory` fail wherever that extra is absent.
     from ..entities.vocabulary_store import VocabularyStore
+    from ..core.models import Chunk
+    from ..retrieval.feedback_prior import PriorTerms
     from ..retrieval.lessons import Lessons
     from ..ingestion.chunk_questions import QuestionLaneReport
     from ..providers.llm import ChatModel
@@ -211,6 +213,9 @@ class MemoryEngine:
         #: break near-ties only; zero weight turns the term off.
         recency_weight: float = fusion.W_RECENCY,
         recency_half_life_days: float = fusion.RECENCY_HALF_LIFE_DAYS,
+        #: How much recorded feedback moves a candidate in fusion (see
+        #: retrieval/feedback_prior.py). Zero, the default, reads no feedback.
+        feedback_weight: float = 0.0,
         demote_restated: bool = True,
         demote_superseded: bool = True,
         blobs: Optional[BlobStore] = None,
@@ -422,16 +427,24 @@ class MemoryEngine:
         fusion.validate_recency(recency_weight, recency_half_life_days)
         self.recency_weight = float(recency_weight)
         self.recency_half_life_days = float(recency_half_life_days)
+        from ..retrieval.feedback_prior import validate_feedback_weight
+
+        validate_feedback_weight(feedback_weight)
+        self.feedback_weight = float(feedback_weight)
 
     async def _emit(self, space: str, kind: str, payload: dict, dedup_key: Optional[str] = None) -> Optional[Event]:
         if self.events is None:
             return None
         return await self.events.append(NewEvent(ts=self.clock(), space=space, kind=kind, payload=payload, dedup_key=dedup_key))
 
+    @staticmethod
+    def _query_hash(query: str) -> str:
+        return hashlib.sha256(query.encode()).hexdigest()[:16]
+
     def _query_for_evidence(self, query: str) -> dict:
         if self.record_queries:
             return {"query": query, "query_hashed": False}
-        return {"query": hashlib.sha256(query.encode()).hexdigest()[:16], "query_hashed": True}
+        return {"query": self._query_hash(query), "query_hashed": True}
 
     async def open(self) -> "MemoryEngine":
         from . import space_cleanup
@@ -1186,6 +1199,7 @@ class MemoryEngine:
             question_lane=self.question_lane,
             lexical_stems=self.lexical_stems,
             vector_weight=self.vector_weight,
+            feedback_prior=self._feedback_prior if self.feedback_weight > 0 else None,
         )
         if type(lessons) is not bool:
             raise InvalidInput("lessons must be a boolean")
@@ -1374,6 +1388,11 @@ class MemoryEngine:
                                   min_corroboration=min_corroboration,
                                   max_events=MAX_FEEDBACK_EVENTS if max_events is None else max_events)
 
+    async def _feedback_prior(self, space: str, candidates: Mapping[int, "Chunk"], now: str) -> "PriorTerms":
+        from ..retrieval.feedback_prior import read_prior
+
+        return await read_prior(self.events, self.documents, space, candidates, now=now, weight=self.feedback_weight)
+
     async def feedback(
         self, space: str, recall_event_id: int, chunk_id: int, useful: bool, note: Optional[str] = None
     ) -> Event:
@@ -1392,8 +1411,22 @@ class MemoryEngine:
             raise InvalidInput(f"chunk {chunk_id} was not returned by recall {recall_event_id}")
         if note is not None and len(note) > 500:
             raise InvalidInput("note must be at most 500 chars")
+        from ..retrieval.feedback_prior import fingerprint, question
+
+        # What the passage said when it was judged, so a ranking prior can tell
+        # when the id now names other text. A passage already gone gets none.
+        # And which question it was judged for, so asking again is not corroboration.
+        # A query kept in the clear is hashed as a hashed recall's is, so the same words are one question either way.
+        asked = recall.payload.get("query")
+        if recall.payload.get("query_hashed") is False:
+            asked = self._query_hash(str(asked))
+        marked: dict[str, object] = {"question": question(asked)}
+        for chunk in await self.documents.get_chunks(space, [chunk_id]):
+            episode = await self.documents.get_episode(space, chunk.episode_id)
+            if episode is not None:
+                marked["fingerprint"] = fingerprint(episode.content, chunk.text)
         return await self._emit(space, "feedback", {
-            "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note,
+            "recall_event_id": recall_event_id, "chunk_id": chunk_id, "useful": bool(useful), "note": note, **marked,
         })  # type: ignore[return-value]
 
     async def _fact_fits_scope(self, space: str, fact: Fact, scope: TextFilter | None) -> bool:

@@ -229,7 +229,10 @@ scone recall "when was the crane survey booked" --lessons
 
 A person can mark a returned passage useful or not (`POST /v1/feedback`),
 and that judgement is kept as an event. `lessons` reads those events back.
-For each passage, the latest judgement of each recall counts. Each one
+For each passage, the latest judgement of each question counts: asking the
+same words again and judging again replaces a judgement rather than
+corroborating it, as the ranking prior below counts them (a judgement
+recorded before questions were counts per recall). Each one
 weighs 1, positive when useful and negative when not, and the weight halves
 every `half_life_days`. Each passage gets a state:
 
@@ -245,14 +248,99 @@ per space, since no per-person identity is recorded yet.
 
 `recall(lessons=True)` (`lessons=true` on `/v1/recall`, `--lessons`) puts
 each passage's lesson beside it, and `GET /v1/lessons` lists them all.
-Lessons never change the order: nothing has measured that ranking by them
-answers better, so they are information beside the score, not part of it.
+Asking for lessons never changes the order; ranking by the same judgements
+is a separate setting, off by default (below).
 A recall asked for lessons also carries `lessons_read`: the window,
 half-life and corroboration used, and how many judgements were read and
 whether that read was cut. A recall not asked answers exactly as before,
 with no `lessons` or `lessons_read` field. `--lessons` is refused with
 `--merge`: a merged passage joins chunks that were judged separately, and
 one lesson cannot stand for them.
+
+## Ranking by what people said
+
+```bash
+SCONE_FEEDBACK_WEIGHT=0.00013 scone recall "what is the throttling threshold on the cafe plan"
+```
+
+`SCONE_FEEDBACK_WEIGHT` (`MemoryEngine(feedback_weight=…)`, default 0) adds
+a term to each fused candidate's score, the way recency is added, from the
+judgements of the last 90 days. Zero reads no feedback and leaves recall as
+it was. It reads the event log, so it is refused with `SCONE_EVENTS=none`.
+The judgements are weighed as lessons weigh them (+1 useful, −1 not, halving
+every 30 days), and counted per question as lessons count them: `feedback`
+records a hash of the question its recall asked (the
+same for the same words whether `record_queries` kept them in the clear or
+not), and asking the same question again and judging again replaces the
+judgement.
+Four rules sit on top:
+
+- useful judgements count only once two questions' do. One useful judgement
+  neither lifts a passage nor offsets a judgement against it. No identity is
+  recorded, so one caller asking two questions, or one question spelled two
+  ways, does corroborate;
+- only the newest two judgements each way count. However many pile up on a
+  popular passage, it weighs what its newest two weigh, and `held` counts
+  the candidates whose older judgements were left out;
+- a judgement against a passage outweighs every useful one older than it,
+  so a passage people stopped finding useful has to be corroborated again;
+- `feedback` records a fingerprint of what the judged passage said (its
+  text and its episode's content). A judgement whose passage no
+  longer matches is dropped as `stale`: a rebuilt store can hand its id to
+  other text, to a span of an episode whose content changed, or to a span
+  chunked differently. A judgement that cannot be checked is dropped as
+  `unverified`: one recorded before fingerprints and questions were, or one
+  of a candidate whose episode cannot be read now.
+
+The term is the weight times that score, cut at `MAX_FEEDBACK_BOOST` (what
+first place is worth over second under rank fusion when both lanes agree at
+full voice, 0.000529; with a hashed embedder's vector lane at its default
+hundredth, a place is worth half that, so the bound is about two places). The
+bound is on each candidate's term, not on who it can pass: a leader sunk
+and a follower lifted close twice it, and deeper ranks sit closer together
+than first and second. A recall with the weight set carries
+`feedback_prior` (on `/v1/recall` too): the weight and bound, how many
+candidates were `boosted`, `demoted`, `capped` and `held`, the `stale`,
+`unverified` and `tentative` counts, the terms of the returned passages, the
+`window_days`, `half_life_days` and `min_corroboration` it read and folded
+with, and `events_read` / `events_cut` (the read takes the newest 5,000
+judgements).
+`scone recall` prints a line when the read or the term was cut. The same
+record goes into the recall event. A recall with the weight at 0 has no
+`feedback_prior` field.
+
+The term does not know the question. With queries hashed in the event log
+(the default) there is nothing to compare a new question with. A passage
+judged useful rises for every question it is a candidate for, including
+one it was never judged for. On the replay in
+[`benchmarks/feedback-replay-v1.results.md`](../benchmarks/feedback-replay-v1.results.md),
+at the engine's defaults (`HashEmbedder`, its vector lane at a hundredth of
+the text lane's voice), 0.00013 lifted paraphrases of judged questions
+(MRR@10 0.7118 to 0.7188 under a judge who marks only the answer useful,
+0.7118 to 0.8090 under one who also marks what sat above it not useful) and
+left unrelated questions where they were (0.8669) only while every passage
+was stored at the same instant. With the vector lane that quiet, fused
+scores sit a whole text-lane place apart, and a term either stays under a
+place or crosses it for every question: 0.00014 cost unrelated questions
+0.11, and the weight chosen at the previous vector voice of 0.25, 0.0001,
+lifts nothing under the first judge now. Stored an hour apart, recency's
+few millionths decide which near-ties the term crosses: two unrelated
+questions of 36 fell on one half (0.8727 to 0.8657). Stored a day apart,
+newest first, nine fell (0.7824 to 0.6644). No weight measured both lifted
+judged questions and kept every layout's unrelated questions within 0.01:
+0.00003 kept them and lifted nothing, 0.00004 cost one half 0.044 a day
+apart, and 0.00002 already cost one question. 0.0002
+cost unrelated questions 0.12 even at one instant, questions about a
+sibling subject worded like a judged one (another rate tier, another
+clinic). A question-unaware term crosses whichever near-ties a store's
+creation times leave, so it trades unrelated questions for judged ones at
+any weight that moves anything. The weight is a
+near-tie breaker, and its scale is rank fusion's: `fusion="score"` and
+`"distribution"` have scores a hundred times larger, and the replay did not
+measure them. Setting the weight costs every recall a read of up to 5,000
+judgements. Over a SQLite log on a loaded machine, that measured 24.83 ms
+against 7.40 ms off with 1,000 judgements, and 79.62 ms against 5.66 ms
+with 5,000.
 
 ## Abstaining, by a floor that was measured
 
