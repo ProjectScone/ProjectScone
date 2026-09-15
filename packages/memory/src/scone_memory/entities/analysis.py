@@ -353,15 +353,23 @@ def _hubs_above(graph: Adjacency, external: frozenset[str], percentile: float | 
 
 
 def _place(labels: Sequence[str]) -> str | None:
-    """The directory a community's paths share: when at least two members
-    are paths, most members are, and every path sits under one directory.
-    A community of files is what its directory is called, not the three
-    file names that happen to lead it."""
+    """The directory a community of files is named by: the deepest one
+    that holds at least half of its paths, when at least two members are
+    paths and most members are. A community of files is what its
+    directory is called, not the three file names that happen to lead it;
+    and a community that spans two packages is named by the one most of
+    it sits in, since a shared root would name nothing."""
     paths = [label.split(":", 1)[0] for label in labels if "/" in label.split(":", 1)[0]]
     if len(paths) < 2 or len(paths) * 2 < len(labels):
         return None
-    shared = os.path.commonprefix([path.split("/")[:-1] for path in paths])
-    return "/".join(shared) if shared else None
+    holding: Counter[str] = Counter()
+    for path in paths:
+        parts = path.split("/")[:-1]
+        for depth in range(1, len(parts) + 1):
+            holding["/".join(parts[:depth])] += 1
+    enough = max(2, -(-len(paths) // 2))
+    deep = [place for place, count in holding.items() if count >= enough]
+    return max(deep, key=lambda place: (place.count("/"), -holding[place], place)) if deep else None
 
 
 def _label(names: Sequence[str], members: Sequence[str]) -> str:
