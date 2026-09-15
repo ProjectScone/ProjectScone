@@ -373,9 +373,17 @@ unless the fourth route is asked for by name:
      whose every sentence fails the check, leaves the answer as it stood,
      and `refine_kept_prior` counts those rounds with a reason each. A
      rewrite may also leave out a sentence the answer had: the rewrite is
-     the answer, and `notes.kept` counts every sentence each round kept, so
-     a carried sentence is counted once per round. Rounds are packed by
-     bytes, which is the reference's CompactAndRefine, and nothing is
+     the answer, `refine_dropped_carried` counts the checked sentences it
+     left out (matched by passage and quote, so a reworded sentence is
+     carried), and a reason names the round. `notes.kept` counts every
+     sentence each round kept, so a carried sentence is counted once per
+     round. Rounds are packed by bytes, and a round after the first answer
+     carries that answer inside the bound: its passages get
+     `max_round_bytes` less the answer's bytes, and each round's record
+     gives both `bytes` and `answer_bytes`. That is the reference's
+     CompactAndRefine. Passages are never cut, so when the answer leaves no
+     room for the next passage the rounds stop there, the rest are unread
+     with a reason, and the answer is `partial` and `truncated`. Nothing is
      folded.
    - **accumulate** gives the model one passage per call and joins what
      each call kept, in passage order, with no fold; a sentence must quote
@@ -391,8 +399,8 @@ unless the fourth route is asked for by name:
    `GET /v1/answer?route=synthesize&synthesis_mode=accumulate`,
    `answer_question(..., route="synthesize", synthesis_mode="refine")`.
    Measured on eight multi-session questions with a local 8B model, no
-   mode spoke more often than `evidence`
-   ([results](../benchmarks/synthesis-modes-v1.results.md)).
+   mode spoke more often than `evidence`, and `refine`'s second round
+   changed no answer ([results](../benchmarks/synthesis-modes-v1.results.md)).
 
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and

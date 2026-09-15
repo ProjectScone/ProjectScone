@@ -46,14 +46,25 @@ the same items, with one local model writing and judging every side.
 | side | items with an answer | faithfulness (judged items) | relevancy (judged items) | quoted share | model calls | passages read | passages cited | cited evidence share |
 |---|---|---|---|---|---|---|---|---|
 | evidence | 7/8 | 0.810 (7) | 0.143 (7) | 0.613 (19/31) | 17 | 84 | 13 | 0.531 |
-| refine | 7/8 | 0.765 (6) | 0.143 (7) | 0.970 (32/33) | 15 | 84 | 11 | 0.531 |
+| refine | 7/8 | 0.765 (6) | 0.143 (7) | not comparable: 32/33 counts 16 sentences twice | 15 | 84 | 11 | 0.531 |
 | accumulate | 6/8 | 0.759 (6) | 0.000 (6) | 0.500 (27/54) | 96 | 96 | 17 | 0.552 |
 | TreeSummarize | 8/8 | 0.786 (7) | 0.000 (8) | n/a | 8 | 96 given | n/a | n/a |
 
 Dropped notes by reason: `evidence` 9 malformed and 3 citing a passage
 the round did not hold; `refine` 1 unknown; `accumulate` 18 malformed, 8
-unknown and 1 unquoted. `evidence` folded on 2 items. `refine_kept_prior`
-was 0 on every item: no refine round left the answer standing.
+unknown and 1 unquoted. `evidence` folded on 2 items.
+
+`refine`'s second round changed no answer. On all seven items it
+answered, its `notes_kept` is exactly twice the sentences it shows (2/1,
+4/2, 2/1, 8/4, 4/2, 4/2, 8/4): the second round returned as many checked
+sentences as the first. No shown sentence cites a passage of the second
+round (the rounds re-derived by recalling the same passages again, with
+no model), and on five of the seven the text is byte-identical to
+`evidence`'s, which on those five kept notes from one round and did not
+fold.
+`refine_kept_prior` was 0 on every item, but it counts only rewrites that
+could not be read or kept no checked sentence; a rewrite that repeats
+the answer is neither.
 
 Statuses: `evidence` and `refine` 7 synthesized and 1 unavailable;
 `accumulate` 6 synthesized and 2 no_evidence. Unverified judgments: one
@@ -62,16 +73,25 @@ TreeSummarize faithfulness (the judge call failed).
 
 ## What it says
 
-- No mode spoke more often than `evidence` here. `refine` matched it on
-  answers (7/8) with two fewer calls; `accumulate` spent 96 calls, 5.6
+- No mode spoke more often than `evidence` here. `refine` answered on the
+  same seven items with two fewer calls, because it never folds and its
+  second round added nothing to the first round's answer, which is
+  `evidence`'s first round. `accumulate` spent 96 calls, 5.6
   times `evidence`'s, and spoke on 6. One passage per call did not stop
   the silence; it gave the model more chances to return malformed notes.
 - `evidence` and `refine` send the same first round (the same prompt at
   temperature 0), so with two rounds they differ only in the second, and
   on five of the seven items both answered their texts are the same.
-- `refine`'s quoted share is not comparable with the others': each
-  rewrite repeats the answer's sentences with quotes that were already
-  checked, and those are counted again.
+- `refine`'s quoted share is not comparable with the others', so the
+  table leaves it out: each rewrite repeats the answer's sentences with
+  quotes that were already checked, and `notes_kept` counts them again.
+  The record now carries `refine_dropped_carried`, the checked sentences
+  a rewrite left out, which was not measured here.
+- Since this run a refine round holds the answer so far inside
+  `max_round_bytes`. It would not have changed this run's rounds: the
+  second rounds held 906 to 1,422 bytes of passages, leaving at least
+  4,578 bytes, and an answer here was at most four sentences whose quotes
+  come from passages of at most 807 bytes, under 3,800 bytes carried.
 - Relevancy is this judge's reading, and it is strict. Asked about
   "you work up to 50 hours per week during peak campaign seasons" for
   "How many hours do I work in a typical week during peak campaign

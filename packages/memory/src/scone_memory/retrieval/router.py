@@ -109,7 +109,8 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
             raise InvalidInput("the synthesize route needs a model; none is configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
         return await _synthesize(engine, space, question, synthesis, limit, synthesis_limits,
                                  why="the synthesize route was asked for",
-                                 mode=cast("Mode", synthesis_mode or "evidence"))  # an unknown name is refused there
+                                 # Any name given, the empty one too, is checked there; only no name is the default.
+                                 mode=cast("Mode", "evidence" if synthesis_mode is None else synthesis_mode))
     when = now or engine.clock()
     if route is not None:
         return await _by(engine, space, question, route, when, limit,

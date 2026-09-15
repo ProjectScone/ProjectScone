@@ -15,8 +15,8 @@ fixture, not an answer-quality benchmark.
 The [synthesis modes run](synthesis-modes-v1.results.md) writes from the same
 twelve passages on eight LongMemEval-S multi-session questions with `evidence`,
 `refine`, `accumulate` and LlamaIndex's TreeSummarize, one local 8B model writing
-and judging. No mode spoke more often than `evidence` (7 of 8); `accumulate` spent
-5.6 times the calls and spoke on 6.
+and judging. No mode spoke more often than `evidence` (7 of 8); `refine`'s second
+round changed no answer, and `accumulate` spent 5.6 times the calls and spoke on 6.
 
 ## Public QA experiments
 

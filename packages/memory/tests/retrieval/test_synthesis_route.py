@@ -122,6 +122,10 @@ async def test_a_mode_is_refused_when_unknown_or_without_the_synthesize_route():
     engine = await memory()
     with pytest.raises(InvalidInput, match="mode"):
         await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=CitingChat(), synthesis_mode="tree")
+    model = CitingChat()
+    with pytest.raises(InvalidInput, match="mode"):
+        await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=model, synthesis_mode="")
+    assert model.calls == 0, "an empty mode is refused like any unknown one, not read as the default"
     with pytest.raises(InvalidInput, match="synthesize route"):
         await answer_question(engine, SPACE, QUESTION, synthesis_mode="refine")
 
@@ -140,6 +144,9 @@ def test_over_http_the_mode_is_a_query_parameter():
         refused = client.get("/v1/answer", params={"q": QUESTION, "route": "synthesize", "synthesis_mode": "tree"},
                              headers=auth)
         assert refused.status_code == 422 and "mode" in refused.json()["error"]
+        empty = client.get("/v1/answer", params={"q": QUESTION, "route": "synthesize", "synthesis_mode": ""},
+                           headers=auth)
+        assert empty.status_code == 422 and "mode" in empty.json()["error"]
 
 
 async def test_the_command_line_passes_the_mode(monkeypatch):

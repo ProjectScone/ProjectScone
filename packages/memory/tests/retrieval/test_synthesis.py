@@ -195,6 +195,13 @@ async def test_a_failing_model_stops_the_rounds_and_says_so():
     assert len(model.calls) == 1
 
 
+async def test_a_failure_before_the_rounds_bound_is_not_reported_as_the_bound():
+    model = FakeChat([ChatError("down")])
+    result = await synthesize_passages(model, QUESTION, [P1, P2, P3], limits=SynthesisLimits(max_round_bytes=70, max_rounds=1))
+    assert result.passages_unread == 3 and result.truncated is False
+    assert result.reasons == ("model failed: ChatError",), "the model stopped the rounds, not the bound of one round"
+
+
 async def test_the_deadline_stops_the_rounds():
     model = SlowChat(0.5)
     result = await synthesize_passages(model, QUESTION, [P1, P2], limits=SynthesisLimits(max_round_bytes=70, timeout_s=0.2))
@@ -244,8 +251,9 @@ async def test_the_record_says_what_was_left_out_and_never_claims_accuracy():
     assert record["notes"] == {"kept": 1, "dropped_unquoted": 1, "dropped_unknown": 0, "dropped_malformed": 0}
     assert record["passages"] == {"given": 1, "read": 1, "unread": 0, "oversize": 0, "cited": 1}
     assert record["sentences"][0] == {"text": N1[0], "citations": [{"passage": "chunk:1", "quote": N1[2], "start": 6, "end": 31}]}
-    assert record["rounds"][0] == {"round": 1, "passages": 1, "bytes": len(P1.text.encode()), "notes_returned": 2,
-                                   "notes_kept": 1, "status": "noted"}
+    assert record["rounds"][0] == {"round": 1, "passages": 1, "bytes": len(P1.text.encode()), "answer_bytes": 0,
+                                   "notes_returned": 2, "notes_kept": 1, "status": "noted"}
+    assert record["refine_dropped_carried"] == 0
     assert record["model_calls"] == 1 and record["folded"] is False and record["truncated"] is False
 
 
