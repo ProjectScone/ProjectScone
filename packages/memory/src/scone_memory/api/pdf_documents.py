@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import asdict
 from importlib.util import find_spec
-from typing import AsyncContextManager
+from typing import AsyncContextManager, Literal
 
 from fastapi import Depends, FastAPI, Path, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -19,6 +19,7 @@ from ..memory.engine import MemoryEngine
 class _PdfBody(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid', hide_input_in_errors=True)
     attachment_id: str = Field(pattern=r'^[a-f0-9]{64}$')
+    chunking: Literal['length', 'code', 'structure', 'semantic', 'unit'] | None = None
 
 
 def pdf_available() -> bool:
@@ -47,7 +48,7 @@ def mount_pdf_document_routes(app: FastAPI, engine: MemoryEngine,
             attachment, raw = await engine.attachment(space, body.attachment_id)
             if attachment.media_type != 'application/pdf':
                 raise InvalidInput('PDF ingestion requires an application/pdf attachment')
-            saved = await ingest_pdf(engine, space, raw, filename=attachment.filename)
+            saved = await ingest_pdf(engine, space, raw, filename=attachment.filename, chunking=body.chunking)
         return JSONResponse(jsonable_encoder(asdict(saved)))
 
     @app.get('/v1/episodes/{episode_id}/pdf')

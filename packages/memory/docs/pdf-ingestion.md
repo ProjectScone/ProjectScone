@@ -112,6 +112,14 @@ per-document counts of pages cut, pages kept whole, and lines left out.
   coverage is `partial`. Its text is kept, never deleted; with OCR it is
   recognized instead. A few icon glyphs beside prose do not make a page
   unreadable, and whitespace is not counted either way.
+- A PDF's bookmarks give each page its section: the titles of the last
+  bookmark at each level that begins on or before the page, outermost first
+  (`page.section`, and `section: "Chapter 2 > Refunds"` on the page's segment
+  in a file import). The text is unchanged. At most 2,000 bookmarks and 8 levels
+  are read, each title cut to 256 characters; past those the outline is read to
+  its bound and `outline` says `capped`, one that cannot be read says
+  `unreadable`, and a PDF without bookmarks says nothing. A segment's section is
+  bounded to one metadata value by dropping its outermost titles (`… > `).
 - `pdf_coverage=text_layer` means every page yielded text. It does **not** certify
   that every visible word, figure or table was understood.
 - Encrypted PDFs, malformed files, absent parser dependencies and exceeded limits
