@@ -5,12 +5,12 @@ from dataclasses import dataclass
 import hashlib
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, ValidationError, model_serializer, model_validator
 
 from ..core.errors import InvalidInput
 from ..core.models import Added, Attachment
 from ..core.validation import check_space
-from .pdf import ParsedPdf, PdfLimits, PdfPage, PdfParser, PypdfParser, validate_pdf
+from .pdf import ParsedPdf, PdfEncryption, PdfLimits, PdfPage, PdfParser, PypdfParser, validate_pdf
 from .text_layer import unreadable
 
 if TYPE_CHECKING:
@@ -27,6 +27,15 @@ class PdfManifest(BaseModel):
     text_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     parser: str = Field(min_length=1, max_length=128)
     pages: tuple[PdfPage, ...] = Field(min_length=1, max_length=1000)
+    #: How an encrypted file was opened and what its owner restricted; absent for a file that was not encrypted.
+    encryption: PdfEncryption | None = None
+
+    @model_serializer(mode='wrap')
+    def omit_absent_encryption(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.encryption is None:
+            value.pop('encryption', None)
+        return value
 
     @model_validator(mode='after')
     def consistent_version(self) -> PdfManifest:
@@ -54,6 +63,8 @@ class PdfProvenance:
     parser: str
     pages: tuple[PdfPage, ...]
     empty_pages: tuple[int, ...]
+    #: How an encrypted file was opened and what its owner restricted; None for a file that was not encrypted.
+    encryption: PdfEncryption | None = None
 
 
 def _sha(data: bytes) -> str:
@@ -92,7 +103,7 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
     validate_pdf(parsed, limits)
     has_ocr = any(page.extraction == 'ocr' for page in parsed.pages)
     has_order = any(page.reading_order is not None for page in parsed.pages)
-    manifest = PdfManifest(schema_version=3 if has_order else 2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()),
+    manifest = PdfManifest(schema_version=3 if has_order else 2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()), encryption=parsed.encryption,
         parser=parsed.parser, pages=parsed.pages)
     encoded = manifest.model_dump_json(exclude=None if has_ocr or has_order else {
         'pages': {'__all__': {'extraction', 'region_geometry', 'regions', 'ocr_engine'}}}).encode()
@@ -165,4 +176,4 @@ async def pdf_provenance(memory: MemoryEngine, space: str, episode_id: int, *,
         raise InvalidInput('PDF span splits a UTF-8 character') from error
     selected = tuple(page for page in manifest.pages if page.start < stop and page.end > start and not page.empty)
     return PdfProvenance(original, retained, manifest.parser, selected,
-        tuple(page.number for page in manifest.pages if page.empty))
+        tuple(page.number for page in manifest.pages if page.empty), manifest.encryption)

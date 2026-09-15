@@ -102,7 +102,10 @@ class BuiltinDocumentParser:
                 for p in pdf.pages if not p.empty),
                 metadata={'empty_pages': ','.join(str(p.number) for p in pdf.pages if p.empty),
                           **({'unreadable_pages': ','.join(map(str, unreadable_pages))} if unreadable_pages else {}),
-                          **({'outline': pdf.outline} if pdf.outline != 'none' else {})})
+                          **({'outline': pdf.outline} if pdf.outline != 'none' else {}),
+                          **({'pdf_opened_with': pdf.encryption.opened_with, 'pdf_password_matched': pdf.encryption.matched,
+                              **({'pdf_restricted': ','.join(pdf.encryption.restricted)} if pdf.encryption.restricted else {})}
+                             if pdf.encryption else {})})
         else:
             raw = await run_bounded(python_worker('scone_memory.ingestion.formats.worker',
                 filename, limits.model_dump_json()), data, timeout=limits.timeout_seconds,
