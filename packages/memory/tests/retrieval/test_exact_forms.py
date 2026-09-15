@@ -11,6 +11,8 @@ holding only the exact word scores what the word alone would.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from scone_memory import InMemoryDocumentStore
@@ -103,7 +105,8 @@ async def test_sqlite_reads_each_family_once_and_scans_the_index_first(tmp_path)
     word, and the word), and joins the rest by key."""
     documents = SqliteDocumentStore(str(tmp_path / "plan.db"))
     try:
-        await put(documents, [EXACT, RELATIVE, "Travellers travelled.", "The traveller left.",
+        # Each query word is in one passage and each family in more, so every word moves.
+        await put(documents, [EXACT, RELATIVE, "Travellers travelled.", "The traveller left.", "Travelling north today.",
                               "We waited a while.", "Whilst they slept.", *NOISE])
         executed: list[str] = []
         documents.conn.set_trace_callback(executed.append)
@@ -128,6 +131,107 @@ async def test_sqlite_adds_nothing_for_a_family_whose_only_member_is_the_query_w
     try:
         await put(documents, [EXACT, *NOISE])
         await documents.search_text("s", "billing", 5, TextFilter())
-        assert exact_form_rank(documents.conn, "billing", ("bill",)) == ("", "bm25(chunk_lexical_fts)", "", [])
+        assert exact_form_rank(documents.conn, "billing", ("bill",)) == ("", "bm25(chunk_lexical_fts)", "", [], 0)
     finally:
         await documents.close()
+
+
+def test_the_credit_can_pass_the_idf_gap_but_not_the_saturated_part():
+    """The credit is the gap between the two idfs times BM25's count part,
+    and that part reaches k1 + 1 for a short passage: a one-word passage
+    gains more than the gap, and never more than 2.2 times it."""
+    from scone_memory.retrieval.lexical import Bm25
+
+    bm25 = Bm25()
+    bm25.add(0, "billing")
+    for number in range(1, 40):
+        bm25.add(number, "bills paid late again today for the harbour office staff members")
+    for number in range(40, 400):
+        bm25.add(number, f"noise words number {number} kettle garden ferry lisbon violin snow road")
+    plain = dict(bm25.search("billing", 5, prefixes=("bill",)))
+    preferred = dict(bm25.search("billing", 5, prefixes=("bill",), exact_forms=True))
+    idf = lambda df: math.log(1 + (400 - df + 0.5) / (df + 0.5))  # noqa: E731
+    gap = idf(1) - idf(40)
+    assert gap < preferred[0] - plain[0] <= (bm25.k1 + 1) * gap
+
+
+async def test_a_family_every_passage_of_which_holds_the_word_moves_nothing(store):
+    """Where no passage holds a relative without the word, the family is as
+    rare as the word, so its idf is the word's and nothing moves. A passage
+    holding "billing" and "bills" is one passage of the family, not two."""
+    family = await put(store, ["billing bills harbour", "billing bills office", "billing bills march", "kettle harbour",
+                               "garden shed roof kettle", "lisbon march mild kettle", "ferry pier seven",
+                               "snow mountain road", "violin lesson thursday", "kitchen upstairs", "green fields"])
+    plain = dict(await store.search_terms("s", "billing kettle", 10, TextFilter(), prefixes=("bill",)))
+    preferred = dict(await store.search_terms("s", "billing kettle", 10, TextFilter(), prefixes=("bill",), exact_forms=True))
+    assert preferred == pytest.approx(plain, rel=1e-12)
+    assert [chunk for chunk in sorted(plain, key=lambda chunk: -plain[chunk])][:3] == family[:3]
+
+
+def _words(count: int) -> list[str]:
+    """Distinct stems the rules keep whole: "bako" for "bakoing" and "bakos"."""
+    return [f"{first}{vowel}{last}o" for first in "bdfgkmnprtv" for vowel in "aeiu" for last in "kmnprt"][:count]
+
+
+async def test_sqlite_answers_a_query_with_more_words_than_a_join_can_hold_and_says_how_many_it_left(tmp_path):
+    """Each word moved reads two tables and SQLite joins at most 64: past
+    MAX_EXACT_FORMS words, the rest keep their family's weight and the
+    store says how many, rather than the lane failing."""
+    from scone_memory.backends.sqlite_lexical import MAX_EXACT_FORMS
+    from scone_memory.retrieval.stems import prefixes
+
+    documents = SqliteDocumentStore(str(tmp_path / "many.db"))
+    try:
+        words = _words(40)
+        await put(documents, [text for word in words for text in (f"notes about {word}ing today", f"{word}s were here")])
+        query = " ".join(f"{word}ing" for word in words)
+        found = await documents.search_terms("s", query, 5, TextFilter(), prefixes=prefixes(query.split()), exact_forms=True)
+        assert len(found) == 5
+        assert documents.exact_forms_cut("s") == 40 - MAX_EXACT_FORMS
+        await documents.search_terms("s", query, 5, TextFilter(), prefixes=prefixes(query.split()))
+        assert documents.exact_forms_cut("s") == 0, "a search without exact forms cuts nothing"
+        await documents.search_terms("s", query, 5, TextFilter(), prefixes=prefixes(query.split()), exact_forms=True)
+        assert await documents.search_text("s", "?!", 5, TextFilter()) == []
+        assert documents.exact_forms_cut("s") == 0, "nor does a search with no words, read after one that cut"
+    finally:
+        await documents.close()
+
+
+async def test_sqlite_joins_a_repeated_word_once_and_a_word_no_row_holds_not_at_all(tmp_path):
+    from scone_memory.backends.sqlite_lexical import exact_form_rank
+
+    documents = SqliteDocumentStore(str(tmp_path / "once.db"))
+    try:
+        await put(documents, ["billing notice", "bills one", "bills two", "kettle"])
+        await documents.search_text("s", "kettle", 5, TextFilter())
+        _, _, joins, _, _ = exact_form_rank(documents.conn, " ".join(["billing"] * 31), ("bill",))
+        assert joins.count("LEFT JOIN") == 2
+        assert exact_form_rank(documents.conn, "billings", ("bill",)) == ("", "bm25(chunk_lexical_fts)", "", [], 0)
+    finally:
+        await documents.close()
+
+
+async def test_past_the_bound_the_rarest_words_keep_the_credit_and_recall_says_the_rest_did_not(tmp_path, monkeypatch):
+    from scone_memory import InMemoryVectorIndex, HashEmbedder, MemoryEngine
+    from scone_memory.backends import sqlite_lexical
+
+    monkeypatch.setattr(sqlite_lexical, "MAX_EXACT_FORMS", 1)
+    documents = SqliteDocumentStore(str(tmp_path / "cap.db"))
+    engine = await MemoryEngine(documents, InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        # "billing" is in one passage and "travelling" in two: "billing" is the rarer word.
+        texts = [EXACT, RELATIVE, "Bills came again.", "Travelling north today.", "Travelling south later.",
+                 "They travelled far.", *NOISE]
+        for text in texts:
+            await engine.remember("s", text)
+        # The query names "travelling" first: the bound keeps the rarer word, not the first.
+        found = await engine.recall("s", "travelling billing", limit=5, lanes=("text",))
+        assert "text: 1 query word(s) past MAX_EXACT_FORMS kept their family's weight" in found.degraded
+        preferred = dict(await documents.search_terms("s", "travelling billing", 10, TextFilter(),
+                                                      prefixes=("travell", "bill"), exact_forms=True))
+        plain = dict(await documents.search_terms("s", "travelling billing", 10, TextFilter(), prefixes=("travell", "bill")))
+        ids = {text: chunk for chunk, text in documents.conn.execute("SELECT id, text FROM chunks")}
+        assert preferred[ids[EXACT]] > plain[ids[EXACT]], "the rarer word keeps its credit"
+        assert preferred[ids["Travelling north today."]] == pytest.approx(plain[ids["Travelling north today."]], rel=1e-12)
+    finally:
+        await engine.close()

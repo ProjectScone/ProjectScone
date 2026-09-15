@@ -51,7 +51,12 @@ def stem(token: str) -> Optional[str]:
 
 
 def prefixes(tokens: Iterable[str]) -> list[str]:
-    """The distinct stem prefixes of ``tokens``, in order, without the tokens themselves."""
+    """The distinct stem prefixes of ``tokens``, in order, without the tokens themselves.
+
+    A prefix that starts with another one is left to that broader one:
+    "states" gives ``stat`` and "statement" ``state``, every word ``state``
+    finds ``stat`` finds too, and with both "statement" would count in two
+    families."""
     seen: set[str] = set()
     out: list[str] = []
     for token in tokens:
@@ -59,4 +64,4 @@ def prefixes(tokens: Iterable[str]) -> list[str]:
         if found is not None and found != token and found not in seen:
             seen.add(found)
             out.append(found)
-    return out
+    return [prefix for prefix in out if not any(other != prefix and prefix.startswith(other) for other in out)]

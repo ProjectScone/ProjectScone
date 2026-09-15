@@ -2604,8 +2604,13 @@ not several). A language the rules do not know, a short word, a number,
 is left exactly as it was. The rules keep a stem of at least three
 letters after a strong suffix and four after a plural or a final "e", do
 not strip a plural after "s", "u" or "i", and reduce a doubled consonant
-except where English keeps it. Measured on LongMemEval-S before it was
-a flag; the numbers are on the pull request that added it.
+except where English keeps it. A prefix that starts with another one the
+query gives is left to the broader one: "states" gives `stat` and
+"statement" `state`, `stat*` finds every word `state*` does, and with
+both "statement" would count in two families. A family's document
+frequency is the passages holding any member, each once, in both stores.
+Measured on LongMemEval-S before it was a flag; the numbers are on the
+pull request that added it.
 
 A family counts once, so a passage holding "bills" earns as much from a
 question about "billing" as a passage holding "billing" itself.
@@ -2616,13 +2621,20 @@ the rarest such word it holds instead of the family's, which is never
 higher. A passage holding only "billing" then scores what "billing" alone
 would; one holding "billing" and "bills" scores their joint count at
 "billing"'s idf, not the word and then the family again; one holding only
-relatives scores as it did. The extra credit is bounded by the gap
-between the two idfs. Both stores that take prefixes apply it: the
+relatives scores as it did. The extra credit is the gap between the two
+idfs times BM25's count part, which reaches `k1 + 1`: at most 2.2 times
+the gap, and more than the gap for a short passage. Both stores that take prefixes apply it: the
 in-memory scorer directly, and SQLite by moving the family phrase's part
 of `bm25()` to the word's idf, computed as FTS5 computes it. That part is
 read only for rows holding the word (the `bm25()` of the family AND the
 word, less that of the word), two small index reads per query word a
-family holds. It does nothing without `SCONE_LEXICAL_STEMS`, and the
+family holds. A word no row holds, a repeated word and a word as common
+as its family read nothing. Each word read adds two tables to the join,
+and SQLite joins at most 64, so at most `MAX_EXACT_FORMS` (24) words move
+in one search, the rarest first; the rest keep their family's weight, and
+the result's `degraded` says how many
+(`text: N query word(s) past MAX_EXACT_FORMS kept their family's weight`).
+The in-memory scorer has no such bound. It does nothing without `SCONE_LEXICAL_STEMS`, and the
 result's `prefixes.exact_forms` says whether it was on; like the prefixes
 themselves, it takes effect only where `prefixes.applied` is true. On by default;
 `SCONE_LEXICAL_EXACT_FORMS=0` turns it off. Measured on LongMemEval-S at
@@ -2631,8 +2643,10 @@ today's defaults, against LlamaIndex's BM25 + vector retrieval
 
 | exact forms | frozen 50: R@5 / all@5 / R@15 / MRR | 100 other items: R@5 / all@5 / R@15 / MRR |
 |---|---|---|
-| off | 0.90 / 0.76 / 1.00 / 0.838 | 0.96 / 0.84 / 0.99 / 0.885 |
-| **on** | **0.90 / 0.76 / 1.00 / 0.844** | **0.97 / 0.87 / 0.99 / 0.904** |
+| off | 0.90 / 0.78 / 1.00 / 0.841 | 0.96 / 0.83 / 0.99 / 0.886 |
+| **on** | **0.90 / 0.78 / 1.00 / 0.844** | **0.97 / 0.86 / 0.99 / 0.904** |
+| SQLite off | 0.90 / 0.78 / 0.98 / 0.839 | 0.96 / 0.83 / 0.99 / 0.888 |
+| **SQLite on** | **0.90 / 0.78 / 1.00 / 0.844** | **0.97 / 0.86 / 0.99 / 0.903** |
 | LlamaIndex BM25 + vector | 0.88 / 0.74 / 0.98 / 0.831 | 0.91 / 0.71 / 0.99 / 0.810 |
 
 Both samples informed the design; a third, blind sample of 100 items
