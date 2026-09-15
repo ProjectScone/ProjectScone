@@ -115,6 +115,12 @@ def test_a_community_of_files_is_named_by_the_directory_they_share():
     assert all(" · src/pkg/" not in label and "src/pkg/a.py" not in label for label in by_label), \
         "the shared directory is not repeated on each member"
     assert any(label.startswith("src/pkg/ · ") and "a.py" in label for label in placed)
+    spread = [fact(1, "app/a.py", "imports", "app/b.py"), fact(2, "app/b.py", "imports", "app/c.py"), fact(3, "app/c.py", "imports", "app/a.py"),
+              fact(4, "app/a.py", "imports", "api/routes.py"), fact(5, "api/routes.py", "imports", "app/b.py"),
+              fact(6, "app/sub/d.py", "imports", "app/a.py")]
+    [community] = analyze_projection(project_entities("alpha", spread, revision=1)).communities
+    assert community.label.startswith("app/ · "), "a community that spans two packages is named by the one most of it sits in"
+    assert "app/a.py" not in community.label and "api/routes.py" in community.label or "routes.py" in community.label
 
 
 def test_communities_are_named_after_their_most_central_members():
