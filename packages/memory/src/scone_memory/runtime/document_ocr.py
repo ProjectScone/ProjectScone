@@ -20,7 +20,8 @@ def build_document_ocr(settings: Settings) -> DocumentOcr | None:
     if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
         raise ValueError('SCONE_DOCUMENT_OCR_EXECUTABLE must name an installed absolute executable')
     def engine_for(language: str) -> TesseractOcr:
-        return TesseractOcr(executable=str(path), language=language, page_segmentation=settings.document_ocr_psm)
+        return TesseractOcr(executable=str(path), language=language, page_segmentation=settings.document_ocr_psm,
+                            orientation=settings.document_ocr_orientation)
     try:
         engine = engine_for(settings.document_ocr_language)
         for language in settings.document_ocr_languages:
