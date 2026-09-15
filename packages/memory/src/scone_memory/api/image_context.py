@@ -19,6 +19,8 @@ class _ImageBody(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid', hide_input_in_errors=True)
     attachment_id: str = Field(pattern=r'^[a-f0-9]{64}$')
     context: ImageContext
+    #: Read by ``core.forget_after``, which refuses as ``POST /v1/episodes`` does.
+    forget_after: str | None = None
 
 
 def mount_image_context_routes(app: FastAPI, engine: MemoryEngine,
@@ -41,7 +43,7 @@ def mount_image_context_routes(app: FastAPI, engine: MemoryEngine,
                 raise InvalidInput('image context supports still PNG, JPEG and WebP images')
             media_type = cast(Literal['image/png', 'image/jpeg', 'image/webp'], attachment.media_type)
             saved = await ingest_image(engine, space, raw, media_type=media_type,
-                context=body.context, filename=attachment.filename)
+                context=body.context, filename=attachment.filename, forget_after=body.forget_after)
         return JSONResponse(jsonable_encoder(asdict(saved)))
 
     @app.get('/v1/images/search')
