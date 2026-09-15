@@ -16,13 +16,72 @@ weight alone before a fusion mode, a fusion mode before a chunk size),
 and among those the higher MRR averaged over the two samples. If no row
 does, nothing changes and this file is the record.
 
-**Status: not measured. No leg finished, so no default changed.** The
-runner and the shared vector cache are built, tested and proven (see
-below). The frozen n=50 leg at 700 characters was started twice and
-stopped at item 5 of 50, because it was projected to run past the
-3-hour limit set for a leg. The second sample and the 2,000-character
-and 512-token chunkings were not started. No R@5, all@5, R@15 or MRR
-with a real embedder exists yet for either side, and none is claimed.
+**Status: measured on both samples at 700 characters. No default
+changed.** Leg A (frozen n=50, seed 42) ran 12:07-13:11 and leg B (n=100,
+seed 7, held out from the frozen 50) ran 13:12-15:30, both exit 0, both
+with `--check`. The 2,000-character and 512-token chunkings were not
+run, and neither was any diversity row.
+
+**The engine at its defaults against the reference's two configurations**
+(R@5 / all@5 / R@10 / R@15 / MRR):
+
+| | frozen 50 | second 100 |
+|---|---|---|
+| Scone at its defaults (rank fusion, vector weight 1.0) | 0.92 / 0.84 / 0.98 / 1.00 / 0.8544 | 0.98 / 0.89 / 0.99 / 0.99 / 0.9231 |
+| LlamaIndex hybrid (BM25 + vector, RRF) | 0.92 / 0.84 / 0.94 / 0.98 / 0.8482 | 0.97 / 0.88 / 0.98 / 0.99 / 0.8904 |
+| LlamaIndex default (vector only) | 0.94 / 0.88 / 0.96 / 0.96 / 0.8558 | 0.94 / 0.84 / 0.97 / 1.00 / 0.8949 |
+
+**Read plainly.** Against the reference's *hybrid*, the engine's defaults
+are level on R@5 and all@5 on the frozen sample and ahead on R@10, R@15
+and MRR, and ahead on every measure on the second sample. Against the
+reference's *vector-only default*, the engine is **behind on the frozen
+sample** (R@5 0.92 against 0.94, all@5 0.84 against 0.88, MRR level at
+0.8544 against 0.8558) and ahead on the second (0.98 against 0.94, 0.89
+against 0.84, 0.9231 against 0.8949). Our own vector lane alone matches
+that 0.94 on the frozen sample, so the gap there is what fusion with the
+text lane costs on those 50 questions, not what the model can find.
+
+**No row met the rule, so nothing changed.** The rule asks for an R@5
+strictly higher than the reference's on both samples. No row clears both
+against the hybrid, and none clears the vector-only default on the
+frozen sample. Distribution fusion has by far the best frozen MRR and is
+level on the second, which does not move a default:
+
+| row (R@5 / all@5 / MRR) | frozen 50 | second 100 |
+|---|---|---|
+| rank 1.0 (default) | 0.92 / 0.84 / 0.8544 | 0.98 / 0.89 / 0.9231 |
+| rank 0.5 | 0.90 / 0.82 / 0.8527 | 0.97 / 0.88 / 0.9242 |
+| rank 0.25 | 0.90 / 0.80 / 0.8517 | 0.98 / 0.89 / 0.9273 |
+| score 1.0 | 0.94 / 0.86 / 0.8654 | 0.97 / 0.92 / 0.9312 |
+| score 0.5 | 0.90 / 0.80 / 0.8590 | 0.97 / 0.89 / 0.9325 |
+| score 0.25 | 0.90 / 0.80 / 0.8468 | 0.97 / 0.89 / 0.9185 |
+| distribution 1.0 | 0.92 / 0.86 / 0.8841 | 0.97 / 0.90 / 0.9250 |
+| distribution 0.5 | 0.90 / 0.82 / 0.8796 | 0.98 / 0.89 / 0.9169 |
+| distribution 0.25 | 0.90 / 0.80 / 0.8659 | 0.97 / 0.89 / 0.9175 |
+| text lane alone | 0.90 / 0.78 / 0.8444 | 0.97 / 0.86 / 0.9042 |
+| vector lane alone | 0.94 / 0.86 / 0.8495 | 0.97 / 0.86 / 0.9384 |
+
+**What the two samples say together.** Both lanes earn their place, and
+neither sample alone would have said so: on the frozen 50 the vector
+lane alone has the best R@5 (0.94) and the text lane the worst (0.90);
+on the second 100 the vector lane has the best MRR (0.9384) and fusion
+the best R@5 (0.98). A row that wins one sample by a wide margin
+(distribution: 0.8841 against the default's 0.8544) can be level on the
+other (0.9250 against 0.9231). That is why the rule asked for both.
+
+**Costs.** Leg A embedded 40,015 texts for us in 2,044 s and 11,658 for
+the reference in 1,646 s; leg B, 82,279 in 4,602 s and 22,137 in
+3,348 s. Each `compare()` check then embedded nothing, reading every
+text from the shared cache. We ask for about twice the reference's texts
+because a 700-character chunk is smaller than its 512-token node. Ten of
+our texts ran past the model's window in leg B (661 tokens lost in all)
+and one in leg A (514 tokens); none of the reference's did, because its
+splitter counts in the model's own tokens.
+
+**Still open.** The 2,000-character and 512-token chunkings, diversity
+rows, and any run with a larger embedding model. The frozen sample's
+fusion gap against a vector-only reference is the first thing to look
+at: it is 1 question on R@5 and 2 on all-sessions@5.
 
 ## Why it stopped, with the costs measured
 
