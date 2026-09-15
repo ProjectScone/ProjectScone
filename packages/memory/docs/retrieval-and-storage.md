@@ -1427,6 +1427,19 @@ MemoryEngine(store, index, embedder, semantic_merge_threshold=0.2)   # or SCONE_
   environment variable, so on a served process
   `SCONE_SEMANTIC_MERGE_THRESHOLD` reaches exactly the records that ask
   for a semantic cut.
+- **A record can name its own.** `remember(..., semantic_merge_threshold=0.5)`,
+  `scone remember --semantic-merge-threshold 0.5`, and
+  `"semantic_merge_threshold": 0.5` on `POST /v1/episodes` and in each
+  batch record (a JSON number: `true` and `"0.5"` are refused). It implies
+  `chunking="semantic"`, is refused beside any other chunking, and wins
+  over the engine's threshold for that record. It is kept on the episode's
+  metadata under `semantic_merge_threshold` (text, and one of the 16 keys
+  an episode may carry), so a recovery re-cuts under it and an archive
+  import that carries only the metadata is honoured; a value there that
+  is not a similarity, or that disagrees with the field, is refused. What
+  a record cannot do is turn off a threshold the engine has: no value
+  means "no second pass". To mix the two, leave the engine's unset and let
+  the records that want the pass ask for it.
 - **The rule.** The chunks are walked in order. A chunk is joined to the
   one before it when the cosine between the two sides' mean sentence
   vectors is at least the threshold **and** the joined span fits the
@@ -1437,19 +1450,31 @@ MemoryEngine(store, index, embedder, semantic_merge_threshold=0.2)   # or SCONE_
 - **It only undoes cuts.** The first pass packs sentences up to the
   target, so a chunk it ended by size can never fit with the whole of the
   next one; the only joins possible are across a valley. A merge never
-  makes a chunk the first pass could not have made for its length.
+  makes a chunk the first pass could not have made for its length. The
+  one size cut packing cannot rule out is inside a sentence longer than
+  the target, whose first piece can be short, and that is ruled out
+  directly: a boundary beside or inside such a sentence is never reopened
+  and never compared. The sentence's vector describes text that lies in
+  its other pieces, so comparing it would judge a join on text that is
+  not in the chunk, and the join would put part of one sentence with
+  another, which the first pass never does.
 - **No second embedding call, and the same answer every time.** The
   sentence vectors the first pass already has are compared. The
-  reference embeds every joined text again.
+  reference embeds every joined text again. A text of one sentence is not
+  embedded at all, with a threshold or without: all its boundaries are
+  the bound's.
 - **The receipt says what the pass did.** `structure` carries
-  `merge_threshold`, `groups` (the chunks the first pass made), `merges`,
-  and every join that did not happen, counted once:
-  `stopped_by_similarity` when the two were less alike than the threshold,
-  `stopped_by_size` when they were alike enough and too long together --
-  the size bound biting. Two chunks that fail both count as unalike. A
-  chunk the first pass ended by size can never fit the next one, so its
-  own size cuts between alike chunks are counted here too. A semantic cut without a
-  threshold has no such receipt (`structure` is null), as before.
+  `merge_threshold`, `groups` (the chunks the first pass made, exactly
+  the chunks it stores without a threshold), `merges`, and every join
+  that did not happen, counted once, so `merges + stopped_by_similarity +
+  stopped_by_size = groups - 1`: `stopped_by_similarity` when the two were
+  less alike than the threshold, `stopped_by_size` when they were alike
+  enough and too long together -- the size bound biting. Two chunks that
+  fail both count as unalike. A chunk the first pass ended by size can
+  never fit the next one, so its own size cuts between alike chunks are
+  counted here too, and every boundary beside or inside a sentence longer
+  than the target is counted here without being compared. A semantic cut
+  without a threshold has no such receipt (`structure` is null), as before.
 - **A similarity above 0 and at most 1.** At or below 0 any two chunks
   that fit and are not opposed would be joined, which is size chunking
   under a semantic name; above 1 nothing would, while the receipt says the pass ran. A
@@ -1459,20 +1484,23 @@ MemoryEngine(store, index, embedder, semantic_merge_threshold=0.2)   # or SCONE_
   derived from each text's depths and assumes no scale; this one does,
   which is why it is off by default. Hashed-token cosines are word
   overlap. Over the sample below (51,250 first-pass chunks in 2,355
-  sessions; `benchmarks/semantic_double_merge.py --pairs`), the 7,060
-  neighbouring pairs that would fit together had a median cosine of 0.04,
-  a 90th percentile of 0.31 and a 95th of 0.39 under `hash-256`: 1,527 of
-  them at or above 0.2, 330 at or above 0.4; a neural model's cosines sit far higher, and a
+  sessions; `benchmarks/semantic_double_merge.py --pairs`), the 6,790
+  neighbouring pairs of whole-sentence chunks that would fit together had
+  a median cosine of 0.04, a 90th percentile of 0.30 and a 95th of 0.38
+  under `hash-256`: 1,386 of them at or above 0.2, 276 at or above 0.4
+  (2,190 more boundaries touch a sentence longer than the target and are
+  never compared); a neural model's cosines sit far higher, and a
   threshold chosen for one embedder means nothing for another.
 - **Stored chunks are never recut, and a replacement is prepared under
   it.** The threshold is part of the configuration a keyed replacement is
   prepared under, so one cut before the setting changed is refused rather
   than stored. Recovery after a crash re-cuts the stored content under the
   engine's threshold, which lands on exactly the chunks the uninterrupted
-  write stores under the same setting. The threshold is not written on
-  the episode: an engine restarted with another value recovers an
-  interrupted record under the new one, as it does with `chunk_target`
-  and `chunk_tokens`.
+  write stores under the same setting. The engine's threshold is not
+  written on the episode: an engine restarted with another value recovers
+  an interrupted record under the new one, as it does with `chunk_target`
+  and `chunk_tokens`. A record's own threshold is written, and recovery
+  uses it.
 - **Not the reference's first pass, and no merging across a chunk.** The
   reference groups sentences by absolute thresholds against the chunk so
   far and can reach one or two chunks past a dissimilar neighbour to join
@@ -1494,14 +1522,14 @@ sessions. Both sides are deterministic, so one run is the number.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | length, 700 characters (default) | 0.90 | 0.76 | 0.92 | 1.00 | 0.838 | 0.807 | 46,637 | | |
 | semantic | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.824 | 51,248 | | |
-| semantic, merge at 0.4 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.824 | 50,942 | 306 | 38,974 / 9,614 |
-| semantic, merge at 0.2 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.825 | 49,865 | 1,383 | 20,734 / 26,777 |
+| semantic, merge at 0.4 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.824 | 50,996 | 252 | 38,122 / 10,520 |
+| semantic, merge at 0.2 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.825 | 49,997 | 1,251 | 20,336 / 27,307 |
 | *reference: BM25 + vector fusion* | 0.88 | 0.74 | 0.90 | 0.98 | 0.831 | 0.784 | | | |
 
 What it says: on this sample the second pass changes almost nothing a
-metric can see. At 0.2 it removes 1,383 chunks (2.7%) and changes the
-top-15 session ranking of 34 items and the top 5 of 8, and no score moves
-but NDCG@5 by 0.001 (0.8236 to 0.8246); at 0.4 it removes 306 (0.6%), changing 7 and 2. The
+metric can see. At 0.2 it removes 1,251 chunks (2.4%) and changes the
+top-15 session ranking of 32 items and the top 5 of 7, and no score moves
+but NDCG@5 by 0.001 (0.8236 to 0.8246); at 0.4 it removes 252 (0.5%), changing 6 and 2. The
 semantic cut itself scores as the length cut does at k=5 and 10, higher
 on MRR (0.857 vs 0.838), lower at k=15 (0.96 vs 1.00). What it does not
 say: 50 items is one or two items a column; hashed-token vectors carry

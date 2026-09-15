@@ -83,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
     p.add_argument("--chunking-profile", choices=tuple(CHUNKING_PROFILES),
                    help="cut at this genre's boundaries (implies --chunking structure)")
+    p.add_argument("--semantic-merge-threshold", type=float,
+                   help="join this record's semantic chunks again when at least this alike (implies --chunking semantic)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
     p = sub.add_parser("import-chat", help="a WhatsApp, Telegram, Discord or Slack export, one conversation memory per message")
@@ -1853,8 +1855,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "remember":
         if args.image is not None and args.jsonl:
             raise InvalidInput("--image cannot be combined with --jsonl; select a single source note")
-        if args.jsonl and (args.chunking or args.chunking_profile):
-            raise InvalidInput("--chunking and --chunking-profile are not applied to --jsonl; set them per record")
+        if args.jsonl and (args.chunking or args.chunking_profile or args.semantic_merge_threshold is not None):
+            raise InvalidInput("--chunking, --chunking-profile and --semantic-merge-threshold are not applied to --jsonl; "
+                               "set them per record")
         raw = read_source(args.file, stdin)
         attachment = None
         if args.jsonl:
@@ -1881,6 +1884,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     attachment_ids=[attachment.attachment_id] if attachment else [],
                     dedup_key=args.dedup_key, replace=args.replace, chunking=args.chunking,
                     chunking_profile=args.chunking_profile,
+                    semantic_merge_threshold=args.semantic_merge_threshold,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)

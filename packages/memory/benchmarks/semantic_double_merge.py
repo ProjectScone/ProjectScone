@@ -18,7 +18,9 @@ similarity and the size target each stopped.
 
 ``--pairs`` instead reads the scale a threshold has to be chosen on: the
 first pass's neighbouring chunks that would fit the target together, and
-the cosine between their mean sentence vectors, as percentiles.
+the cosine between their mean sentence vectors, as percentiles. A boundary
+beside or inside a sentence longer than the target is the bound's and is
+never compared; those are counted apart.
 
 Run from packages/memory:
 
@@ -82,12 +84,14 @@ async def row(items: list[BenchItem], name: str, options: dict[str, Any], log: A
 
 
 async def pairs(items: list[BenchItem], target: int = DEFAULT_TARGET) -> dict[str, Any]:
-    """Cosines between neighbouring first-pass chunks, split by whether the
-    two would fit ``target`` together -- only those can ever be merged."""
+    """Cosines between neighbouring first-pass chunks of whole sentences,
+    split by whether the two would fit ``target`` together -- only those
+    can ever be merged. Boundaries touching a piece of a sentence cut by
+    size are counted, not compared."""
     embedder = HashEmbedder()
     fitting: list[float] = []
     too_long: list[float] = []
-    sessions = groups = 0
+    sessions = groups = by_size = 0
     for item in items:
         for session in item.sessions:
             text = "\n".join(session)
@@ -100,7 +104,10 @@ async def pairs(items: list[BenchItem], target: int = DEFAULT_TARGET) -> dict[st
                                             semantic_chunks.SENSITIVITY)
             made = semantic_chunks._assemble(text, sentences, cuts, target)
             groups += len(made)
-            for (left, first, last), (right, start, end) in zip(made, made[1:]):
+            for (left, first, last, left_piece), (right, start, end, right_piece) in zip(made, made[1:]):
+                if left_piece or right_piece:
+                    by_size += 1
+                    continue
                 similar = semantic_chunks._cosine(semantic_chunks._centre(vectors[first:last + 1]),
                                                   semantic_chunks._centre(vectors[start:end + 1]))
                 (fitting if right.end - left.start <= target else too_long).append(similar)
@@ -110,6 +117,7 @@ async def pairs(items: list[BenchItem], target: int = DEFAULT_TARGET) -> dict[st
         return {str(p): round(ordered[int(p / 100 * (len(ordered) - 1))], 3) for p in (10, 25, 50, 75, 90, 95)}
 
     return {"sessions": sessions, "groups": groups, "fitting_pairs": len(fitting), "too_long_pairs": len(too_long),
+            "piece_boundaries": by_size,
             "fitting_cosine_percentiles": percentiles(fitting), "too_long_cosine_percentiles": percentiles(too_long),
             "fitting_at_or_above": {str(t): sum(value >= t for value in fitting) for t in (0.1, 0.2, 0.3, 0.4, 0.5)}}
 

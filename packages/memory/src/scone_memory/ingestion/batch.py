@@ -17,7 +17,7 @@ from ..core.models import Added, MAX_CONTENT_BYTES
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, MAX_METADATA_KEYS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
-from .semantic_chunks import semantic_cut
+from .semantic_chunks import held_threshold, merge_refused, semantic_cut
 from .structure_chunks import structured_spans
 from .chunking_profiles import profile_named, profiled_spans
 from .embedding_cache import EmbeddingCache, cache_key
@@ -207,6 +207,13 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
                                f"not chunking={mode!r}")
         mode = "structure"
         clean_meta["chunking_profile"] = profile
+    threshold = _record_threshold(record.semantic_merge_threshold, clean_meta.get("semantic_merge_threshold"))
+    if threshold is not None:
+        if mode not in (None, "semantic"):
+            raise InvalidInput(f"semantic_merge_threshold joins the chunks of chunking=semantic, "
+                               f"not chunking={mode!r}")
+        mode = "semantic"
+        clean_meta["semantic_merge_threshold"] = repr(threshold)
     if mode is not None:
         # Whether the mode exists and fits the source is `cut_for`'s to say,
         # and it says so before anything is stored.
@@ -214,8 +221,8 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
     if len(clean_meta) > MAX_METADATA_KEYS:
         # Counted after both are added, or the episode is stored with more
         # keys than its own export may carry back in.
-        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys, counting chunking and "
-                           f"chunking_profile, which are stored on the episode when a record names them")
+        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys, counting chunking, chunking_profile "
+                           f"and semantic_merge_threshold, which are stored on the episode when a record names them")
     try:
         for value in (record.source or '', *clean_tags, *clean_meta.values()):
             value.encode('utf-8')
@@ -228,6 +235,21 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
     return NewEpisode(space=space, kind=kind, content=content, content_hash=digest,
                       created_at=happened, ingested_at=when, source=record.source,
                       tags=clean_tags, metadata=clean_meta)
+
+
+def _record_threshold(given: object, kept: str | None) -> float | None:
+    """A record's merge threshold, from its field or from the metadata an
+    archive carries it in; refused when either is not a similarity or the
+    two disagree."""
+    held = None if kept is None else held_threshold(kept)
+    if given is None:
+        return held
+    reason = merge_refused(given)
+    if reason is not None:
+        raise InvalidInput(reason)
+    if held is not None and held != given:
+        raise InvalidInput(f"metadata says semantic_merge_threshold={kept!r} but the record asks for {given!r}")
+    return cast(float, given)
 
 
 async def _validated_record(runtime: IngestionRuntime, space: str, record: Record, when: str) -> NewEpisode:
@@ -319,7 +341,8 @@ def context_lines(content: str, source: str | None, spans: Sequence[tuple[int, i
 
 async def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
     cut = await cut_for(runtime, new.content, new.source, new.metadata.get("chunking"),
-                        new.metadata.get("chunking_profile"), episode=new)
+                        new.metadata.get("chunking_profile"), episode=new,
+                        merge_threshold=new.metadata.get("semantic_merge_threshold"))
     byte_offsets = [(sp.start, sp.end) for sp in byte_spans(new.content, cut.spans)]
     receipt: dict[str, object] | None = None
     if runtime.heading_context:
@@ -452,7 +475,7 @@ class Cut:
 
 async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
                   chunking: str | None = None, profile: str | None = None, *,
-                  episode: NewEpisode | None = None) -> Cut:
+                  episode: NewEpisode | None = None, merge_threshold: str | None = None) -> Cut:
     """Where to cut, and which way it was: at declarations when the source
     is code and the name it was stored under says which language, at the
     document's own headings and clauses when asked, where its subject
@@ -498,8 +521,9 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
         by_unit = unit_spans(content, named, runtime.chunk_target)
         return Cut(list(by_unit.spans), "unit", {key: value for key, value in by_unit.record().items() if key != "chunks"})
     if mode == "semantic":
-        meant = await semantic_cut(content, runtime.embedder, runtime.chunk_target,
-                                   merge_threshold=runtime.semantic_merge_threshold)
+        # The record's own threshold, as its metadata keeps it, wins over the engine's.
+        threshold = runtime.semantic_merge_threshold if merge_threshold is None else held_threshold(merge_threshold)
+        meant = await semantic_cut(content, runtime.embedder, runtime.chunk_target, merge_threshold=threshold)
         return Cut(list(meant.spans), "semantic", meant.record())
     if runtime.chunk_tokens is not None:
         from .embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION
@@ -514,9 +538,10 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
 
 async def spans_for(runtime: IngestionRuntime, content: str, source: str | None,
                     chunking: str | None = None, profile: str | None = None, *,
-                    episode: NewEpisode | None = None) -> list[Span]:
+                    episode: NewEpisode | None = None, merge_threshold: str | None = None) -> list[Span]:
     """The spans of ``cut_for``, for callers that need only where."""
-    return (await cut_for(runtime, content, source, chunking, profile, episode=episode)).spans
+    return (await cut_for(runtime, content, source, chunking, profile, episode=episode,
+                          merge_threshold=merge_threshold)).spans
 
 
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record], *,
@@ -682,7 +707,8 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
             )
             if not chunks:
                 spans = await spans_for(runtime, episode.content, episode.source, episode.metadata.get("chunking"),
-                                        episode.metadata.get("chunking_profile"), episode=as_new)
+                                        episode.metadata.get("chunking_profile"), episode=as_new,
+                                        merge_threshold=episode.metadata.get("semantic_merge_threshold"))
                 chunks = await runtime.documents.insert_chunks(
                     [
                         NewChunk(
