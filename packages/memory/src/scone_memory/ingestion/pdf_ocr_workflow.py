@@ -14,9 +14,9 @@ from ..core.errors import InvalidInput, NotFound
 from ..core.models import Added, Attachment
 from ..core.validation import check_space
 from ..ocr.types import OcrEngine, OcrResult
-from .documents import PdfIngested, ingest_pdf, pdf_provenance
+from .documents import PdfIngested, ingest_pdf, pdf_provenance, unreadable_pages
 from .pdf import ParsedPdf, PdfLimits
-from .pdf_ocr import OcrPdfOptions, OcrPdfParser, assemble_ocr_pdf
+from .pdf_ocr import OcrPdfOptions, OcrPdfParser, assemble_ocr_pdf, needs_recognition
 
 if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
@@ -195,9 +195,10 @@ class PdfOcrWorkflow:
             parsed = await self._parser.inspect(raw, self._limits)
             recognized: dict[int, OcrResult] = {}
             reused: list[int] = []
-            text_bytes = len(parsed.text.encode())
+            encoded = parsed.text.encode()
+            text_bytes = len(encoded)
             for page in parsed.pages:
-                if not page.empty and self._parser.options.mode != 'all_pages':
+                if not needs_recognition(encoded, page, self._parser.options):
                     continue
                 receipt = await self._pages.run(_run_key(run_id, f'page:{page.number}'), space=space,
                     scope=self._scope, inputs={'original': attachment_id, 'page': page.number})
@@ -216,7 +217,7 @@ class PdfOcrWorkflow:
             added = Added.model_validate(saved['added'])
             manifest, _ = await self._memory.attachment(space, cast(str, saved['manifest']))
             return PdfOcrIngested(added, original, manifest, tuple(p.number for p in complete.pages if p.empty),
-                                  tuple(reused), bool(receipt.reused_steps))
+                                  unreadable_pages(complete), tuple(reused), bool(receipt.reused_steps))
         except (FileNotFoundError, NotFound):
             raise WorkflowError('sources_invalid') from None
         except (OSError, sqlite3.OperationalError):

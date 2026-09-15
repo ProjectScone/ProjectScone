@@ -16,11 +16,12 @@ merely share a label. Weights are the number of facts behind each pair.
 
 from __future__ import annotations
 
-import math
 from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 import hashlib
-from typing import Literal
+import math
+import os
+from typing import Literal, Sequence
 
 from .project import Entity, EntityProjection
 
@@ -112,6 +113,10 @@ class AnalysisCoverage:
     #: of the partition and the central ranking, attached to the community
     #: of what names them most, and listed apart.
     external_entities: int = 0
+    #: The degree percentile above which the graph's own entities were held
+    #: out of the partition as hubs, and how many were.
+    exclude_hubs: float | None = None
+    hubs_held_apart: int = 0
     #: Communities over a quarter of the graph split on their own links.
     split_oversized: int = 0
     #: Large communities holding communities of their own, split on their own links.
@@ -137,6 +142,7 @@ class AnalysisCoverage:
                 "reasons": list(self.reasons), "betweenness": self.betweenness,
                 "betweenness_estimated": self.betweenness != "exact", "levels": self.levels,
                 "resolution": self.resolution, "external_entities": self.external_entities,
+                "exclude_hubs": self.exclude_hubs, "hubs_held_apart": self.hubs_held_apart,
                 "split_oversized": self.split_oversized,
                 "split_nested": self.split_nested, "unsplittable": self.unsplittable,
                 "detach_hubs": self.detach_hubs, "hubs_detached": self.hubs_detached,
@@ -155,11 +161,14 @@ class GraphAnalysis:
     version: str = ANALYSIS_VERSION
     #: The entities named but never read, by id.
     external: frozenset[str] = frozenset()
+    #: The graph's own entities held out of the partition as hubs, by id.
+    hubs: frozenset[str] = frozenset()
 
 
 #: A relation whose object can be something the graph only names: a module
 #: imported, a package depended on, a document cited, a type used.
-NAMED_ONLY = frozenset(("imports", "depends_on", "develops_with", "cites", "uses_type", "references"))
+NAMED_ONLY = frozenset(("imports", "imports_when_called", "imports_for_types", "depends_on", "develops_with", "cites",
+                        "uses_type", "references", "runs_with", "requires_env", "connects_to"))
 
 
 def external_entities(projection: EntityProjection) -> frozenset[str]:
@@ -307,7 +316,7 @@ def _guarded(graph: Adjacency, parts: list[list[str]], resolution: float) -> tup
     return sorted(guarded, key=lambda part: (-len(part), part[0])), fired
 
 
-def _rejoined(graph: Adjacency, parts: list[list[str]], hubs: set[str]) -> list[list[str]]:
+def _rejoined(graph: Adjacency, parts: list[list[str]], hubs: frozenset[str]) -> list[list[str]]:
     """``parts`` with each hub, in name order, added to the part most of its link weight goes to."""
     joined = [list(part) for part in parts]
     for hub in sorted(hubs):
@@ -409,30 +418,83 @@ _ANALYSES: OrderedDict[tuple[str, float, float | None], GraphAnalysis] = Ordered
 
 
 def cached_analysis(projection: EntityProjection, resolution: float = 1.0,
-                    detach_hubs: float | None = None) -> GraphAnalysis:
-    """The projection's analysis, computed once per digest, resolution and hub percentile."""
-    key = (projection.digest, float(resolution), detach_hubs)
+                    exclude_hubs: float | None = None, detach_hubs: float | None = None) -> GraphAnalysis:
+    """The projection's analysis, computed once per digest, resolution and
+    hub percentiles."""
+    key = (projection.digest, float(resolution), None if exclude_hubs is None else float(exclude_hubs),
+           None if detach_hubs is None else float(detach_hubs))
     if key in _ANALYSES:
         _ANALYSES.move_to_end(key)
         return _ANALYSES[key]
-    found = _ANALYSES[key] = analyze_projection(projection, resolution=resolution, detach_hubs=detach_hubs)
+    found = _ANALYSES[key] = analyze_projection(projection, resolution=resolution, exclude_hubs=exclude_hubs,
+                                                detach_hubs=detach_hubs)
     while len(_ANALYSES) > _KEPT:
         _ANALYSES.popitem(last=False)
     return found
 
 
+def _hubs_above(graph: Adjacency, external: frozenset[str], percentile: float | None) -> frozenset[str]:
+    """The graph's own entities with more neighbours than the given
+    percentile of them (nearest rank), or none when no percentile is set."""
+    if percentile is None:
+        return frozenset()
+    own = [node for node in graph if node not in external]
+    if not own:
+        return frozenset()
+    degrees = sorted(len(graph[node]) for node in own)
+    cut = degrees[max(0, math.ceil(len(degrees) * percentile / 100) - 1)]
+    return frozenset(node for node in own if len(graph[node]) > cut)
+
+
+def _place(labels: Sequence[str]) -> str | None:
+    """The directory a community of files is named by: the deepest one
+    that holds at least half of its paths, when at least two members are
+    paths and most members are. A community of files is what its
+    directory is called, not the three file names that happen to lead it;
+    and a community that spans two packages is named by the one most of
+    it sits in, since a shared root would name nothing."""
+    paths = [label.split(":", 1)[0] for label in labels if "/" in label.split(":", 1)[0]]
+    if len(paths) < 2 or len(paths) * 2 < len(labels):
+        return None
+    holding: Counter[str] = Counter()
+    for path in paths:
+        parts = path.split("/")[:-1]
+        for depth in range(1, len(parts) + 1):
+            holding["/".join(parts[:depth])] += 1
+    enough = max(2, -(-len(paths) // 2))
+    deep = [place for place, count in holding.items() if count >= enough]
+    return max(deep, key=lambda place: (place.count("/"), -holding[place], place)) if deep else None
+
+
+def _label(names: Sequence[str], members: Sequence[str]) -> str:
+    """A community's name: the directory its files share, then its most
+    central members with that directory left off; or the members alone."""
+    place = _place(members)
+    if place is None:
+        return " · ".join(names)
+    return " · ".join([place + "/", *(name[len(place) + 1:] if name.startswith(place + "/") else name for name in names)])
+
+
 def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_000,
                        max_surprises: int = 20, max_suggestions: int = 10, resolution: float = 1.0,
-                       detach_hubs: float | None = None) -> GraphAnalysis:
+                       exclude_hubs: float | None = None, detach_hubs: float | None = None) -> GraphAnalysis:
     """``resolution`` sets how fine the communities are: above 1 favours
     smaller ones, below 1 larger ones, as in modularity with a resolution.
+    ``exclude_hubs`` (a degree percentile, 50 to 100) holds the graph's own
+    entities with more neighbours than that out of the partition, as
+    externals are held: a base class every file inherits, or a person every
+    note mentions, would otherwise glue every community into one.
 
     ``detach_hubs``, a degree percentile from 50 to 100, leaves the entities
-    linked to more neighbours than that out while communities are found, so
-    an entity everything touches does not pull unrelated groups into one;
-    each then joins the community most of its link weight goes to."""
+    linked to more neighbours than that out only while communities are
+    found, so an entity everything touches does not pull unrelated groups
+    into one; each then joins the community most of its link weight goes
+    to, as a full member. Detached hubs are picked among what is left once
+    externals and held-apart hubs are out."""
     if not resolution > 0:
         raise ValueError("resolution must be positive")
+    if exclude_hubs is not None and not 50 <= exclude_hubs <= 100:
+        raise ValueError("exclude_hubs must be a percentile from 50 to 100")
     if detach_hubs is not None and (not isinstance(detach_hubs, (int, float)) or not 50 <= detach_hubs <= 100):
         raise ValueError("detach_hubs is a degree percentile from 50 to 100")
     entities = {entity.entity_id: entity for entity in projection.entities}
@@ -461,24 +523,26 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
     # `typing`, imported by every file, would otherwise be the strongest
     # tie between any two communities and the most central thing in each.
     external = external_entities(projection) & kept
-    own: Adjacency = {node: {other: weight for other, weight in graph[node].items() if other not in external}
-                      for node in graph if node not in external}
-    # Hubs are the graph's own entities with the most links to each other:
-    # an external is already out of the partition, and what a file imports
-    # from outside pulls no two of its communities together.
-    hubs: set[str] = set()
-    if detach_hubs is not None and own:
-        degrees = sorted(len(neighbours) for neighbours in own.values())
-        cut = degrees[max(0, math.ceil(len(degrees) * detach_hubs / 100) - 1)]  # nearest-rank percentile
-        hubs = {node for node, neighbours in own.items() if len(neighbours) > cut}
-    without = {node: {other: weight for other, weight in neighbours.items() if other not in hubs}
-               for node, neighbours in own.items() if node not in hubs}
+    # A hub is held apart the same way when asked: out of the partition,
+    # the naming, the surprises and the counts between communities, and
+    # attached afterwards to the community it links most.
+    hubs = _hubs_above(graph, external, exclude_hubs)
+    apart = external | hubs
+    own: Adjacency = {node: {other: weight for other, weight in graph[node].items() if other not in apart}
+                      for node in graph if node not in apart}
+    # Detached hubs are the graph's own entities with the most links to each
+    # other, among what is left once externals and held-apart hubs are out:
+    # they leave only while communities are found, and rejoin as members.
+    detached = _hubs_above(own, frozenset(), detach_hubs)
+    without = {node: {other: weight for other, weight in neighbours.items() if other not in detached}
+               for node, neighbours in own.items() if node not in detached}
     parts, levels = _partition(without, resolution)
     found = parts
     parts, fired = _guarded(without, parts, resolution)
-    parts = _rejoined(own, parts, hubs)
-    # Measured like the final modularity, over the graph's own entities with the hubs rejoined, so the two compare.
-    before = (_modularity(own, {node: str(index) for index, part in enumerate(_rejoined(own, found, hubs))
+    parts = _rejoined(own, parts, detached)
+    # Measured like the final modularity, over the graph's own entities with the detached hubs rejoined,
+    # so the two compare.
+    before = (_modularity(own, {node: str(index) for index, part in enumerate(_rejoined(own, found, detached))
                                 for node in part}, resolution)
               if fired["split_oversized"] or fired["split_nested"] else None)
     parts = sorted((sorted(part) for part in parts), key=lambda part: (-len(part), part[0]))
@@ -489,10 +553,10 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
     # linkless node did before.
     attached: dict[str, list[str]] = defaultdict(list)
     alone: list[list[str]] = []
-    for node in sorted(external):
+    for node in sorted(apart):
         naming: Counter[str] = Counter()
         for other, weight in graph[node].items():
-            if other in membership and other not in external:
+            if other in membership and other not in apart:
                 naming[membership[other]] += weight
         if naming:
             membership[node] = min(naming, key=lambda community: (-naming[community], community))
@@ -514,18 +578,19 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         # Links are counted among the graph's own members: an attached
         # external is not a tie the partition made, and `typing` imported
         # from two communities is not a link between them.
-        members = [node for node in part if node not in external] or list(part)
+        members = [node for node in part if node not in apart] or list(part)
         inside = set(members)
         internal = sum(1 for node in members for neighbour in graph[node] if neighbour in inside) // 2
         boundary = sum(1 for node in members for neighbour in graph[node]
-                       if neighbour not in inside and neighbour not in external)
+                       if neighbour not in inside and neighbour not in apart)
         local = {node: sum(weight for neighbour, weight in graph[node].items() if neighbour in inside) for node in part}
         # Named by the graph's own members: a community is not called `typing`.
         top = sorted(members, key=lambda node: (-local[node], -rank.get(node, 0.0), node))[:3]
         kinds: Counter[str] = Counter(str(entities[node].kind) for node in part if entities[node].kind)
         predicates = sum((predicates_by_node[node] for node in part), Counter())
         communities.append(Community(
-            membership[part[0]], " · ".join(entities[node].label for node in top), tuple(part), tuple(top),
+            membership[part[0]], _label([entities[node].label for node in top], [entities[node].label for node in members]),
+            tuple(part), tuple(top),
             internal, boundary,
             _round(2 * internal / (len(members) * (len(members) - 1))) if len(members) > 1 else None,
             tuple(sorted(kinds.items(), key=lambda item: (-item[1], item[0]))),
@@ -537,18 +602,18 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         for neighbour, weight in graph[node].items():
             # What an entity imports from outside the graph spreads it
             # across nothing: only ties to the graph's own count.
-            if neighbour not in external:
+            if neighbour not in apart:
                 spread[membership[neighbour]] += weight
         total = sum(spread.values())
         participation = (1 - sum((value / total) ** 2 for value in spread.values())
-                         if total and node not in external else 0.0)
+                         if total and node not in apart else 0.0)
         importance.append(Importance(node, membership[node], len(graph[node]), strength[node], rank[node],
                                      between[node], _round(participation), node in external))
     importance.sort(key=lambda item: (-item.pagerank, item.entity_id))
 
     between_communities: Counter[tuple[str, str]] = Counter()
     for (left, right) in pairs:
-        if left in external or right in external:
+        if left in apart or right in apart:
             continue
         if left in kept and right in kept and membership[left] != membership[right]:
             ends = sorted((membership[left], membership[right]))
@@ -559,9 +624,9 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         subject, obj = relation.subject_id, relation.object_id
         if subject not in kept or obj not in kept or membership[subject] == membership[obj]:
             continue
-        if obj in external:
+        if obj in apart or subject in apart:
             # Everything imports `typing`; that a second community does too
-            # is no surprise.
+            # is no surprise, and neither is a link to a hub held apart.
             continue
         ends = sorted((membership[subject], membership[obj]))
         links = between_communities[(ends[0], ends[1])]
@@ -577,7 +642,7 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         suggestions.append(Suggestion(
             "connection", f"How is {entities[surprise.subject_id].label} connected to {entities[surprise.object_id].label}?",
             (surprise.subject_id, surprise.object_id), (surprise.relation_id,), surprise.fact_ids))
-    for item in sorted((item for item in importance if not item.external),
+    for item in sorted((item for item in importance if item.entity_id not in apart),
                        key=lambda item: (-item.participation, -item.degree, item.entity_id))[:3]:
         if item.participation < 0.3 or item.degree < 2:
             continue
@@ -585,7 +650,7 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         crossing = [relation for relation in projection.relations
                     if item.entity_id in (relation.subject_id, relation.object_id)
                     and relation.subject_id in kept and relation.object_id in kept
-                    and relation.object_id not in external
+                    and relation.object_id not in apart
                     and membership[relation.subject_id] != membership[relation.object_id]]
         suggestions.append(Suggestion(
             "bridge", f"What role does {entities[item.entity_id].label} play between "
@@ -609,5 +674,7 @@ def analyze_projection(projection: EntityProjection, *, max_entities: int = 20_0
         tuple(communities), tuple(importance), surprising,
         tuple(suggestions[:max_suggestions]),
         AnalysisCoverage(len(strength), len(kept), len(isolated), bool(reasons), tuple(reasons), method, levels,
-                         resolution, len(external), fired["split_oversized"], fired["split_nested"],
-                         fired["unsplittable"], detach_hubs, len(hubs), before), external=frozenset(external))
+                         resolution, len(external), exclude_hubs=exclude_hubs, hubs_held_apart=len(hubs),
+                         split_oversized=fired["split_oversized"], split_nested=fired["split_nested"],
+                         unsplittable=fired["unsplittable"], detach_hubs=detach_hubs, hubs_detached=len(detached),
+                         modularity_before_guards=before), external=frozenset(external), hubs=hubs)
