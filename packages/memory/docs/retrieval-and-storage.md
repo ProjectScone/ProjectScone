@@ -229,7 +229,10 @@ scone recall "when was the crane survey booked" --lessons
 
 A person can mark a returned passage useful or not (`POST /v1/feedback`),
 and that judgement is kept as an event. `lessons` reads those events back.
-For each passage, the latest judgement of each recall counts. Each one
+For each passage, the latest judgement of each question counts: asking the
+same words again and judging again replaces a judgement rather than
+corroborating it, as the ranking prior below counts them (a judgement
+recorded before questions were counts per recall). Each one
 weighs 1, positive when useful and negative when not, and the weight halves
 every `half_life_days`. Each passage gets a state:
 
@@ -263,9 +266,10 @@ SCONE_FEEDBACK_WEIGHT=0.0001 scone recall "what is the throttling threshold on t
 `SCONE_FEEDBACK_WEIGHT` (`MemoryEngine(feedback_weight=…)`, default 0) adds
 a term to each fused candidate's score, the way recency is added, from the
 judgements of the last 90 days. Zero reads no feedback and leaves recall as
-it was. Needs an event log. The judgements are weighed as lessons weigh them
-(+1 useful, −1 not, halving every 30 days), but per question rather than per
-recall: `feedback` records a hash of the question its recall asked (the
+it was. It reads the event log, so it is refused with `SCONE_EVENTS=none`.
+The judgements are weighed as lessons weigh them (+1 useful, −1 not, halving
+every 30 days), and counted per question as lessons count them: `feedback`
+records a hash of the question its recall asked (the
 same for the same words whether `record_queries` kept them in the clear or
 not), and asking the same question again and judging again replaces the
 judgement.
@@ -309,12 +313,20 @@ judged useful rises for every question it is a candidate for, including
 one it was never judged for. On the replay in
 [`benchmarks/feedback-replay-v1.results.md`](../benchmarks/feedback-replay-v1.results.md),
 0.0001 lifted paraphrases of judged questions (MRR@10 0.7188 to 0.7743) and
-left unrelated questions where they were (0.8692), with two judgements per
-subject and with six, from six questions. It sits near an edge: a term of
-0.0002, which two judgements made the moment before a question reach at
-this weight, cost one unrelated question of 36 on one half. 0.0002 already
-cost unrelated questions 0.09, mostly questions about a sibling subject worded
-like a judged one (another rate tier, another clinic). The weight is a
+left unrelated questions where they were (0.8692) only while every passage
+was stored at the same instant. Then recency ties them all, and the term
+only has to settle exact ties. Stored an hour apart, recency's few
+millionths decide which near-ties the term crosses: one unrelated question
+of 36 fell on one half (0.8773 to 0.8634). Stored a day apart, newest
+first, four fell (0.7963 to 0.7523). No weight measured both lifted judged
+questions and kept every layout's unrelated questions within 0.01: 0.00005
+cost half b 0.0185 a day apart, and 0.00004 and below lifted judged
+questions in one layout at most. 0.0002
+cost unrelated questions 0.09 even at one instant, mostly questions about a
+sibling subject worded like a judged one (another rate tier, another
+clinic). A question-unaware term crosses whichever near-ties a store's
+creation times leave, so it trades unrelated questions for judged ones at
+any weight that moves anything. The weight is a
 near-tie breaker, and its scale is rank fusion's: `fusion="score"` and
 `"distribution"` have scores a hundred times larger, and the replay did not
 measure them. Setting the weight costs every recall a read of up to 5,000

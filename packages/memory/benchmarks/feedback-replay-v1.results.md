@@ -37,8 +37,12 @@ judged ones should gain, and questions nobody judged should stay within 0.01.
   questions of the other half (both ways of asking plus the paraphrase).
 - Engine: in-memory document store, vector index and event log,
   `HashEmbedder`, defaults otherwise (rank fusion, both lanes). No model.
+- Storage: every table up to [Passages stored apart](#passages-stored-apart)
+  stores all 48 passages at the same instant, so recency adds the same to
+  every candidate. That section stores them an hour or a day apart instead.
 - Reproduce: `scone_memory.bench.feedback_replay.measure(path, judge=...,
-  judgements=...)` and `report(...)`.
+  judgements=..., stored_hours_apart=..., newest_first=...)` and
+  `report(...)`.
   [`tests/benchmarks/test_feedback_replay.py`](../tests/benchmarks/test_feedback_replay.py)
   holds the chosen weight's result on every change.
 
@@ -89,7 +93,9 @@ At 0.0001, four paraphrases rose and none fell, under either judge. Those
 four were cafe-tier and northgate-hours when half a was judged, and
 team-tier and riverside-hours when half b was. All four belong to sibling
 pairs: the prior helped exactly where the near miss and the answer were
-tied. The unrelated delta is 0.0000 on both halves.
+tied. The unrelated delta is 0.0000 on both halves. That holds only
+because the passages share a creation instant; see
+[Passages stored apart](#passages-stored-apart).
 
 At 0.0002, 15 unrelated questions fell under either judge (kind: 5 rose;
 strict: 8 rose). They were all three questions of team-tier and cafe-tier,
@@ -106,7 +112,11 @@ that, the columns measure the bound, not the weight.
 gives exactly the off ranks on both halves under both judges: 0 rose, 0
 fell. The strict judge recorded no judgement against on those first
 askings (12 events per half, all useful), so this control tests only that
-one useful judgement moves nothing.
+one useful judgement moves nothing. It does not separate much: with
+corroboration removed (a useful judgement counting from the first), the
+single judgements still give exactly the off ranks at 0.0001 on both halves.
+Only the 0.0005 column moves then, so the test keeps that column. The rule
+itself is proven at unit level in `tests/retrieval/test_feedback_prior.py`.
 
 **Judgements recorded.** Kind: 24 per half. Strict: 26 (half a) and 28
 (half b).
@@ -149,6 +159,69 @@ half b under the kind judge: unrelated 0.8773 to 0.8634. Two judgements made
 just before a question weigh 2 now too, so at 0.0001 a fresh pair reaches
 that term.
 
+## Passages stored apart
+
+A real store's passages were written at different times. Stored at one
+instant, they all get the same recency, and the prior only has to settle
+exact rank-fusion ties. Stored apart, recency's small differences break
+those ties first, and they decide which near-ties the term crosses. At
+0.0001 at one instant, ledger-backup's first question still ranked its
+answer above the judged inventory backup passage (normalised score 1.0
+against 0.999796). Stored an hour apart, the inventory passage is the newer
+one and passes it (1.0 against 0.999855).
+
+The same replay with the passages stored an hour or a day apart, the
+file's last passage the newest (`oldest first`) or its first
+(`newest first`). Kind judge, two judgements per subject, MRR@10:
+
+| Stored | Half judged | judged off | 0.00005 | **0.0001** | unrelated off | 0.00005 | **0.0001** |
+|---|---|---:|---:|---:|---:|---:|---:|
+| one instant | a | 0.7153 | 0.7153 | **0.7708** | 0.8611 | 0.8611 | **0.8611** |
+| one instant | b | 0.7222 | 0.7222 | **0.7778** | 0.8773 | 0.8773 | **0.8773** |
+| 1 h, oldest first | a | 0.7153 | 0.7153 | **0.7569** | 0.8611 | 0.8611 | **0.8611** |
+| 1 h, oldest first | b | 0.7222 | 0.7222 | **0.7778** | 0.8773 | 0.8773 | **0.8634** |
+| 1 h, newest first | a | 0.7153 | 0.7153 | **0.7708** | 0.8611 | 0.8611 | **0.8611** |
+| 1 h, newest first | b | 0.7222 | 0.7222 | **0.7639** | 0.8773 | 0.8773 | **0.8773** |
+| 24 h, oldest first | a | 0.5972 | 0.6389 | **0.6806** | 0.7917 | 0.7894 | **0.7894** |
+| 24 h, oldest first | b | 0.5833 | 0.5833 | **0.6528** | 0.7963 | 0.7778 | **0.7778** |
+| 24 h, newest first | a | 0.7083 | 0.7500 | **0.7500** | 0.7963 | 0.7963 | **0.7523** |
+| 24 h, newest first | b | 0.7222 | 0.7639 | **0.7639** | 0.8472 | 0.8472 | **0.8472** |
+
+At 0.0001 the unrelated questions that fell were ledger-backup's first
+question (1 h, oldest first, half b); team-tier's paraphrase (24 h, oldest
+first, half a) with northgate-hours' paraphrase and ledger-backup's first
+question (the same layout, half b); and all three team-tier questions and
+globex-quota's second (24 h, newest first, half a). The same three
+fell at 0.00005 a day apart, oldest first. The strict judge gives the same
+unrelated columns except 24 h, newest first: tomatoes-watering's first
+question falls on half a in place of globex-quota's, and half b's unrelated
+MRR rises to 0.8611 at both weights. Its judged columns are equal or higher.
+
+Pooled over both halves at 0.0001, judged paraphrases gained in every
+layout (0.7188 to 0.7674 an hour apart either way, 0.5903 to 0.6667 and
+0.7153 to 0.7569 a day apart). Unrelated questions lost 0.0069 an hour
+apart oldest first, 0.0104 a day apart oldest first and 0.0220 a day apart
+newest first.
+
+The rule that chose 0.0001, re-applied to every layout: take the largest
+weight whose unrelated MRR stays within 0.01 of off on half a. It picks
+0.00005, since 0.0001 costs half a 0.044 a day apart newest first. Half b
+then fails the check a day apart oldest first (0.7963 to 0.7778), where
+0.00005 lifts none of b's judged paraphrases. Weights 0.00002, 0.00003 and
+0.00004 stayed within 0.01 in every layout under both judges (at worst
+0.0046, one question). 0.00003 and 0.00004 lifted one judged paraphrase per
+half, and only a day apart, newest first; 0.00002 lifted one only there,
+on half b under the strict judge. Each of the three cost one unrelated
+question per half a day apart, oldest first.
+
+So no weight measured passes. A term that does not know the question
+crosses whichever near-ties a store's creation times leave, and any weight
+large enough to lift a judged question can cost an unrelated one. The
+weight stays off by default. 0.0001 is the weight chosen at one instant,
+not one shown safe.
+[`tests/benchmarks/test_feedback_replay.py`](../tests/benchmarks/test_feedback_replay.py)
+holds the 1 h (both judges) and 24 h numbers quoted here.
+
 ## Cost
 
 With the weight set, every recall reads up to 5,000 judgements from the
@@ -178,6 +251,9 @@ another process counts on the next recall. The trade is that cost.
   two questions, or one question spelled two ways, and lift it for every
   question it is a candidate for. The hold caps what repeating that buys
   at two judgements' worth, and it does not stop the first two.
+- Passages stored apart were measured an hour and a day apart in file
+  order and its reverse. A real store's creation times are neither, and
+  its near-ties fall where they fall.
 - The corpus is small and authored. The sibling pairs are the case that
   breaks a prior that does not know the question, and there are eight of
   them against eight standalone subjects. A real corpus's share of alike

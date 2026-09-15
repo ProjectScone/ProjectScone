@@ -220,6 +220,20 @@ def test_the_feedback_weight_comes_from_the_environment_is_off_by_default_and_re
             Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": value})
 
 
+def test_a_feedback_weight_with_no_event_log_is_refused(tmp_path):
+    """The prior reads judgements from the event log: with none, the setting would move nothing and say so nowhere."""
+    import pytest
+
+    from scone_memory.core.errors import InvalidInput
+
+    base = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
+    with pytest.raises(InvalidInput, match="SCONE_FEEDBACK_WEIGHT.*SCONE_EVENTS=none"):
+        Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.0001", "SCONE_EVENTS": "none"})
+    assert Settings.from_env(base | {"SCONE_EVENTS": "none"}).events == "none", "off, it needs no log"
+    assert Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.0001", "SCONE_EVENTS": "memory"}).feedback_weight == 0.0001
+    assert Settings.from_env(base | {"SCONE_FEEDBACK_WEIGHT": "0.0001"}).events is None, "the default log is read"
+
+
 async def test_a_synonym_file_is_read_at_build_time_and_reaches_every_engine(tmp_path):
     from scone_memory import HashEmbedder
     from scone_memory.runtime.config import FILE_SETTINGS, build_in_process_engine, build_synonyms

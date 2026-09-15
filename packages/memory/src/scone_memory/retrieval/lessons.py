@@ -2,7 +2,9 @@
 
 A person marks a returned passage useful or not, and the event is kept.
 Here those events are read back: per passage, the latest judgement of each
-recall counts, each judgement weighs 1 and halves every ``half_life_days``
+question counts (asking the same words again and judging again replaces a
+judgement, as the ranking prior counts it; one recorded before questions
+were counts per recall), each judgement weighs 1 and halves every ``half_life_days``
 (positive when useful, negative when not), and the passage gets a state:
 
 - ``preferred``: at least ``min_corroboration`` useful judgements and none against;
@@ -79,16 +81,21 @@ def _check(half_life_days: float, min_corroboration: int) -> None:
 
 
 def judgements_by_passage(events: Iterable[Event], moment: datetime) -> dict[int, list[Event]]:
-    """Per judged passage, the latest judgement of each recall made up to ``moment``, oldest first."""
+    """Per judged passage, the latest judgement of each question made up to ``moment``, oldest first.
+
+    A question is what ``feedback`` recorded of its recall's query, so two recalls of the same words are
+    one; a judgement recorded before questions were is told apart by its recall instead."""
     # Each timestamp is parsed once: a ranking prior folds up to MAX_FEEDBACK_EVENTS of these per recall.
-    latest: dict[tuple[int, int], tuple[datetime, int, Event]] = {}
+    latest: dict[tuple[object, int], tuple[datetime, int, Event]] = {}
     for event in events:
         if event.kind != "feedback":
             continue
         at = parse_rfc3339(event.ts)
         if at > moment:
             continue
-        key = (int(event.payload["recall_event_id"]), int(event.payload["chunk_id"]))  # type: ignore[call-overload]
+        asked = event.payload.get("question")
+        which = str(asked) if asked is not None else int(event.payload["recall_event_id"])  # type: ignore[call-overload]
+        key = (which, int(event.payload["chunk_id"]))  # type: ignore[call-overload]
         held = latest.get(key)
         if held is None or (at, event.event_id) > held[:2]:
             latest[key] = (at, event.event_id, event)
