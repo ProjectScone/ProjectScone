@@ -179,6 +179,9 @@ def test_the_import_url_command_takes_a_schedule(server, capsys):
                     stdin=io.StringIO(""), out=out)
     assert code == 0 and "is to be forgotten after 2099-01-01T00:00:00.000Z" in out.getvalue(), out.getvalue()
     out = io.StringIO()
+    code = cli.main(["import-url", server + "/notes.md"], env=env, stdin=io.StringIO(""), out=out)
+    assert code == 0 and "imported" in out.getvalue() and "forgotten" not in out.getvalue(), out.getvalue()
+    out = io.StringIO()
     code = cli.main(["import-url", server + "/page.html", "--forget-after", "2020-01-01"], env=env,
                     stdin=io.StringIO(""), out=out)
     assert code == 2 and "forget_after" in capsys.readouterr().err
