@@ -903,6 +903,10 @@ def test_a_module_tree_places_a_declaration_by_its_relation_first_and_by_its_nam
     assert [child["name"] for child in x["children"][0]["children"]] == ["open"], "a nested name is shortened to what it adds"
     assert tree["children"][1]["children"][0]["children"][0]["name"] == "App", "placed under its file by name when no relation is drawn"
     assert folded == 0 and module_tree([("p", "a person")], []) == (None, 0)
+    library, _ = module_tree([("f", "top.py"), ("r", "README.md"), ("a", "asyncio.run"), ("m", "ast.Module"), ("j", "json.dumps"),
+                              ("d", "pkg/deep.py")], [])
+    assert [item["name"] for item in library["children"]] == ["pkg/", "README.md", "top.py"], \
+        "a dotted library name is not a file; a bare name is one when a reader knows its suffix"
 
 
 def test_a_module_tree_keeps_every_declaration_reachable_and_bounds_its_depth():
