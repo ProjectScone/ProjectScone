@@ -37,12 +37,19 @@ entry becomes a proposal only when:
    - the quote is present (`missing_quote`), at most 2000 characters
      (`quote_too_long`) and verbatim in the chunk (`quote_not_in_source`)
      — these three are the report's `unquoted`, and `quoted_share` is the
-     share of whole triples that had none of them;
+     share of whole triples that had none of them. A quote whose words
+     stand in the chunk with other runs of whitespace between them is
+     first replaced by the chunk's own span (`settle_quote`) and counted
+     in `quotes_settled`: a model copying a hard-wrapped line joins it
+     with a space, and the stored quote must be a substring of the
+     episode. Case, punctuation and every other character must match;
    - `statement_type` is `observation` (`not_an_observation`);
    - both ends are named in the quote (`subject_not_in_quote`,
      `object_not_in_quote`);
-   - the quote's clause is not negated, conditional, planned or an
-     instruction (`context_not_asserted`);
+   - the quote's clause holds none of the negating, conditional and
+     hedging words the distiller refuses (`not`, `if`, `unless`, `may`,
+     `should`, `plans` and others; `when` and `can` are not among them),
+     and is not an instruction or a question (`context_not_asserted`);
    - the predicate's words, less glue words, are the quote's
      (`predicate_not_in_quote`). A suggested predicate is therefore used
      only where the quote supports its words: the pass does not map
