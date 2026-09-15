@@ -675,7 +675,14 @@ past `max_redirects` (5) is refused, and the fetch has a deadline; a media
 type the document lane does not read is refused, not guessed at. Only
 `http` and `https` are fetched, and a URL carrying credentials is not
 sent. `scone import-url --json` prints the record: episode, URLs, media
-type, bytes, redirects, format and segment count.
+type, bytes, redirects, format, segment count and `forget_after`.
+
+`--forget-after 30d` (`"forget_after"` in the body, `forget_after=` in code)
+schedules the page's memory to be forgotten; a past or unreadable schedule is
+refused before anything is fetched. `POST /v1/documents`, `ingest_document` and
+`store_document` take it too, refused before the file is parsed or its manifest
+stored; a parse that outlasts it still stores the instant resolved then, due at
+once ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
 
 ## Durable extraction checkpoints
 

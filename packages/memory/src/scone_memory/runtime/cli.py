@@ -190,6 +190,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-files", type=int, default=1000)
     p.add_argument("--max-total-bytes", type=int, default=256_000_000)
     p.add_argument("--extension", action="append", help="restrict to a dotted suffix; repeat for several")
+    p.add_argument("--forget-after", help="forget every source this run writes at this time: RFC 3339, YYYY-MM-DD, "
+                                          "or a duration such as 30d, resolved once for the run; an unchanged "
+                                          "source keeps the schedule it holds")
 
     p = sub.add_parser("jobs", help="recent ingest batches and how far each has got")
     p.add_argument("--limit", type=int, default=20)
@@ -320,6 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import-url", help="fetch a page by URL and read it as the document its media type says it is "
                                           "(needs SCONE_URL_IMPORT=1; private hosts need SCONE_URL_IMPORT_PRIVATE=1)")
     p.add_argument("url", help="an http or https URL")
+    p.add_argument("--forget-after", help="forget the page's memory at this time: RFC 3339, YYYY-MM-DD, or a duration "
+                                          "such as 30d; a page already held keeps the schedule it has")
     from .document_markdown import add_document_markdown_parser
     add_document_markdown_parser(sub)
 
@@ -534,6 +539,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-bytes", type=int, default=1_000_000, help="bytes read from one file")
     p.add_argument("--no-ignore", action="store_true",
                    help="read the tree whole; by default what its .gitignore and .sconeignore files exclude is left unread")
+    p.add_argument("--forget-after", help="forget every file this sync writes at this time: RFC 3339, YYYY-MM-DD, "
+                                          "or a duration such as 30d, resolved once for the run; an unchanged "
+                                          "file keeps the schedule it holds")
 
     p = sub.add_parser("map", help="remember every source file under a directory as it is now -- a changed file "
                                     "updates its memory -- and optionally what each says")
@@ -901,7 +909,8 @@ async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> i
     chosen = {"suffixes": tuple(args.suffix)} if args.suffix else {}
     done = await sync_directory(engine, args.space, args.directory, marker=args.marker,
                                 apply=args.apply, remove=args.remove, limit=args.limit,
-                                max_bytes=args.max_bytes, ignore=not args.no_ignore, repo=args.repo, **chosen)
+                                max_bytes=args.max_bytes, ignore=not args.no_ignore, repo=args.repo,
+                                forget_after=args.forget_after, **chosen)
     if args.json:
         print(json.dumps(done.record()), file=out)
         return 0
@@ -1860,12 +1869,16 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
 
         if settings is None or not settings.url_import:
             raise InvalidInput("URL import is off; start with SCONE_URL_IMPORT=1 to fetch pages")
-        imported = await ingest_url(engine, space, args.url, limits=WebLimits(allow_private=settings.url_import_private))
+        imported = await ingest_url(engine, space, args.url, limits=WebLimits(allow_private=settings.url_import_private),
+                                    forget_after=args.forget_after)
         if args.json:
             emit(imported.record())
         else:
+            page = imported.document.added
             print(f"imported {imported.url} as {imported.document.format} ({imported.bytes} bytes, "
-                  f"{imported.document.segments} segment(s)) into episode {imported.document.added.episode_id}", file=out)
+                  f"{imported.document.segments} segment(s)) into episode {page.episode_id}", file=out)
+            if page.forget_after is not None:
+                print(f"  episode {page.episode_id} is to be forgotten after {page.forget_after}", file=out)
         return 0
     if args.command == "summarize":
         from .config import build_chat

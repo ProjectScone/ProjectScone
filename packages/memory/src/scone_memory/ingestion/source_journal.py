@@ -33,6 +33,11 @@ class SourceRevision(BaseModel):
     parser_revision: str = Field(min_length=1, max_length=128)
     generation: int = Field(default=0, ge=0, lt=2**63)
     episode_id: int | None = Field(default=None, gt=0)
+    #: When the revision is to be forgotten: the schedule of the run that
+    #: prepared it, which whichever run finishes it stores. It is how a
+    #: later run tells a revision whose time came from one forgotten by
+    #: hand, after the sweep has left only a tombstone.
+    forget_after: str | None = Field(default=None, max_length=64)
 
 
 class SourceEntry(BaseModel):

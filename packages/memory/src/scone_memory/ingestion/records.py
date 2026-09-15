@@ -6,6 +6,7 @@ import hashlib
 from typing import Literal, Mapping, Optional, Sequence
 
 from ..core.errors import InvalidInput
+from ..core.forget_after import Resolved
 from ..core.ports import NewEpisode
 
 
@@ -49,7 +50,9 @@ class Record:
     #: When this memory is to be forgotten: an RFC 3339 time, a date, or a
     #: duration from the engine's clock (``core.forget_after``). Kept, as the
     #: resolved instant, on the episode's metadata under ``forget_after``.
-    forget_after: Optional[str] = None
+    #: ``Resolved`` is an instant an ingestion path already checked, stored
+    #: even when it has passed since.
+    forget_after: Optional[str | Resolved] = None
 
     @classmethod
     def from_dict(cls, data: Mapping) -> "Record":

@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 import pathlib
 from typing import TYPE_CHECKING, Optional, Sequence
 
+from ..core import forget_after as schedule
 from ..core.errors import InvalidInput, SconeError
 from .code import BRACE_SUFFIXES, PYTHON_SUFFIXES
 from .code_tree import TREE_SUFFIXES
@@ -163,6 +164,13 @@ class SyncReceipt:
     #: more than one read returns, or a store that cannot read claims by
     #: episode -- and may still stand.
     claims_unread: bool = False
+    #: The instant every file this sync added or updated is to be forgotten,
+    #: resolved once from what the caller asked; None when it asked for none.
+    forget_after: Optional[str] = None
+    #: Unchanged files -- not written, so they keep the schedule their memory
+    #: holds -- whose memory holds another schedule than ``forget_after``, or
+    #: one when this sync asked for none.
+    schedule_kept: int = 0
 
     @property
     def capped(self) -> bool:
@@ -185,7 +193,9 @@ class SyncReceipt:
                 # Only when there is something to say, so a sync without the
                 # code graph reads exactly as it did.
                 **({"claims_closed": self.claims_closed} if self.claims_closed else {}),
-                **({"claims_unread": True} if self.claims_unread else {})}
+                **({"claims_unread": True} if self.claims_unread else {}),
+                **({"forget_after": self.forget_after} if self.forget_after is not None else {}),
+                **({"schedule_kept": self.schedule_kept} if self.schedule_kept else {})}
 
     def text(self) -> str:
         did = "synced" if self.applied else "would sync"
@@ -193,6 +203,11 @@ class SyncReceipt:
                  + (" (capped)" if self.capped else "")
                  + f"; {self.added} added, {self.updated} updated, {self.unchanged} unchanged"
                  + (f"; {self.embeddings_reused} chunk embedding(s) reused" if self.embeddings_reused else "")]
+        if self.forget_after is not None:
+            lines.append(f"every file {'written' if self.applied else 'it would write'} is to be forgotten after "
+                         f"{self.forget_after}")
+        if self.schedule_kept:
+            lines.append(f"{self.schedule_kept} unchanged file(s) keep the schedule their memory holds")
         if self.ignored or self.ignored_directories:
             lines.append(f"{self.ignored} file(s) and {self.ignored_directories} directory(ies) left unread by "
                          f"{', '.join(self.ignore_files) or 'the ignore rules'}; pass --no-ignore to read them")
@@ -244,6 +259,7 @@ class _Tally:
     unchanged: int = 0
     empty: int = 0
     cut: int = 0
+    schedule_kept: int = 0
     #: Chunks of added and updated files whose vector the embedding cache
     #: answered: what this run did not pay the embedder for.
     embeddings_reused: int = 0
@@ -405,12 +421,21 @@ async def sync_directory(
     max_bytes: int = MAX_BYTES,
     ignore: bool = True,
     repo: Optional[str] = None,
+    forget_after: str | schedule.Resolved | None = None,
 ) -> SyncReceipt:
     """Bring ``space`` into step with ``root``, or say what that would do.
     ``ignore`` reads the tree's `.gitignore` and `.sconeignore` files and
     leaves what they exclude unread; off, the tree is read whole. ``repo``
     names the repository: every file is held as `repo/path`, so several
-    repositories synced into one space keep their files apart."""
+    repositories synced into one space keep their files apart.
+
+    ``forget_after`` schedules every file this sync writes to be forgotten,
+    as ``remember``'s does. It is resolved once, before the walk, so a
+    duration names one instant for the whole run, a walk that outlasts it
+    still writes that instant (the files written after it are due at once),
+    and a refused one refuses the run before anything is read. An unchanged file is not written and
+    keeps the schedule its memory holds; ``schedule_kept`` counts those whose
+    schedule is not this one."""
     from .repositories import repository_prefix
 
     try:
@@ -429,6 +454,7 @@ async def sync_directory(
     name = marker if marker is not None else default_marker(where)
     if not name.strip():
         raise InvalidInput("a marker cannot be blank: it is what names this directory's memories")
+    when = schedule.asked(forget_after, engine.clock())
 
     rules = Ignore.load(where) if ignore else None
     reading, there, unreadable, links, special, skipped, pruned = _files(where, suffixes, limit, rules)
@@ -468,6 +494,7 @@ async def sync_directory(
         held = known.get(here)
         if held is not None and held.content == text:
             tally.unchanged += 1
+            tally.schedule_kept += held.metadata.get(schedule.KEY) != schedule.instant(when)
             tally.saw(here, "unchanged")
             continue
         what = "updated" if held is not None else "added"
@@ -481,7 +508,7 @@ async def sync_directory(
             # since both halves are text a caller chose.
             done = await engine.replace(space, Record(content=text, kind="file", source=here,
                                                       dedup_key=_key(name, here),
-                                                      metadata={"sync": name}), resolve=resolve)
+                                                      metadata={"sync": name}, forget_after=when), resolve=resolve)
             tally.claims(done.claims_closed, done.claims_unread)
             tally.embeddings_reused += done.added.embeddings_reused
         setattr(tally, what, getattr(tally, what) + 1)
@@ -533,7 +560,8 @@ async def sync_directory(
         special=special,
         empty=tally.empty, cut=tally.cut, changes=tuple(tally.changes),
         listed_all=tally.listed_all, checked_for_missing=whole,
-        claims_closed=tally.claims_closed, claims_unread=tally.claims_unread)
+        claims_closed=tally.claims_closed, claims_unread=tally.claims_unread,
+        forget_after=schedule.instant(when), schedule_kept=tally.schedule_kept)
     if apply:
         # Only a sync that wrote can be a last success; a plan succeeded
         # at nothing and must not look like a completed sync.

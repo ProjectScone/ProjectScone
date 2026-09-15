@@ -120,7 +120,7 @@ The authenticated HTTP interface exposes:
 | Method | Route | Behavior |
 | --- | --- | --- |
 | GET | `/v1/sync-collections` | Configured collection catalog in `items` |
-| POST | `/v1/sync-runs` | Admit `{run_id, collection_id, delete_missing?}` |
+| POST | `/v1/sync-runs` | Admit `{run_id, collection_id, delete_missing?, forget_after?}`; the schedule is resolved at admission and kept on the run ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)) |
 | GET | `/v1/sync-runs` | Status history with `limit` and opaque `after` cursor |
 | GET | `/v1/sync-runs/{run_id}` | Status and immutable request in `record` |
 | GET | `/v1/sync-runs/{run_id}/request` | Durable request and control record |
