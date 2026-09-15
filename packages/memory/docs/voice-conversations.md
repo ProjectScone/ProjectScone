@@ -333,7 +333,8 @@ the turn before, is interrupted by speech like any reply, and is bounded by
 `turn_timeout`. Once spoken it is stored as an assistant episode with
 `idle_count`, `idle_action` (`prompt`) and `idle_silent_ms`, and is added to the
 history the model sees, so the next answer knows what was asked. A prompt the user
-talks over is cleared and not stored, and their speech clears the count. A prompt
+talks over is cleared and not stored, and their speech clears the count. An idle
+with no prompt clears nothing. A prompt
 that would take the history past `max_history_bytes` fails the session, as a reply
 would.
 
