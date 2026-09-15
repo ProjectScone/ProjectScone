@@ -1864,11 +1864,11 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         if args.json:
             emit(imported.record())
         else:
-            added = imported.document.added
+            page = imported.document.added
             print(f"imported {imported.url} as {imported.document.format} ({imported.bytes} bytes, "
-                  f"{imported.document.segments} segment(s)) into episode {added.episode_id}", file=out)
-            if added.forget_after is not None:
-                print(f"  episode {added.episode_id} is to be forgotten after {added.forget_after}", file=out)
+                  f"{imported.document.segments} segment(s)) into episode {page.episode_id}", file=out)
+            if page.forget_after is not None:
+                print(f"  episode {page.episode_id} is to be forgotten after {page.forget_after}", file=out)
         return 0
     if args.command == "summarize":
         from .config import build_chat
