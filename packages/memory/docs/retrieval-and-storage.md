@@ -2513,7 +2513,11 @@ order as history.
   the predicate, the instant and both claims, and points at `scone facts`.
   The ledger cannot decide which is right; a person can.
 - Saying the same thing twice at one moment is agreement, not a
-  collision, and is not counted.
+  collision, and is not counted. Nor is a many-valued predicate
+  (`calls`, `imports`, `depends_on`, or one named in `SCONE_MANY_VALUED`):
+  its values hold side by side by design, so a file that imports two
+  modules on one line is not contested. Counted, they made a code graph
+  read as thousands of collisions.
 
 ## Moving one space into another
 
@@ -2678,7 +2682,11 @@ and every item points back to the facts behind it.
   Values keep their exact text: `3 MB` and `3 mb` are two attributes.
 - **Names** are the entity's recorded spellings. The label is the most
   common one, and casing is recovered from the source quote, so `alice chen`
-  is labelled `Alice Chen`.
+  is labelled `Alice Chen`. A code name (a path, or a path and a
+  declaration) is shown as the code declares it, whatever the count: a
+  declaration is called by its lowercased key once per call it receives,
+  and a busy method would otherwise be labelled `directorysync._finish`
+  beside a quiet one labelled `DirectorySync.open`.
 - **Kinds** (person, organisation, place, project, product, event, concept)
   are inferred hints from the predicates around an entity. They carry
   `kind_status: "inferred"` and list the fact ids that suggested them. Hints
