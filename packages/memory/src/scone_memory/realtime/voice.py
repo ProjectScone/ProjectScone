@@ -280,7 +280,7 @@ class VoiceSession:
                     # output of a newer transcript while either task awaits.
                     async with control:
                         await self._interrupt(transport)
-                        self._turns.speech_started(now=time.perf_counter())  # heard by the local detector
+                        self._speaking(time.perf_counter())  # heard by the local detector
                     continue
                 yield chunk
             input_drained = True
@@ -291,29 +291,38 @@ class VoiceSession:
                     async with control:
                         if isinstance(event, SpeechStarted):
                             await self._interrupt(transport)
-                            self._turns.speech_started(now=time.perf_counter())  # heard by the recognizer
+                            self._speaking(time.perf_counter())  # heard by the recognizer
                         elif is_question(event):
                             heard = time.perf_counter()
                             await self._interrupt(transport)  # new words supersede output, even while held
-                            if self._keypad is not None:  # keys entered before these words are given first
-                                for entry in self._keypad.drain(heard, "speech"):
-                                    await self._keyed(entry, heard, transport, model, tts)
+                            # Keys pressed before this speech began are given before its
+                            # words; keys pressed after it began waited, and follow them.
+                            before, after = self._keypad.words(heard) if self._keypad is not None else ([], [])
+                            for entry in before:
+                                await self._keyed(entry, heard, transport, model, tts)
                             judgement = await self._judge(detector, self._turns.text_with(event.text, event.speaker))
                             # The hold keeps the process clock the turn's timing reads,
                             # and counts from when the transcript arrived, so a
                             # detector's own time is part of the wait it reports.
                             for end in self._turns.heard(event.text, event.speaker, judgement, heard):
                                 await self._begin(end, heard, transport, model, tts)
+                            for entry in after:
+                                await self._keyed(entry, heard, transport, model, tts)
+                            if self._keypad is not None and self._keypad.pending:
+                                self._turns.speech_started(heard)  # the caller is keying the rest of it
                             held.set()
                         elif event.final:
                             # Speech ended with no words (a cough, a door): a held
                             # clause waits its hold again from here, not the turn's bound.
-                            self._turns.speech_stopped(now=time.perf_counter())
+                            now = time.perf_counter()
+                            self._turns.speech_stopped(now=now)
+                            for entry in self._keypad.no_words(now) if self._keypad is not None else ():
+                                await self._keyed(entry, now, transport, model, tts)
                             held.set()  # that deadline may come before the one being waited on
                         elif event.text.strip():
                             # Words not yet final (a streaming recognizer's partial):
                             # the speaker is still talking, as when speech starts.
-                            self._turns.speech_started(now=time.perf_counter())
+                            self._speaking(time.perf_counter())  # a partial
             async with control:
                 now = time.perf_counter()
                 if self._keypad is not None:
@@ -409,6 +418,11 @@ class VoiceSession:
         if not isinstance(judgement, Judgement):
             raise ValueError("end-of-turn detector must return a Judgement")
         return judgement
+
+    def _speaking(self, now: float) -> None:
+        self._turns.speech_started(now=now)
+        if self._keypad is not None:
+            self._keypad.speech(now)
 
     async def _keyed(self, entry: KeypadEntry, now: float, transport, model, tts):
         # A keypad entry is text that finishes the user's turn; only the

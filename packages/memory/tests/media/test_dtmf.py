@@ -235,19 +235,53 @@ def test_a_key_heard_by_one_way_only_long_after_is_not_a_duplicate():
     assert stream.duplicates == 0
 
 
-def test_the_window_holds_for_tones_that_began_before_an_earlier_report():
-    """Digits wait in the order they were reported, and tones are placed
-    where they began, which can be before a carrier digit reported first."""
+@pytest.mark.parametrize("held_ms", [300, 1200, 2000], ids=["short", "past-window", "twice-window"])
+def test_a_key_held_down_and_reported_when_released_is_one_press(held_ms):
+    """A carrier may report a key when it is let go. The tones began when it
+    was pressed, so a key held longer than the window was two keys when the
+    window ran from where the tones began; it runs from where they were last heard."""
     stream = MediaStream(DIALECTS["twilio"], digits="both")
-    feed(stream, silence(960))
-    six = samples("6", 100)
-    feed(stream, six[:160])
-    [five] = stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": "5"}}))
-    [heard] = feed(stream, six[160:])
-    assert five.offset_ms == 980 and heard.digit == "6" and heard.offset_ms < 980 - (1980 - 980 - DUPLICATE_WINDOW_MS)
-    feed(stream, silence(920))
-    [late] = stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": "6"}}))
-    assert late.offset_ms == 1980 and stream.duplicates == 0, "more than the window after the tones began"
+    heard = feed(stream, silence(40) + samples("5", held_ms))
+    heard += stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": "5"}}))
+    heard += feed(stream, silence(100))
+    assert [(d.digit, d.source) for d in heard] == [("5", "inband")]
+    assert heard[0].offset_ms == pytest.approx(40, abs=dtmf.WINDOW_MS / 2), "still placed where it began"
+    assert stream.duplicates == 1
+
+
+def test_the_window_runs_from_the_end_of_the_tones_and_not_from_the_report():
+    stream = MediaStream(DIALECTS["twilio"], digits="both")
+    heard = feed(stream, samples("8", 1200) + silence(int(DUPLICATE_WINDOW_MS) + 200))
+    heard += stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": "8"}}))
+    assert [d.source for d in heard] == ["inband", "event"], "let go more than the window before the report"
+    assert stream.duplicates == 0
+
+
+def test_a_digit_behind_an_older_one_still_leaves_the_window():
+    """Digits wait in the order they were reported. One reported later can
+    leave the window first, while the oldest's tones are still sounding."""
+    stream = MediaStream(DIALECTS["twilio"], digits="both")
+    heard = feed(stream, samples("5", 200))  # the oldest: tones still sounding below
+    [seven] = stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": "7"}}))
+    heard += feed(stream, samples("5", int(DUPLICATE_WINDOW_MS) + 200))
+    heard += feed(stream, samples("7", 100))
+    assert [(d.digit, d.source) for d in heard] == [("5", "inband"), ("7", "inband")], \
+        "the reported 7 was more than the window before these tones"
+    assert seven.source == "event" and stream.duplicates == 0
+
+
+def test_a_key_held_down_moves_on_its_own_press_and_no_earlier_one():
+    """Two presses of one key a moment apart, the first heard only in the
+    audio. The carrier reports the second when it is let go, and then
+    reports a third press whose tones were not in the audio."""
+    stream = MediaStream(DIALECTS["twilio"], digits="both")
+    event = json.dumps({"event": "dtmf", "dtmf": {"digit": "1"}})
+    heard = feed(stream, samples("1", 100) + silence(300) + samples("1", 900))
+    heard += stream.inbound(event)
+    heard += feed(stream, silence(60))
+    heard += stream.inbound(event)
+    assert [d.source for d in heard] == ["inband", "inband", "event"]
+    assert stream.duplicates == 1
 
 
 def test_digits_waiting_to_be_paired_are_bounded_and_the_bound_says_when_it_bit(monkeypatch):

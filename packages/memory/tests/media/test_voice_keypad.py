@@ -10,11 +10,11 @@ import asyncio
 
 import pytest
 
-from scone_memory.realtime.audio import ReplyCompleted, TextDelta, Transcript
+from scone_memory.realtime.audio import ReplyCompleted, SpeechStarted, TextDelta, Transcript
 from scone_memory.realtime.keypad import KeypadPolicy, Keypress
 from scone_memory.realtime.turn_end import LexicalEndOfTurn
 
-from .test_voice_turn_end import PCM, SID, SPACE, Model, Rig, memory  # noqa: F401 - memory is a fixture
+from .test_voice_turn_end import PCM, SID, SPACE, Model, Resource, Rig, memory  # noqa: F401 - memory is a fixture
 
 
 async def keys(rig, *presses):
@@ -127,12 +127,132 @@ async def test_speech_while_keys_are_held_gives_the_keys_to_the_turn_first(memor
     async with Rig(memory, keypad=KeypadPolicy("collect", timeout=5)) as rig:
         await keys(rig, "7", "7")
         await asyncio.sleep(.05)
-        await rig.say(Transcript("Actually, can I talk to someone?"))
+        await rig.say(SpeechStarted(), Transcript("Actually, can I talk to someone?"))
         users = await rig.users(2)
         keyed, spoken = sorted(users, key=lambda e: e.episode_id)
         assert (keyed.content, keyed.metadata["keypad_ended"]) == ("[keypad] 77", "speech")
         assert (spoken.content, spoken.metadata["turn_end"]) == ("Actually, can I talk to someone?", "silence")
         assert "keypad_keys" not in spoken.metadata
+        await rig.finish()
+
+
+def by_time(episodes):
+    return sorted(episodes, key=lambda e: e.episode_id)
+
+
+async def test_keys_pressed_after_the_caller_spoke_are_given_after_their_words(memory):
+    """The recognizer gives the words after the caller has stopped and it has
+    waited; the keys come at once. Speech had begun before the keys, so the
+    words are the caller's turn first and the keys come after them."""
+    async with Rig(memory, keypad=KeypadPolicy("collect", timeout=.3)) as rig:
+        await rig.say(SpeechStarted())
+        await asyncio.sleep(.05)
+        await keys(rig, "4", "1", "1", "1")
+        await asyncio.sleep(.05)
+        await rig.say(Transcript("my card number is um"))
+        spoken, keyed = by_time(await rig.users(2))
+        assert (spoken.content, spoken.metadata["turn_end"]) == ("my card number is um", "silence")
+        assert (keyed.content, keyed.metadata["keypad_ended"]) == ("[keypad] 4111", "timeout")
+        assert "keypad_waited" not in keyed.metadata, "still being collected when the words came"
+        await rig.finish()
+
+
+async def test_keys_that_finish_a_clause_still_on_its_way_join_it(memory):
+    async with Rig(memory, keypad=KeypadPolicy("collect", timeout=5), turn_detector_factory=LexicalEndOfTurn,
+                   turn_hold=.2) as rig:
+        await rig.say(SpeechStarted())
+        await asyncio.sleep(.05)
+        await keys(rig, "4", "1", "1", "1", "#")
+        await asyncio.sleep(.1)
+        assert rig.session.stored_count == 0, "the keys wait for the words the caller said first"
+        await rig.say(Transcript("my card number is um"))
+        [user] = await rig.users(1)
+        assert (user.content, user.metadata["turn_end"]) == ("my card number is um [keypad] 4111#", "keypad")
+        assert (user.metadata["keypad_ended"], user.metadata["keypad_waited"]) == ("terminator", "words")
+        await asyncio.sleep(.3)  # past the clause's hold: nothing is left to time out
+        assert len(await rig.users(1)) == 1, "one turn, not the keys and then the clause alone"
+        await rig.finish()
+
+
+async def test_keys_still_being_collected_when_the_words_come_hold_the_clause(memory):
+    policy = KeypadPolicy("collect", timeout=.4)
+    async with Rig(memory, keypad=policy, turn_detector_factory=LexicalEndOfTurn, turn_hold=.15, turn_max_duration=5) as rig:
+        await rig.say(SpeechStarted())
+        await asyncio.sleep(.05)
+        await keys(rig, "4", "1")
+        await asyncio.sleep(.05)
+        await rig.say(Transcript("my card number is um"))
+        await asyncio.sleep(.25)  # past the clause's own hold
+        assert rig.session.stored_count == 0, "the caller is keying the rest of the sentence"
+        [user] = await rig.users(1)
+        assert user.content == "my card number is um [keypad] 41" and user.metadata["keypad_ended"] == "timeout"
+        await rig.finish()
+
+
+async def test_a_partial_transcript_or_the_sessions_own_detector_also_says_speech_began(memory):
+    class Detector(Resource):
+        def __init__(self):
+            super().__init__()
+            self.frames = 0
+
+        async def detect(self, chunk):
+            self.frames += 1
+            return self.frames > 1
+
+    detector = Detector()
+    async with Rig(memory, keypad=KeypadPolicy("append"), activity_factory=lambda: detector) as rig:
+        await rig.say(None)  # nothing in the first chunk
+        await rig.transport.input.put(PCM)  # the detector hears speech in the second
+        async with asyncio.timeout(2):
+            while detector.frames < 2:
+                await asyncio.sleep(.005)
+        await asyncio.sleep(.05)
+        await keys(rig, "5")
+        await asyncio.sleep(.05)
+        assert rig.session.stored_count == 0, "held for the words the detector heard begin"
+        await rig.say(Transcript("my extension is"))
+        await rig.say(Transcript("and my", final=False))
+        await asyncio.sleep(.05)
+        await keys(rig, "6")
+        await asyncio.sleep(.05)
+        await rig.say(Transcript("room is"))
+        spoken, five, later, six = by_time(await rig.users(4))
+        assert [e.content for e in (spoken, five, later, six)] == \
+            ["my extension is", "[keypad] 5", "room is", "[keypad] 6"]
+        assert five.metadata["keypad_waited"] == six.metadata["keypad_waited"] == "words"
+        await rig.finish()
+
+
+async def test_with_no_keys_being_collected_an_open_clause_waits_only_its_hold(memory):
+    async with Rig(memory, keypad=KeypadPolicy("collect", timeout=5), turn_detector_factory=LexicalEndOfTurn,
+                   turn_hold=.05, turn_max_duration=5) as rig:
+        await rig.say(Transcript("Send it to"))
+        [user] = await rig.users(1)
+        assert user.metadata["turn_end"] == "semantic_incomplete_timeout", "not held to the turn's bound for keys"
+        await rig.finish()
+
+
+async def test_keys_wait_for_the_words_no_longer_than_speech_wait_and_say_so(memory):
+    async with Rig(memory, keypad=KeypadPolicy("append", speech_wait=.1)) as rig:
+        await rig.say(SpeechStarted())
+        await asyncio.sleep(.05)
+        await keys(rig, "5")
+        [user] = await rig.users(1)
+        assert (user.content, user.metadata["keypad_ended"], user.metadata["keypad_waited"]) == \
+            ("[keypad] 5", "key", "timeout")
+        await rig.finish()
+
+
+async def test_speech_that_ends_without_words_lets_the_waiting_keys_go(memory):
+    async with Rig(memory, keypad=KeypadPolicy("append")) as rig:
+        await rig.say(SpeechStarted())
+        await asyncio.sleep(.05)
+        await keys(rig, "5")
+        await asyncio.sleep(.05)
+        assert rig.session.stored_count == 0
+        await rig.say(Transcript("", final=True))
+        [user] = await rig.users(1)
+        assert (user.content, user.metadata["keypad_waited"]) == ("[keypad] 5", "no_words")
         await rig.finish()
 
 
@@ -156,6 +276,33 @@ async def test_keys_held_when_the_session_stops_are_stored_and_not_answered(memo
     assert (user.content, user.metadata["keypad_ended"], user.metadata["turn_end"]) == \
         ("[keypad] 8", "session_ended", "session_ended")
     assert rig.model.contexts == []
+
+
+async def test_keys_waiting_for_words_when_the_session_stops_are_stored_and_not_answered(memory):
+    rig = Rig(memory, keypad=KeypadPolicy("collect", timeout=5))
+    async with rig:
+        await rig.say(SpeechStarted())
+        await asyncio.sleep(.05)
+        await keys(rig, "8", "#")
+        await asyncio.sleep(.05)
+        assert rig.session.stored_count == 0
+    [user] = await rig.users(1)
+    assert (user.content, user.metadata["turn_end"]) == ("[keypad] 8#", "session_ended")
+    assert (user.metadata["keypad_ended"], user.metadata["keypad_waited"]) == ("terminator", "no_words")
+    assert rig.model.contexts == []
+
+
+async def test_keys_waiting_for_words_when_input_ends_are_answered(memory):
+    rig = Rig(memory, keypad=KeypadPolicy("append"))
+    async with rig:
+        await rig.say(SpeechStarted())
+        await asyncio.sleep(.05)
+        await keys(rig, "3")
+        await asyncio.sleep(.05)
+        await rig.finish()
+    [user] = await rig.users(1)
+    assert (user.content, user.metadata["keypad_waited"]) == ("[keypad] 3", "no_words")
+    assert rig.model.contexts[0][-1]["content"] == "[keypad] 3"
 
 
 async def test_a_keypad_policy_is_checked_when_the_session_is_made(memory):
