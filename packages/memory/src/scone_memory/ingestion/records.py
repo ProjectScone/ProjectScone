@@ -36,10 +36,15 @@ class Record:
     #: None keeps the engine's rule. Kept on the episode's metadata under
     #: ``chunking`` so a recovery cuts the way the record asked.
     chunking: Optional[str] = None
+    #: The genre whose boundaries structure chunking cuts at (statute,
+    #: paper, manual, qa, resume); implies ``chunking="structure"``. Kept
+    #: on the episode's metadata under ``chunking_profile``.
+    chunking_profile: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Mapping) -> "Record":
-        known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata", "dedup_key", "content_hash", "chunking") if k in data}
+        known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata", "dedup_key", "content_hash", "chunking",
+                                      "chunking_profile") if k in data}
         if "content" not in known:
             raise InvalidInput("a record needs content")
         return cls(**known)

@@ -34,6 +34,7 @@ from ..memory.engine import MemoryEngine, Record
 from ..core.errors import InvalidInput, NotFound, SconeError
 from ..retrieval.filters import read_conditions
 from ..ingestion.chunker import DEFAULT_TARGET as DEFAULT_CHUNK_TARGET
+from ..ingestion.chunking_profiles import PROFILES as CHUNKING_PROFILES
 
 CLI_DEFAULTS = {"SCONE_DOCUMENTS": "sqlite", "SCONE_VECTORS": "sqlite"}
 
@@ -80,6 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
     p.add_argument("--chunking", choices=("length", "code", "structure", "semantic", "unit"),
                    help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
+    p.add_argument("--chunking-profile", choices=tuple(CHUNKING_PROFILES),
+                   help="cut at this genre's boundaries (implies --chunking structure)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
     p = sub.add_parser("import-chat", help="a WhatsApp, Telegram, Discord or Slack export, one conversation memory per message")
@@ -1788,6 +1791,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "remember":
         if args.image is not None and args.jsonl:
             raise InvalidInput("--image cannot be combined with --jsonl; select a single source note")
+        if args.jsonl and (args.chunking or args.chunking_profile):
+            raise InvalidInput("--chunking and --chunking-profile are not applied to --jsonl; set them per record")
         raw = read_source(args.file, stdin)
         attachment = None
         if args.jsonl:
@@ -1813,6 +1818,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     created_at=args.created_at, metadata=metadata,
                     attachment_ids=[attachment.attachment_id] if attachment else [],
                     dedup_key=args.dedup_key, replace=args.replace, chunking=args.chunking,
+                    chunking_profile=args.chunking_profile,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)
