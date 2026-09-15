@@ -541,17 +541,19 @@ class MemoryEngine:
         replace: bool = False,
         *, embedding_checkpoint: EmbeddingCheckpoint | None = None,
         chunking: Optional[str] = None,
+        chunking_profile: Optional[str] = None,
     ) -> Added:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
         ``replace``) instead of a duplicate. ``chunking`` names how this
         record is cut (length, code, structure, semantic); None keeps the
-        engine's rule."""
+        engine's rule. ``chunking_profile`` names a genre (statute, paper,
+        manual, qa, resume) whose boundaries structure chunking cuts at."""
         await self._living(space)
         if replace and embedding_checkpoint is not None:
             raise InvalidInput('embedding checkpoints apply to append ingestion, not replacement')
         record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key,
-                        chunking=chunking)
+                        chunking=chunking, chunking_profile=chunking_profile)
         if replace:
             added = (await self.replace(space, record)).added
         else:

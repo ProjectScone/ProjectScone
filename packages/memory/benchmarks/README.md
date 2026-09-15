@@ -6,6 +6,11 @@ exact references. The [scaling report](../docs/scaling-validation.md) records th
 results alongside S3 request/byte counts and image-parser timings. These storage
 experiments are separate from the real-world answer-quality evaluations below.
 
+The [chunking profiles run](chunking-profiles-v1.results.md) compares where
+plain structure chunking and a declared genre profile cut a statute-like and a
+Q&A-like fixture: chunks starting at a boundary, headings split from their first
+clause, and the cost in chunks.
+
 The [knowledge lifecycle run](knowledge-lifecycle-v1.results.md) exercises a real
 CLI server over HTTP with PDF/image ingestion, Qdrant, persistent source evidence,
 two restarts and deletion. It records the initial SIGTERM cleanup failure and
