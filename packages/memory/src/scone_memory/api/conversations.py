@@ -105,7 +105,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             runtime_available=None, model_connections_available=False,
                             vision_available=None, vision_factory=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
                             agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None, document_video=None,
-                            directory_sync_service=None, synthesis_factory=None, url_import=None):
+                            directory_sync_service=None, synthesis_factory=None, url_import=None, followup=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -485,6 +485,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             conversation_options: dict[str, object] = dict(answer_review.options()) if answer_review is not None else {}
             if adaptive_retriever is not None:
                 conversation_options.update(adaptive_retriever=adaptive_retriever, recall_timeout=adaptive_retriever.limits.timeout_s)
+            # Follow-up queries (SCONE_FOLLOWUP_QUERIES) reach every text runtime the same way.
+            conversation_options.update(followup or {})
             if chosen is not None:
                 runtime = chosen.text(engine, space, sid, **fixed.kwargs(), **conversation_options)
             else:

@@ -1,0 +1,479 @@
+{
+ "schema_version": 1,
+ "name": "followup-pairs-v1",
+ "description": "Synthetic two-turn pairs for follow-up queries. Subjects of the first ten are taken from benchmarks/entity_graph/fixtures-v1.jsonl and tests/fixtures/generation/v1.json; the rest, every follow-up turn and every distractor are authored. Splits alternate and were declared before any measurement. Measures the mechanism on a small corpus, not a real-world rate.",
+ "passages": [
+  "Alice Chen works at Acme Robotics as a controls engineer.",
+  "Alice Chen joined Acme Robotics in May 2021.",
+  "Acme Robotics is headquartered in Lisbon.",
+  "Acme Robotics has a storage quota of 512 MB.",
+  "Bob Stone lives in Lisbon near the river.",
+  "Bob Stone knows Alice Chen from a climbing club.",
+  "Carol Diaz works for Globex on the platform team.",
+  "Carol Diaz owns the migration project called Atlas.",
+  "Globex is based in Porto.",
+  "Globex employs about 340 people.",
+  "Project Atlas is owned by Carol Diaz.",
+  "Project Atlas is ready for launch review.",
+  "Lab A reports the dusk gate mode as open.",
+  "Lab B reports the dusk gate mode as closed.",
+  "beacon routes requests to cedar.",
+  "cedar persists through ridge.",
+  "ridge uses a local journal.",
+  "The ridge journal is encrypted with a device key.",
+  "The cafe tier allows 17 requests per minute.",
+  "The team tier allows 42 requests per minute.",
+  "Dana Whitfield plays the cello in a string quartet.",
+  "Dana Whitfield learned from Maria Ostrova at the conservatory.",
+  "Kestrel Bank opened its Leeds branch in 2019.",
+  "The Leeds branch of Kestrel Bank is managed by Omar Hadid.",
+  "Tomas Reyes drives a green Volvo estate.",
+  "Tomas Reyes bought the Volvo new in 2011.",
+  "Harbor Clinic is open from 8am to 6pm on weekdays.",
+  "Harbor Clinic accepts walk-in patients before noon.",
+  "Priya Nair graduated from the University of Edinburgh.",
+  "Priya Nair studied marine biology.",
+  "Leo Hart is on call for Orion Deploy this week.",
+  "Orion Deploy escalations go to the platform lead, then the CTO.",
+  "Mei Tanaka moved to Osaka.",
+  "Mei Tanaka relocated in October 2023.",
+  "Greenleaf Market sells organic produce and bread.",
+  "Greenleaf Market opens on Sundays from 9 to 1.",
+  "Victor Lund is the head of finance.",
+  "Victor Lund reports to Sara Quint, the chief operating officer.",
+  "We run version 3.2 of the Falcon API.",
+  "Falcon API 3.2 reaches end of life in March 2027.",
+  "Nadia Ellis is allergic to peanuts.",
+  "Nadia Ellis carries an epinephrine pen for a severe reaction.",
+  "Birchwood School starts term on 3 September.",
+  "Birchwood School's half-term break runs 27 to 31 October.",
+  "Sam Okafor's phone number is 555-0142.",
+  "Sam Okafor's email is sam.okafor@example.org.",
+  "The Juniper telescope points at Polaris on clear nights.",
+  "Juniper calibration uses a star field test each month.",
+  "Hugo Brandt joined Initech in May 2018.",
+  "Lena Fox joined the choir in 2015.",
+  "The Porto office relocated in 2020.",
+  "Ravi Shah moved to Dublin in October 2022.",
+  "The shared drive has a storage quota of 2 GB.",
+  "Globex Labs has a storage quota of 1 TB.",
+  "Nora Blake knows the harbor master from school.",
+  "Ian Moore owns a small bakery.",
+  "The Delta project status is on hold.",
+  "Project Hermes is waiting on legal review.",
+  "The staging journal is not encrypted.",
+  "The analytics tier allows 5 requests per minute.",
+  "Oliver Grant learned guitar from his uncle.",
+  "The Manchester branch is managed by Tessa Wood.",
+  "Ella Price bought her bicycle in 2019.",
+  "The dental clinic accepts walk-in patients on Fridays.",
+  "Chris Dunn studied economics.",
+  "Billing escalations go to the finance lead.",
+  "The library opens on Sundays from 10 to 4.",
+  "Maya Hill reports to the head of design.",
+  "The Hawk SDK reaches end of life in June 2026.",
+  "Paul Kerr carries an inhaler for asthma.",
+  "The county half-term break runs 20 to 24 February.",
+  "The front desk email is desk@example.org.",
+  "Calibration of the lab scale uses certified weights.",
+  "The team offsite is booked for April.",
+  "The garden shed needs a new roof before winter.",
+  "Mark takes his coffee black.",
+  "The quarterly report is due on Friday.",
+  "Our Wi-Fi password rotates every month.",
+  "The printer on floor two is out of toner.",
+  "Lunch on Thursday is at the noodle bar."
+ ],
+ "pairs": [
+  {
+   "id": "alice-start",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Where does Alice Chen work?",
+     "gold": "Alice Chen works at Acme Robotics as a controls engineer."
+    },
+    {
+     "question": "Since when?",
+     "gold": "Alice Chen joined Acme Robotics in May 2021."
+    }
+   ]
+  },
+  {
+   "id": "acme-quota",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Where is Acme Robotics based?",
+     "gold": "Acme Robotics is headquartered in Lisbon."
+    },
+    {
+     "question": "How much storage does it get?",
+     "gold": "Acme Robotics has a storage quota of 512 MB."
+    }
+   ]
+  },
+  {
+   "id": "bob-knows",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Where does Bob Stone live?",
+     "gold": "Bob Stone lives in Lisbon near the river."
+    },
+    {
+     "question": "Who does he know there?",
+     "gold": "Bob Stone knows Alice Chen from a climbing club."
+    }
+   ]
+  },
+  {
+   "id": "carol-owns",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Which company does Carol Diaz work for?",
+     "gold": "Carol Diaz works for Globex on the platform team."
+    },
+    {
+     "question": "What project does she own?",
+     "gold": "Carol Diaz owns the migration project called Atlas."
+    }
+   ]
+  },
+  {
+   "id": "globex-staff",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Where is Globex based?",
+     "gold": "Globex is based in Porto."
+    },
+    {
+     "question": "How many people work there?",
+     "gold": "Globex employs about 340 people."
+    }
+   ]
+  },
+  {
+   "id": "atlas-status",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Who owns Project Atlas?",
+     "gold": "Project Atlas is owned by Carol Diaz."
+    },
+    {
+     "question": "What's its status?",
+     "gold": "Project Atlas is ready for launch review."
+    }
+   ]
+  },
+  {
+   "id": "dusk-lab-b",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What does Lab A report about the dusk gate?",
+     "gold": "Lab A reports the dusk gate mode as open."
+    },
+    {
+     "question": "And Lab B?",
+     "gold": "Lab B reports the dusk gate mode as closed."
+    }
+   ]
+  },
+  {
+   "id": "beacon-cedar",
+   "split": "held_out",
+   "kind": "standalone",
+   "turns": [
+    {
+     "question": "Where does beacon route requests?",
+     "gold": "beacon routes requests to cedar."
+    },
+    {
+     "question": "What does cedar persist through?",
+     "gold": "cedar persists through ridge."
+    }
+   ]
+  },
+  {
+   "id": "ridge-encrypted",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What journal does ridge use?",
+     "gold": "ridge uses a local journal."
+    },
+    {
+     "question": "Is it encrypted?",
+     "gold": "The ridge journal is encrypted with a device key."
+    }
+   ]
+  },
+  {
+   "id": "tier-team",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "How many requests per minute does the cafe tier allow?",
+     "gold": "The cafe tier allows 17 requests per minute."
+    },
+    {
+     "question": "What about the team tier?",
+     "gold": "The team tier allows 42 requests per minute."
+    }
+   ]
+  },
+  {
+   "id": "dana-teacher",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What instrument does Dana Whitfield play?",
+     "gold": "Dana Whitfield plays the cello in a string quartet."
+    },
+    {
+     "question": "Who taught her?",
+     "gold": "Dana Whitfield learned from Maria Ostrova at the conservatory."
+    }
+   ]
+  },
+  {
+   "id": "kestrel-manager",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "When did Kestrel Bank open its Leeds branch?",
+     "gold": "Kestrel Bank opened its Leeds branch in 2019."
+    },
+    {
+     "question": "Who manages it?",
+     "gold": "The Leeds branch of Kestrel Bank is managed by Omar Hadid."
+    }
+   ]
+  },
+  {
+   "id": "tomas-car-age",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What car does Tomas Reyes drive?",
+     "gold": "Tomas Reyes drives a green Volvo estate."
+    },
+    {
+     "question": "How old is it?",
+     "gold": "Tomas Reyes bought the Volvo new in 2011."
+    }
+   ]
+  },
+  {
+   "id": "harbor-walkins",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What are the Harbor Clinic opening hours?",
+     "gold": "Harbor Clinic is open from 8am to 6pm on weekdays."
+    },
+    {
+     "question": "Does it take walk-ins?",
+     "gold": "Harbor Clinic accepts walk-in patients before noon."
+    }
+   ]
+  },
+  {
+   "id": "priya-subject",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Which university did Priya Nair attend?",
+     "gold": "Priya Nair graduated from the University of Edinburgh."
+    },
+    {
+     "question": "What did she study?",
+     "gold": "Priya Nair studied marine biology."
+    }
+   ]
+  },
+  {
+   "id": "orion-escalation",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Who is on call for Orion Deploy this week?",
+     "gold": "Leo Hart is on call for Orion Deploy this week."
+    },
+    {
+     "question": "What's the escalation path?",
+     "gold": "Orion Deploy escalations go to the platform lead, then the CTO."
+    }
+   ]
+  },
+  {
+   "id": "mei-when",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Where did Mei Tanaka move to?",
+     "gold": "Mei Tanaka moved to Osaka."
+    },
+    {
+     "question": "When?",
+     "gold": "Mei Tanaka relocated in October 2023."
+    }
+   ]
+  },
+  {
+   "id": "greenleaf-sunday",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What does Greenleaf Market sell?",
+     "gold": "Greenleaf Market sells organic produce and bread."
+    },
+    {
+     "question": "Is it open on Sundays?",
+     "gold": "Greenleaf Market opens on Sundays from 9 to 1."
+    }
+   ]
+  },
+  {
+   "id": "victor-manager",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What is Victor Lund's role?",
+     "gold": "Victor Lund is the head of finance."
+    },
+    {
+     "question": "Who does he report to?",
+     "gold": "Victor Lund reports to Sara Quint, the chief operating officer."
+    }
+   ]
+  },
+  {
+   "id": "falcon-eol",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "Which version of the Falcon API are we on?",
+     "gold": "We run version 3.2 of the Falcon API."
+    },
+    {
+     "question": "When does that version reach end of life?",
+     "gold": "Falcon API 3.2 reaches end of life in March 2027."
+    }
+   ]
+  },
+  {
+   "id": "nadia-severity",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What is Nadia Ellis allergic to?",
+     "gold": "Nadia Ellis is allergic to peanuts."
+    },
+    {
+     "question": "How severe is it?",
+     "gold": "Nadia Ellis carries an epinephrine pen for a severe reaction."
+    }
+   ]
+  },
+  {
+   "id": "birchwood-halfterm",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "When does Birchwood School start term?",
+     "gold": "Birchwood School starts term on 3 September."
+    },
+    {
+     "question": "And when is the half-term break?",
+     "gold": "Birchwood School's half-term break runs 27 to 31 October."
+    }
+   ]
+  },
+  {
+   "id": "sam-email",
+   "split": "development",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What's Sam Okafor's phone number?",
+     "gold": "Sam Okafor's phone number is 555-0142."
+    },
+    {
+     "question": "And his email?",
+     "gold": "Sam Okafor's email is sam.okafor@example.org."
+    }
+   ]
+  },
+  {
+   "id": "juniper-calibration",
+   "split": "held_out",
+   "kind": "follow-up",
+   "turns": [
+    {
+     "question": "What does the Juniper telescope point at?",
+     "gold": "The Juniper telescope points at Polaris on clear nights."
+    },
+    {
+     "question": "How is it calibrated?",
+     "gold": "Juniper calibration uses a star field test each month."
+    }
+   ]
+  },
+  {
+   "id": "standalone-globex",
+   "split": "development",
+   "kind": "standalone",
+   "turns": [
+    {
+     "question": "Who owns Project Atlas?",
+     "gold": "Project Atlas is owned by Carol Diaz."
+    },
+    {
+     "question": "Where is Globex based?",
+     "gold": "Globex is based in Porto."
+    }
+   ]
+  },
+  {
+   "id": "standalone-mei",
+   "split": "held_out",
+   "kind": "standalone",
+   "turns": [
+    {
+     "question": "What instrument does Dana Whitfield play?",
+     "gold": "Dana Whitfield plays the cello in a string quartet."
+    },
+    {
+     "question": "Where did Mei Tanaka move to?",
+     "gold": "Mei Tanaka moved to Osaka."
+    }
+   ]
+  }
+ ]
+}

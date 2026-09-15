@@ -23,6 +23,8 @@ from ..integrations.scoped_tools import ScopedMemoryTools
 from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import AdaptiveRetriever
+from ..retrieval.followup import REWRITE_TIMEOUT_S
+from ..providers.llm import ChatModel
 from .answer_requirements import AnswerRequirements, validated_requirements
 from .answer_review import AnswerReviewer, AnswerReviewLimits, ReviewedAnswer, review_answer, require_contextual_reviewer
 from .context import ContextReceipt, MemoryContext
@@ -147,7 +149,8 @@ class TextConversation:
                  tool_limits: ToolLoopLimits | None = None, tool_initial_search: bool = False,
                  tool_compute: bool = False, tool_tables: bool = False, history_policy: str = "refuse",
                  standing_profile: "ProfilePolicy | None" = None, profile_limit: int = 10,
-                 max_profile_bytes: int = 1000):
+                 max_profile_bytes: int = 1000, followup_queries: str = "off",
+                 followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S):
         check_space(space)
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
@@ -167,6 +170,8 @@ class TextConversation:
         if tool_model_factory is not None and any(value is not None for value in
                 (evidence_selector, adaptive_retriever)):
             raise ValueError("tool mode cannot combine independent retrieval or extractive evidence")
+        if tool_model_factory is not None and followup_queries != "off":
+            raise ValueError("followup_queries is for ordinary search; tool mode chooses its own searches")
         if tool_model_factory is not None and neighbor_chunks != 0:
             raise ValueError("neighbor_chunks is for ordinary search; tool mode uses read_memory")
         if type(tool_compute) is not bool or (tool_compute and tool_model_factory is None):
@@ -232,7 +237,9 @@ class TextConversation:
                                       adaptive_retriever=adaptive_retriever, recall_timeout=recall_timeout,
                                       neighbor_chunks=neighbor_chunks, reading_order=reading_order,
                                       standing_profile=standing_profile,
-                                      profile_limit=profile_limit, max_profile_bytes=max_profile_bytes)
+                                      profile_limit=profile_limit, max_profile_bytes=max_profile_bytes,
+                                      followup_queries=followup_queries, followup_model=followup_model,
+                                      followup_timeout=followup_timeout)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task[dict] | None = None
         self._closed = False

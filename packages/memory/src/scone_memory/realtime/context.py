@@ -8,6 +8,7 @@ import math
 import re
 import logging
 import time
+from dataclasses import replace
 from uuid import uuid4
 from collections.abc import Mapping
 from typing import NotRequired, TYPE_CHECKING, TypedDict
@@ -18,7 +19,9 @@ if TYPE_CHECKING:
 from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import GRAPH_REASONS, AdaptiveRetriever
-from ..retrieval.conversation_plan import overview_evidence, plan_conversation_retrieval
+from ..retrieval.conversation_plan import ConversationPlan, overview_evidence, plan_conversation_retrieval
+from ..retrieval.followup import MODES as FOLLOWUP_MODES, REWRITE_TIMEOUT_S, Followup, fused, plan_followup
+from ..providers.llm import ChatModel
 from ..retrieval.overview import OverviewResult
 from ..core.models import Fact, RecallItem, RecallResult
 from ..core.ports import TextFilter
@@ -161,6 +164,9 @@ class ContextReceipt(TypedDict):
     profile_bytes: NotRequired[int]
     profile_omitted_count: NotRequired[int]
     profile_truncated: NotRequired[bool]
+    #: With follow-up queries on: what the latest message was searched
+    #: with beside itself, carried from which message, or why nothing was.
+    followup: NotRequired[dict[str, object]]
 
 
 class MemoryContext:
@@ -181,6 +187,11 @@ class MemoryContext:
     ``neighbor_chunks`` (0..4, default off) adds verified adjacent chunks after
     the ``limit`` ranked anchors, up to 24 total sources within the same byte
     budget. It applies only to ordinary search; adaptive selection is unchanged.
+    ``followup_queries`` ("off", "carry", or "rewrite" with ``followup_model``)
+    also searches a follow-up message with what earlier user turns named,
+    fused by rank with the message and inside the same scope; see
+    ``retrieval.followup``. Adaptive retrieval plans its own queries, so the
+    two are not combined.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str, *, where: Mapping[str, str] | None = None,
@@ -190,8 +201,20 @@ class MemoryContext:
                  adaptive_retriever: AdaptiveRetriever | None = None,
                  neighbor_chunks: int = 0, reading_order: str = "ranked",
                  standing_profile: "ProfilePolicy | None" = None,
-                 profile_limit: int = 10, max_profile_bytes: int = 1000) -> None:
+                 profile_limit: int = 10, max_profile_bytes: int = 1000,
+                 followup_queries: str = "off", followup_model: ChatModel | None = None,
+                 followup_timeout: float = REWRITE_TIMEOUT_S) -> None:
         check_space(space)
+        if followup_queries not in FOLLOWUP_MODES:
+            raise ValueError(f"followup_queries must be one of {', '.join(FOLLOWUP_MODES)}")
+        if (followup_queries == "rewrite") != (followup_model is not None):
+            raise ValueError("followup_model is required for followup_queries='rewrite' and for nothing else")
+        if (isinstance(followup_timeout, bool) or not isinstance(followup_timeout, (int, float))
+                or not 0 < followup_timeout <= 60):
+            raise ValueError("followup_timeout must be finite, above 0 and at most 60 seconds")
+        if adaptive_retriever is not None and followup_queries != "off":
+            raise ValueError("adaptive retrieval plans its own queries; followup_queries must be off with it")
+        self._followup, self._followup_model, self._followup_timeout = followup_queries, followup_model, followup_timeout
         if type(max_profile_bytes) is not int or not MIN_PROFILE_BYTES <= max_profile_bytes <= MAX_PROFILE_BYTES:
             raise ValueError(f"max_profile_bytes must be an integer from {MIN_PROFILE_BYTES} to {MAX_PROFILE_BYTES}")
         if type(profile_limit) is not int or not 1 <= profile_limit <= 50:
@@ -355,6 +378,20 @@ class MemoryContext:
             return request, receipt
         try:
             plan = plan_conversation_retrieval(query)
+            followup: Followup | None = None
+            if self._followup != "off":
+                # A model's rewrite runs before the search deadline, under its own.
+                followup = await plan_followup(request, self._followup, model=self._followup_model,
+                                               question=plan.query, timeout_s=self._followup_timeout)
+                if followup.query is not None and plan.mode == "overview":
+                    if plan_conversation_retrieval(followup.query).mode == "search":
+                        plan = ConversationPlan("search", plan.query, plan.formulation)
+                        followup = replace(followup, reason=followup.reason
+                                           + "; the message alone reads as an overview request, so both were searched")
+                    else:
+                        followup = replace(followup, applied=False, query=None, reason=followup.reason
+                                           + "; not searched: the follow-up query also reads as an overview request")
+                receipt["followup"] = followup.record()
             receipt["retrieval_mode"] = plan.mode
             if plan.formulation is not None:
                 receipt["query_formulation"] = {
@@ -384,6 +421,10 @@ class MemoryContext:
                 else:
                     if self._adaptive_retriever is None:
                         result = await self._memory.recall(self._space, plan.query, limit=min(20, self._limit * 4), **self._scope.kwargs())
+                        if followup is not None and followup.query is not None:
+                            second = await self._memory.recall(
+                                self._space, followup.query, limit=min(20, self._limit * 4), **self._scope.kwargs())
+                            result = fused(result, second, limit=min(20, self._limit * 4))
                     else:
                         adaptive = await self._adaptive_retriever.retrieve(self._space, plan.query,
                             scope=self._scope, exclude_session_id=self._session_id)
