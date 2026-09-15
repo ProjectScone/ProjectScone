@@ -48,6 +48,12 @@ records 400 paired tool-loop turns. Exact match stays at 56.5% while offered
 tool-result bytes fall 28.11%; dataset-level gains and regressions keep this
 presentation option disabled by default.
 
+The [question lane run](chunk-question-lane-v1.results.md) writes questions per
+chunk with llama3.2-ctx8k over 233 chunks of this repository's documents and
+asks 43 questions written by a different prompt. R@5 falls from 0.953 to 0.837
+with the lane on; no fusion weight beats the lane off on held-out questions, so
+the lane stays off by default.
+
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model
 adapter using original public questions and source paragraphs. They do not
