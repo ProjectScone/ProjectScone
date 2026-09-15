@@ -288,6 +288,25 @@ async def test_the_question_lane_is_a_flag_that_reaches_every_engine():
         Settings.from_env({"SCONE_QUESTION_LANE": "maybe"})
 
 
+async def test_exact_word_forms_are_a_flag_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_LEXICAL_EXACT_FORMS": "0"})
+    assert settings.lexical_exact_forms is False and Settings.from_env({}).lexical_exact_forms is True, "on unless turned off"
+    assert Settings().lexical_exact_forms is True, "settings built in code agree with the environment's default"
+    assert "lexical_exact_forms" in ENGINE_SETTINGS
+    engine = await build_engine(settings)
+    try:
+        assert engine.lexical_exact_forms is False
+    finally:
+        await engine.close()
+    assert (await build_in_process_engine(settings, HashEmbedder())).lexical_exact_forms is False
+    assert (await build_in_process_engine(Settings.from_env({}), HashEmbedder())).lexical_exact_forms is True
+    with pytest.raises(InvalidInput, match="SCONE_LEXICAL_EXACT_FORMS"):
+        Settings.from_env({"SCONE_LEXICAL_EXACT_FORMS": "maybe"})
+
+
 async def test_the_vector_weight_is_a_number_that_reaches_every_engine():
     from scone_memory import HashEmbedder
     from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine

@@ -49,6 +49,8 @@
                                    terms) beside its text and search it as a lane of its own (off by default)
     SCONE_LEXICAL_STEMS=0          turn off the text lane's stem-prefix families (bill* for billing); on by
                                    default, measured; the index is untouched either way
+    SCONE_LEXICAL_EXACT_FORMS=0    turn off weighing a stem family at the query word's own idf in a passage that
+                                   holds that word (still one term); on by default, measured
     SCONE_VECTOR_WEIGHT=0.5        the vector lane's voice in rank fusion against the text lane's 1.0 (a number
                                    above 0 and at most 4); unset, a hashed-token embedder gets 0.01 and any
                                    other embedder 1.0, measured (0.25 was the hashed default before)
@@ -236,6 +238,9 @@ class Settings:
     #: (ingestion/chunk_questions.py), and the pass that writes them may run.
     question_lane: bool = False
     lexical_stems: bool = True
+    #: SCONE_LEXICAL_EXACT_FORMS: with stem prefixes, a passage holding the
+    #: query's own word weighs its family at that word's idf.
+    lexical_exact_forms: bool = True
     vector_weight: Optional[float] = None
     many_valued: tuple[str, ...] = ()
     relation_inverse: tuple[str, ...] = ()
@@ -541,6 +546,8 @@ class Settings:
             question_lane=parse_flag("SCONE_QUESTION_LANE", env.get("SCONE_QUESTION_LANE")),
             lexical_stems=(parse_flag("SCONE_LEXICAL_STEMS", env["SCONE_LEXICAL_STEMS"])
                            if env.get("SCONE_LEXICAL_STEMS") else True),
+            lexical_exact_forms=(parse_flag("SCONE_LEXICAL_EXACT_FORMS", env["SCONE_LEXICAL_EXACT_FORMS"])
+                                 if env.get("SCONE_LEXICAL_EXACT_FORMS") else True),
             vector_weight=_vector_weight(env.get("SCONE_VECTOR_WEIGHT")),
             relation_inverse=tuple(item.strip() for item in env.get("SCONE_RELATION_INVERSE", "").split(",")
                                    if item.strip()),
@@ -883,7 +890,7 @@ ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget
                    "semantic_merge_threshold",
                    "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "question_lane",
-                   "lexical_stems",
+                   "lexical_stems", "lexical_exact_forms",
                    "vector_weight", "recency_weight", "recency_half_life_days", "feedback_weight")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy", "synonyms")
@@ -1008,7 +1015,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         abstention=build_abstention(settings),
         synonyms=build_synonyms(settings),
         context_lane=settings.context_lane, question_lane=settings.question_lane,
-        lexical_stems=settings.lexical_stems,
+        lexical_stems=settings.lexical_stems, lexical_exact_forms=settings.lexical_exact_forms,
         vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
     ).open()
@@ -1265,7 +1272,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         synonyms=build_synonyms(settings),
         context_lane=settings.context_lane,
         question_lane=settings.question_lane, lexical_stems=settings.lexical_stems,
-        vector_weight=settings.vector_weight,
+        lexical_exact_forms=settings.lexical_exact_forms, vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
         blobs=blobs,
     )
