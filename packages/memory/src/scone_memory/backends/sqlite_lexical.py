@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import math
 import re
 import sqlite3
 from typing import Iterator, Sequence
@@ -77,6 +78,58 @@ def lexical_match(query: str, prefixes: Sequence[str] = ()) -> str | None:
     pieces = ['"' + token.replace('"', '""') + '"' for token in tokens if not any(token.startswith(stem) for stem in stems)]
     pieces += ['"' + stem.replace('"', '""') + '"*' for stem in stems]
     return " OR ".join(pieces) if pieces else None
+
+
+#: The idf FTS5's bm25() gives a phrase more than half the rows hold, so a
+#: weight can be moved from one idf to another as bm25() itself would weigh it.
+_FTS5_MIN_IDF = 1e-6
+
+
+def _fts5_idf(rows: int, hits: int) -> float:
+    """The idf FTS5's bm25() gives a phrase ``hits`` of ``rows`` rows hold."""
+    idf = math.log((rows - hits + 0.5) / (hits + 0.5))
+    return idf if idf > 0 else _FTS5_MIN_IDF
+
+
+def _hits(conn: sqlite3.Connection, phrase: str) -> int:
+    return int(conn.execute("SELECT count(*) FROM chunk_lexical_fts WHERE chunk_lexical_fts MATCH ?", (phrase,)).fetchone()[0])
+
+
+def exact_form_rank(conn: sqlite3.Connection, query: str, prefixes: Sequence[str]) -> tuple[str, str, list[object]]:
+    """The rank expression, the joins it reads and their parameters, in the
+    order they appear, for a family search that weighs the query's own words.
+
+    bm25() scores a prefix phrase at the family's idf and cannot weigh one
+    row's phrase differently from another's. A row holding one of the
+    query's own words in a family has that phrase's part moved to the idf
+    of the rarest such word it holds: the family phrase's own bm25() is
+    read beside the whole expression's, and the difference between the two
+    idfs, as a multiple of it, is added. The family is still one phrase,
+    counted once, as ``Bm25.search`` counts it with ``exact_forms``; a row
+    holding only relatives keeps its rank.
+    """
+    stems = [term(prefix) for prefix in prefixes if prefix]
+    tokens = [term(token) for token in tokenize(query)]
+    rank, joins, selected, joined = "bm25(chunk_lexical_fts)", "", [], []
+    rows = int(conn.execute("SELECT count(*) FROM chunk_lexical").fetchone()[0])
+    for number, stem in enumerate(stems):
+        forms = [token for token in tokens if token.startswith(stem)]
+        if not forms:
+            continue
+        family = '"' + stem.replace('"', '""') + '"*'
+        family_idf = _fts5_idf(rows, _hits(conn, family))
+        # The rarest form first: a CASE takes the first form a row holds.
+        weighed = sorted(((_fts5_idf(rows, _hits(conn, '"' + form.replace('"', '""') + '"')), form) for form in forms),
+                         reverse=True)
+        alias = f"family{number}"
+        rank += " + coalesce(CASE" + "".join(f" WHEN instr(' ' || cl.terms || ' ', ?) > 0 THEN ? * {alias}.rank"
+                                             for _ in weighed) + " END, 0.0)"
+        for idf, form in weighed:
+            selected += [f" {form} ", idf / family_idf - 1]
+        joins += (f" LEFT JOIN (SELECT rowid AS chunk_id, bm25(chunk_lexical_fts) AS rank FROM chunk_lexical_fts"
+                  f" WHERE chunk_lexical_fts MATCH ?) AS {alias} ON {alias}.chunk_id = c.id")
+        joined.append(family)
+    return rank, joins, [*selected, *joined]
 
 
 @contextmanager

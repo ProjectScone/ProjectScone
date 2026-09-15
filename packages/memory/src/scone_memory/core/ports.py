@@ -209,12 +209,14 @@ class ContextIndex(Protocol):
 class PrefixSearch(Protocol):
     """A document store whose text lane can search a term's family by prefix
     (``bill*``) beside whole terms. Optional: ``prefix_search(store)`` says
-    whether a store has it, and a recall says whether prefixes applied."""
+    whether a store has it, and a recall says whether prefixes applied.
+    With ``exact_forms``, a passage holding one of the query's own words in
+    a family has the family weighed at that word's idf, still counted once."""
 
     prefix_terms: bool
 
     async def search_terms(self, space: str, query: str, limit: int, filter: "TextFilter", *,
-                           prefixes: Sequence[str]) -> list[tuple[int, float]]: ...
+                           prefixes: Sequence[str], exact_forms: bool = False) -> list[tuple[int, float]]: ...
 
 
 def prefix_search(store: object) -> Optional[PrefixSearch]:
