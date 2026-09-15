@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from operator import mul
 from itertools import count
 from bisect import bisect_left, bisect_right, insort
 from typing import Mapping, Optional, Sequence
@@ -67,6 +68,7 @@ class InMemoryDocumentStore:
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
         #: The context lane: what each chunk is under, indexed beside its text.
         self._context: dict[str, Bm25] = defaultdict(Bm25)
+        self._questions: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
         #: Fact writes per space, only ever growing: the ledger stamp.
         self._fact_writes: dict[str, int] = defaultdict(int)
@@ -103,6 +105,7 @@ class InMemoryDocumentStore:
         for key in [key for key in self._chunks_by_episode if key[0] == space]:
             del self._chunks_by_episode[key]
         self._bm25.pop(space, None)
+        self._questions.pop(space, None)
         if fact_ids:
             self._fact_writes[space] += 1
         for fact_id in fact_ids:
@@ -205,6 +208,7 @@ class InMemoryDocumentStore:
         for chunk_id in removed:
             self._bm25[space].remove(chunk_id)
             self._context[space].remove(chunk_id)
+            self._questions[space].remove(chunk_id)
             del self._chunks[chunk_id]
         self._chunks_by_episode.pop((space, episode_id), None)
         if episode is not None:
@@ -253,6 +257,8 @@ class InMemoryDocumentStore:
     narrows_metadata = True
     #: This store keeps a context index beside chunk text (see ContextIndex).
     context_lane = True
+    #: This store keeps the questions each chunk answers (see QuestionIndex).
+    question_lane = True
     #: This store can search a term's family by prefix (see PrefixSearch).
     prefix_terms = True
 
@@ -271,6 +277,19 @@ class InMemoryDocumentStore:
 
     async def search_context(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
         return self._context[space].search(query, limit, self._allowed(space, filter))
+
+    async def index_questions(self, space: str, chunk_id: int, questions: Sequence[str]) -> bool:
+        chunk = self._chunks.get(chunk_id)
+        if chunk is None or chunk.space != space:
+            return False
+        index = self._questions[space]
+        index.remove(chunk_id)
+        if questions:
+            index.add(chunk_id, "\n".join(questions))
+        return True
+
+    async def search_questions(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        return self._questions[space].search(query, limit, self._allowed(space, filter))
 
     def _allowed(self, space: str, filter: TextFilter) -> list[int] | None:
         if (filter.as_of or filter.tags or filter.where or filter.conditions
@@ -546,6 +565,9 @@ class InMemoryVectorIndex:
 
     def __init__(self) -> None:
         self._points: dict[int, VectorPoint] = {}
+        #: Each held point's vector norm, taken when it was written, so a
+        #: search pays one dot product per point rather than two norms more.
+        self._norms: dict[int, float] = {}
         self.dim: Optional[int] = None
         self._writer: tuple[str, str] | None = None
         #: Writes that have taken the record and not yet returned, by writer.
@@ -631,6 +653,7 @@ class InMemoryVectorIndex:
             validate_vector(point.vector, self.dim)
         for point in points:
             self._points[point.chunk_id] = point
+            self._norms[point.chunk_id] = _norm(point.vector)
 
     async def search(
         self,
@@ -643,6 +666,8 @@ class InMemoryVectorIndex:
         conditions: "Filter | None" = None,
     ) -> list[tuple[int, float]]:
         validate_vector(vector, self.dim)
+        query_norm = _norm(vector)
+        norms = self._norms
         scored = []
         for point in self._points.values():
             if point.space != space:
@@ -655,7 +680,12 @@ class InMemoryVectorIndex:
                 continue
             if conditions is not None and not conditions.matches(point.metadata):
                 continue
-            scored.append((point.chunk_id, _cosine(vector, point.vector)))
+            norm = norms[point.chunk_id]
+            # sum over map(mul) adds the same products in the same order as a
+            # generator, so the score is the plain formula's to the last bit;
+            # math.sumprod rounds differently and would reorder near-ties.
+            scored.append((point.chunk_id, 0.0 if query_norm == 0 or norm == 0
+                           else sum(map(mul, vector, point.vector)) / (query_norm * norm)))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         return scored[:limit]
 
@@ -667,15 +697,12 @@ class InMemoryVectorIndex:
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         for chunk_id in chunk_ids:
             self._points.pop(chunk_id, None)
+            self._norms.pop(chunk_id, None)
 
     async def delete_space(self, space: str) -> None:
         self._points = {chunk_id: p for chunk_id, p in self._points.items() if p.space != space}
+        self._norms = {chunk_id: self._norms[chunk_id] for chunk_id in self._points}
 
 
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+def _norm(vector: Sequence[float]) -> float:
+    return math.sqrt(sum(map(mul, vector, vector)))

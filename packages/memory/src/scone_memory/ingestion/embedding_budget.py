@@ -38,24 +38,32 @@ TOKENIZER_VERSION = "tokenizer-v1"
 
 Outcome = Literal["fits", "shortened", "dropped", "body_over"]
 
-_PIECE = re.compile(r"[^\W\d_]+|\d+|[^\w\s]|_")
+#: The pieces the estimate counts: a run of letters, a run of digits, a mark
+#: or an underscore. A piece never spans whitespace.
+PIECE = re.compile(r"[^\W\d_]+|\d+|[^\w\s]|_")
 _PART = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[^\W\d_]")
 #: The start and end markers an encoder model puts around every input.
-_MARKERS = 2
+MARKERS = 2
 
 
 def estimated_tokens(text: str) -> int:
     """An estimate of the tokens an encoder model reads for ``text``, meant to err high."""
-    count = _MARKERS
-    for piece in _PIECE.findall(text):
-        if piece.isdigit():
-            count += math.ceil(len(piece) / 2)
-        elif piece[0].isalpha() or UNSPACED_CHAR.search(piece):
-            count += len(UNSPACED_CHAR.findall(piece))
-            count += sum(math.ceil(len(part) / 4) for part in _PART.findall(UNSPACED_CHAR.sub(" ", piece)))
-        else:
-            count += 1
-    return count
+    return MARKERS + sum(map(piece_tokens, PIECE.findall(text)))
+
+
+def piece_tokens(piece: str) -> int:
+    """The estimate's tokens for one piece ``PIECE`` found."""
+    if piece.isascii() and (piece.islower() or piece.isupper() or piece[1:].islower()):
+        # A plain word -- lower case, capitals, or one capital first -- is the
+        # one part the rule below would find, and most words are plain: this
+        # is the same count without three regular expressions a word.
+        return (len(piece) + 3) // 4
+    if piece.isdigit():
+        return math.ceil(len(piece) / 2)
+    if piece[0].isalpha() or UNSPACED_CHAR.search(piece):
+        return (len(UNSPACED_CHAR.findall(piece))
+                + sum(math.ceil(len(part) / 4) for part in _PART.findall(UNSPACED_CHAR.sub(" ", piece))))
+    return 1
 
 
 def fitted(*, body: str, heading: str, table: Optional[str], wrap: Callable[[str], str],

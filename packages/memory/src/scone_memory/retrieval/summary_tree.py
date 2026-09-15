@@ -116,6 +116,12 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def summary_key(episode_id: int, content_hash: str, fan_in: int, level: int, index: int) -> str:
+    """The source key a stored node is kept under: one per document, content, shape and place, so a
+    summary above finds the node it cites by one keyed read rather than a walk over the space."""
+    return f"summary:{episode_id}:{content_hash}:{fan_in}:{level}:{index}"
+
+
 def summary_metadata(tree_of: "Episode", node: Node, fan_in: int, model_name: str, detail_id: str) -> dict[str, str]:
     """What a stored summary says about itself, in the episode's metadata:
     every value bounded, the long account in the attachment ``detail_id``."""
@@ -213,7 +219,7 @@ async def build_summary_tree(engine: "MemoryEngine", model: ChatModel, space: st
                                       metadata=summary_metadata(episode, node, fan_in, model_name or type(model).__name__,
                                                                 detail.attachment_id),
                                       attachment_ids=(detail.attachment_id,),
-                                      dedup_key=f"summary:{episode_id}:{content_hash}:{fan_in}:{node.level}:{node.index}", replace=True)
+                                      dedup_key=summary_key(episode_id, content_hash, fan_in, node.level, node.index), replace=True)
         stored.append(Node(node.level, node.index, node.text, node.written_from, node.covers, node.synthesis, added.episode_id))
     return SummaryTree(episode_id, content_hash, len(chunks), fan_in, level, tuple(stored),
                        empty_groups=empty, unjoined=unjoined, model_calls=calls, stored=True, reasons=tuple(reasons))
@@ -244,13 +250,16 @@ async def stored_summaries(engine: "MemoryEngine", space: str, episode_id: int) 
     document is a new episode with no summaries until its own are built."""
     await engine.episode(space, episode_id)
     found = await engine.episodes(space, {"summary_of": str(episode_id)})
-    rows = []
-    for one in found:
-        meta = one.metadata
-        try:
-            rows.append(StoredSummary(one.episode_id, int(meta["summary_level"]), int(meta["summary_index"]), one.content,
-                                      int(meta["summary_fan_in"]), int(meta["summary_chunks"]), int(meta["summary_first_chunk"]),
-                                      int(meta["summary_last_chunk"]), meta["summary_detail"], meta.get("summary_content_hash", "")))
-        except (KeyError, ValueError):
-            continue
+    rows = [row for row in map(stored_summary, found) if row is not None]
     return tuple(sorted(rows, key=lambda s: (-s.level, s.index)))
+
+
+def stored_summary(episode: "Episode") -> Optional[StoredSummary]:
+    """A stored episode read as a summary, or None when its metadata does not say where it sits."""
+    meta = episode.metadata
+    try:
+        return StoredSummary(episode.episode_id, int(meta["summary_level"]), int(meta["summary_index"]), episode.content,
+                             int(meta["summary_fan_in"]), int(meta["summary_chunks"]), int(meta["summary_first_chunk"]),
+                             int(meta["summary_last_chunk"]), meta["summary_detail"], meta.get("summary_content_hash", ""))
+    except (KeyError, ValueError):
+        return None

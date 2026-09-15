@@ -6,6 +6,16 @@ exact references. The [scaling report](../docs/scaling-validation.md) records th
 results alongside S3 request/byte counts and image-parser timings. These storage
 experiments are separate from the real-world answer-quality evaluations below.
 
+The [chunking profiles run](chunking-profiles-v1.results.md) compares where
+plain structure chunking and a declared genre profile cut a statute-like and a
+Q&A-like fixture: chunks starting at a boundary, headings split from their first
+clause, and the cost in chunks.
+
+The [hot-path run](hot-paths-v1.results.md) measures ingestion throughput and
+recall latency on the built-in in-memory and SQLite stores with
+[`hot_paths.py`](hot_paths.py), before and after a set of behaviour-preserving
+optimisations, and shows all 400 recalls returned identical results.
+
 The [knowledge lifecycle run](knowledge-lifecycle-v1.results.md) exercises a real
 CLI server over HTTP with PDF/image ingestion, Qdrant, persistent source evidence,
 two restarts and deletion. It records the initial SIGTERM cleanup failure and
@@ -18,6 +28,16 @@ twelve passages on eight LongMemEval-S multi-session questions with `evidence`,
 and judging; our modes' texts were the same in all four runs. No mode spoke more often than `evidence`
 (7 of 8); `refine`'s second rounds returned the answer so far and wrote nothing
 new, and `accumulate` spent 5.6 times the calls and spoke on 6.
+
+## Retrieval defaults against LlamaIndex
+
+The [north star defaults sweep](northstar-defaults-2026-09-14.results.md)
+compares the engine with LlamaIndex's BM25 retriever fused with its vector
+retriever. Both run on LongMemEval-S with the same hashed vectors, and the
+sweep covers fusion mode, vector weight, chunk size and diversity. It is
+checked on 100 items outside the frozen 50. It set the hashed-token
+embedder's default vector weight to 0.01, and records why the other
+winning rows did not become defaults. `northstar_defaults.py` reruns it.
 
 ## Public QA experiments
 
@@ -54,6 +74,12 @@ The [repeated-search compaction comparison](public-search-compaction-v1.results.
 records 400 paired tool-loop turns. Exact match stays at 56.5% while offered
 tool-result bytes fall 28.11%; dataset-level gains and regressions keep this
 presentation option disabled by default.
+
+The [question lane run](chunk-question-lane-v1.results.md) writes questions per
+chunk with llama3.2-ctx8k over 233 chunks of this repository's documents and
+asks 43 questions written by a different prompt. R@5 falls from 0.953 to 0.837
+with the lane on; no fusion weight beats the lane off on held-out questions, so
+the lane stays off by default.
 
 The [v1 protocol](public-qa-v1.protocol.md) fixes the sample and settings before
 inference. These experiments exercise Scone's native memory retrieval and model

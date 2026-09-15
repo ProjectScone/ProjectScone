@@ -40,6 +40,8 @@ GRAPH_ARGUMENTS = {
     "memory_entity_duplicates": {"limit", "min_score", "max_bytes", "space"},
     "memory_temporal_answer": {"question", "now", "limit", "max_bytes", "space"},
     "memory_graph_cycles": {"limit", "max_bytes", "space"},
+    "memory_graph_stats": {"max_bytes", "space"},
+    "memory_graph_hubs": {"limit", "above", "max_bytes", "space"},
     "memory_graph_health": {"limit", "max_bytes", "space"},
     "memory_graph_affected": {"name", "max_hops", "limit", "max_bytes", "space"},
 }
@@ -624,3 +626,18 @@ async def test_the_blast_radius_tool_lists_what_rests_on_a_symbol_and_refuses_an
     assert error, "an unknown name is refused, not answered with nothing"
     error, text = await affected(name="cli.py:helper")
     assert not error and "nothing in this graph rests on" in text
+
+
+async def test_the_stats_and_hubs_tools_and_resources_count_the_graph(server):
+    await store_and_distill(server, "main calls run.", "app.py:main", "calls", "lib.py:run")
+    await store_and_distill(server, "helper calls main.", "cli.py:helper", "calls", "app.py:main")
+    error, counted = await call(server, "memory_graph_stats")
+    assert not error and "stats: space default" in counted and "facts by origin:" in counted
+    error, ranked = await call(server, "memory_graph_hubs", limit=1)
+    assert not error and "hubs: space default" in ranked and "1. " in ranked and "neighbours" in ranked
+    error, refused = await call(server, "memory_graph_hubs", above=10)
+    assert error and "percentile" in refused
+    stats_resource = await server.read_resource("scone://graph/stats")
+    assert "stats: space default" in "".join(part.content for part in stats_resource)
+    hubs_resource = await server.read_resource("scone://default/graph/hubs")
+    assert "hubs: space default" in "".join(part.content for part in hubs_resource)

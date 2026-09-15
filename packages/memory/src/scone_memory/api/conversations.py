@@ -43,6 +43,7 @@ from ..retrieval.evidence_records import canonical_evidence, fingerprint, restri
 from .app import create_app, episode_json, permitted
 from ._lifecycle import finish_host_cleanup
 from ..realtime.catalog import PersonaCatalog
+from ..realtime.turn_end import LexicalEndOfTurn
 from ..realtime.websocket import WebSocketAudioTransport
 
 # What a host without a catalog reports: the revision of an empty one.
@@ -105,7 +106,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             runtime_available=None, model_connections_available=False,
                             vision_available=None, vision_factory=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
                             agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None, document_video=None,
-                            directory_sync_service=None, synthesis_factory=None, url_import=None, followup=None):
+                            directory_sync_service=None, synthesis_factory=None, url_import=None, followup=None,
+                            semantic_turn=False):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -130,6 +132,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     adaptive_retriever and recall_timeout keywords when it is configured.
     tool_retrieval describes the explicit ConversationTools binding installed by
     the host on its text factories. It advertises configuration, not model health.
+    semantic_turn=True gives each voice session the lexical end-of-turn detector:
+    a final transcript that stops mid-clause is held for the rest of the turn.
     """
     from ..runtime.conversation_tools import ConversationTools
 
@@ -402,6 +406,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "recall_scope": scoped_runtime_factory is not None or bool(catalog and catalog.personas),
                 "personas": len(catalog.personas) if catalog is not None else 0,
                 "voice": bool(catalog and catalog.personas), "video": False, "streaming": public_text_streaming,
+                "voice_turn_end": "semantic" if semantic_turn else "silence",
                 "voice_stream": ({"schema_version": 1, "transport": "websocket", "protocol": "scone-pcm-v1",
                                   "authentication": "hello", "reconnect": False, "pcm": "s16le",
                                   "input_channels": [1, 2], "min_sample_rate": 8000,
@@ -1053,7 +1058,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             return
         try:
             fixed = RecallScope.from_mapping(current["recall_scope"])
-            session = chosen.voice(engine, space, sid, transport_factory=lambda: transport, capture=True, **fixed.kwargs())
+            turns = {"turn_detector_factory": LexicalEndOfTurn} if semantic_turn else {}
+            session = chosen.voice(engine, space, sid, transport_factory=lambda: transport, capture=True,
+                                   **fixed.kwargs(), **turns)
             journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
         except Exception:
             await refuse("voice session failed to initialize")

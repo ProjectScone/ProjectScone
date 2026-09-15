@@ -14,8 +14,8 @@ from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING
 
 from ..core.errors import InvalidInput
 from ..ingestion.code import code_language, declaration_at, line_span
-from ..core.models import DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
-from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search
+from ..core.models import Chunk, DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
+from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search, question_index
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
 from . import fact_recall, fusion, supersession
@@ -30,10 +30,15 @@ from .entity_lane import ENTITY_WEIGHT, entity_lane
 #: same choice for the same reason. The cost is on the record too: a
 #: passage under the words can now come before one that merely says them.
 CONTEXT_WEIGHT = 2.0
+#: The question lane's share (ingestion.chunk_questions): the context lane's,
+#: which is what it was measured at (benchmarks/chunk-question-lane-v1.results.md,
+#: where no lower weight beat the lane off on held-out questions either).
+QUESTION_WEIGHT = 2.0
 from .episode_scope import episode_fits
 from .filters import Filter, parse_filter
 from .phrases import Phrases, checked_phrases
 if TYPE_CHECKING:
+    from .summary_expand import Expanded
     from .synonyms import Synonyms
     from ..entities.project import EntityProjection
 from .reranking import (Reranker, RerankCandidate, candidate_is_retained,
@@ -91,10 +96,29 @@ class RecallRuntime:
     synonyms: "Synonyms | None" = None
     #: Whether the words a chunk is under are searched as a lane of their own.
     context_lane: bool = False
+    #: Whether the questions each chunk answers, kept in an index of their own, are searched.
+    question_lane: bool = False
     #: Whether a query term's family is searched by stem prefix in the text lane.
     lexical_stems: bool = False
     #: The vector lane's voice in rank fusion, against the text lane's 1.0.
     vector_weight: float = 1.0
+
+
+#: Given the items recall would return, its required and excluded phrases and
+#: its scope, the answer with each stored summary expanded (``summary_expand``).
+SummaryExpander = Callable[[Sequence[RecallItem], Sequence[str], Sequence[str], TextFilter], Awaitable["Expanded"]]
+
+
+def placed_in_file(episode: Episode, chunk: Chunk) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """Where in its file a chunk sits -- its first and last line, and the
+    declaration holding it when the source is code -- worked out from the
+    episode rather than stored: the same span always answers the same way,
+    and a chunk written before any of this can still answer."""
+    language = code_language(episode.source)
+    held = (declaration_at(episode.content, chunk.start, chunk.end, language=language, offsets="bytes")
+            if language is not None else None)
+    lines = line_span(episode.content, chunk.start, chunk.end, "bytes")
+    return (lines[0] if lines else None, lines[1] if lines else None, held.name if held is not None else None)
 
 
 def _ms(since: float) -> float:
@@ -214,6 +238,7 @@ async def recall(
     require: Sequence[str] = (),
     exclude: Sequence[str] = (),
     diversity: Optional[float] = None,
+    summaries: Optional[SummaryExpander] = None,
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -310,6 +335,7 @@ async def recall(
         "synonyms": (None if expansion is None
                      else {"matched": len(expansion.matched), "added": len(expansion.added), "capped": expansion.capped}),
         "context_lane": runtime.context_lane,
+        "question_lane": runtime.question_lane,
         "prefixes": ({"added": len(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
         "fusion_weights": {"vector": runtime.vector_weight, "text": 1.0},
         "similarity_floor": runtime.similarity_floor,
@@ -384,8 +410,8 @@ async def recall(
             failed.add("text")
 
     # The context lane: what each passage is under, searched with the same
-    # query the text lane got, fused at a lower weight so a passage that
-    # says the words comes before one that is only under them.
+    # query the text lane got, fused at CONTEXT_WEIGHT -- twice the text
+    # lane's, so a passage only under the words can come before one that says them.
     context_hits: list[tuple[int, float]] = []
     if runtime.context_lane:
         keeper = context_index(runtime.documents)
@@ -402,6 +428,26 @@ async def recall(
                 latency["context"] = _ms(t0)
             except Exception as e:  # noqa: BLE001
                 degraded.append(f"context lane: {type(e).__name__}: {e}")
+
+    # The question lane: the questions a model wrote that each passage
+    # answers (ingestion.chunk_questions), in an index of their own so the
+    # flag that searches them searches nothing else.
+    question_hits: list[tuple[int, float]] = []
+    if runtime.question_lane:
+        asked_index = question_index(runtime.documents)
+        if asked_index is None:
+            degraded.append(f"question lane: not kept by the {runtime.documents.name} document store")
+        else:
+            try:
+                t0 = time.perf_counter()
+                question_hits = await asked_index.search_questions(
+                    space, text_query, depth,
+                    TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                               kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
+                )
+                latency["question"] = _ms(t0)
+            except Exception as e:  # noqa: BLE001
+                degraded.append(f"question lane: {type(e).__name__}: {e}")
 
     if candidate_limit is not None or active_reranker is not None:
         text_lane = text_lane[:depth]
@@ -454,7 +500,15 @@ async def recall(
         "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
     }
     lane_hits: list[list[tuple[int, float]]] = [vector_lane, text_lane]
-    weights = [runtime.vector_weight, 1.0]
+    # The vector lane's weight is its voice against the text lane's. With
+    # nothing from the text lane (not asked, failed, or found nothing) it
+    # has nothing to speak against, and a light voice would only shrink its
+    # rank scores under the recency term, which is sized against a full
+    # voice: at a hundredth, half an hour of age outranks an exact match.
+    # So it speaks at full voice, and the event records the voice it had.
+    vector_voice = runtime.vector_weight if text_lane else 1.0
+    evidence["fusion_weights"] = {"vector": vector_voice, "text": 1.0}
+    weights = [vector_voice, 1.0]
     if graph_boost:
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
         lane_hits.append(entity_hits)
@@ -463,6 +517,10 @@ async def recall(
         ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
         lane_hits.append(context_hits)
         weights.append(CONTEXT_WEIGHT)
+    if runtime.question_lane:
+        ranks["question"] = {cid: i + 1 for i, (cid, _) in enumerate(question_hits)}
+        lane_hits.append(question_hits)
+        weights.append(QUESTION_WEIGHT)
     fuse = {"score": fusion.relative_scores, "distribution": fusion.distribution_scores}.get(fusion_mode, fusion.rrf)
     fused = fuse(lane_hits, weights=weights)
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
@@ -567,6 +625,7 @@ async def recall(
         latency["rerank"] = outcome.trace.duration_ms
         if outcome.failure is not None:
             degraded.append(f"rerank: {outcome.failure}")
+        degraded.extend(f"rerank: {note}" for note in outcome.notes)
         if outcome.trace.status == "applied":
             rerank_scores = outcome.scores
             ranked = list(outcome.ordered_ids) + [cid for cid in candidate_order if cid not in rerank_scores]
@@ -598,13 +657,7 @@ async def recall(
     for item in items:
         chunk = chunks[item.chunk_id]
         episode = episodes.get(chunk.episode_id)
-        # Where in the file this came from, worked out from the episode
-        # rather than stored: the same span always answers the same way,
-        # and a chunk written before any of this can still answer.
-        language = code_language(episode.source) if episode else None
-        held = (declaration_at(episode.content, chunk.start, chunk.end, language=language, offsets="bytes")
-                if episode is not None and language is not None else None)
-        lines = line_span(episode.content, chunk.start, chunk.end, "bytes") if episode is not None else None
+        first_line, last_line, declaration = placed_in_file(episode, chunk) if episode is not None else (None, None, None)
         result_items.append(
             RecallItem(
                 chunk_id=chunk.chunk_id,
@@ -620,13 +673,22 @@ async def recall(
                 metadata=dict(episode.metadata) if episode else {},
                 start=chunk.start,
                 end=chunk.end,
-                first_line=lines[0] if lines else None,
-                last_line=lines[1] if lines else None,
-                declaration=held.name if held is not None else None,
+                first_line=first_line,
+                last_line=last_line,
+                declaration=declaration,
             )
         )
     fact_scope = scope if narrowing or clean_tags or clean_where else None
     facts = await fact_recall.facts_for_query(runtime.documents, space, query, boundary or now, scope=fact_scope, degraded=degraded)
+    retrieved = len(result_items)
+    expanded: "Expanded | None" = None
+    if summaries is not None:
+        # Before the event is written, so it lists what is returned and a
+        # chunk a summary brought can be judged; held to the same scope and
+        # phrases the lanes' passages were; and before supersession, so a
+        # retired claim is marked and moved whichever way it came back.
+        expanded = await summaries(result_items, required, excluded, scope)
+        result_items = list(expanded.items)
     if runtime.demote_superseded:
         # After the facts, because this is the one thing in the recall path
         # that reads the ledger rather than the index -- what the returned
@@ -666,7 +728,8 @@ async def recall(
         fusion=cast(Literal["rank", "score", "distribution"], fusion_mode),
         lanes=answered,
         diversity=diversity_trace,
-        phrases=_finished(phrase_trace, len(result_items), limit,
+        # What the lanes returned: a summary's chunks do not fill a place the phrases emptied.
+        phrases=_finished(phrase_trace, retrieved, limit,
                           window_full=len(vector_lane) >= vector_depth or len(text_lane) >= depth),
         entities=query_entities,
         top_similarity=top_similarity,
@@ -674,6 +737,7 @@ async def recall(
         returned_bytes=sum(len(i.text.encode()) for i in result_items),
         space_bytes=counts.bytes,
         expansion=expansion.record() if expansion is not None else None,
+        expanded=expanded.record() if expanded is not None else None,
         prefixes=({"added": list(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
     )
     latency["total"] = _ms(started)
@@ -690,7 +754,8 @@ async def recall(
         "items": [
             {"chunk_id": i.chunk_id, "episode_id": i.episode_id, "score": i.score,
              "similarity": i.similarity, "lanes": i.lanes,
-             **({"rerank_score": i.rerank_score} if i.rerank_score is not None else {})}
+             **({"rerank_score": i.rerank_score} if i.rerank_score is not None else {}),
+             **({"via_summary": i.via_summary["episode_id"]} if i.via_summary is not None else {})}
             for i in result_items
         ],
         "items_coverage": "returned",
@@ -704,6 +769,7 @@ async def recall(
         "space_bytes": result.space_bytes,
         **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
         **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
+        **({"expanded": result.expanded} if result.expanded is not None else {}),
     })
     if event is not None:
         result.event_id = event.event_id
