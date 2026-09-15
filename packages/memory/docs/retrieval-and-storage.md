@@ -1446,9 +1446,9 @@ MemoryEngine(store, index, embedder, semantic_merge_threshold=0.2)   # or SCONE_
   and every join that did not happen, counted once:
   `stopped_by_similarity` when the two were less alike than the threshold,
   `stopped_by_size` when they were alike enough and too long together --
-  the size bound biting. Two chunks that fail both count as unalike. Most
-  size stops are the first pass's own size cuts: pieces of one subject
-  that were never going to fit together. A semantic cut without a
+  the size bound biting. Two chunks that fail both count as unalike. A
+  chunk the first pass ended by size can never fit the next one, so its
+  own size cuts between alike chunks are counted here too. A semantic cut without a
   threshold has no such receipt (`structure` is null), as before.
 - **A similarity above 0 and at most 1.** At or below 0 any two chunks
   that fit and are not opposed would be joined, which is size chunking
@@ -1458,10 +1458,11 @@ MemoryEngine(store, index, embedder, semantic_merge_threshold=0.2)   # or SCONE_
 - **The scale is the embedder's.** The first pass's own threshold is
   derived from each text's depths and assumes no scale; this one does,
   which is why it is off by default. Hashed-token cosines are word
-  overlap. Over the sample below (51,186 first-pass chunks in 2,355
-  sessions), the 7,060 neighbouring pairs that would fit together had a
-  median cosine of 0.04, a 90th percentile of 0.31 and a 95th of 0.39
-  under `hash-256`; a neural model's cosines sit far higher, and a
+  overlap. Over the sample below (51,250 first-pass chunks in 2,355
+  sessions; `benchmarks/semantic_double_merge.py --pairs`), the 7,060
+  neighbouring pairs that would fit together had a median cosine of 0.04,
+  a 90th percentile of 0.31 and a 95th of 0.39 under `hash-256`: 1,527 of
+  them at or above 0.2, 330 at or above 0.4; a neural model's cosines sit far higher, and a
   threshold chosen for one embedder means nothing for another.
 - **Stored chunks are never recut, and a replacement is prepared under
   it.** The threshold is part of the configuration a keyed replacement is
@@ -1500,7 +1501,7 @@ sessions. Both sides are deterministic, so one run is the number.
 What it says: on this sample the second pass changes almost nothing a
 metric can see. At 0.2 it removes 1,383 chunks (2.7%) and changes the
 top-15 session ranking of 34 items and the top 5 of 8, and no score moves
-but NDCG@5 by 0.001; at 0.4 it removes 306 (0.6%), changing 7 and 2. The
+but NDCG@5 by 0.001 (0.8236 to 0.8246); at 0.4 it removes 306 (0.6%), changing 7 and 2. The
 semantic cut itself scores as the length cut does at k=5 and 10, higher
 on MRR (0.857 vs 0.838), lower at k=15 (0.96 vs 1.00). What it does not
 say: 50 items is one or two items a column; hashed-token vectors carry

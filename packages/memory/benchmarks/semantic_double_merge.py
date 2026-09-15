@@ -16,6 +16,10 @@ Each record's receipt is kept, so a row also says what the second pass
 did: chunks stored, first-pass chunks, merges, and how many joins
 similarity and the size target each stopped.
 
+``--pairs`` instead reads the scale a threshold has to be chosen on: the
+first pass's neighbouring chunks that would fit the target together, and
+the cosine between their mean sentence vectors, as percentiles.
+
 Run from packages/memory:
 
     PYTHONPATH=$PWD/src python benchmarks/semantic_double_merge.py \\
@@ -36,6 +40,8 @@ from typing import Any, Optional
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.bench.comparative import compare
 from scone_memory.bench.runner import BenchItem, load_items, stratified_sample
+from scone_memory.ingestion import semantic_chunks
+from scone_memory.ingestion.chunker import DEFAULT_TARGET
 
 KS = (5, 10, 15)
 COUNTS = ("groups", "merges", "stopped_by_similarity", "stopped_by_size")
@@ -75,6 +81,39 @@ async def row(items: list[BenchItem], name: str, options: dict[str, Any], log: A
             "wall_seconds": round(time.perf_counter() - started)}
 
 
+async def pairs(items: list[BenchItem], target: int = DEFAULT_TARGET) -> dict[str, Any]:
+    """Cosines between neighbouring first-pass chunks, split by whether the
+    two would fit ``target`` together -- only those can ever be merged."""
+    embedder = HashEmbedder()
+    fitting: list[float] = []
+    too_long: list[float] = []
+    sessions = groups = 0
+    for item in items:
+        for session in item.sessions:
+            text = "\n".join(session)
+            if not text.strip():
+                continue
+            sessions += 1
+            sentences = semantic_chunks.sentence_spans(text)
+            vectors = await embedder.embed([text[s.start:s.end].strip() for s in sentences])
+            cuts = semantic_chunks._valleys(semantic_chunks._block_similarity(vectors, semantic_chunks.BLOCK),
+                                            semantic_chunks.SENSITIVITY)
+            made = semantic_chunks._assemble(text, sentences, cuts, target)
+            groups += len(made)
+            for (left, first, last), (right, start, end) in zip(made, made[1:]):
+                similar = semantic_chunks._cosine(semantic_chunks._centre(vectors[first:last + 1]),
+                                                  semantic_chunks._centre(vectors[start:end + 1]))
+                (fitting if right.end - left.start <= target else too_long).append(similar)
+
+    def percentiles(values: list[float]) -> dict[str, float]:
+        ordered = sorted(values)
+        return {str(p): round(ordered[int(p / 100 * (len(ordered) - 1))], 3) for p in (10, 25, 50, 75, 90, 95)}
+
+    return {"sessions": sessions, "groups": groups, "fitting_pairs": len(fitting), "too_long_pairs": len(too_long),
+            "fitting_cosine_percentiles": percentiles(fitting), "too_long_cosine_percentiles": percentiles(too_long),
+            "fitting_at_or_above": {str(t): sum(value >= t for value in fitting) for t in (0.1, 0.2, 0.3, 0.4, 0.5)}}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data", required=True)
@@ -82,10 +121,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--thresholds", default="0.2,0.4")
     parser.add_argument("--no-length", action="store_true", help="skip the length row")
+    parser.add_argument("--pairs", action="store_true", help="print the neighbouring-chunk cosine distribution only")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
     items = [item for item in stratified_sample(load_items(args.data), args.n, seed=args.seed) if item.has_evidence]
+    if args.pairs:
+        found = asyncio.run(pairs(items))
+        Path(args.out).write_text(json.dumps(found, indent=1))
+        print(json.dumps(found))
+        return
     configs: list[tuple[str, dict[str, Any]]] = [] if args.no_length else [("length", {})]
     configs.append(("semantic", {"semantic_aware": True}))
     thresholds: list[Optional[float]] = [float(part) for part in args.thresholds.split(",") if part.strip()]
