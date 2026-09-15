@@ -189,7 +189,8 @@ class MemoryContext:
             raise ValueError(f"reading_order must be one of {', '.join(READING_ORDERS)}")
         #: Passages are chosen in rank order and rendered in this order;
         #: "ends" puts the best at both ends of the block for a model that
-        #: attends least to the middle. The rank stays on each passage.
+        #: attends least to the middle. The receipt names the order, and
+        #: `reading_order.ranked` restores the ranked order from it.
         self._reading_order: ReadingOrder = reading_order  # type: ignore[assignment]
         if adaptive_retriever is not None:
             if adaptive_retriever.memory is not memory:
