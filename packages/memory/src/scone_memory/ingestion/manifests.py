@@ -64,13 +64,16 @@ _NORMALISE = re.compile(r"[-_.]+")
 
 def is_manifest(path: str) -> bool:
     """Known by its name, wherever it sits: the named manifests, a .NET
-    project file by its suffix, and any ``requirements*.txt`` or
-    ``requirements/*.txt``."""
+    project file by its suffix, any ``requirements*.txt`` or
+    ``requirements/*.txt``, and an MCP configuration, which is a manifest
+    of the servers a project hands its agents."""
+    from .mcp_config import is_mcp_config
+
     if not path:
         return False
     parts = path.replace("\\", "/").lower().rsplit("/", 2)
     name = parts[-1]
-    if name in _NAMED or name.endswith(_PROJECT_SUFFIXES):
+    if name in _NAMED or name.endswith(_PROJECT_SUFFIXES) or is_mcp_config(path):
         return True
     if not name.endswith(".txt"):
         return False
@@ -677,7 +680,11 @@ def _pipfile(content: str, path: str) -> tuple[CodeClaim, ...]:
 
 
 def _reader(path: str) -> Optional[Callable[[str, str], tuple[CodeClaim, ...]]]:
+    from .mcp_config import is_mcp_config, mcp_config_claims
+
     name = path.replace("\\", "/").lower().rsplit("/", 1)[-1]
+    if is_mcp_config(path):
+        return mcp_config_claims
     if name == "pyproject.toml":
         return _pyproject
     if name == "package.json":

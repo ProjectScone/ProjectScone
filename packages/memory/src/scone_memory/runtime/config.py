@@ -29,6 +29,7 @@
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_HEADING_CONTEXT=1        embed each chunk with the headings above it, or its file and declarations (off by default)
+    SCONE_EMBEDDING_BUDGET=1       shorten that context to fit the embedder's declared window, never the chunk (off by default)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
     SCONE_RELATION_INVERSE=works_at:employs   which predicates are the other side of which
@@ -74,6 +75,14 @@
                                        review; unset = every submitted fact is a ledger claim, which
                                        is what the Rust server does without --propose-below
 
+    SCONE_FOLLOWUP_QUERIES off | carry | rewrite   served text conversations also search a follow-up turn
+                                   ("since when?") with what earlier user turns named (carry), or as a
+                                   self-hosted model restates it (rewrite); off by default. Text
+                                   conversations of serve and serve-conversations --model-factory only;
+                                   history-only serving refuses it, and voice sessions do not take it
+    SCONE_FOLLOWUP_URL, SCONE_FOLLOWUP_MODEL, SCONE_FOLLOWUP_API_KEY, SCONE_FOLLOWUP_TIMEOUT (5)
+                                   rewrite only: its own self-hosted endpoint, never another setting's key
+
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)
     SCONE_API_KEY     one key for the space "default" (used when SCONE_API_KEYS is unset)
@@ -95,6 +104,7 @@ if TYPE_CHECKING:
 
 from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
+from ..retrieval.followup import REWRITE_TIMEOUT_S
 from ..retrieval.fusion import RECENCY_HALF_LIFE_DAYS, W_RECENCY, validate_recency
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 
@@ -179,6 +189,7 @@ class Settings:
     url_import_private: bool = False
     contextual_embeddings: bool = False
     heading_context: bool = False
+    embedding_budget: bool = False
     table_context_embeddings: bool = False
     #: SCONE_EMBEDDING_CACHE: unset embeds every chunk of every stored
     #: record; "memory" keeps vectors for the process; a path keeps them in
@@ -236,8 +247,12 @@ class Settings:
     document_video_config: Optional[str] = None
     document_ocr_executable: Optional[str] = None
     document_ocr_language: str = 'eng'
+    #: Languages a request may choose for its scan, besides document_ocr_language.
+    document_ocr_languages: tuple[str, ...] = ()
     document_ocr_psm: int = 3
     document_ocr_dpi: int = 150
+    #: Turn a page Tesseract's orientation detection is sure is turned before reading it.
+    document_ocr_orientation: bool = False
     conversations_journal: Optional[str] = None
     conversations_model_factory: Optional[str] = None
     # A persona catalog (JSON array of Persona documents) needs a registry
@@ -268,17 +283,26 @@ class Settings:
     adaptive_max_evidence_bytes: int = 16000
     adaptive_graph_hops: int = 0
     adaptive_search_history: bool = False
+    #: SCONE_FOLLOWUP_QUERIES: off, carry (earlier turns' named terms searched
+    #: beside a follow-up), or rewrite (a self-hosted model restates it).
+    followup_queries: str = "off"
+    followup_url: str | None = None
+    followup_model: str | None = None
+    followup_api_key: str | None = field(default=None, repr=False)
+    followup_timeout: float = REWRITE_TIMEOUT_S
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         from .conversation_review import validate_review_settings
+        from .conversation_followup import validate_followup_settings
         from .conversation_retrieval import validate_adaptive_settings
         from .conversation_tools import validate_tool_settings
 
         validate_review_settings(self)
         validate_adaptive_settings(self)
+        validate_followup_settings(self)
         validate_tool_settings(self)
         if self.qdrant_hnsw_ef is not None and (type(self.qdrant_hnsw_ef) is not int or self.qdrant_hnsw_ef < 1):
             raise InvalidInput("SCONE_QDRANT_HNSW_EF must be a positive integer")
@@ -415,6 +439,7 @@ class Settings:
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             heading_context=env.get("SCONE_HEADING_CONTEXT") == "1",
+            embedding_budget=env.get("SCONE_EMBEDDING_BUDGET") == "1",
             table_context_embeddings=env.get("SCONE_TABLE_CONTEXT_EMBEDDINGS") == "1",
             embedding_cache=env.get("SCONE_EMBEDDING_CACHE") or None,
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
@@ -471,8 +496,11 @@ class Settings:
             document_video_config=env.get("SCONE_DOCUMENT_VIDEO_CONFIG") or None,
             document_ocr_executable=env.get('SCONE_DOCUMENT_OCR_EXECUTABLE') or None,
             document_ocr_language=env.get('SCONE_DOCUMENT_OCR_LANGUAGE', 'eng'),
+            document_ocr_languages=tuple(one.strip() for one in env.get('SCONE_DOCUMENT_OCR_LANGUAGES', '').split(',')
+                                         if one.strip()),
             document_ocr_psm=int(env.get('SCONE_DOCUMENT_OCR_PSM', '3')),
             document_ocr_dpi=int(env.get('SCONE_DOCUMENT_OCR_DPI', '150')),
+            document_ocr_orientation=env.get('SCONE_DOCUMENT_OCR_ORIENTATION') == '1',
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
@@ -494,6 +522,11 @@ class Settings:
             adaptive_max_evidence_bytes=_environment_integer("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", env.get("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", "16000")),
             adaptive_graph_hops=_environment_integer("SCONE_ADAPTIVE_GRAPH_HOPS", env.get("SCONE_ADAPTIVE_GRAPH_HOPS", "0")),
             adaptive_search_history=parse_flag("SCONE_ADAPTIVE_SEARCH_HISTORY", env.get("SCONE_ADAPTIVE_SEARCH_HISTORY")),
+            followup_queries=env.get("SCONE_FOLLOWUP_QUERIES") or "off",
+            followup_url=env.get("SCONE_FOLLOWUP_URL") or None,
+            followup_model=env.get("SCONE_FOLLOWUP_MODEL") or None,
+            followup_api_key=env.get("SCONE_FOLLOWUP_API_KEY") or None,
+            followup_timeout=parse_seconds("SCONE_FOLLOWUP_TIMEOUT", env.get("SCONE_FOLLOWUP_TIMEOUT"), REWRITE_TIMEOUT_S),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
@@ -739,7 +772,7 @@ def build_vectors(settings: Settings, documents=None):
 
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
-ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
+ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "lexical_stems",
                    "vector_weight", "recency_weight", "recency_half_life_days")
 #: Settings carried into an engine that are read from a file, not a value.
@@ -831,6 +864,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
         contextual_embeddings=settings.contextual_embeddings,
         heading_context=settings.heading_context,
+        embedding_budget=settings.embedding_budget,
         table_context_embeddings=settings.table_context_embeddings,
         similarity_floor=settings.similarity_floor,
         recency_weight=settings.recency_weight,
@@ -1030,6 +1064,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         record_queries=settings.events_queries == "text",
         contextual_embeddings=settings.contextual_embeddings,
         heading_context=settings.heading_context,
+        embedding_budget=settings.embedding_budget,
         table_context_embeddings=settings.table_context_embeddings,
         embedding_cache=embedding_cache,
         demote_restated=settings.demote_restated,

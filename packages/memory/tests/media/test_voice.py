@@ -108,6 +108,30 @@ class Rig:
         await self.transport.input.put(types.AudioChunk(b"\x02\x00" * 320, 16000))
 
 
+async def test_a_voice_turn_records_context_first_token_first_audio_and_total():
+    from scone_memory import InMemoryEventLog
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), events=InMemoryEventLog()).open()
+    rig = Rig(memory)
+    running = asyncio.create_task(rig.session.run())
+    try:
+        await asyncio.wait_for(rig.session.started.wait(), 2)
+        await rig.audio()
+        await asyncio.wait_for(rig.transport.delivered.wait(), 2)
+        async with asyncio.timeout(3):
+            while not await memory.events.query("voice-test", kind="conversation_turn", limit=1):
+                await asyncio.sleep(.005)
+        [event] = await memory.events.query("voice-test", kind="conversation_turn", limit=1)
+        timing = event.payload["latency_ms"]
+        assert event.payload["mode"] == "voice" and event.payload["session_id"] == "native-voice"
+        assert set(timing) == {"context", "first_token", "first_audio", "total"}
+        assert 0 <= timing["context"] <= timing["first_token"] <= timing["first_audio"] <= timing["total"]
+    finally:
+        await rig.session.close()
+        await asyncio.gather(running, return_exceptions=True)
+    await memory.close()
+
+
 async def test_local_activity_interrupts_output_before_a_new_transcript(memory):
     types, _ = api()
 

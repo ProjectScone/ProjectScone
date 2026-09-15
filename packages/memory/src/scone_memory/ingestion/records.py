@@ -10,7 +10,7 @@ from ..core.ports import NewEpisode
 
 
 #: The ways one record can ask to be cut.
-Chunking = Literal["length", "code", "structure", "semantic"]
+Chunking = Literal["length", "code", "structure", "semantic", "unit"]
 
 
 @dataclass(frozen=True)
