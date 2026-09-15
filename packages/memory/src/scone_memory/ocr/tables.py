@@ -49,8 +49,9 @@ _CURRENCY = '$\u20ac\u00a3\u00a5'
 #: (an accounting negative) or a dash standing for none.
 _NUMBER_START = '0123456789(-\u2013\u2014'
 #: Rows of fewer cells held above a grid as its possible title, caption
-#: or header rows; more than this is prose, not a header.
-MAX_HEADER_ROWS = 3
+#: or header rows -- a statement's caption, its years, a section's
+#: heading and a section's name; more than this is prose, not a header.
+MAX_HEADER_ROWS = 4
 
 
 def _is_title(text: str) -> bool:
@@ -200,12 +201,27 @@ def _heads(row: _Row, spans: tuple[tuple[int, int], ...], text: Callable[[Sequen
     (a caption over the values), not a wrapped word over one column. A
     row set past the first column is a caption, and the comma closing
     "Three Months Ended March 31," -- the years follow below -- is not a
-    sentence's, as it is at the margin."""
+    sentence's, as it is at the margin. A lone cell from the first
+    column closed by a colon is a section's heading ("Basic net loss per
+    share:") when it is short and opens with a capital or a digit; a
+    sentence's tail on a line of its own ("were as follows:") is not."""
     for cell in row.cells:
         line = text(cell).rstrip()
-        if not _is_title(line.rstrip(',') if spans[0][0] > 0 else line):
+        if spans[0][0] > 0:
+            line = line.rstrip(',')
+        elif len(row.cells) == 1 and _is_heading(line):
+            line = line.rstrip(':')
+        if not _is_title(line):
             return False
     return len(row.cells) > 1 or spans[0][0] == 0 or spans[0][1] >= 2
+
+
+def _is_heading(line: str) -> bool:
+    """Whether a colon-closed line is a heading rather than a sentence's
+    tail: short (under six words and forty characters) and opening with
+    a capital letter or a digit."""
+    return (line.endswith(':') and len(line.split()) < 6 and len(line) < 40
+            and (line[0].isupper() or line[0].isdigit()))
 
 
 def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
@@ -266,6 +282,35 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
             left, _, right, _ = _box(regions, indices)
             covered = [j for j, (start, end) in enumerate(columns) if _reaches(left, right, start, end, loosely)]
             if not covered or covered != list(range(covered[0], covered[-1] + 1)) or covered[0] < used:
+                return None
+            taken.append((covered[0], len(covered)))
+            used = covered[-1] + 1
+        return tuple(taken)
+
+    def placed_in_order(row: _Row) -> tuple[tuple[int, int], ...] | None:
+        """A row of several cells above the grid placed as ``placed`` does,
+        except that a cell reaching no band claims the one unclaimed band
+        between its neighbours' claims, the row's ends counting as claims:
+        a header's cells run over the columns in order, and a column's
+        name may sit beside a narrow column of digits rather than over
+        it. A cell with two or more bands to choose from, or a row of one
+        cell, is not placed."""
+        if len(row.cells) < 2:
+            return None
+        columns = bands()
+        claims: list[list[int]] = []
+        for indices in row.cells:
+            left, _, right, _ = _box(regions, indices)
+            claims.append([j for j, (start, end) in enumerate(columns) if _reaches(left, right, start, end)])
+        taken: list[tuple[int, int]] = []
+        used = 0
+        for position, covered in enumerate(claims):
+            if not covered:
+                following = next((claim[0] for claim in claims[position + 1:] if claim), len(columns))
+                covered = list(range(used, following))
+                if len(covered) != 1:
+                    return None
+            if covered != list(range(covered[0], covered[-1] + 1)) or covered[0] < used:
                 return None
             taken.append((covered[0], len(covered)))
             used = covered[-1] + 1
@@ -340,6 +385,8 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
             placed_rows = 0
             for row in reversed(pending):
                 spans = placed(row) if len(row.cells) < columns else None
+                if spans is None and 1 < len(row.cells) < columns:
+                    spans = placed_in_order(row)
                 if len(row.cells) == 1 and len(row.cells) < columns:
                     # A caption centred over the columns it names falls
                     # short of half of the last: placed loosely, when that
