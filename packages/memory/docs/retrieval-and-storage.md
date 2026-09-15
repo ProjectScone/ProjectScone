@@ -890,6 +890,150 @@ invariant test that should have caught the first asserted exactly the
 right property and passed, because its fixture never contained the
 junction.
 
+## Cutting a document at its genre's boundaries
+
+Structure chunking reads what any document carries and packs it up to the
+target. It cannot know what a genre knows: that `Article 2` owns the `(a)`
+below it, that `A:` belongs to the `Q:` above it, that a references list is
+not part of the conclusion it follows, or that `Section 4.2 Transfers` is a
+section at all (the plain clause rule wants a bare number). Whoever stores a
+document often does know, so a record can say:
+
+```python
+await engine.remember(space, text, chunking_profile="statute")
+```
+
+`scone remember --chunking-profile statute`, `"chunking_profile": "statute"`
+on `POST /v1/episodes` and in each batch record, or the same key in a
+`--jsonl` record. The profiles are `statute`, `paper`, `manual`, `qa` and
+`resume` (`ingestion/chunking_profiles.py`, `PROFILES`).
+
+**Why a field and not a fifth chunking mode.** A profile is a set of
+boundaries for structure chunking, not another way to cut: `chunking` stays
+the closed set of four, and `chunking_profile` names what one of them cuts
+at. A profile implies `chunking="structure"` (stored explicitly), naming it
+with `length`, `code` or `semantic` is refused, and the receipt's `chunking`
+still reads `structure`. It is not called `profile` because that already
+names a space's profile of facts (`GET /v1/profile`), and one name serves the
+record, the metadata key, the HTTP field and the flag.
+
+Each profile is data: a tuple of named rules, each a line pattern with a rank.
+The structure chunker's line scan asks the profile what each line is, so
+Markdown and setext headings, tables, fences and front matter are read
+exactly as without one, and a heading whose title matches a rule is named by
+it (`## References` is `references`).
+
+| profile | rules (rank) | kept apart |
+| --- | --- | --- |
+| `statute` | `part` (Part/Title/Book/Division), `chapter` (Chapter, 第…章), `article` (Article/Art./Section/Sec./§/Clause/Rule, 第…条); then `subsection` (4.2), `paragraph` (1.), `numbered` ((1)), `roman` ((iv)), `letter` ((a), a)), `capital` ((A)) nested in the order the article first uses them | nothing |
+| `paper` | `abstract`, `section` (Introduction, Methods, Results, Discussion, Conclusion, Appendix and the usual others, the whole line), `references`, then `subsection` (2.1 Title) and `reference` ([1] or 1., only inside references) | each section, the references |
+| `manual` | `task` (To …:/How to …:), `procedure` (3.2 Title, Chapter 4 …), `step` (1., Step 3:), `substep` ((a), b.) | nothing |
+| `qa` | `question` (Q:/Question:, or a line ending in `?` that opens a paragraph); `answer` (A:/Answer:) is counted and never cut at | each question with its answer |
+| `resume` | `section` (Summary, Experience, Education, Skills, Projects and the rest, the whole line) | each section |
+
+The units are then packed as a tree rather than a list:
+
+- **A subtree that fits the target is never split.** An article with its
+  clauses, a task with its steps, a question with its answer is one chunk
+  when it can be. Small siblings still pack together while they fit.
+- **A heading travels with its first child.** When a subtree is too big,
+  its own text goes into the first chunk of its children if it is only a
+  marker (shorter than `MIN_CHUNK`) or the two fit together; otherwise it is
+  its own chunk, so a long introduction cannot drag a question over the
+  target and split it from its answer.
+- **Kept-apart units never share a chunk with a sibling.**
+- **A table is never cut**, as without a profile.
+- **A unit longer than the target is split by size**, the first piece at the
+  unit and the rest counted in `by_size`.
+
+The receipt carries the structure counts plus which profile cut, how many
+lines each rule matched (including rules that do not cut) and which kind of
+unit each chunk began at:
+
+```json
+{"chunking": "structure",
+ "structure": {"units": 13, "at_boundary": 6, "by_size": 2, "tables": 0, "over_target": 0, "capped": false,
+               "why": "profile statute: 6 chunk(s) begin at one of 13 boundary(ies) its rules found; 2 begin where the byte target fell, inside a unit longer than 700 or outside any unit",
+               "profile": "statute", "matched": {"part": 1, "article": 4, "paragraph": 3, "letter": 5},
+               "began": {"part": 1, "article": 3, "letter": 2}}}
+```
+
+`over_target` under a profile counts every chunk longer than the target,
+whatever put it there: a table kept whole, or a last piece shorter than
+`MIN_CHUNK` that the size chunker joins to the one before it. The unit bound
+(`MAX_SECTIONS`) is the structure chunker's, reported the same way in
+`capped`.
+
+The profile is kept on the episode's metadata under `chunking_profile`
+beside `chunking`, so a recovery re-cuts with it, and a record holding it
+only in metadata (an archive import) is cut the same way. An unknown
+profile, one that is not text, a profile with another chunking, or a
+metadata key that says otherwise is refused while the record is validated,
+before anything is stored. That includes a record whose content is already
+stored and would come back as a duplicate, and one record of a partial
+batch, which is answered as failed on its own.
+
+**Structure that is not there is not invented.** A named marker must be
+followed by the end of the line, punctuation or a capitalised title, so
+`Section 3 of this Act applies` is a sentence; a paper or resume section
+name must be the whole line, so `Experience shows that…` and `Results were
+mixed` are prose; a question without `Q:` must open a paragraph, so a
+rhetorical question inside an answer does not start a new pair; a reference
+entry is only read inside references. Each has a test.
+
+**Measured** with `benchmarks/chunking_profiles.py` on two synthetic
+fixtures generated from a fixed seed, at the default target of 700: a statute
+of 12,292 characters (3 parts, 13 articles, 14 numbered paragraphs, 27
+lettered clauses) and a Q&A file of 13,190 characters (24 pairs, answers of 75
+to 761 characters, some of two paragraphs). All three ways of cutting are
+scored against the profile's own units; the full output is in
+`benchmarks/chunking-profiles-v1.results.md`.
+
+| | length | structure | statute profile |
+| --- | --- | --- | --- |
+| chunks | 21 | 23 | 27 |
+| chunks starting at a genre boundary | 11 (52%) | 22 (96%) | 26 (96%) |
+| part or article split from its first clause | 8 of 14 | 4 of 14 | **0 of 14** |
+| part or article that fits the target, split anyway | 4 of 6 | 6 of 6 | **0 of 6** |
+
+| | length | structure | qa profile |
+| --- | --- | --- | --- |
+| chunks | 26 | 27 | 30 |
+| chunks starting at a genre boundary | 16 (62%) | 10 (37%) | 24 (80%) |
+| question split from its answer | 0 of 24 | 15 of 24 | **0 of 24** |
+| pair that fits the target, split anyway | 2 of 16 | 7 of 16 | **0 of 16** |
+
+On the statute the share of chunks starting at a boundary does not move:
+plain structure already starts its chunks at `Article` and `(a)` lines. What
+moves is where the chunk ends: plain structure leaves `Article 2` /
+`Definitions` as the last lines of one chunk and its clauses in the next.
+The only chunk not at a boundary in either is the document's title. On the
+Q&A file plain structure reads `A:` as a boundary of its own and cuts
+between a question and its answer 15 times out of 24; the six chunks under
+the profile that do not start at a question are the second pieces of answers
+longer than the target. Length chunking never separates the two there
+because `Q:` and `A:` sit on adjacent lines, but it splits pairs that fit.
+
+The cost is chunks: 17% more on the statute and 11% more on the Q&A file
+than plain structure, because whole subtrees do not pack as tightly as loose
+units. Whether a reader answers better from these chunks is unmeasured.
+
+Run over this directory's own documents (`--corpus docs`), where no genre
+applies, the rules stay quiet: `qa` and `resume` match nothing, `paper` one
+heading, and `statute` and `manual` 19 numbered-list lines, which are steps.
+Chunk counts under every profile were within 1% of plain structure; the
+counts, which move whenever these documents are edited, are in the results
+file.
+
+**Limits.** English markers, plus 第…章 and 第…条. A `(i)` is read as a roman
+numeral unless it follows `(h)` (likewise `(v)` after `(u)`, `(x)` after
+`(w)`). A hard-wrapped line that happens to begin with `(a)` or `12.` reads
+as a marker, as it does in plain structure. The title path is not prepended
+to a chunk as the reference implementation does, because stored text stays
+an exact excerpt; `heading_context` is the way to put Markdown headings into
+the embedding input, and it does not yet read profile markers. Nothing
+chooses a profile for a document: it is declared, per record, or not used.
+
 ## Embedding a chunk with the headings above it
 
 A chunk cut from a long document loses what the document said it was
