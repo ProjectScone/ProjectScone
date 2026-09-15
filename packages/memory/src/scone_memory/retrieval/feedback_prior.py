@@ -33,7 +33,8 @@ sit on top:
 The term is ``feedback_weight`` times that score, cut at ``MAX_FEEDBACK_BOOST``
 either way; ``capped`` counts the candidates it cut. The read takes the
 newest ``lessons.MAX_FEEDBACK_EVENTS`` judgements of the last
-``FEEDBACK_WINDOW_DAYS`` and says when that bound bit.
+``FEEDBACK_WINDOW_DAYS`` and says when that bound bit; the record names the
+window, half-life and corroboration it read and folded with, as a lesson's does.
 
 The term does not know the question. A passage judged useful rises for every
 query it is a candidate for, so a recorded question hashed in the log (the
@@ -115,10 +116,15 @@ class PriorTerms:
     events_cut: bool = False
     #: Candidates with more than ``min_corroboration`` counted judgements one way, the older left out.
     held: int = 0
+    #: What the judgements were read over and folded with: none older than ``window_days`` is read.
+    window_days: int = FEEDBACK_WINDOW_DAYS
+    half_life_days: float = FEEDBACK_HALF_LIFE_DAYS
+    min_corroboration: int = MIN_CORROBORATION
 
     def record(self, returned: Sequence[int]) -> dict[str, object]:
         return {"version": FEEDBACK_PRIOR_VERSION, "weight": self.weight, "max_boost": self.max_boost,
-                "read": self.read, "events_read": self.events_read, "events_cut": self.events_cut,
+                "read": self.read, "window_days": self.window_days, "half_life_days": self.half_life_days,
+                "min_corroboration": self.min_corroboration, "events_read": self.events_read, "events_cut": self.events_cut,
                 "boosted": sum(term > 0 for term in self.terms.values()),
                 "demoted": sum(term < 0 for term in self.terms.values()),
                 "capped": self.capped, "held": self.held, "stale": self.stale, "unverified": self.unverified, "tentative": self.tentative,
@@ -170,16 +176,18 @@ def prior_terms(events: Iterable[Event], fingerprints: Mapping[int, Optional[str
         if abs(raw) > max_boost:
             capped += 1
         found[chunk] = max(-max_boost, min(max_boost, raw))
-    return PriorTerms(found, float(weight), max_boost, capped, stale, unverified, tentative, held=held)
+    return PriorTerms(found, float(weight), max_boost, capped, stale, unverified, tentative, held=held,
+                      half_life_days=float(half_life_days), min_corroboration=min_corroboration)
 
 
 async def read_prior(events: "Optional[EventLog]", documents: "DocumentStore", space: str,
                      candidates: Mapping[int, "Chunk"], *, now: str, weight: float) -> PriorTerms:
     """The terms for a recall's fused candidates, from the newest judgements of the window."""
+    window = FEEDBACK_WINDOW_DAYS
     if events is None:
         return PriorTerms(weight=float(weight), read=False)
     bound = lessons.MAX_FEEDBACK_EVENTS
-    since = (parse_rfc3339(now) - timedelta(days=FEEDBACK_WINDOW_DAYS)).isoformat().replace("+00:00", "Z")
+    since = (parse_rfc3339(now) - timedelta(days=window)).isoformat().replace("+00:00", "Z")
     read = await events.query(space, kind="feedback", since=since, limit=bound + 1)
     kept = read[:bound]  # newest first, so a cut drops the oldest
     judged = {int(event.payload["chunk_id"]) for event in kept} & set(candidates)  # type: ignore[call-overload]
@@ -194,4 +202,4 @@ async def read_prior(events: "Optional[EventLog]", documents: "DocumentStore", s
                     for chunk in judged}
     relevant = [event for event in kept if int(event.payload["chunk_id"]) in fingerprints]  # type: ignore[call-overload]
     terms = prior_terms(relevant, fingerprints, now=now, weight=weight, max_boost=MAX_FEEDBACK_BOOST)
-    return replace(terms, events_read=len(kept), events_cut=len(read) > bound)
+    return replace(terms, events_read=len(kept), events_cut=len(read) > bound, window_days=window)

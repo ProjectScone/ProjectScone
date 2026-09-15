@@ -154,6 +154,8 @@ def test_events_other_than_feedback_are_not_judgements():
 def test_the_record_names_the_terms_of_returned_passages_only():
     record = feedback_prior.PriorTerms({1: 0.0002, 2: -0.0001}, weight=0.0001).record([1, 3])
     assert record["returned_terms"] == {"1": 0.0002} and (record["boosted"], record["demoted"]) == (1, 1)
+    folded = terms([judged(1, NOW, 7, True, recall=1)], half_life_days=7, min_corroboration=3).record([7])
+    assert (folded["half_life_days"], folded["min_corroboration"]) == (7.0, 3), "the settings it was folded with"
 
 
 async def test_the_read_skips_what_it_cannot_check_and_what_recall_did_not_find():
@@ -434,20 +436,28 @@ async def test_the_read_says_when_its_bound_cut_it(monkeypatch):
     assert cut.feedback_prior["events_read"] == 1 and cut.feedback_prior["boosted"] == 0
 
 
-async def test_judgements_older_than_the_window_are_not_read():
+async def test_judgements_older_than_the_window_are_not_read(monkeypatch):
     clock = Clock("2026-05-01T00:00:00.000Z")
     engine = await engine_with(clock, weight=0.0002)
     try:
         before = await engine.recall("default", QUERY, lanes=TEXT)
         await judge_twice(engine, QUERY, before.items[1].chunk_id)
+        clock.now = "2026-05-03T00:00:00.000Z"
+        with monkeypatch.context() as patched:
+            patched.setattr(feedback_prior, "FEEDBACK_WINDOW_DAYS", 1)
+            narrow = await engine.recall("default", QUERY, lanes=TEXT)
         clock.now = "2026-07-29T00:00:00.000Z"
         inside = await engine.recall("default", QUERY, lanes=TEXT)
         clock.now = "2026-07-31T00:00:00.000Z"
         outside = await engine.recall("default", QUERY, lanes=TEXT)
     finally:
         await engine.close()
+    assert narrow.feedback_prior is not None and (narrow.feedback_prior["events_read"], narrow.feedback_prior["window_days"]) == (0, 1)
     assert inside.feedback_prior is not None and inside.feedback_prior["events_read"] == 2
     assert outside.feedback_prior is not None and outside.feedback_prior["events_read"] == 0
+    # A read of none says what it looked over, so it does not read as "never judged".
+    assert (outside.feedback_prior["window_days"], outside.feedback_prior["half_life_days"],
+            outside.feedback_prior["min_corroboration"]) == (90, 30.0, 2)
 
 
 async def test_feedback_on_a_passage_that_cannot_be_read_records_no_fingerprint(monkeypatch):
