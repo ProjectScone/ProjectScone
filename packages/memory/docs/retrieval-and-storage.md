@@ -221,6 +221,55 @@ the claims that hold, then the space's recent activity. `GET /v1/profile`
   says which revision the answer is of.
 - Closed, excluded and proposed claims are never profiled, as before.
 
+### Static and dynamic buckets
+
+Some of a profile is settled (a name, a role, a diet) and some is what its
+subject is in the middle of (this quarter's project, this week's city). A
+reader can ask for the same claims in two buckets: `GET
+/v1/profile?buckets=both` (or `static`, or `dynamic`), `scone profile
+--buckets both`, `engine.profile(space, buckets=BucketBounds())`, and a
+conversation's standing claims (below). Unasked, nothing changes: the
+profile's body, order and coverage are what they were.
+
+Which bucket a claim goes in is a rule the ledger can check, never a guess at
+what its words mean. The first rule that applies decides, and each shown
+claim names it in `coverage.placed` with the numbers it read:
+
+1. `override`: the predicate is named in `SCONE_PROFILE_STATIC_PREDICATES`
+   or `SCONE_PROFILE_DYNAMIC_PREDICATES` (one predicate in both is refused).
+2. `changes`: the claim's slot changed value at least
+   `SCONE_PROFILE_DYNAMIC_CHANGES` times (default 2) in the last
+   `SCONE_PROFILE_CHANGE_WINDOW_DAYS` (default 365) -- dynamic, however long
+   this value has held. A slot is the subject and predicate, with the object
+   too for a many-valued predicate, as the ledger keys it; so a many-valued
+   predicate's values never count as changes of one another. The slot's
+   first value is not a change, a change on the window's first instant is
+   outside it, and the same value stated again after a gap is not a change.
+   Closed and excluded claims count as history; proposed and declined ones
+   never held and do not.
+3. `tenure`: the claim has held for at least
+   `SCONE_PROFILE_STATIC_AFTER_DAYS` (default 90): static; younger, dynamic.
+
+The static bucket keeps the profile's own order (most restated, then
+newest). The dynamic bucket decays: each claim weighs `(1 + restatements) *
+0.5 ** (days since last stated / SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS)`
+(default 30 days), where last stated is the newest of its own start and
+its restatements up to now, so what was said often long ago falls behind
+what was said lately. `placed` carries `last_stated` and `weight` for
+dynamic claims.
+
+Each bucket is bounded on its own: `static_limit` and `dynamic_limit` (1 to
+50, default 10) claims, `static_max_bytes` and `dynamic_max_bytes` (100 to
+16,000, default 2,000) bytes of the bucket's claim records
+(`{fact_id, subject, predicate, object, valid_from, rule}`) as compact JSON.
+`coverage.static` and `coverage.dynamic` say `candidates`, `shown`,
+`omitted`, `bytes`, the bounds, and `cut`: `"count"`, `"bytes"` or null.
+`coverage.candidates_truncated` says when the profile's own candidate bound
+(the newest 200 claims) left claims unplaced. A bound given without
+`buckets` is refused rather than ignored. The change count reads the same
+bounded ledger read as the profile, so a read cut by `fact_limit` (in
+`coverage.reasons`) can undercount changes.
+
 ## What people said about a passage
 
 ```bash
