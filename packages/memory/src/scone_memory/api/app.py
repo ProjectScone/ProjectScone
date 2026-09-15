@@ -569,7 +569,7 @@ def create_app(
     from .entity_routes import mount_entity_routes
     mount_entity_routes(app, engine, space_for, synthesis_factory=synthesis_factory)
     from .openai_proxy import mount_openai_proxy_routes
-    mount_openai_proxy_routes(app, engine, space_for, ingest_slot, synthesis_factory,
+    mount_openai_proxy_routes(app, engine, space_for, synthesis_factory,
                               assert_current_space=assert_current_space)
     from .filesystem_routes import mount_filesystem_routes
     mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)

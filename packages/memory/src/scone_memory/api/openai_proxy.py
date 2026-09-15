@@ -24,7 +24,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from typing import AsyncContextManager, Optional, cast
+from typing import Optional, cast
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request
@@ -35,6 +35,7 @@ from ..core.errors import InvalidInput
 from ..memory.engine import MemoryEngine, Record
 from ..providers.llm import ChatError, ChatModel
 from ..realtime.context import MemoryContext
+from ..retrieval.conversation_plan import plan_conversation_retrieval
 from .app import read_bounded
 from .responses import LedgerJSONResponse
 
@@ -48,8 +49,16 @@ MAX_MESSAGES = 200
 RECALL_LIMIT = 5
 #: Bytes the recalled block may take, at most; the record says how many passages did not fit.
 MAX_CONTEXT_BYTES = 8_000
+#: Passages of the session's own stored turns looked at to find turns the
+#: request did not resend; the record says when the probe filled.
+SESSION_PROBE_LIMIT = 20
 
-_SESSION = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+#: A session's stored identity is its name behind this prefix, so a name can
+#: equal neither a document's source nor a native conversation's id.
+SESSION_PREFIX = "openai:"
+#: Characters a session name may take: the stored identity holds at most 128.
+MAX_SESSION_CHARS = 128 - len(SESSION_PREFIX)
+_SESSION = re.compile(rf"[A-Za-z0-9._:-]{{1,{MAX_SESSION_CHARS}}}")
 _ROLES = ("system", "developer", "user", "assistant")
 
 
@@ -112,12 +121,11 @@ def _text_of(index: int, message: _Message) -> str:
     return text
 
 
-def _session_of(request: Request) -> str:
+def _session_of(request: Request) -> str | None:
+    """The session name the request gave, or None for a session of its own."""
     named = request.headers.get("x-scone-session")
-    if named is None:
-        return f"openai-{uuid4().hex}"
-    if not _SESSION.fullmatch(named):
-        raise InvalidInput("x-scone-session is 1..128 letters, digits, '.', '_', ':' or '-'")
+    if named is not None and not _SESSION.fullmatch(named):
+        raise InvalidInput(f"x-scone-session is 1..{MAX_SESSION_CHARS} letters, digits, '.', '_', ':' or '-'")
     return named
 
 
@@ -131,18 +139,57 @@ def _user_prompt(turns: list[dict[str, object]]) -> str:
             + json.dumps(earlier, ensure_ascii=False) + "\n\nLatest user message:\n" + str(latest["content"]))
 
 
-async def _recalled(engine: MemoryEngine, space: str, session_id: str,
+async def _unsent_turns(engine: MemoryEngine, space: str, session_id: str,
+                        turns: list[dict[str, object]]) -> dict[str, object]:
+    """The session's stored turns that bear on the latest message but that
+    the request does not carry, so recall may admit them: a client that
+    trims its history, or sends only the latest message, still has them as
+    memory. A turn is held when any of its probed passages is inside a
+    message the request sent; the probe is a scoped recall, not a walk of
+    the space, and says when it filled."""
+    record: dict[str, object] = {"status": "probed", "probe_limit": SESSION_PROBE_LIMIT, "probed": 0,
+                                 "limit_reached": False, "admitted_turn_ids": [], "error_type": None}
+    query = plan_conversation_retrieval(str(turns[-1]["content"])).query
+    try:
+        found = await engine.recall(space, query, limit=SESSION_PROBE_LIMIT, kind="conversation",
+                                    where={"session_id": session_id})
+    except Exception as failure:
+        logging.getLogger(__name__).warning("session_probe.failed", extra={
+            "event": "session_probe.failed", "session_id": session_id, "exception_type": type(failure).__name__})
+        return {**record, "status": "failed", "error_type": type(failure).__name__}
+    sent = [str(turn["content"]) for turn in turns]
+    held, seen = set(), []
+    for item in found.items:
+        turn_id = item.metadata.get("turn_id")
+        if turn_id is None:
+            continue
+        if turn_id not in seen:
+            seen.append(turn_id)
+        if any(item.text.strip() in text for text in sent):
+            held.add(turn_id)
+    return {**record, "probed": len(found.items), "limit_reached": len(found.items) >= SESSION_PROBE_LIMIT,
+            "admitted_turn_ids": [turn_id for turn_id in seen if turn_id not in held]}
+
+
+async def _recalled(engine: MemoryEngine, space: str, session_id: str, named: bool,
                     turns: list[dict[str, object]]) -> tuple[dict[str, object], str | None, dict[str, object] | None]:
     """What recall found for the latest turn, the block to inject (or None)
     and the record of what was injected. Preparation is the native text
-    conversation's, so bounds, exclusions and the packet format are its own."""
+    conversation's, so bounds, exclusions and the packet format are its own;
+    the session's stored turns the request did not resend are admitted, as
+    a native conversation admits turns that have left its window."""
+    unsent: dict[str, object] = {"status": "skipped", "probe_limit": SESSION_PROBE_LIMIT, "probed": 0,
+                                 "limit_reached": False, "admitted_turn_ids": [], "error_type": None}
+    if named:
+        unsent = await _unsent_turns(engine, space, session_id, turns)
     context = MemoryContext(engine, space, session_id, limit=RECALL_LIMIT, max_context_bytes=MAX_CONTEXT_BYTES)
-    prepared, receipt = await context.prepare(turns)
+    admitted = frozenset(cast(list[str], unsent["admitted_turn_ids"]))
+    prepared, receipt = await context.prepare(turns, admit_turn_ids=admitted)
     recall: dict[str, object] = {
         "status": receipt["status"], "items": [], "claim_ids": [], "omitted_count": receipt["omitted_count"],
         "limit": RECALL_LIMIT, "max_context_bytes": MAX_CONTEXT_BYTES,
         "low_confidence": receipt["low_confidence"], "degraded": receipt["degraded"],
-        "error_type": receipt["error_type"]}
+        "error_type": receipt["error_type"], "session_turns": unsent}
     if "query_formulation" in receipt:
         recall["query_formulation"] = receipt["query_formulation"]
     if receipt["status"] != "prepared":
@@ -163,7 +210,6 @@ async def _recalled(engine: MemoryEngine, space: str, session_id: str,
 
 
 def mount_openai_proxy_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[..., object],
-                              ingest_slot: Callable[[int], AsyncContextManager[None]],
                               synthesis_factory: Callable[[], ChatModel | None] | None, *,
                               assert_current_space: Callable[[Request, str], None]) -> None:
     @app.post("/v1/openai/chat/completions")
@@ -179,7 +225,9 @@ def mount_openai_proxy_routes(app: FastAPI, engine: MemoryEngine, space_for: Cal
         texts = [(message.role, _text_of(index, message)) for index, message in enumerate(body.messages)]
         if texts[-1][0] != "user" or not texts[-1][1].strip():
             raise InvalidInput("the conversation must end with a nonblank user message")
-        session_id = _session_of(request)
+        named = _session_of(request)
+        session = named if named is not None else uuid4().hex
+        session_id = SESSION_PREFIX + session
         model = synthesis_factory() if synthesis_factory is not None else None
         if model is None:
             raise InvalidInput("the OpenAI-compatible route needs a model; none is configured "
@@ -187,55 +235,75 @@ def mount_openai_proxy_routes(app: FastAPI, engine: MemoryEngine, space_for: Cal
 
         turns: list[dict[str, object]] = [{"role": role, "content": text} for role, text in texts
                                           if role in ("user", "assistant")]
-        recall, wrapped, injected = await _recalled(engine, space, session_id, turns)
+        recall, wrapped, injected = await _recalled(engine, space, session_id, named is not None, turns)
         system_parts = [text for role, text in texts if role in ("system", "developer")]
         if wrapped is not None:
             system_parts.append(wrapped)
         try:
             reply = await model.complete("\n\n".join(system_parts), _user_prompt(turns))
         except ChatError as error:
-            return LedgerJSONResponse({"error": f"the configured chat model failed: {error}"}, status_code=502)
+            # The provider's words stay in the server: they can carry its
+            # account, key fragments or internal hosts.
+            logging.getLogger(__name__).warning("chat.failed", extra={
+                "event": "chat.failed", "session_id": session_id, "exception_type": type(error).__name__})
+            return LedgerJSONResponse({"error": "the configured chat model did not return a reply"}, status_code=502)
 
         assert_current_space(request, space)
         turn_id = uuid4().hex
-        capture = await _capture(engine, ingest_slot, space, session_id, turn_id, texts[-1][1], reply)
+        capture = await _capture(engine, space, session_id, turn_id, texts[-1][1], reply)
         name = getattr(model, "model", None)
         record = {
             "id": f"chatcmpl-{turn_id}", "object": "chat.completion", "created": int(time.time()),
             "model": name if isinstance(name, str) else "unknown",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}],
-            "scone": {"session_id": session_id, "turn_id": turn_id, "requested_model": body.model,
+            "scone": {"session": session, "session_id": session_id, "turn_id": turn_id, "requested_model": body.model,
                       "not_forwarded": sorted(body.model_fields_set - {"messages", "stream"}),
                       "provider_completion": "unverified", "recall": recall, "injected": injected,
                       "capture": capture},
         }
         items = cast(list[dict[str, object]], recall["items"])
-        headers = {"x-scone-session": session_id, "x-scone-recall-status": str(recall["status"]),
+        headers = {"x-scone-session": session, "x-scone-recall-status": str(recall["status"]),
                    "x-scone-injected-bytes": str(injected["bytes"] if injected else 0),
                    "x-scone-recalled-episodes": ",".join(str(item["episode_id"]) for item in items),
                    "x-scone-capture-status": str(capture["status"])}
         return LedgerJSONResponse(record, headers=headers)
 
 
-async def _capture(engine: MemoryEngine, ingest_slot: Callable[[int], AsyncContextManager[None]], space: str,
-                   session_id: str, turn_id: str, question: str, reply: str) -> dict[str, object]:
-    """The user turn and the reply as two conversation episodes, in one
-    batch, shaped as a native text conversation keeps them. The model has
-    already answered, so a failed write is reported, not raised."""
-    records = []
+async def _capture(engine: MemoryEngine, space: str, session_id: str, turn_id: str,
+                   question: str, reply: str) -> dict[str, object]:
+    """The user turn and the reply as two conversation episodes, shaped as
+    a native text conversation keeps them and written one at a time, user
+    first, so a reply that cannot be kept never takes the user turn with it.
+    A blank reply is not written. The model has already answered, so a
+    failed write is reported, not raised. Neither write takes the ingest
+    lane: a lane that refused could not be retried once the reply is out."""
+    kept: dict[str, dict[str, object]] = {}
     for role, text in (("user", question), ("assistant", reply)):
+        if role == "assistant" and kept["user"]["status"] != "captured":
+            kept[role] = {"status": "not_attempted", "episode_id": None, "error_type": None}
+            continue
+        if not text.strip():
+            kept[role] = {"status": "blank", "episode_id": None, "error_type": None}
+            continue
         metadata = dict(integration="scone-openai-proxy", session_id=session_id, turn_id=turn_id, role=role,
                         representation="aggregated_text",
                         capture_status="submitted" if role == "user" else "aggregated")
         if role == "assistant":
             metadata["provider_completion"] = "unverified"
-        records.append(Record(text, kind="conversation", source=session_id, metadata=metadata,
-                              dedup_key=f"scone-openai:{session_id}:{turn_id}:{role}"))
-    try:
-        async with ingest_slot(len(records)):
-            added = await engine.remember_many(space, records)
-    except Exception as error:
-        logging.getLogger(__name__).warning("capture.failed", extra={
-            "event": "capture.failed", "session_id": session_id, "exception_type": type(error).__name__})
-        return {"status": "failed", "episode_ids": [], "error_type": type(error).__name__}
-    return {"status": "captured", "episode_ids": [each.episode_id for each in added], "error_type": None}
+        record = Record(text, kind="conversation", source=session_id, metadata=metadata,
+                        dedup_key=f"scone-openai:{session_id}:{turn_id}:{role}")
+        try:
+            [added] = await engine.remember_many(space, [record])
+        except Exception as error:
+            logging.getLogger(__name__).warning("capture.failed", extra={
+                "event": "capture.failed", "session_id": session_id, "role": role,
+                "exception_type": type(error).__name__})
+            kept[role] = {"status": "failed", "episode_id": None, "error_type": type(error).__name__}
+            continue
+        kept[role] = {"status": "captured", "episode_id": added.episode_id, "error_type": None}
+    user, assistant = kept["user"], kept["assistant"]
+    status = ("failed" if user["status"] != "captured"
+              else "captured" if assistant["status"] == "captured" else "partial")
+    return {"status": status,
+            "episode_ids": [each["episode_id"] for each in (user, assistant) if each["status"] == "captured"],
+            "error_type": user["error_type"] or assistant["error_type"], "user": user, "assistant": assistant}
