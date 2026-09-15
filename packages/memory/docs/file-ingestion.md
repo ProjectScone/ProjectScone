@@ -108,11 +108,29 @@ line the episode holds. A name given bare (`utils.py`) names a bare module;
 give the path from the project root, as the directory sync does, for the
 module the graph's other files name.
 
+## Note front matter
+
+A Markdown note that opens with a `---` line and closes it (`---` or `...`)
+within 200 lines (Obsidian, Jekyll, Hugo, Zettlr) has its front matter read
+into the document's metadata and kept out of the note's lines, whose numbers
+stay those of the file; a note that is only front matter keeps the block as
+its text. Scalars (a trailing ` #` comment cut, quotes removed), inline lists
+(`[a, b]`) and item lists (`- item`, indented or not) are read; `title`,
+`tags` and `aliases` keep their names, lists join with commas, and every
+other key is `frontmatter_<key>` (lowercased, `-` as `_`), so a note's
+`source:` cannot pass for the engine's. Sixteen keys are kept. What is data
+the reader cannot keep is counted in `frontmatter_skipped`, never guessed
+at: a nested mapping, a list of mappings, a folded or literal block scalar,
+a value over 256 characters, a key past the bound or repeated, and a key
+that names one of the reader's own counters; a blank line, a comment and an
+empty value are not data and are not counted. `frontmatter_keys` says how
+many landed. Only `.md`, `.markdown` and `.mdx` are read this way.
+
 ## Coverage
 
 | Reader | Evidence retained | Limits |
 |---|---|---|
-| Text, Markdown and code files | Line locators | Source text only; no AST or semantic code graph |
+| Text, Markdown and code files | Line locators; a Markdown note's YAML front matter as metadata (`title`, `tags`, `aliases`, `frontmatter_<key>`) | Source text only; no AST or semantic code graph; front matter read without a YAML parser: scalars and lists, nested mappings counted as skipped |
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
 | HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
