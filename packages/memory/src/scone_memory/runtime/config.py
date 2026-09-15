@@ -30,6 +30,9 @@
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_HEADING_CONTEXT=1        embed each chunk with the headings above it, or its file and declarations (off by default)
     SCONE_EMBEDDING_BUDGET=1       shorten that context to fit the embedder's declared window, never the chunk (off by default)
+    SCONE_CHUNK_TOKENS=512         measure the length chunker's target in tokens, packing whole sentences, instead
+                                   of 700 characters; counted by the embedder's tokenizer or the estimate (unset: characters)
+    SCONE_CHUNK_OVERLAP_TOKENS=64  tokens of the chunk before that each such chunk starts with (default 0)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
     SCONE_RELATION_INVERSE=works_at:employs   which predicates are the other side of which
@@ -45,8 +48,8 @@
     SCONE_LEXICAL_STEMS=0          turn off the text lane's stem-prefix families (bill* for billing); on by
                                    default, measured; the index is untouched either way
     SCONE_VECTOR_WEIGHT=0.5        the vector lane's voice in rank fusion against the text lane's 1.0 (a number
-                                   above 0 and at most 4); unset, a hashed-token embedder gets 0.25 and any
-                                   other embedder 1.0, measured
+                                   above 0 and at most 4); unset, a hashed-token embedder gets 0.01 and any
+                                   other embedder 1.0, measured (0.25 was the hashed default before)
     SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
     SCONE_PROFILE_WITHOUT          predicates a profile never shows
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
@@ -207,6 +210,11 @@ class Settings:
     contextual_embeddings: bool = False
     heading_context: bool = False
     embedding_budget: bool = False
+    #: SCONE_CHUNK_TOKENS and SCONE_CHUNK_OVERLAP_TOKENS: the length
+    #: chunker's target in tokens and the overlap between its chunks; None
+    #: keeps the character target.
+    chunk_tokens: Optional[int] = None
+    chunk_overlap_tokens: int = 0
     table_context_embeddings: bool = False
     #: SCONE_EMBEDDING_CACHE: unset embeds every chunk of every stored
     #: record; "memory" keeps vectors for the process; a path keeps them in
@@ -432,6 +440,8 @@ class Settings:
                      "SCONE_RERANK_MAX_BYTES", "SCONE_RERANK_TIMEOUT"):
             if env.get(name) is not None and not isinstance(env[name], str):
                 raise InvalidInput(f"{name} must be an environment string")
+        chunk_tokens, chunk_overlap_tokens = _chunk_tokens(env.get("SCONE_CHUNK_TOKENS"),
+                                                           env.get("SCONE_CHUNK_OVERLAP_TOKENS"))
         return cls(
             documents=env.get("SCONE_DOCUMENTS", "memory"),
             vectors=env.get("SCONE_VECTORS", "memory"),
@@ -504,6 +514,8 @@ class Settings:
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
             heading_context=env.get("SCONE_HEADING_CONTEXT") == "1",
             embedding_budget=env.get("SCONE_EMBEDDING_BUDGET") == "1",
+            chunk_tokens=chunk_tokens,
+            chunk_overlap_tokens=chunk_overlap_tokens,
             table_context_embeddings=env.get("SCONE_TABLE_CONTEXT_EMBEDDINGS") == "1",
             embedding_cache=env.get("SCONE_EMBEDDING_CACHE") or None,
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
@@ -849,8 +861,10 @@ def build_vectors(settings: Settings, documents=None):
 
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
-ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
-                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "question_lane", "lexical_stems",
+ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget", "chunk_tokens", "chunk_overlap_tokens",
+                   "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
+                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "question_lane",
+                   "lexical_stems",
                    "vector_weight", "recency_weight", "recency_half_life_days", "feedback_weight")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy", "synonyms")
@@ -958,6 +972,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         contextual_embeddings=settings.contextual_embeddings,
         heading_context=settings.heading_context,
         embedding_budget=settings.embedding_budget,
+        chunk_tokens=settings.chunk_tokens, chunk_overlap_tokens=settings.chunk_overlap_tokens,
         table_context_embeddings=settings.table_context_embeddings,
         similarity_floor=settings.similarity_floor,
         recency_weight=settings.recency_weight,
@@ -1030,6 +1045,30 @@ def build_worker(engine: MemoryEngine, settings: Settings, spaces):
         deriver = Deriver(engine, chat)
     return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s,
                                batch=settings.distill_batch, retention=settings.retention, deriver=deriver)
+
+
+def _chunk_tokens(tokens: Optional[str], overlap: Optional[str]) -> tuple[Optional[int], int]:
+    """SCONE_CHUNK_TOKENS and SCONE_CHUNK_OVERLAP_TOKENS, refused by name
+    when they cannot work together, rather than left for the engine to
+    refuse in words that name neither."""
+    from ..ingestion.token_chunks import refused
+
+    def whole(name: str, raw: str) -> int:
+        try:
+            return int(raw)
+        except ValueError:
+            raise InvalidInput(f"{name} must be a whole number of tokens, got {raw!r}") from None
+
+    target = whole("SCONE_CHUNK_TOKENS", tokens) if tokens is not None and tokens.strip() else None
+    carried = whole("SCONE_CHUNK_OVERLAP_TOKENS", overlap) if overlap is not None and overlap.strip() else 0
+    if target is None:
+        if carried:
+            raise InvalidInput("SCONE_CHUNK_OVERLAP_TOKENS needs SCONE_CHUNK_TOKENS: an overlap in tokens is of a target in tokens")
+        return None, 0
+    reason = refused(target, carried)
+    if reason is not None:
+        raise InvalidInput(f"SCONE_CHUNK_TOKENS/SCONE_CHUNK_OVERLAP_TOKENS: {reason}")
+    return target, carried
 
 
 def _vector_weight(raw: Optional[str]) -> Optional[float]:
@@ -1159,6 +1198,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         contextual_embeddings=settings.contextual_embeddings,
         heading_context=settings.heading_context,
         embedding_budget=settings.embedding_budget,
+        chunk_overlap_tokens=settings.chunk_overlap_tokens, chunk_tokens=settings.chunk_tokens,
         table_context_embeddings=settings.table_context_embeddings,
         embedding_cache=embedding_cache,
         demote_restated=settings.demote_restated,

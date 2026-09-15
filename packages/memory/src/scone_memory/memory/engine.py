@@ -48,7 +48,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..ingestion.chunk_questions import QuestionLaneReport
     from ..providers.llm import ChatModel
 from ..retrieval.abstention import AbstentionPolicy
-from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
+from ..retrieval.recall import (RecallRuntime, SummaryExpander, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
@@ -56,7 +56,7 @@ from ..retrieval.overview import OverviewResult
 from ..retrieval.synonyms import Synonyms
 
 #: The vector lane's default voice when the embedder is a hash of tokens (see MemoryEngine).
-HASHED_VECTOR_WEIGHT = 0.25
+HASHED_VECTOR_WEIGHT = 0.01
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core import extracted
@@ -101,6 +101,7 @@ from ..core.models import (
     Tombstone,
     DEPENDENCY_KINDS,
     LINK_KINDS,
+    RecallItem,
     RecallResult,
     Status,
 )
@@ -238,14 +239,22 @@ class MemoryEngine:
         context_lane: bool = False,
         lexical_stems: bool = True,
         vector_weight: Optional[float] = None,
+        chunk_tokens: int | None = None,
+        chunk_overlap_tokens: int = 0,
         question_lane: bool = False,
     ) -> None:
         if vector_weight is None:
             # A hashed-token embedder ranks by word overlap, badly: a weak
-            # echo of the text lane. Measured on LongMemEval-S, giving it a
-            # quarter voice moved the fused ranking from behind the text lane
-            # alone to level with the reference's best; a real embedder knows
-            # things the text lane does not and keeps its full voice.
+            # echo of the text lane. Measured on LongMemEval-S (the frozen
+            # 50 and 100 items outside them), every voice it had in the order
+            # cost the fused ranking; at a hundredth it still runs -- the
+            # confidence signal, passages the text lane did not find, and at
+            # full voice when the text lane brings nothing (recall applies
+            # that) -- and on both samples the fused ranking scored as
+            # the text lane alone did (benchmarks/northstar-defaults-2026-09-14.results.md;
+            # SCONE_VECTOR_WEIGHT=0.25 is the previous default). A real
+            # embedder knows things the text lane does not and keeps its
+            # full voice.
             vector_weight = HASHED_VECTOR_WEIGHT if embedder.id.startswith("hash-") else 1.0
         if isinstance(vector_weight, bool) or not isinstance(vector_weight, (int, float)) or not 0 < vector_weight <= 4:
             raise InvalidInput("vector_weight must be a number above 0 and at most 4")
@@ -315,15 +324,30 @@ class MemoryEngine:
             if isinstance(window, bool) or not isinstance(window, int) or window < 1:
                 raise InvalidInput("embedding_budget needs an embedder that declares its input window "
                                    "(max_input_tokens); this one declares none")
-            counter = getattr(embedder, "count_tokens", None)
-            if callable(counter):
-                # Tried now: the vector writer's name says the tokenizer counted, so it must be able to.
-                try:
-                    counter("")
-                except Exception as error:  # noqa: BLE001 - any failure to count refuses the setting, with its reason
-                    raise InvalidInput(f"embedding_budget counts with the embedder's tokenizer, which failed: "
-                                       f"{type(error).__name__}: {error}") from error
+        if chunk_tokens is not None or chunk_overlap_tokens:
+            from ..ingestion.token_chunks import refused
+
+            reason = (refused(chunk_tokens, chunk_overlap_tokens) if chunk_tokens is not None
+                      else "chunk_overlap_tokens needs chunk_tokens: an overlap in tokens is of a target in tokens")
+            if reason is not None:
+                raise InvalidInput(reason)
+        counter = getattr(embedder, "count_tokens", None)
+        if (embedding_budget or chunk_tokens is not None) and callable(counter):
+            # Tried now: the vector writer's name and the chunk receipt say
+            # the tokenizer counted, so it must be able to.
+            setting = "embedding_budget" if embedding_budget else "chunk_tokens"
+            try:
+                counter("")
+            except Exception as error:  # noqa: BLE001 - any failure to count refuses the setting, with its reason
+                raise InvalidInput(f"{setting} counts with the embedder's tokenizer, which failed: "
+                                   f"{type(error).__name__}: {error}") from error
         self.embedding_budget = embedding_budget
+        #: The length chunker's target in tokens, packed from whole sentences
+        #: (ingestion/token_chunks.py); None cuts at chunk_target characters.
+        #: Code, structure, semantic and unit cuts keep the character target.
+        self.chunk_tokens = chunk_tokens
+        #: Tokens of the chunk before that a token-measured chunk starts with.
+        self.chunk_overlap_tokens = chunk_overlap_tokens
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -610,7 +634,7 @@ class MemoryEngine:
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
                          self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context,
-                         self.embedding_budget)
+                         self.embedding_budget, self.chunk_tokens, self.chunk_overlap_tokens)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -628,7 +652,8 @@ class MemoryEngine:
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
                         self.code_aware, self.code_graph, self.structure_aware,
-                        self.semantic_aware, self.heading_context, self.embedding_budget) != configuration):
+                        self.semantic_aware, self.heading_context, self.embedding_budget,
+                        self.chunk_tokens, self.chunk_overlap_tokens) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -768,7 +793,9 @@ class MemoryEngine:
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware, heading_context=self.heading_context,
             embedding_budget=cast(int, getattr(self.embedder, "max_input_tokens")) if self.embedding_budget else None,
-            count_tokens=getattr(self.embedder, "count_tokens", None) if self.embedding_budget else None,
+            count_tokens=(getattr(self.embedder, "count_tokens", None)
+                          if self.embedding_budget or self.chunk_tokens is not None else None),
+            chunk_tokens=self.chunk_tokens, chunk_overlap_tokens=self.chunk_overlap_tokens,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
             context_lane=self.context_lane,
             document_outline=partial(document_outline, blobs=self.blobs),
@@ -1083,9 +1110,19 @@ class MemoryEngine:
         exclude: Sequence[str] = (),
         diversity: Optional[float] = None,
         lessons: bool = False,
+        expand_summaries: Optional[str] = None,
+        expand_max_chunks: Optional[int] = None,
     ) -> RecallResult:
         """``lessons`` puts beside each returned passage what people said about it
         (``engine.lessons``), leaving the order as it was.
+
+        ``expand_summaries`` (``follow`` or ``replace``) puts after each stored
+        summary among the returned passages, or in its place, the chunks its
+        citations rest on -- only those, never a forgotten document's -- each
+        saying in ``via_summary`` which summary it came through; at most
+        ``expand_max_chunks`` are added (``summary_expand``), so the answer can
+        hold more than ``limit``, and ``expanded`` says what was added, refused
+        and cut.
 
         ``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -1166,12 +1203,31 @@ class MemoryEngine:
         )
         if type(lessons) is not bool:
             raise InvalidInput("lessons must be a boolean")
+        summaries: Optional[SummaryExpander] = None
+        if expand_summaries is not None:
+            from ..retrieval.summary_expand import DEFAULT_MAX_CHUNKS, Expanded, check_expansion, expand_summaries as expand
+
+            # Before the search, so a mistaken request spends no work and logs no recall.
+            cap = DEFAULT_MAX_CHUNKS if expand_max_chunks is None else expand_max_chunks
+            check_expansion(expand_summaries, cap)
+            mode = cast("Literal['replace', 'follow']", expand_summaries)
+
+            async def expand_found(items: Sequence[RecallItem], required: Sequence[str], excluded: Sequence[str],
+                                   scope: TextFilter) -> Expanded:
+                return await expand(self, space, items, mode=mode, max_chunks=cap, require=required, exclude=excluded,
+                                    scope=scope)
+
+            # Run inside recall, before its event is written and before lessons,
+            # so the event lists the chunks a summary brought and they are read for lessons too.
+            summaries = expand_found
+        elif expand_max_chunks is not None:
+            raise InvalidInput("expand_max_chunks is a cap on expand_summaries; ask for expand_summaries with it")
         result = await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
                             entity_notes=notes, lanes=lanes,
-                            require=require, exclude=exclude, diversity=diversity)
+                            require=require, exclude=exclude, diversity=diversity, summaries=summaries)
         if lessons:
             from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons, read_summary
 

@@ -59,9 +59,25 @@ def byte_spans(content: str, spans: list[Span]) -> list[Span]:
     that ``content.encode()[start:end].decode()`` equals the chunk text."""
     if content.isascii():
         return spans
-    offsets = [0]
-    for ch in content:
-        offsets.append(offsets[-1] + len(ch.encode()))
+    size = len(content)
+    points = sorted({point for span in spans for point in (span.start, span.end)} | {size})
+    if points[0] < 0 or points[-1] > size:
+        # Not offsets into this text: index a table of every character, so
+        # a negative offset counts from the end and one past it is refused,
+        # as they always were.
+        table = [0]
+        for ch in content:
+            table.append(table[-1] + len(ch.encode()))
+        return [Span(table[s.start], table[s.end]) for s in spans]
+    # Only where a span starts or ends is a byte offset needed: encode the
+    # stretch up to each such point once, running on to the end so that a
+    # character UTF-8 cannot hold is refused wherever it stands.
+    offsets: dict[int, int] = {}
+    at = previous = 0
+    for point in points:
+        at += len(content[previous:point].encode())
+        offsets[point] = at
+        previous = point
     return [Span(offsets[s.start], offsets[s.end]) for s in spans]
 
 

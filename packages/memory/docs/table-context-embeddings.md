@@ -25,7 +25,9 @@ Before embedding, Scone loads the original and manifest from the record's memory
 space, verifies their digests and types, validates cell/header associations, and
 checks that the reconstructed extraction matches the episode. Missing sources,
 corruption, inconsistent stored chunk text/spans and context-budget excess refuse
-indexing before a model call. Additional context is bounded to 8,192 UTF-8 bytes
+indexing before a model call. Spans must be in order -- each starting after the one
+before starts and ending after it ends -- but may overlap, as a length cut measured
+in tokens with `chunk_overlap_tokens` stores them. Additional context is bounded to 8,192 UTF-8 bytes
 per chunk and 8 MiB per episode, including the prefix framing. There is no silent
 truncation or fallback to different inputs.
 

@@ -568,6 +568,126 @@ Forgetting a document does not yet forget its summaries; they carry
 coverage on broad questions with and without stored summaries waits for a
 run with the local model.
 
+### Expanding a summary hit to the chunks it cites
+
+```bash
+scone recall "what does the mill survey say about the river" --limit 10 --expand-summaries follow
+scone recall "what does the mill survey say about the river" --expand-summaries replace --expand-max-chunks 8 --json
+```
+
+A stored summary answers a broad question as the model's word, and a reader
+who has to quote the document wants the document's own text. The leading
+framework's document summary index retrieves over summaries and returns the
+nodes under the chosen one — every node of the document. `expand_summaries`
+returns the chunks the summary *cites*, and only those: `follow` puts them
+after the summary, `replace` puts them in its place (engine
+`recall(..., expand_summaries="follow")`, HTTP `GET
+/v1/recall?expand_summaries=follow`, CLI `--expand-summaries`). No model is
+called and nothing is re-embedded.
+
+Resolution runs downward through the account each summary keeps as its
+attachment. A level-one summary cites chunks. A summary above cites a node
+of the level below (or a chunk carried up as a lone remainder) with a quote
+at an offset of that node's text; the quote lands in some of that node's
+sentences, and only their citations are followed. So the root of a long
+document expands to the chunks its own sentences rest on, not to the
+document, and a chunk a summary's span covers but no citation names is not
+served. Chunks come back in the document's order, each scored as the summary
+was, with no lanes of its own, and each carries `via_summary`: the summary's
+episode and chunk, its level and index, the episode it summarizes, the mode,
+and `cited`, the character spans of the chunk's stored text where the quotes
+it rests on sit. Its `first_line`, `last_line` and `declaration` are worked
+out from the document as a direct hit's are, and so is `superseded`: expansion
+runs before supersession, so a chunk whose claim the ledger retired is marked
+and moved below its replacement whether it came back directly or through a
+summary. Spans rather than the quotes themselves, so an answer holds no second
+copy of a passage's text for withholding to miss. A cited chunk already in the
+answer is not repeated.
+
+What it refuses, and says so in `expanded`:
+
+- A citation is followed only when the text it names holds its quote at
+  its offsets. A chunk that is not one of the summarized document's chunks
+  is counted in `missing`; one that does not hold the quote in `unquoted`;
+  a node that is not stored below the citing level, was written from other
+  content, or whose account cannot be read, in `unresolved`. None is served.
+  A node is found by the source key its build stored it under, one read,
+  not by listing the document's summaries, which walks every episode in the
+  space.
+- The scope and the phrases the recall was given hold for what a summary
+  brings. A cited chunk the scope would not retain is not served and is
+  counted in `dropped_scope`: the same check the reranker makes before
+  exposing a passage's text (kind, source prefix, since and until, tags,
+  `where`, conditions, `as_of`, and a span that still holds its text), so a
+  recall narrowed to `kind=note` gets the summary and none of the file it
+  cites. A cited chunk lacking a `require` phrase or holding an `exclude` one
+  is counted in `dropped_required` or `dropped_excluded`.
+- Only a whole summary is replaced. One resting partly on citations that
+  failed, or that lost a chunk to the scope, the phrases or the cap, stands
+  beside what was left even under `replace`, and is named in `partial`.
+- A summary whose document is forgotten is refused as `source_gone` and
+  nothing of the document is served: forgetting a document leaves its
+  summaries, and what they cite is deleted text. A document whose content
+  hash no longer matches `summary_content_hash` is refused as
+  `content_changed` (a stored document is never rewritten, so this is a
+  note written by hand or carried from another store). A document that
+  could not be read is `unread`, and one whose id was never stored here (a
+  note carried from another store) is `source_unknown`; neither is a
+  finding that it is gone. Following citations awaits reads, and a
+  document can be forgotten during any of them, so every chunk about to be
+  served is read again after the last one, with nothing awaited between that
+  read and the answer: a document whose chunks moved is read again for its
+  reason, `source_gone` when it was forgotten and `changed_while_read` when it
+  is still there, and none of its chunks is served under any summary; a
+  store that cannot answer that read confirms nothing, and every summary is
+  `unread`. Those reads (one chunk read per pass, plus a document re-read for
+  each document found changed) are not counted against `MAX_READS`;
+  metadata that does not say what a note summarizes is `malformed`; an
+  account that cannot be read is `detail_unreadable`; citations that reach
+  no chunk are `nothing_cited`. A refused summary stands as it was.
+- `expand_max_chunks` (20 unless set, at most 200) bounds the chunks added
+  across the answer. When it cuts, `capped` counts the cited chunks left
+  out and `cut` names the summaries, and a cut summary is kept followed by
+  what fit, even under `replace`, since part of what it cites does not stand
+  for all of it; a summary the cap left no room for at all stands as it was
+  and is not counted in `expanded`. Citation accounts and node lookups read
+  per call are bounded too (`MAX_READS`, 200; a failed read counts), and a
+  summary past that budget stands as it was and is counted in `not_read`.
+
+The answer can hold more than `limit` items, and `returned_bytes` counts
+what is returned. Expansion runs inside recall before `lessons`, so the
+chunks a summary brings are read for lessons, and before the route's
+withholding stage, so what it adds is scanned like any passage. It is refused
+with `merge` and with a window (`window`, or `window_unit=sentences`, and so
+`compress`): a merged or widened passage holds text the summary does not rest
+on under its `via_summary`, and a widened one has a new `start` and text, so
+the spans in `cited` would no longer index the text returned. On the command
+line it is refused with `--parts` too, which answers without recall's
+expansion. The recall event is written after expansion: it lists the items
+returned, each chunk a summary brought marked with that summary's episode
+in `via_summary`, with `returned_bytes` and the `expanded` record, so
+feedback on a brought chunk is accepted and feedback on a replaced summary
+is refused as not returned. Whether the phrases left the answer short is
+still judged on what the lanes returned.
+
+Measured on a scripted fixture, not a quality claim
+(`benchmarks/summary_expansion.py`, 14 September 2026): four documents of
+three sections of three paragraphs, one chunk each, with summary trees built
+by `FakeChat` replies the script writes and `HashEmbedder`; twelve questions
+asking what a document says about one section's theme, the section's three
+chunks gold, `limit=10`, scored on the first ten items. With level-one
+summaries citing two of three paragraphs, recall_at(10) is 0.278 off, 0.667
+with `follow` and with `replace`; every chunk under each summary's span in its
+place (the document-summary-index shape, computed by the script) gives 1.000.
+With every paragraph cited: 0.278 off, 0.722 `follow` (whole list 1.000),
+1.000 `replace`, 1.000 under the span. With expansion off 4.58 of the ten
+places held summaries. The citation ratio is the script's, and so is the
+ceiling of cited-only expansion; this fixture does not show a summary whose
+span is much wider than what it cites, beyond the root. Median latency over
+five interleaved repeats was 3.3–4.0 ms per recall in every arm, inside the
+spread on a machine at load average about 60, so no latency claim is made.
+Not measured: summaries a real model wrote, and real documents.
+
 ### Checking the rule instead of asserting it
 
 A routing rule written down is only better than one a model invents if
@@ -1227,6 +1347,142 @@ unretrievable — and a heading above a table was separated from it. The
 invariant test that should have caught the first asserted exactly the
 right property and passed, because its fixture never contained the
 junction.
+
+## A chunk measured in tokens
+
+The length cut's target is 700 characters. A model reads tokens, and the
+reference framework's splitter measures its nodes in them -- 512 by
+default -- filling each with whole sentences, so one of its nodes carries
+more of a conversation than one of our chunks. `chunk_tokens` measures
+the length cut in tokens instead:
+
+```python
+MemoryEngine(store, index, embedder, chunk_tokens=512)                           # or SCONE_CHUNK_TOKENS=512
+MemoryEngine(store, index, embedder, chunk_tokens=512, chunk_overlap_tokens=64)  # SCONE_CHUNK_OVERLAP_TOKENS=64
+```
+
+- **Whole sentences are packed.** Sentences are found as the semantic cut
+  finds them (a stop followed by space, not after an initial, a title or
+  before a lower-case word) and added to a chunk while its count stays
+  within the target. A chunk ends where a sentence ends.
+- **A sentence is cut inside only when it alone is over the target**, and
+  then at a line break before a space, and at a space before a hard cut
+  inside a word. The receipt counts both: `sentences_over_target` and
+  `hard_cuts`.
+- **Counted by the embedder's tokenizer when it has one** (`tokenizer-v1`;
+  the local BGE models do), **by the budget's estimate otherwise**
+  (`estimate-v1`, no model: see "Keeping that context inside the embedder's
+  window" below). The count of an empty text -- the start and end markers
+  a model adds -- is paid once a chunk, so a 512-token chunk fits a
+  512-token window as that count sees it. The estimate is meant to err
+  high, and it is not a bound on any model's count: cutting every tenth
+  LongMemEval-S item's 2,443 sessions at 512 by the estimate, BGE-small's
+  own tokenizer counted 8 of the 16,301 chunks over 512, the largest 534
+  (Portuguese prose); on the first 200 LongMemEval oracle items at 256,
+  1 of 9,590, at 261. Nor is it a count of the reference's tokens
+  (tiktoken's `cl100k_base`): on the conversations below a chunk it held
+  to 512 had 330 of those at the median and 640 at most. An embedder
+  with a window and no tokenizer should be given a target below it.
+- **The bound says when it did not hold -- as its count sees it.** The
+  chunk is measured again whole, and `over_target` counts the chunks the
+  count measured over the target (a tokenizer need not count a chunk as
+  the sum of its sentences); `largest` gives the largest count. Under
+  `estimate-v1` both are the estimate measuring what it packed, the sum
+  of pieces it already held to the target, so `over_target` can be above
+  0 there only beside a hard cut, and says nothing about a model's window.
+- **An overlap repeats whole trailing sentences** of the chunk before, as
+  many as fit in `chunk_overlap_tokens`, and gives way from its front when
+  it and the next sentence do not fit. With it on, stored spans of
+  neighbouring chunks overlap; `overlapped` counts the chunks that start
+  with repeated text. Off (0) by default, and refused without
+  `chunk_tokens` or at or above it. It works with table context
+  (`table_context_embeddings`), which embeds each overlapping chunk with
+  the headers it lacks: the spans it checks must be in order -- each
+  starting after the one before starts and ending after it ends -- not
+  disjoint, so a space stored with an overlap can be rebuilt or recovered
+  with table context turned on later.
+- **Only the length cut.** Code, structure, semantic and unit cuts keep the
+  character target, and a record's receipt still says `chunking: length`,
+  with the token counts under `structure` (`measure: tokens`).
+- **Stored chunks are never recut.** The setting decides how records
+  stored from then on are cut; a record already stored keeps its chunks,
+  and the same content stored again is a duplicate that changes nothing.
+  Both values are part of the configuration a keyed replacement is
+  prepared under, so a replacement cut before the setting changed is
+  refused rather than stored as if cut under the new one.
+- **Scripts written without spaces are one sentence to it.** The sentence
+  finder knows `.`, `!` and `?`; Chinese or Japanese prose is packed by
+  hard cuts inside that one sentence and the receipt says so. Leave
+  `chunk_tokens` unset for such text until it learns the full-width stops.
+  A hard cut's end is found by widening from the part's start, doubling
+  until a part does not fit, so the count never reads far past the part
+  it finds: a 100,000-letter word is counted 16 times over, where halving
+  from the word's end counted it 341 times over and grew with the square
+  of the word. 300,000 characters of Chinese prose took 3.4 s at 256
+  tokens and 2.3 s at 512, against 135 s and 61 s (three interleaved
+  rounds, medians; the same cuts).
+- **Off by default.** Cut positions decide what chunks exist, and the
+  numbers below are one sample on a hashed-token embedder.
+
+### What it measured
+
+LongMemEval-S, the 50 items stratified by question type (seed 42), the
+hashed-token embedder on both sides, no model, no reranker, engine
+defaults otherwise (stem prefixes on, vector weight 0.25), engines built
+through `Settings.from_env` with `SCONE_CHUNK_TOKENS`. The reference is
+LlamaIndex 0.14.24 at its best retrieval configuration:
+`QueryFusionRetriever(VectorIndexRetriever + BM25Retriever)` over
+`SentenceSplitter(chunk_size=512, chunk_overlap=0)`, every node ranked and
+folded to sessions. Both sides are deterministic: ours returned the same
+rankings in each of three rounds, and the reference the same scores in
+each of its four runs.
+
+| our chunks | R@5 | all-sessions@5 | R@15 | MRR | k=5 against the reference: won / lost |
+| --- | --- | --- | --- | --- | --- |
+| 700 characters (default) | 0.88 | 0.72 | 0.98 | 0.807 | 1 / 1 |
+| 256 tokens | 0.88 | 0.74 | 0.98 | 0.831 | 1 / 1 |
+| **512 tokens** | **0.92** | **0.78** | 0.96 | 0.840 | 2 / 0 |
+| 1,024 tokens | 0.90 | 0.74 | **1.00** | **0.856** | 2 / 1 |
+| *reference: `SentenceSplitter(512)`, BM25 + vector fusion* | 0.88 | 0.74 | 0.98 | 0.831 | |
+
+Chunk sizes over the same 2,355 sessions:
+
+| | chunks | a session | median characters | median `cl100k_base` tokens | largest | sentences over the target |
+| --- | --- | --- | --- | --- | --- | --- |
+| 700 characters | 46,640 | 19.8 | 576 | 117 | 643 | -- |
+| 256 tokens | 33,717 | 14.3 | 762 | 159 | 400 | 532 of 253,069 |
+| 512 tokens | 16,689 | 7.1 | 1,581 | 330 | 640 | 104 |
+| 1,024 tokens | 8,745 | 3.7 | 3,201 | 666 | 1,325 | 18 |
+| reference, 512 | 11,946 | 5.1 | 2,233 | 482 | | |
+
+No word was hard-cut, and the estimate counted no chunk over its target
+(which, as above, it could only beside a hard cut: this is not a check
+against a model's window).
+
+What it says: at 512 estimated tokens our engine is ahead of the
+reference at its best at k=5 (R@5 0.92 vs 0.88, all-sessions@5 0.78 vs
+0.74, MRR 0.840 vs 0.831; two items won, none lost) and still one item
+behind at k=15; the best MRR was at 1,024. What it does not say: 50
+items is one or two items a column, so these are not differences a
+second sample is sure to repeat; with hashed-token vectors both lanes are
+lexical; and the two sides' chunks are not the same size -- the
+reference's 512 tiktoken nodes sit between our 512 and 1,024 estimated
+tokens. Nothing about answer quality.
+
+It costs time. Cutting those sessions (24.8 million characters) alone,
+the four ways interleaved, five rounds, medians: 0.60 s at 700
+characters, 9.0 s at 256 tokens, 8.7 s at 512 and 9.0 s at 1,024. The
+estimate reads each session once and every sentence, line, word and
+chunk is a difference of running totals. The first version estimated
+every sentence's text and then every chunk's again; against it, in one
+process, interleaved, five rounds, the medians were 75.0 s against 20.0 s
+at 256 tokens, 65.8 s against 24.5 s at 512 and 23.3 s against 8.5 s at
+1,024 -- 3.0, 2.7 and 2.6 times as fast by the median of each round's
+ratio, on a machine whose load went from 15 to 68 during the run (the
+quietest rounds: 13.2 against 5.8 s, 15.1 against 7.3 s, 16.2 against
+8.0 s). Both versions cut every session into the same spans with the
+same receipt at 256, 512, 1,024, and 512 with a 64-token overlap. The
+retrieval numbers above were taken with the first version.
 
 ## Cutting a document at its genre's boundaries
 
@@ -2357,10 +2613,42 @@ outvote the text lane's right ones. Measured on LongMemEval-S with that
 embedder, the text lane alone was ahead of the fused ranking.
 `SCONE_VECTOR_WEIGHT` (`MemoryEngine(..., vector_weight=)`) is the
 vector lane's weight against the text lane's 1.0 — a number above 0 and
-at most 4, 1.0 by default — and every recall event records
-`fusion_weights`, so a ranking can always be read back to the voices
-that made it. Change it only on a number: the pull request that added it
-carries the measurement.
+at most 4 — and every recall event records `fusion_weights`, so a
+ranking can always be read back to the voices that made it. Unset, it
+follows the embedder: 1.0 for any embedder but hashed tokens, and 0.01
+for hashed tokens. Change it only on a number.
+
+The hashed default is measured against LlamaIndex's best retrieval
+(its BM25 retriever fused with its vector retriever) on LongMemEval-S,
+both sides on the same hashed vectors, sessions folded from passages
+([results](../benchmarks/northstar-defaults-2026-09-14.results.md)):
+
+| hashed vector weight | frozen 50: R@5 / all@5 / R@15 / MRR | 100 other items: R@5 / all@5 / R@15 / MRR |
+|---|---|---|
+| 1.0 | 0.84 / 0.72 / 0.92 / 0.759 | 0.93 / 0.74 / 0.98 / 0.789 |
+| 0.25 (the default before) | 0.88 / 0.72 / 0.98 / 0.807 | 0.95 / 0.79 / 0.99 / 0.852 |
+| **0.01** | **0.90 / 0.76 / 1.00 / 0.838** | **0.96 / 0.84 / 0.99 / 0.885** |
+| LlamaIndex BM25 + vector | 0.88 / 0.74 / 0.98 / 0.831 | 0.91 / 0.71 / 0.99 / 0.810 |
+
+Every voice the hashed vector lane had in the order cost the ranking.
+At 0.01 the fused ranking scored exactly as the text lane alone did on
+both samples, and its top five sessions were the text lane's in 149 of
+the 150 items. The
+lane still runs at that weight: it gives the confidence signal
+(`top_similarity`, the similarity floor), it answers alone when the text
+lane fails, and a passage only it found can still come back.
+`SCONE_VECTOR_WEIGHT=0.25` restores the previous
+default. Relative-score fusion and larger chunks also moved the numbers
+on these samples; neither is a default, and the results file says why.
+
+The weight is a voice against the text lane, so it applies only when the
+text lane brings passages. When it brings none (`lanes=["vector"]`, a text
+lane that failed, or one that found nothing), the vector lane ranks at a
+full voice of 1.0, and that recall's `fusion_weights` says so. The recency
+term is sized against a full voice: at a hundredth, the vector lane's
+first and second places differ by what about half an hour of age is
+worth to that term (at 1.0, about two days), so newer passages would
+come back first instead of closer ones.
 
 ### Both stores agree on every script
 
