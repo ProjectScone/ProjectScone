@@ -33,6 +33,8 @@
     SCONE_CHUNK_TOKENS=512         measure the length chunker's target in tokens, packing whole sentences, instead
                                    of 700 characters; counted by the embedder's tokenizer or the estimate (unset: characters)
     SCONE_CHUNK_OVERLAP_TOKENS=64  tokens of the chunk before that each such chunk starts with (default 0)
+    SCONE_SEMANTIC_MERGE_THRESHOLD=0.2  join a semantic cut's neighbouring chunks again when at least this alike
+                                   and they fit the chunk target together (unset: no second pass)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
     SCONE_RELATION_INVERSE=works_at:employs   which predicates are the other side of which
@@ -102,6 +104,11 @@
                                    recognizer's error, which ends the session with a held turn
                                    stored, not answered (default 0; no model; `scone serve` voice
                                    personas only)
+    SCONE_VOICE_KEYPAD off | append | collect   served voice sessions take keys the client sends as
+                                   {"type": "keypad", "key": "5"} on the audio socket: each key
+                                   finishes the user's turn (append), or keys are collected until
+                                   #, 3 s without a key or 32 keys into one turn (collect). Off by
+                                   default, when the socket refuses a keypad message
 
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)
@@ -125,6 +132,7 @@ if TYPE_CHECKING:
 from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
 from ..retrieval.followup import REWRITE_TIMEOUT_S
+from ..retrieval.feedback_prior import validate_feedback_weight
 from ..retrieval.fusion import RECENCY_HALF_LIFE_DAYS, W_RECENCY, validate_recency
 from ..retrieval.listwise import DEFAULT_PASSAGE_BYTES, DEFAULT_TIMEOUT, DEFAULT_WINDOW, validate_listwise_options
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
@@ -216,6 +224,9 @@ class Settings:
     #: keeps the character target.
     chunk_tokens: Optional[int] = None
     chunk_overlap_tokens: int = 0
+    #: SCONE_SEMANTIC_MERGE_THRESHOLD: the similarity at which a semantic
+    #: cut's neighbouring chunks are joined again; None keeps its cuts.
+    semantic_merge_threshold: Optional[float] = None
     table_context_embeddings: bool = False
     #: SCONE_EMBEDDING_CACHE: unset embeds every chunk of every stored
     #: record; "memory" keeps vectors for the process; a path keeps them in
@@ -246,6 +257,9 @@ class Settings:
     #: age at which it halves. Zero weight turns it off.
     recency_weight: float = W_RECENCY
     recency_half_life_days: float = RECENCY_HALF_LIFE_DAYS
+    #: How much recorded feedback moves a candidate in fusion
+    #: (SCONE_FEEDBACK_WEIGHT; retrieval/feedback_prior.py). Zero, the default, turns it off.
+    feedback_weight: float = 0.0
     candidate_limit: int | None = None
     reranker_factory: str | None = None
     reranker_cross_encoder_dir: str | None = None
@@ -292,6 +306,9 @@ class Settings:
     document_ocr_dpi: int = 150
     #: Turn a page Tesseract's orientation detection is sure is turned before reading it.
     document_ocr_orientation: bool = False
+    #: A layout engine that labels a scanned page's regions (see ocr/layout_json.py);
+    #: without one the labels are inferred from geometry and text.
+    document_layout_executable: Optional[str] = None
     conversations_journal: Optional[str] = None
     conversations_model_factory: Optional[str] = None
     # A persona catalog (JSON array of Persona documents) needs a registry
@@ -331,6 +348,8 @@ class Settings:
     followup_timeout: float = REWRITE_TIMEOUT_S
     #: SCONE_SEMANTIC_TURN: voice turns end on what was said as well as the pause.
     semantic_turn: bool = False
+    #: SCONE_VOICE_KEYPAD: off, append (each key finishes the turn) or collect (keys until #).
+    voice_keypad: str = "off"
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
@@ -378,6 +397,14 @@ class Settings:
         except InvalidInput as error:
             raise InvalidInput(str(error).replace("recency_weight", "SCONE_RECENCY_WEIGHT")
                                .replace("recency_half_life_days", "SCONE_RECENCY_HALF_LIFE_DAYS")) from None
+        try:
+            validate_feedback_weight(self.feedback_weight)
+        except InvalidInput as error:
+            raise InvalidInput(str(error).replace("feedback_weight", "SCONE_FEEDBACK_WEIGHT")) from None
+        if self.feedback_weight > 0 and self.events == "none":
+            # It reads judgements from the event log: with none, recall would be unchanged and nothing would say why.
+            raise InvalidInput("SCONE_FEEDBACK_WEIGHT reads recorded feedback from the event log, "
+                               "which SCONE_EVENTS=none turns off")
         if self.reranker_factory is not None:
             _reranker_spec(self.reranker_factory)
         for name, value in (("DIR", self.reranker_cross_encoder_dir), ("MODEL", self.reranker_cross_encoder_model)):
@@ -509,6 +536,7 @@ class Settings:
             embedding_budget=env.get("SCONE_EMBEDDING_BUDGET") == "1",
             chunk_tokens=chunk_tokens,
             chunk_overlap_tokens=chunk_overlap_tokens,
+            semantic_merge_threshold=_semantic_merge_threshold(env.get("SCONE_SEMANTIC_MERGE_THRESHOLD")),
             table_context_embeddings=env.get("SCONE_TABLE_CONTEXT_EMBEDDINGS") == "1",
             embedding_cache=env.get("SCONE_EMBEDDING_CACHE") or None,
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
@@ -537,6 +565,7 @@ class Settings:
             recency_weight=_environment_float("SCONE_RECENCY_WEIGHT", env.get("SCONE_RECENCY_WEIGHT") or str(W_RECENCY)),
             recency_half_life_days=_environment_float("SCONE_RECENCY_HALF_LIFE_DAYS",
                                                       env.get("SCONE_RECENCY_HALF_LIFE_DAYS") or str(RECENCY_HALF_LIFE_DAYS)),
+            feedback_weight=_environment_float("SCONE_FEEDBACK_WEIGHT", env.get("SCONE_FEEDBACK_WEIGHT") or "0"),
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),
             reranker_factory=env.get("SCONE_RERANKER_FACTORY") or None,
@@ -583,6 +612,7 @@ class Settings:
             document_ocr_psm=int(env.get('SCONE_DOCUMENT_OCR_PSM', '3')),
             document_ocr_dpi=int(env.get('SCONE_DOCUMENT_OCR_DPI', '150')),
             document_ocr_orientation=env.get('SCONE_DOCUMENT_OCR_ORIENTATION') == '1',
+            document_layout_executable=env.get('SCONE_DOCUMENT_LAYOUT_EXECUTABLE') or None,
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
@@ -610,6 +640,7 @@ class Settings:
             followup_api_key=env.get("SCONE_FOLLOWUP_API_KEY") or None,
             followup_timeout=parse_seconds("SCONE_FOLLOWUP_TIMEOUT", env.get("SCONE_FOLLOWUP_TIMEOUT"), REWRITE_TIMEOUT_S),
             semantic_turn=parse_flag("SCONE_SEMANTIC_TURN", env.get("SCONE_SEMANTIC_TURN")),
+            voice_keypad=_voice_keypad(env.get("SCONE_VOICE_KEYPAD")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
@@ -856,10 +887,11 @@ def build_vectors(settings: Settings, documents=None):
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
 ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget", "chunk_tokens", "chunk_overlap_tokens",
+                   "semantic_merge_threshold",
                    "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "question_lane",
                    "lexical_stems", "lexical_exact_forms",
-                   "vector_weight", "recency_weight", "recency_half_life_days")
+                   "vector_weight", "recency_weight", "recency_half_life_days", "feedback_weight")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy", "synonyms")
 #: Settings carried into an engine through a policy they build.
@@ -967,10 +999,11 @@ async def build_in_process_engine(settings: Settings, embedder):
         heading_context=settings.heading_context,
         embedding_budget=settings.embedding_budget,
         chunk_tokens=settings.chunk_tokens, chunk_overlap_tokens=settings.chunk_overlap_tokens,
-        table_context_embeddings=settings.table_context_embeddings,
+        table_context_embeddings=settings.table_context_embeddings, semantic_merge_threshold=settings.semantic_merge_threshold,
         similarity_floor=settings.similarity_floor,
         recency_weight=settings.recency_weight,
         recency_half_life_days=settings.recency_half_life_days,
+        feedback_weight=settings.feedback_weight,  # carried, though these engines keep no event log to read
         demote_restated=settings.demote_restated,
         candidate_limit=settings.candidate_limit,
         reranker=reranker,
@@ -1064,6 +1097,24 @@ def _chunk_tokens(tokens: Optional[str], overlap: Optional[str]) -> tuple[Option
     return target, carried
 
 
+def _semantic_merge_threshold(raw: Optional[str]) -> Optional[float]:
+    """SCONE_SEMANTIC_MERGE_THRESHOLD, refused by name here rather than
+    left for the engine to refuse in words that do not name it."""
+    from ..ingestion.semantic_chunks import merge_refused
+
+    given = (raw or "").strip()
+    if not given:
+        return None
+    try:
+        value = float(given)
+    except ValueError:
+        raise InvalidInput(f"SCONE_SEMANTIC_MERGE_THRESHOLD must be a number, got {raw!r}") from None
+    reason = merge_refused(value)
+    if reason is not None:
+        raise InvalidInput(f"SCONE_SEMANTIC_MERGE_THRESHOLD: {reason}")
+    return value
+
+
 def _vector_weight(raw: Optional[str]) -> Optional[float]:
     if raw is None or not raw.strip():
         return None
@@ -1084,6 +1135,17 @@ def parse_flag(name: str, raw: Optional[str]) -> bool:
     if value in ("1", "true", "yes", "on"):
         return True
     raise InvalidInput(f"{name} must be 1 or 0, got {raw!r}")
+
+
+#: What a served voice session does with a key the client sends: nothing, or a realtime.keypad mode.
+VOICE_KEYPAD_MODES = ("off", "append", "collect")
+
+
+def _voice_keypad(raw: Optional[str]) -> str:
+    value = (raw or "off").strip().lower()
+    if value not in VOICE_KEYPAD_MODES:
+        raise InvalidInput(f"SCONE_VOICE_KEYPAD must be off, append or collect, got {raw!r}")
+    return value
 
 
 def parse_retention(raw: str) -> dict[str, float]:
@@ -1193,11 +1255,12 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         embedding_budget=settings.embedding_budget,
         chunk_overlap_tokens=settings.chunk_overlap_tokens, chunk_tokens=settings.chunk_tokens,
         table_context_embeddings=settings.table_context_embeddings,
-        embedding_cache=embedding_cache,
+        embedding_cache=embedding_cache, semantic_merge_threshold=settings.semantic_merge_threshold,
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
         recency_weight=settings.recency_weight,
         recency_half_life_days=settings.recency_half_life_days,
+        feedback_weight=settings.feedback_weight,  # read from the event log given above
         candidate_limit=settings.candidate_limit,
         reranker=reranker,
         rerank_limit=settings.rerank_limit,

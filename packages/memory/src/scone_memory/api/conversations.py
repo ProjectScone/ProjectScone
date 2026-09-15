@@ -43,6 +43,7 @@ from ..retrieval.evidence_records import canonical_evidence, fingerprint, restri
 from .app import create_app, episode_json, permitted
 from ._lifecycle import finish_host_cleanup
 from ..realtime.catalog import PersonaCatalog
+from ..realtime.keypad import KeypadPolicy
 from ..realtime.turn_end import LexicalEndOfTurn
 from ..realtime.websocket import WebSocketAudioTransport
 
@@ -107,7 +108,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             vision_available=None, vision_factory=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
                             agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None, document_video=None,
                             directory_sync_service=None, synthesis_factory=None, url_import=None, followup=None,
-                            semantic_turn=False):
+                            semantic_turn=False, voice_keypad="off"):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
     runtime_factory(space, sid) supplies async reply(text) and close(). None
@@ -134,6 +135,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     the host on its text factories. It advertises configuration, not model health.
     semantic_turn=True gives each voice session the lexical end-of-turn detector:
     a final transcript that stops mid-clause is held for the rest of the turn.
+    voice_keypad (off, append or collect) lets the audio socket take the
+    client's keypad messages and gives each voice session that keypad policy.
     """
     from ..runtime.conversation_tools import ConversationTools
 
@@ -163,6 +166,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     configured = runtime_factory is not None or scoped_runtime_factory is not None or catalog is not None
     def bare_runtime_available():
         return (runtime_factory is not None or scoped_runtime_factory is not None) and (runtime_available is None or runtime_available())
+    if voice_keypad not in ("off", "append", "collect"):
+        raise ValueError("voice_keypad must be off, append or collect")
     if type(public_text_streaming) is not bool or (public_text_streaming and not configured):
         raise ValueError("public_text_streaming requires a configured compatible runtime")
     owned: dict[tuple[str, str], OwnedSession] = {}
@@ -407,6 +412,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 "personas": len(catalog.personas) if catalog is not None else 0,
                 "voice": bool(catalog and catalog.personas), "video": False, "streaming": public_text_streaming,
                 "voice_turn_end": "semantic" if semantic_turn else "silence",
+                "voice_keypad": voice_keypad,
                 "voice_stream": ({"schema_version": 1, "transport": "websocket", "protocol": "scone-pcm-v1",
                                   "authentication": "hello", "reconnect": False, "pcm": "s16le",
                                   "input_channels": [1, 2], "min_sample_rate": 8000,
@@ -1052,13 +1058,15 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             if not isinstance(sample_rate, int):
                 raise ValueError("sample rate must be an integer")
             transport = WebSocketAudioTransport(websocket, sample_rate=sample_rate,
-                                                channels=hello.get("channels", 1))
+                                                channels=hello.get("channels", 1), keypad=voice_keypad != "off")
         except (ValueError, TypeError):
             await refuse("unsupported audio format")
             return
         try:
             fixed = RecallScope.from_mapping(current["recall_scope"])
-            turns = {"turn_detector_factory": LexicalEndOfTurn} if semantic_turn else {}
+            turns: dict[str, object] = {"turn_detector_factory": LexicalEndOfTurn} if semantic_turn else {}
+            if voice_keypad != "off":
+                turns["keypad"] = KeypadPolicy(voice_keypad)
             session = chosen.voice(engine, space, sid, transport_factory=lambda: transport, capture=True,
                                    **fixed.kwargs(), **turns)
             journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])

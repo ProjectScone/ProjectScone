@@ -23,7 +23,10 @@ the number of source claims considered, including claims already in the target.
 `attachments` and `attachment_bytes` count verified destination holds, including
 existing ones; these are not newly allocated storage counts.
 `unlinked_attachments` counts holds that were unlinked in the source.
-`attachments_skipped` counts linked blobs used only by tombstoned source episodes.
+`past_forget_after` counts source episodes left behind because their own
+`forget_after` had come ([scheduled forgetting](scheduled-forgetting.md)); they
+go when the source space is deleted.
+`attachments_skipped` counts linked blobs used only by tombstoned or overdue source episodes.
 A blob shared with an accepted episode still moves.
 
 ## Claims whose sources were forgotten

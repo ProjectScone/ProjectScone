@@ -106,6 +106,8 @@ class OpenSearchVectorIndex:
         self._owns_client = client is None
         self.url = url.rstrip("/")
         self.index = index
+        #: The cluster as configured, or the injected client itself when it chose the cluster.
+        self._endpoint: object = self.url if client is None else id(client)
         self.refresh = refresh
         self.batch_size = batch_size
         self.max_batch_bytes = max_batch_bytes
@@ -113,6 +115,11 @@ class OpenSearchVectorIndex:
 
     def _url(self, suffix: str = "") -> str:
         return f"{self.url}/{self.index}{suffix}"
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self._endpoint, self.index)
 
     async def ensure(self, dim: int) -> None:
         self.dim = None

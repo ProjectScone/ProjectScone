@@ -1,6 +1,6 @@
 """Broad questions, three synthesis modes and the reference's TreeSummarize, one local model, one local judge.
 
-Usage: PYTHONPATH=src python benchmarks/synthesis_modes.py <longmemeval_s.json> <out_dir> [n] [seed] [model] [k]
+Usage: PYTHONPATH=src python benchmarks/synthesis_modes.py <longmemeval_s.json> <out_dir> [n] [seed] [model] [k] [runs]
 Needs a local Ollama at 127.0.0.1:11434 and llama-index-core installed.
 The scoreboard's protocol (comparative-synthesis-v1, 2026-09-13) with the
 modes added: for n LongMemEval-S multi-session items (stratified, seed 42),
@@ -11,10 +11,15 @@ LlamaIndex's TreeSummarize. Sides run one after another per item, their
 order rotated item by item. Each written text is judged by the same model
 for faithfulness to the passages and relevancy to the question. Our sides
 also report the mechanical quoted share: notes kept with a checked quote
-over notes the model returned. Rows are appended to rows.jsonl as they
-finish, so a stopped run keeps what it measured.
+over notes the model returned, leaving out on both sides the sentences a
+refine rewrite repeated from the answer so far (``notes.carried``), so the
+share is of sentences the model wrote new and compares across modes.
+Rows are appended to run<r>/rows.jsonl as they finish, so a stopped run
+keeps what it measured. With runs > 1 the whole protocol repeats, each
+item's side order rotated one further per run, and report.json gives
+every run's aggregate and the median of each number across runs.
 """
-import asyncio, json, sys, time
+import asyncio, json, statistics, sys, time
 from pathlib import Path
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine, Record
@@ -76,18 +81,21 @@ async def one(item, model, judge, k, order):
             cited = {c.passage_id for s in made.sentences for c in s.citations}
             cited_sessions = {p.source for p in passages if p.id in cited}
             returned = sum(r.notes_returned for r in made.rounds)
+            fresh = returned - made.notes_carried
             dropped = made.notes_dropped_unquoted + made.notes_dropped_unknown + made.notes_dropped_malformed
             row[side] = {"status": made.status, "sentences": len(made.sentences), "model_calls": made.model_calls,
                          "rounds": len(made.rounds), "passages_read": made.passages_read,
                          "passages_cited": made.passages_cited,
                          "cited_evidence_share": round(len(evidence & cited_sessions) / len(evidence), 3) if evidence else None,
                          "notes_returned": returned, "notes_kept": made.notes_kept, "notes_dropped": dropped,
+                         "notes_carried": made.notes_carried, "refine_dropped_carried": made.refine_dropped_carried,
                          "notes_dropped_unquoted": made.notes_dropped_unquoted,
                          "notes_dropped_unknown": made.notes_dropped_unknown,
                          "notes_dropped_malformed": made.notes_dropped_malformed,
-                         "quoted_share": round(made.notes_kept / returned, 3) if returned else None,
+                         "quoted_share": round((made.notes_kept - made.notes_carried) / fresh, 3) if fresh else None,
                          "folded": made.folded, "fold_dropped_uncited": made.fold_dropped_uncited,
                          "refine_kept_prior": made.refine_kept_prior, "reasons": list(made.reasons),
+                         "round_notes": [[r.notes_returned, r.notes_kept, r.notes_carried] for r in made.rounds],
                          "seconds": round(seconds, 1), "text": made.text()}
         row[side].update(await judge_text(judge, item.question, text, texts))
     return row
@@ -106,7 +114,11 @@ def aggregate(rows):
                  "seconds": round(sum(s["seconds"] for s in present), 1)}
         if side in OURS:
             returned = sum(s["notes_returned"] for s in present)
-            entry.update({"quoted_share": round(sum(s["notes_kept"] for s in present) / returned, 3) if returned else None,
+            carried = sum(s["notes_carried"] for s in present)
+            fresh_kept = sum(s["notes_kept"] for s in present) - carried
+            entry.update({"quoted_share": round(fresh_kept / (returned - carried), 3) if returned - carried else None,
+                          "quoted": fresh_kept, "written": returned - carried, "notes_carried": carried,
+                          "refine_dropped_carried": sum(s["refine_dropped_carried"] for s in present),
                           "notes_returned": returned, "notes_kept": sum(s["notes_kept"] for s in present),
                           "notes_dropped": sum(s["notes_dropped"] for s in present),
                           "passages_read": sum(s["passages_read"] for s in present),
@@ -122,36 +134,66 @@ def aggregate(rows):
     return agg
 
 
-async def main(data: Path, out: Path, n: int, seed: int, model_name: str, k: int):
-    items = [i for i in load_items(data) if i.question_type == "multi-session"]
-    items = stratified_sample(items, n, seed=seed)
-    if n == 8 and seed == 42:
-        assert [i.question_id for i in items] == EXPECTED, "not the scoreboard's items"
-    model = OpenAICompatibleChat("http://127.0.0.1:11434/v1", model_name, timeout=600.0)
+MEDIAN_KEYS = ("items_with_answer", "faithfulness", "relevancy", "quoted_share", "model_calls", "passages_read",
+               "passages_cited", "cited_evidence_share", "refine_kept_prior", "refine_dropped_carried", "notes_carried")
+
+
+def medians(aggregates):
+    """Each number's median across runs, beside its spread; a number a run lacks is left out of that median."""
+    out = {}
+    for side in SIDES:
+        entry = {}
+        for key in MEDIAN_KEYS:
+            values = [a[side][key] for a in aggregates if a[side].get(key) is not None]
+            if values:
+                entry[key] = {"median": round(statistics.median(values), 3), "min": min(values), "max": max(values),
+                              "runs": len(values)}
+        out[side] = entry
+    return out
+
+
+async def one_run(items, model, model_name, k, seed, out: Path, run: int):
     out.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     rows = []
     for idx, item in enumerate(items):
-        order = SIDES[idx % len(SIDES):] + SIDES[:idx % len(SIDES)]
+        turn = (idx + run - 1) % len(SIDES)
+        order = SIDES[turn:] + SIDES[:turn]
         row = await one(item, model, model, k, order)
         rows.append(row)
         with (out / "rows.jsonl").open("a") as fh:
             fh.write(json.dumps(row) + "\n")
-        print(f"{idx + 1}/{len(items)} {item.question_id} " + " | ".join(
+        print(f"run {run} {idx + 1}/{len(items)} {item.question_id} " + " | ".join(
             f"{s}: {row[s].get('status', 'failed' if row[s].get('failed') else 'written')} f={row[s].get('faithfulness')} "
             f"r={row[s].get('relevancy')} calls={row[s]['model_calls']} {row[s]['seconds']}s" for s in SIDES), flush=True)
     wall = round(time.perf_counter() - started, 1)
-    record = {"protocol": "comparative-synthesis-modes-v1", "dataset": "LongMemEval-S multi-session", "n": len(rows),
+    record = {"protocol": "comparative-synthesis-modes-v1", "run": run, "dataset": "LongMemEval-S multi-session", "n": len(rows),
               "seed": seed, "k": k, "model": model_name, "judge": model_name, "judge_is_writer": True, "embedder": "hash",
               "limits": {"max_round_bytes": 6000, "max_rounds": 16, "max_sentences": 12, "timeout_s": 600.0},
               "llamaindex": {"version": __import__("llama_index.core").core.__version__, "synthesizer": "TreeSummarize"},
               "wall_seconds": wall, "aggregate": aggregate(rows), "items": rows}
     (out / "report.json").write_text(json.dumps(record, indent=2))
-    print(json.dumps(record["aggregate"], indent=1))
+    print(json.dumps(record["aggregate"], indent=1), flush=True)
+    return record
+
+
+async def main(data: Path, out: Path, n: int, seed: int, model_name: str, k: int, runs: int):
+    items = [i for i in load_items(data) if i.question_type == "multi-session"]
+    items = stratified_sample(items, n, seed=seed)
+    if n == 8 and seed == 42:
+        assert [i.question_id for i in items] == EXPECTED, "not the scoreboard's items"
+    model = OpenAICompatibleChat("http://127.0.0.1:11434/v1", model_name, timeout=600.0)
+    records = [await one_run(items, model, model_name, k, seed, out / f"run{run}", run) for run in range(1, runs + 1)]
+    aggregates = [r["aggregate"] for r in records]
+    summary = {"protocol": "comparative-synthesis-modes-v1", "runs": runs, "model": model_name, "k": k, "n": len(items),
+               "wall_seconds": [r["wall_seconds"] for r in records], "per_run": aggregates, "median": medians(aggregates)}
+    (out / "report.json").write_text(json.dumps(summary, indent=2))
+    print(json.dumps(summary["median"], indent=1), flush=True)
 
 
 if __name__ == "__main__":
     data = Path(sys.argv[1]); out = Path(sys.argv[2])
     n = int(sys.argv[3]) if len(sys.argv) > 3 else 8; seed = int(sys.argv[4]) if len(sys.argv) > 4 else 42
     model = sys.argv[5] if len(sys.argv) > 5 else "llama3.1-ctx8k:latest"; k = int(sys.argv[6]) if len(sys.argv) > 6 else 12
-    asyncio.run(main(data, out, n, seed, model, k))
+    runs = int(sys.argv[7]) if len(sys.argv) > 7 else 1
+    asyncio.run(main(data, out, n, seed, model, k, runs))

@@ -161,14 +161,77 @@ new run id; extraction/indexing retries preserve the chosen order and source
 mapping. Page OCR checkpoints retain the original recognizer observations,
 then deterministically rebuild the ordered text on resume.
 
+## Label the page's regions
+
+Every recognized page's regions, and every text-layer page laid out in
+reading order, carry a `label` saying what the region is, from one
+vocabulary: `title`, `heading`, `paragraph`, `list`, `table`, `figure`,
+`caption`, `header`, `footer`, `page_number`, `footnote`, `formula`,
+`code`, `sidebar`, `reference`. The page's `labels` receipt (and the
+segment's `layout_labels` metadata) says where they came from.
+
+Without a layout engine the labels are inferred (`labels-v1`) from what
+geometry and text can tell, and the receipt names the rules that fired:
+a page number by its shape in the page's top or bottom strip; a running
+`header` or `footer` by a line recurring at the edge of three pages or
+more, every page but the first it appears on; a `table` by the aligned
+grid the table inference finds; a `list` by lines opening with a bullet,
+a number or a letter and its mark, two or more of them; a `footnote` by
+its mark at the bottom of the page; a `title` on the first page, in its
+top third, by a line 1.4 times the page's median line height (or, on a
+text layer's grid, which has no sizes, by its isolation); a `heading` by
+1.25 times the median height or, when short and unpunctuated, by the
+space above and below it. Everything else is a `paragraph`. A figure, a
+formula, a caption or a sidebar is only an engine's to say. A page past
+the line bound is left unlabelled and says so.
+
+With a layout engine, each region takes the label of the engine box it
+lies in most (`engine-boxes-v1`); a region outside every box is
+unlabelled and counted. The seam is `ocr.types.LayoutEngine`: `analyse(
+image) -> LayoutResult` of labelled, normalized boxes. The host runs one
+as an executable that reads a PNG on standard input and answers in JSON
+lines -- the page's size, then one region per line with `label`, a
+pixel `box`, and optional `score` and `order` -- configured by
+`SCONE_DOCUMENT_LAYOUT_EXECUTABLE`. Labels may be this vocabulary's or
+PP-Structure's and deepdoc's words (`doc_title`, `paragraph_title`,
+`text`, `figure caption`, `vision_footnote`, `equation`, …); a label
+with no name here is dropped and counted. A size that does not match the
+page, a box off the page or a line that is not JSON refuses the page.
+The engine runs under the page's deadline; its answer is kept in the
+page's OCR checkpoint and in the checkpoint binding, so pages recognized
+without an engine are not reused with one. `ocr_choices` says `layout:
+engine` or `layout: inferred`.
+
 ## Inspect possible tables without repeating OCR
 
-The original `aligned-rows-v1` strategy groups retained OCR rectangles into
+The `aligned-rows-v2` strategy groups retained OCR rectangles into
 candidate cells and checks for common column gaps across at least three
-consecutive rows. It returns `geometry_inferred` results; it does not identify
-semantic headers, merged or multi-line cells, or missing values. Aligned prose
-can resemble a table, and irregular tables can remain unassigned. This is an
-inspection feature, not table-aware indexing or an accuracy benchmark.
+consecutive rows. A row of fewer cells beside the full rows -- a title
+across the table, a "Total" beside two numbers -- is read as cells that
+span the grid's columns, each over the contiguous columns its own width
+covers (`column_span`), judged against the full rows' column extents;
+nothing narrower is widened, and a row that fits no column stays
+unassigned. A sentence above the grid is not its title; a row of one
+cell at its foot, or one opening with a footnote's mark, is its note or
+the prose below it, not its last row; all stay unassigned. It returns `geometry_inferred` results; it does not identify
+semantic headers, multi-line cells or missing values. Aligned prose can
+resemble a table, and irregular tables can remain unassigned. A layout
+stored under `aligned-rows-v1` is one read before spans were.
+
+A page's candidates also reach the document: the segment of a
+recognized page, or of a text-layer page laid out in reading order,
+carries them as `table_cells` the way the DOCX and HTML readers give
+theirs (`DocumentTableCell` with row, column, `column_span`, and a byte
+span of the segment's text holding exactly the cell's words), located
+`page:N/table:T/cell:R,C`, and validated the same way. Only the regions
+labelled `table` are read for cells; a page whose labels name no table
+carries none, whatever a grid over its lines would propose. The cells
+come in the order the page's text reads them, each keeping its row and
+column, so a table a recognizer read column by column cites its columns
+in turn; a table whose cells do not sit together in the page's text is
+left out rather than cited wrongly, and the segment's `tables` and
+`tables_unreadable` metadata count both. No header, row span or empty
+cell is invented.
 
 ```python
 from scone_memory.ocr import infer_tables

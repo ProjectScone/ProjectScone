@@ -25,6 +25,7 @@ import re
 from statistics import median
 from typing import Literal, Sequence
 
+from ..ocr.labels import LayoutLabels, infer_labels
 from ..ocr.layout import ReadingOrderReceipt, order_columns
 from ..ocr.types import OcrRegion
 from .pdf import MAX_REGIONS_PER_PAGE, PdfTextRegion
@@ -104,6 +105,9 @@ class PageLayout:
     regions: tuple[PdfTextRegion, ...]
     receipt: ReadingOrderReceipt | None
     running: tuple[str, ...]
+    #: What each region is, by the rules (`ocr.labels`); None when the
+    #: page was left as extracted and has no regions to label.
+    labels: LayoutLabels | None = None
 
 
 def _reads_as_prose(runs: Sequence[tuple[int, int, int]], indices: Sequence[int]) -> bool:
@@ -122,12 +126,15 @@ def _reads_as_prose(runs: Sequence[tuple[int, int, int]], indices: Sequence[int]
 
 
 def lay_out_page(rows: Sequence[str], offset: int, *, drop: dict[int, str] | None = None,
-                 direction: Literal['ltr', 'rtl'] = 'ltr') -> PageLayout:
+                 direction: Literal['ltr', 'rtl'] = 'ltr', first_page: bool = False) -> PageLayout:
     """The page's rows, as pypdf's layout mode wrote them, in reading order.
 
     ``offset`` is where the page's text begins in the document's UTF-8
     bytes, so the regions carry absolute spans like OCR regions do.
-    ``drop`` names running rows to leave out, from ``running_rows``."""
+    ``drop`` names running rows to leave out, from ``running_rows``.
+    ``first_page`` lets the rules read a title. The regions come back
+    labelled by the rules (a grid has no sizes, so a heading is told by
+    its isolation), and the receipt says which rules fired."""
     drop = drop or {}
     kept = [row for index, row in enumerate(rows) if index not in drop]
     running = tuple(drop[index] for index in sorted(drop))
@@ -179,4 +186,6 @@ def lay_out_page(rows: Sequence[str], offset: int, *, drop: dict[int, str] | Non
                                      provider_index=index, reading_column=column))
         offset = text_end
         previous = (row, end, column)
-    return PageLayout(''.join(parts), tuple(ordered), receipt, running)
+    labelled, labels = infer_labels(ordered, first_page=first_page, running=running, sized=False)
+    return PageLayout(''.join(parts), tuple(region.model_copy(update={'label': label})
+                                            for region, label in zip(ordered, labelled)), receipt, running, labels)

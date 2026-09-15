@@ -25,7 +25,8 @@ A recall narrowed by `conditions`, `kind`, `source_prefix`, `since` or
 whether the request was applied `in_store` (every row the lane holds was
 eligible) or `postfiltered` (the lane returned its best window and the
 request then removed what did not fit), how deep each lane looked
-(`text_window`, `vector_window`) and returned, how many candidates the
+(`text_window`, `vector_window`, and `image_window` when the recall ran the
+[image lane](image-embedding-lane.md)) and returned, how many candidates the
 filter removed (`postfiltered_out`), and `window_exhausted` -- the filter
 removed candidates while a post-filtered lane's window was full, so a
 memory that fits may lie deeper than the recall looked. An empty answer
@@ -229,7 +230,10 @@ scone recall "when was the crane survey booked" --lessons
 
 A person can mark a returned passage useful or not (`POST /v1/feedback`),
 and that judgement is kept as an event. `lessons` reads those events back.
-For each passage, the latest judgement of each recall counts. Each one
+For each passage, the latest judgement of each question counts: asking the
+same words again and judging again replaces a judgement rather than
+corroborating it, as the ranking prior below counts them (a judgement
+recorded before questions were counts per recall). Each one
 weighs 1, positive when useful and negative when not, and the weight halves
 every `half_life_days`. Each passage gets a state:
 
@@ -245,14 +249,99 @@ per space, since no per-person identity is recorded yet.
 
 `recall(lessons=True)` (`lessons=true` on `/v1/recall`, `--lessons`) puts
 each passage's lesson beside it, and `GET /v1/lessons` lists them all.
-Lessons never change the order: nothing has measured that ranking by them
-answers better, so they are information beside the score, not part of it.
+Asking for lessons never changes the order; ranking by the same judgements
+is a separate setting, off by default (below).
 A recall asked for lessons also carries `lessons_read`: the window,
 half-life and corroboration used, and how many judgements were read and
 whether that read was cut. A recall not asked answers exactly as before,
 with no `lessons` or `lessons_read` field. `--lessons` is refused with
 `--merge`: a merged passage joins chunks that were judged separately, and
 one lesson cannot stand for them.
+
+## Ranking by what people said
+
+```bash
+SCONE_FEEDBACK_WEIGHT=0.00013 scone recall "what is the throttling threshold on the cafe plan"
+```
+
+`SCONE_FEEDBACK_WEIGHT` (`MemoryEngine(feedback_weight=…)`, default 0) adds
+a term to each fused candidate's score, the way recency is added, from the
+judgements of the last 90 days. Zero reads no feedback and leaves recall as
+it was. It reads the event log, so it is refused with `SCONE_EVENTS=none`.
+The judgements are weighed as lessons weigh them (+1 useful, −1 not, halving
+every 30 days), and counted per question as lessons count them: `feedback`
+records a hash of the question its recall asked (the
+same for the same words whether `record_queries` kept them in the clear or
+not), and asking the same question again and judging again replaces the
+judgement.
+Four rules sit on top:
+
+- useful judgements count only once two questions' do. One useful judgement
+  neither lifts a passage nor offsets a judgement against it. No identity is
+  recorded, so one caller asking two questions, or one question spelled two
+  ways, does corroborate;
+- only the newest two judgements each way count. However many pile up on a
+  popular passage, it weighs what its newest two weigh, and `held` counts
+  the candidates whose older judgements were left out;
+- a judgement against a passage outweighs every useful one older than it,
+  so a passage people stopped finding useful has to be corroborated again;
+- `feedback` records a fingerprint of what the judged passage said (its
+  text and its episode's content). A judgement whose passage no
+  longer matches is dropped as `stale`: a rebuilt store can hand its id to
+  other text, to a span of an episode whose content changed, or to a span
+  chunked differently. A judgement that cannot be checked is dropped as
+  `unverified`: one recorded before fingerprints and questions were, or one
+  of a candidate whose episode cannot be read now.
+
+The term is the weight times that score, cut at `MAX_FEEDBACK_BOOST` (what
+first place is worth over second under rank fusion when both lanes agree at
+full voice, 0.000529; with a hashed embedder's vector lane at its default
+hundredth, a place is worth half that, so the bound is about two places). The
+bound is on each candidate's term, not on who it can pass: a leader sunk
+and a follower lifted close twice it, and deeper ranks sit closer together
+than first and second. A recall with the weight set carries
+`feedback_prior` (on `/v1/recall` too): the weight and bound, how many
+candidates were `boosted`, `demoted`, `capped` and `held`, the `stale`,
+`unverified` and `tentative` counts, the terms of the returned passages, the
+`window_days`, `half_life_days` and `min_corroboration` it read and folded
+with, and `events_read` / `events_cut` (the read takes the newest 5,000
+judgements).
+`scone recall` prints a line when the read or the term was cut. The same
+record goes into the recall event. A recall with the weight at 0 has no
+`feedback_prior` field.
+
+The term does not know the question. With queries hashed in the event log
+(the default) there is nothing to compare a new question with. A passage
+judged useful rises for every question it is a candidate for, including
+one it was never judged for. On the replay in
+[`benchmarks/feedback-replay-v1.results.md`](../benchmarks/feedback-replay-v1.results.md),
+at the engine's defaults (`HashEmbedder`, its vector lane at a hundredth of
+the text lane's voice), 0.00013 lifted paraphrases of judged questions
+(MRR@10 0.7118 to 0.7188 under a judge who marks only the answer useful,
+0.7118 to 0.8090 under one who also marks what sat above it not useful) and
+left unrelated questions where they were (0.8669) only while every passage
+was stored at the same instant. With the vector lane that quiet, fused
+scores sit a whole text-lane place apart, and a term either stays under a
+place or crosses it for every question: 0.00014 cost unrelated questions
+0.11, and the weight chosen at the previous vector voice of 0.25, 0.0001,
+lifts nothing under the first judge now. Stored an hour apart, recency's
+few millionths decide which near-ties the term crosses: two unrelated
+questions of 36 fell on one half (0.8727 to 0.8657). Stored a day apart,
+newest first, nine fell (0.7824 to 0.6644). No weight measured both lifted
+judged questions and kept every layout's unrelated questions within 0.01:
+0.00003 kept them and lifted nothing, 0.00004 cost one half 0.044 a day
+apart, and 0.00002 already cost one question. 0.0002
+cost unrelated questions 0.12 even at one instant, questions about a
+sibling subject worded like a judged one (another rate tier, another
+clinic). A question-unaware term crosses whichever near-ties a store's
+creation times leave, so it trades unrelated questions for judged ones at
+any weight that moves anything. The weight is a
+near-tie breaker, and its scale is rank fusion's: `fusion="score"` and
+`"distribution"` have scores a hundred times larger, and the replay did not
+measure them. Setting the weight costs every recall a read of up to 5,000
+judgements. Over a SQLite log on a loaded machine, that measured 24.83 ms
+against 7.40 ms off with 1,000 judgements, and 79.62 ms against 5.66 ms
+with 5,000.
 
 ## Abstaining, by a floor that was measured
 
@@ -377,7 +466,9 @@ unless the fourth route is asked for by name:
      left out (matched by passage and quote, so a reworded sentence is
      carried), and a reason names the round. `notes.kept` counts every
      sentence each round kept, so a carried sentence is counted once per
-     round. Rounds are packed by bytes, and a round after the first answer
+     round; `notes.carried` (and each round's `notes_carried`) counts those
+     repeats, so `notes.kept` less `notes.carried` is what the rounds
+     wrote new. Rounds are packed by bytes, and a round after the first answer
      carries that answer inside the bound: its passages get
      `max_round_bytes` less the answer's bytes, and each round's record
      gives both `bytes` and `answer_bytes`. That is the reference's
@@ -392,15 +483,30 @@ unless the fourth route is asked for by name:
 
    In every mode the calls are bounded by the rounds bound (six by
    default; `evidence` may add its one fold), and passages past it are
-   left unread, counted, and the answer is `partial`. `detail` names the
+   left unread, counted, and the answer is `partial`. A `partial` answer's
+   text ends with one line, `partial:` and the reasons, so `scone answer`
+   without `--json` says what was left unread or cut. `detail` names the
    `mode`, the `model_calls`, and under `passages` how many were read and
    how many the shown sentences `cited`. A mode on any other route is
    refused. `scone answer --route synthesize --synthesis-mode refine`,
    `GET /v1/answer?route=synthesize&synthesis_mode=accumulate`,
    `answer_question(..., route="synthesize", synthesis_mode="refine")`.
-   Measured on eight multi-session questions with a local 8B model, no
-   mode spoke more often than `evidence`, and `refine`'s second round
-   changed no answer ([results](../benchmarks/synthesis-modes-v1.results.md)).
+
+   The route reads with rounds of 12,000 bytes and a bound of six rounds;
+   `limit` sets the passages, and no option of the command line or the API
+   sets the round size or the rounds. What a mode does depends on how much
+   its passages hold. Twelve passages of about 600 bytes fit one round:
+   `refine` makes one call, the same call `evidence` makes, and has nothing
+   to refine; `accumulate` reads six of the twelve, one call each, and is
+   `partial`. `refine` refines only when the passages read overflow a
+   round, and `accumulate` reads them all only when `limit` is six or less.
+   A measurement on eight multi-session questions with a local 8B model
+   set rounds of 6,000 bytes and a bound of 16, limits the route does not
+   use, so that its twelve passages (6.6 to 7.2 kB) took two rounds: no
+   mode spoke more often than `evidence`, and `refine`'s second rounds
+   returned the answer so far with nothing new
+   ([results](../benchmarks/synthesis-modes-v1.results.md)). At the route's
+   limits those passages fit one round, and `refine` makes no second.
 
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
@@ -607,6 +713,164 @@ span is much wider than what it cites, beyond the root. Median latency over
 five interleaved repeats was 3.3–4.0 ms per recall in every arm, inside the
 spread on a machine at load average about 60, so no latency claim is made.
 Not measured: summaries a real model wrote, and real documents.
+
+### Descending the summary trees
+
+```bash
+scone tree-recall "what does the mill survey say about the river" --branching 2
+scone --json tree-recall "what does the mill survey say about the river" --episode 42 --text --limit 5
+```
+
+Expansion starts from a summary the lanes happened to find. The leading
+framework's tree index goes the other way: it starts at the root summaries,
+keeps the children most like the question, and descends to the leaves.
+`tree_recall` is that descent over the trees `summarize` stores (engine
+`tree_recall(space, query, ...)`, HTTP `GET /v1/recall/tree`, CLI
+`tree-recall`; module `retrieval/summary_traverse.py`). No model is called.
+
+- **Where it starts.** The documents named (`episode_ids`, HTTP
+  `episode_id`, CLI `--episode`, repeatable), or every document with a stored
+  tree, kept only when `kind`, `source_prefix`, `since`, `until` and `tags`
+  fit the document itself. Each starts at the highest level of summaries
+  written from its present content. The trees are found by one walk over the
+  space's episodes, the same walk `GET /v1/episodes/{id}/summaries` makes, and
+  its size is reported in `walked`; a keyed pointer to each tree's top, which
+  would remove that walk, is not written by the builder yet. The space is
+  counted again after the listing, and episodes it did not return — a store
+  that caps what it lists (Elasticsearch lists at most 10,000), or episodes
+  stored meanwhile — are counted in `unlisted`, since a tree among them was
+  not found. With no documents named, a tree whose document the listing did
+  not return — a document forgotten, or replaced, leaves its summaries
+  behind — cannot be fitted to the filters and is not read: it is counted in
+  `unlisted_trees`, so trees left behind by every update cost a call a count,
+  not a read and a refusal each. More than
+  `MAX_DOCUMENTS` (100) documents with trees in scope is refused, not cut to
+  some of them, and so is a step with more than `MAX_CANDIDATES` (1,000)
+  candidates to score — a stored tree keeps a step to `branching` times its
+  `fan_in`, so only a wide unjoined top or a forged account reaches it.
+- **How it descends.** At every step all candidates are scored against the
+  question: by the cosine of the question's embedding with the vectors
+  already stored for the candidate's chunks (a summary stored as several
+  chunks scores as its best one) and, with `text`, by BM25 over that step's
+  candidates too, fused by rank with equal cosines sharing a rank. The
+  `branching` best (default 2, at most 10) are kept *across all documents*,
+  as the reference's retriever pools the children of every node it kept
+  before choosing, not `branching` per parent. A kept summary's children are
+  what its account says it was written from — the nodes of the level below
+  and chunks — so a group the model left empty is not guessed at from spans.
+  The chunks a first-level summary names are leaves. A chunk a higher summary
+  names is a remainder the builder carried up beside its nodes unsummarized
+  (a level of `fan_in` × n + 1 items), so it is a candidate at the next step
+  with those nodes and a leaf only if that step keeps it; each step records
+  the summaries kept in `chosen` and the chunks kept in `chunks`.
+  `max_depth` (default and most 5, a stored tree's most levels) bounds the
+  steps.
+- **What comes back.** The chunks reached, branch first: in the order of the
+  ranks down their paths, so every chunk under the summary kept first at a
+  step comes before any chunk under the next, whether its tree ends at that
+  step or goes further down (documents of different lengths give trees of
+  different heights), and within a branch in their own ranking; the first
+  `limit` (default 10, at most 50). Branch first, because a chunk's own words
+  are the signal a broad question defeats: ranked by those alone, the chunks
+  of a lower branch can displace the section the descent chose. The fixture
+  below has trees of one height only and does not measure that choice; the
+  tests pin the order on trees of one and two heights. Each
+  item carries `via_tree`: the document, and the path of summaries kept on the
+  way down, top first, each with its episode, level, index, `rank` among those
+  kept at its step and `similarity` (and `text_rank` with `text`); a chunk
+  carried up and kept at a step has its own `rank` there too.
+  `similarity` is the chunk's own cosine; `score` is its place in the order,
+  `1 / (1 + place)`, since no one number ranks it. The route answers with the
+  items and the whole record, not recall's shape: it is not a recall event,
+  so feedback cannot name its chunks, and it does not withhold.
+- **What it never returns.** A summary whose `summary_content_hash` does not
+  match its document's content is not a candidate at any step and is counted
+  in `stale`; a document whose every summary is stale is refused as
+  `content_changed`. A chunk named below a summary that is not one of the
+  document's is `missing`; a node named that is not stored from this content
+  and with this `fan_in`, is not below the node naming it, or is not a name
+  at all, and an account that cannot be read or does not list names, are
+  `unresolved`; none is followed. A document named and forgotten is refused
+  as `source_gone` (its summaries outlive it), one never stored as
+  `source_unknown`, one unreadable as `unread`, and one the listing left out
+  as `unlisted`. The walk awaits reads and a document or a summary can be
+  forgotten during any of them (building a tree again forgets the old
+  nodes), so the chunks about to be returned, and the chunks of every summary
+  on their paths, are read again in one read after the last one, with nothing
+  awaited between that read and the answer: a document whose chunks moved is
+  read again for its reason and serves none of its chunks, one with a summary
+  on a path gone or changed is refused as `tree_changed`, and the next chunks
+  in order are read again in their place; a store that cannot answer that
+  read confirms nothing, and every document with a chunk reached is refused
+  as `unread`. A document refused at that read is not in `documents`, and
+  its chunks are not in `leaves`.
+- **The bounds say when they cut.** `cut_by_limit` counts chunks reached and
+  not returned, `cut_by_depth` the candidates (summaries, and chunks carried
+  up beside them) reached and never scored because the depth ran out (the
+  chunks under them were not reached), and `uncovered` the
+  chunks of a descended document under no summary a descent starts from — a
+  group the model wrote nothing about, a remainder left beside an unjoined
+  top — since no descent can reach them. `untreed` names documents asked for
+  that have no tree, `out_of_scope` counts those the filters left out, and
+  `why` says all of it in words.
+- **What it costs.** One embedding call per question. A step whose
+  candidates do not all have a stored vector — an index without
+  `vectors_of`, a vector missing, or vectors another embedder wrote
+  (`vector_block`) — is embedded in one call, so every score at a step is on
+  one scale; `embed_calls`, `embedded_texts` and `vectors` (steps read from the
+  index, steps embedded) say what was spent. The in-memory and SQLite
+  indexes hand vectors back; the others embed.
+
+Measured on a scripted fixture, not a quality claim
+(`benchmarks/summary_traversal.py`, 15 September 2026, `--repeats 3 --cite
+2`): four documents of four sections of five paragraphs, one chunk each
+(twenty chunks a document), trees of `fan_in` 5 built by `FakeChat` replies
+the script writes — a node per section with a sentence for each of the first
+two paragraphs naming the theme and the document, and a root with a sentence
+per section — and `HashEmbedder`. Sixteen questions ask what a document says
+about one section's theme, the theme word in that section's first paragraph
+only; the five chunks of the section are gold. Every arm asks for ten chunks
+and is scored on the first ten items; embedder calls are counted by a wrapper
+around the embedder, not by the report.
+
+| arm | recall_at(10) | embedder calls / question | texts embedded / question |
+|---|---:|---:|---:|
+| flat recall, no trees stored | 0.150 | 1 | 1 |
+| flat recall, trees stored | 0.175 | 1 | 1 |
+| `expand_summaries=follow` | 0.225 | 1 | 1 |
+| `expand_summaries=replace` | 0.400 | 1 | 1 |
+| `tree_recall`, branching 1 (five chunks returned) | 0.938 | 1 | 1 |
+| `tree_recall`, branching 2 | 0.938 | 1 | 1 |
+| `tree_recall`, branching 3 | 0.938 | 1 | 1 |
+| `tree_recall`, branching 2, `text` | 1.000 | 1 | 1 |
+| `tree_recall`, branching 2, index without stored vectors | 0.938 | 4 | 23 |
+| LlamaIndex `TreeSelectLeafEmbeddingRetriever`, `child_branch_factor` 1 | 0.188 | 14 | 14 |
+| the same, `child_branch_factor` 2 | 0.188 | 23 | 23 |
+| the same, `child_branch_factor` 10 | 0.288 | 67 | 67 |
+
+The LlamaIndex arms run the installed reference retriever, unmodified, over
+the same trees — the same chunk and summary texts and parent-to-child links,
+read from the stored trees into its `IndexGraph` — embedding through the
+comparative runner's adapter around the same `HashEmbedder`. It returns only
+the leaves it selects (at most `child_branch_factor`), ranks those leaves by
+their own similarity, and embeds every node it scores on every question.
+Flat recall is held to two chunks of one document (`PER_EPISODE_CAP`), so it
+can reach at most 0.4 of a five-chunk section here; with the trees stored,
+5.19 of its ten places held summaries. Expansion follows citations, so with
+two of five paragraphs cited its ceiling is the script's; with every
+paragraph cited (`--cite 5`) `follow` and `replace` reach 0.838, flat recall
+0.163, and every traversal arm is unchanged (it follows `written_from`, not
+citations). The one question every vector-only traversal arm misses (the
+weather log's rainfall) is lost at the second step: the hashed words of the
+snow and instruments sections' summaries overlap the question's more; with
+`text` BM25 picks the rainfall section. Median latency per question over three
+interleaved repeats was 0.72–1.63 ms for the Scone arms at a load average near
+35, too close and too loaded for a latency claim among them; the LlamaIndex
+arms' 67–350 ms include the adapter's thread and event loop per embedding
+call, so no latency comparison with them is made either. Not measured:
+summaries a real model wrote, a real embedder, real documents, and narrow
+questions, where a chunk's own words are the right signal and branch-first
+order may cost what it gains here.
 
 ### Checking the rule instead of asserting it
 
@@ -972,12 +1236,50 @@ from the nearest `src`, `super::` and `self::` from the module,
 `com.acme.store.Shelf` from where the file's `package` line roots it --
 is resolved to the file that holds the module (`src/store.rs`,
 `src/util/mod.rs`, `com/acme/store/Shelf.java`) when whoever walked the
-tree can confirm one, and kept as written otherwise. **No call is claimed**:
-resolving a call means knowing what a name refers to, which needs a
-parser this does not have, and an edge nobody can check is worse than no
-edge. Python gets calls because Python's own parser gives them.
+tree can confirm one, and kept as written otherwise. **The line reader
+claims no call**: resolving a call means knowing what a name refers to,
+which needs a parser it does not have, and an edge nobody can check is
+worse than no edge. Python gets calls because Python's own parser gives
+them; TypeScript and JavaScript get them from their grammar with the
+`code-graph` extra; and with the `code-languages` extra (the grammar
+pack that already reads Ruby, Lua, shell, Perl and fish) Go, Rust,
+Java, C#, Swift, C, C++, Scala and PHP get them the same way: a call to
+a bare name is an edge when this file declares the name at its top or
+in the type that holds the caller and nothing nearer binds it, so a
+parameter, a local, a closure's argument or a nested function is a
+value and not an edge, and a call through a receiver (`x.y()`,
+`T::f()`, `this.m()`) is left alone, since it needs a type nobody here
+has. Where a grammar speaks it decides `defines` and `calls` for that
+file, and a method is named by what holds it: Go's by its receiver
+(`K.m`), a Rust `impl`'s by its type, a `mod`'s functions by the mod, a
+C++ method by its class whether declared inside it or defined as `K::m`
+outside; a namespace or a package holds nothing by its own name.
+A bare call inside a Rust `impl` or `trait` or a PHP class names a
+free function, never a sibling method, since those need `Self::f` or
+`$this->f`; a C++ method defined outside its class still sees the
+class's other members. A bare call nothing in the file binds is a call
+to what an import brought in, when the import reached a file: `use
+crate::util::helper; helper()` is `src/util.rs:helper`, an alias (`use
+… as h`) binds the alias, a Java `import static lib.Text.trim` binds
+`Text.trim`, a TypeScript `import { tidy } from "@acme/ui"` binds
+`tidy` in the package's index -- within one repository, and across
+repositories where the import names a package another repository in
+the space publishes (see file-ingestion.md, "More than one repository
+in a space"); a glob, a module imported whole, a package nobody here
+publishes, and a name a local shadows bind nothing. Past the reader's
+depth or line bound the grammar says nothing and the line reader's
+whole answer stands.
+Measured over 2,545 files of the reference corpus: 18,128 calls bound
+in 1,389 files, and the grammar's declarations agreeing with the line
+reader's on 31,733 of the line reader's 41,819, most of the rest being
+closures and calls the line reader had read as declarations.
 
-A relative import is followed only to a file the map actually read.
+A relative import is followed only to a file the map actually read;
+an absolute import of a package that a manifest in the space publishes
+(`import libpkg.util`, `from "@acme/ui/button"`, `use acme_core::store`,
+a Go import path) is followed to that repository's file when the file
+was mapped, which is how two repositories named with `map --repo` link
+(see file-ingestion.md, "More than one repository in a space").
 Resolution belongs to the walk, because that is what knows which files
 exist; a file on its own cannot tell where its package root is, so on its
 own it says nothing about `from .code import x` rather than guessing. What it read
@@ -1403,6 +1705,141 @@ quietest rounds: 13.2 against 5.8 s, 15.1 against 7.3 s, 16.2 against
 8.0 s). Both versions cut every session into the same spans with the
 same receipt at 256, 512, 1,024, and 512 with a 64-token overlap. The
 retrieval numbers above were taken with the first version.
+
+## Joining a semantic cut's chunks again
+
+A semantic cut (`chunking="semantic"`, or `semantic_aware=True` as the
+engine's rule) packs sentences up to the target and cuts where similarity
+dips below both sides and stands out from the rest of that text. That
+test is relative, so a passage about one subject all the way through can
+still be cut at its deepest dip. The reference's double-merging splitter
+answers with a second pass: neighbouring groups at least a threshold
+alike are joined again, within a maximum size. `semantic_merge_threshold`
+is that pass:
+
+```python
+MemoryEngine(store, index, embedder, semantic_merge_threshold=0.2)   # or SCONE_SEMANTIC_MERGE_THRESHOLD=0.2
+```
+
+- **Every semantic cut, and only those.** The engine's rule and a record's
+  own `chunking="semantic"` (`remember(..., chunking="semantic")`, `scone
+  remember --chunking semantic`, `"chunking": "semantic"` on
+  `POST /v1/episodes` and in each batch record) both get the pass; length,
+  code, structure and unit cuts never read it. `semantic_aware` has no
+  environment variable, so on a served process
+  `SCONE_SEMANTIC_MERGE_THRESHOLD` reaches exactly the records that ask
+  for a semantic cut.
+- **A record can name its own.** `remember(..., semantic_merge_threshold=0.5)`,
+  `scone remember --semantic-merge-threshold 0.5`, and
+  `"semantic_merge_threshold": 0.5` on `POST /v1/episodes` and in each
+  batch record (a JSON number: `true` and `"0.5"` are refused). It implies
+  `chunking="semantic"`, is refused beside any other chunking, and wins
+  over the engine's threshold for that record. It is kept on the episode's
+  metadata under `semantic_merge_threshold` (text, and one of the 16 keys
+  an episode may carry), so a recovery re-cuts under it and an archive
+  import that carries only the metadata is honoured; a value there that
+  is not a similarity, or that disagrees with the field, is refused. What
+  a record cannot do is turn off a threshold the engine has: no value
+  means "no second pass". To mix the two, leave the engine's unset and let
+  the records that want the pass ask for it.
+- **The rule.** The chunks are walked in order. A chunk is joined to the
+  one before it when the cosine between the two sides' mean sentence
+  vectors is at least the threshold **and** the joined span fits the
+  chunk target -- the same measure the first pass packs sentences by. A
+  joined chunk is compared by the mean of all its sentences, not by the
+  chunk it started as or the one it last took in, and keeps whether its
+  own end is a change of subject.
+- **It only undoes cuts.** The first pass packs sentences up to the
+  target, so a chunk it ended by size can never fit with the whole of the
+  next one; the only joins possible are across a valley. A merge never
+  makes a chunk the first pass could not have made for its length. The
+  one size cut packing cannot rule out is inside a sentence longer than
+  the target, whose first piece can be short, and that is ruled out
+  directly: a boundary beside or inside such a sentence is never reopened
+  and never compared. The sentence's vector describes text that lies in
+  its other pieces, so comparing it would judge a join on text that is
+  not in the chunk, and the join would put part of one sentence with
+  another, which the first pass never does.
+- **No second embedding call, and the same answer every time.** The
+  sentence vectors the first pass already has are compared. The
+  reference embeds every joined text again. A text of one sentence is not
+  embedded at all, with a threshold or without: all its boundaries are
+  the bound's.
+- **The receipt says what the pass did.** `structure` carries
+  `merge_threshold`, `groups` (the chunks the first pass made, exactly
+  the chunks it stores without a threshold), `merges`, and every join
+  that did not happen, counted once, so `merges + stopped_by_similarity +
+  stopped_by_size = groups - 1`: `stopped_by_similarity` when the two were
+  less alike than the threshold, `stopped_by_size` when they were alike
+  enough and too long together -- the size bound biting. Two chunks that
+  fail both count as unalike. A chunk the first pass ended by size can
+  never fit the next one, so its own size cuts between alike chunks are
+  counted here too, and every boundary beside or inside a sentence longer
+  than the target is counted here without being compared. A semantic cut
+  without a threshold has no such receipt (`structure` is null), as before.
+- **A similarity above 0 and at most 1.** At or below 0 any two chunks
+  that fit and are not opposed would be joined, which is size chunking
+  under a semantic name; above 1 nothing would, while the receipt says the pass ran. A
+  bool, NaN or anything that is not a number is refused, and the
+  environment variable is refused by name.
+- **The scale is the embedder's.** The first pass's own threshold is
+  derived from each text's depths and assumes no scale; this one does,
+  which is why it is off by default. Hashed-token cosines are word
+  overlap. Over the sample below (51,250 first-pass chunks in 2,355
+  sessions; `benchmarks/semantic_double_merge.py --pairs`), the 6,790
+  neighbouring pairs of whole-sentence chunks that would fit together had
+  a median cosine of 0.04, a 90th percentile of 0.30 and a 95th of 0.38
+  under `hash-256`: 1,386 of them at or above 0.2, 276 at or above 0.4
+  (2,190 more boundaries touch a sentence longer than the target and are
+  never compared); a neural model's cosines sit far higher, and a
+  threshold chosen for one embedder means nothing for another.
+- **Stored chunks are never recut, and a replacement is prepared under
+  it.** The threshold is part of the configuration a keyed replacement is
+  prepared under, so one cut before the setting changed is refused rather
+  than stored. Recovery after a crash re-cuts the stored content under the
+  engine's threshold, which lands on exactly the chunks the uninterrupted
+  write stores under the same setting. The engine's threshold is not
+  written on the episode: an engine restarted with another value recovers
+  an interrupted record under the new one, as it does with `chunk_target`
+  and `chunk_tokens`. A record's own threshold is written, and recovery
+  uses it.
+- **Not the reference's first pass, and no merging across a chunk.** The
+  reference groups sentences by absolute thresholds against the chunk so
+  far and can reach one or two chunks past a dissimilar neighbour to join
+  across it (`merging_range`). Here the first pass is the valley cut
+  above, and a join across a chunk would pull in a chunk that failed the
+  very test.
+
+### What it measured
+
+`benchmarks/semantic_double_merge.py`: LongMemEval-S, the 50 items
+stratified by question type (seed 42), the hashed-token embedder on both
+sides, no model, no reranker, engine defaults otherwise (vector weight
+0.01). Every row is `bench.comparative.compare()` itself with
+`hybrid=True`: a fresh engine per item against LlamaIndex 0.14.24's
+BM25 + vector fusion over `SentenceSplitter(512)`, both folded to
+sessions. Both sides are deterministic, so one run is the number.
+
+| our cut | R@5 | all-sessions@5 | R@10 | R@15 | MRR | NDCG@5 | chunks | merges | stopped: similarity / size |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| length, 700 characters (default) | 0.90 | 0.76 | 0.92 | 1.00 | 0.838 | 0.807 | 46,637 | | |
+| semantic | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.824 | 51,248 | | |
+| semantic, merge at 0.4 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.824 | 50,996 | 252 | 38,122 / 10,520 |
+| semantic, merge at 0.2 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.825 | 49,997 | 1,251 | 20,336 / 27,307 |
+| *reference: BM25 + vector fusion* | 0.88 | 0.74 | 0.90 | 0.98 | 0.831 | 0.784 | | | |
+
+What it says: on this sample the second pass changes almost nothing a
+metric can see. At 0.2 it removes 1,251 chunks (2.4%) and changes the
+top-15 session ranking of 32 items and the top 5 of 7, and no score moves
+but NDCG@5 by 0.001 (0.8236 to 0.8246); at 0.4 it removes 252 (0.5%), changing 6 and 2. The
+semantic cut itself scores as the length cut does at k=5 and 10, higher
+on MRR (0.857 vs 0.838), lower at k=15 (0.96 vs 1.00). What it does not
+say: 50 items is one or two items a column; hashed-token vectors carry
+0.01 of the fused ranking, so a cut changes the ranking mostly through
+the text lane; nothing about a neural embedder, whose scale needs its own
+thresholds, and nothing about answer quality. The record, with the
+per-item session rankings, is in
+`benchmarks/semantic-double-merge-v1.results.md`.
 
 ## Cutting a document at its genre's boundaries
 
@@ -4966,6 +5403,19 @@ With 20,000 facts on SQLite, a view costs:
   closed.
 - The drawings show at most 200 entities and 600 relations, and say what
   they left out.
+
+### Proposing triples under a suggested vocabulary
+
+A pass run by hand with a chat model (`ingestion.dynamic_schema.extract_dynamic_schema`,
+`scone dynamic-schema`) asks, per chunk, for the triples the chunk states
+with the kind of each end, under suggested entity kinds and predicates
+and a switch that allows or forbids new ones. A triple is kept only with
+a span quoted verbatim from the chunk and past the distiller's grounding
+gate; it is stored as a proposal for review, never as a held claim. Kinds
+and predicates outside the suggestion are reported as proposed vocabulary
+with example quotes, and calls, triples per chunk and new types are
+bounded, each saying when it cut. Off by default, one model call per
+chunk. See [dynamic-schema-extraction.md](dynamic-schema-extraction.md).
 
 ## Which embedder wrote the vectors
 

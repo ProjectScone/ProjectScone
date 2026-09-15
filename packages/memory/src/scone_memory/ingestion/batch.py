@@ -12,12 +12,14 @@ import json
 import math
 from typing import Sequence, cast
 
+from ..core import forget_after
 from ..core.errors import InvalidInput, SconeError
-from ..core.models import Added, MAX_CONTENT_BYTES
+from ..core.timeutil import parse_rfc3339
+from ..core.models import Added, ForgetReceipt, MAX_CONTENT_BYTES, ScheduledForget
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, MAX_METADATA_KEYS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
-from .semantic_chunks import semantic_spans
+from .semantic_chunks import held_threshold, merge_refused, semantic_cut
 from .structure_chunks import structured_spans
 from .chunking_profiles import profile_named, profiled_spans
 from .embedding_cache import EmbeddingCache, cache_key
@@ -153,6 +155,10 @@ class IngestionRuntime:
     #: `structure_aware`, and costs one extra embedding call per episode
     #: -- its sentences are embedded to find the boundaries.
     semantic_aware: bool = False
+    #: The similarity at which a semantic cut's neighbouring chunks are
+    #: joined again within the target (semantic_chunks.semantic_cut); None
+    #: keeps the first pass's cuts. Only the semantic cut reads it.
+    semantic_merge_threshold: float | None = None
     #: Whether each chunk is embedded with the headings it sits under (for
     #: code, its file and declarations). Changes vectors, never stored text.
     heading_context: bool = False
@@ -170,10 +176,20 @@ class IngestionRuntime:
     #: the cut, its receipt and the embedding inputs ask for the same one,
     #: and each read fetches, hashes and validates the whole manifest.
     outlines_read: dict[tuple[str, str], DocumentOutline | None] = field(default_factory=dict)
+    #: Forget one episode through the engine's ordinary forget. A write whose
+    #: identity is held by a memory already past its ``forget_after`` forgets
+    #: that memory first and is stored afresh: the overdue one is as good as
+    #: gone, and a duplicate of it would go with it at the next sweep. None
+    #: leaves such a write a duplicate.
+    forget_overdue: Callable[[str, int], Awaitable[ForgetReceipt]] | None = None
 
 
-def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False) -> NewEpisode:
-    """Validate and snapshot caller input before any source can be removed."""
+def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False,
+                     past_schedule: bool = False) -> NewEpisode:
+    """Validate and snapshot caller input before any source can be removed.
+
+    A ``forget_after`` already past ``when`` is refused unless ``past_schedule``,
+    which only a caller re-deriving a stored record's identity passes."""
     content = record.content
     if not isinstance(content, str) or (not content.strip() and not (verified_visual and content == "")):
         raise InvalidInput("content must not be empty")
@@ -203,15 +219,31 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
                                f"not chunking={mode!r}")
         mode = "structure"
         clean_meta["chunking_profile"] = profile
+    threshold = _record_threshold(record.semantic_merge_threshold, clean_meta.get("semantic_merge_threshold"))
+    if threshold is not None:
+        if mode not in (None, "semantic"):
+            raise InvalidInput(f"semantic_merge_threshold joins the chunks of chunking=semantic, "
+                               f"not chunking={mode!r}")
+        mode = "semantic"
+        clean_meta["semantic_merge_threshold"] = repr(threshold)
     if mode is not None:
         # Whether the mode exists and fits the source is `cut_for`'s to say,
         # and it says so before anything is stored.
         clean_meta["chunking"] = mode
+    scheduled, held_schedule = record.forget_after, clean_meta.get(forget_after.KEY)
+    if scheduled is not None or held_schedule is not None:
+        asked_at = forget_after.resolve(scheduled, when, allow_past=past_schedule) if scheduled is not None else None
+        held_at = (forget_after.resolve(held_schedule, when, allow_past=past_schedule)
+                   if held_schedule is not None else None)
+        if asked_at is not None and held_at is not None and asked_at != held_at:
+            raise InvalidInput(f"metadata says forget_after={held_at!r} but the record asks for {asked_at!r}")
+        clean_meta[forget_after.KEY] = cast(str, asked_at or held_at)
     if len(clean_meta) > MAX_METADATA_KEYS:
-        # Counted after both are added, or the episode is stored with more
+        # Counted after all are added, or the episode is stored with more
         # keys than its own export may carry back in.
-        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys, counting chunking and "
-                           f"chunking_profile, which are stored on the episode when a record names them")
+        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys, counting chunking, chunking_profile, "
+                           f"semantic_merge_threshold and forget_after, which are stored on the episode when a "
+                           f"record names them")
     try:
         for value in (record.source or '', *clean_tags, *clean_meta.values()):
             value.encode('utf-8')
@@ -224,6 +256,21 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
     return NewEpisode(space=space, kind=kind, content=content, content_hash=digest,
                       created_at=happened, ingested_at=when, source=record.source,
                       tags=clean_tags, metadata=clean_meta)
+
+
+def _record_threshold(given: object, kept: str | None) -> float | None:
+    """A record's merge threshold, from its field or from the metadata an
+    archive carries it in; refused when either is not a similarity or the
+    two disagree."""
+    held = None if kept is None else held_threshold(kept)
+    if given is None:
+        return held
+    reason = merge_refused(given)
+    if reason is not None:
+        raise InvalidInput(reason)
+    if held is not None and held != given:
+        raise InvalidInput(f"metadata says semantic_merge_threshold={kept!r} but the record asks for {given!r}")
+    return cast(float, given)
 
 
 async def _validated_record(runtime: IngestionRuntime, space: str, record: Record, when: str) -> NewEpisode:
@@ -315,7 +362,8 @@ def context_lines(content: str, source: str | None, spans: Sequence[tuple[int, i
 
 async def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
     cut = await cut_for(runtime, new.content, new.source, new.metadata.get("chunking"),
-                        new.metadata.get("chunking_profile"), episode=new)
+                        new.metadata.get("chunking_profile"), episode=new,
+                        merge_threshold=new.metadata.get("semantic_merge_threshold"))
     byte_offsets = [(sp.start, sp.end) for sp in byte_spans(new.content, cut.spans)]
     receipt: dict[str, object] | None = None
     if runtime.heading_context:
@@ -448,7 +496,7 @@ class Cut:
 
 async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
                   chunking: str | None = None, profile: str | None = None, *,
-                  episode: NewEpisode | None = None) -> Cut:
+                  episode: NewEpisode | None = None, merge_threshold: str | None = None) -> Cut:
     """Where to cut, and which way it was: at declarations when the source
     is code and the name it was stored under says which language, at the
     document's own headings and clauses when asked, where its subject
@@ -494,7 +542,10 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
         by_unit = unit_spans(content, named, runtime.chunk_target)
         return Cut(list(by_unit.spans), "unit", {key: value for key, value in by_unit.record().items() if key != "chunks"})
     if mode == "semantic":
-        return Cut(list(await semantic_spans(content, runtime.embedder, runtime.chunk_target)), "semantic")
+        # The record's own threshold, as its metadata keeps it, wins over the engine's.
+        threshold = runtime.semantic_merge_threshold if merge_threshold is None else held_threshold(merge_threshold)
+        meant = await semantic_cut(content, runtime.embedder, runtime.chunk_target, merge_threshold=threshold)
+        return Cut(list(meant.spans), "semantic", meant.record())
     if runtime.chunk_tokens is not None:
         from .embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION
         from .token_chunks import token_spans
@@ -508,9 +559,10 @@ async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
 
 async def spans_for(runtime: IngestionRuntime, content: str, source: str | None,
                     chunking: str | None = None, profile: str | None = None, *,
-                    episode: NewEpisode | None = None) -> list[Span]:
+                    episode: NewEpisode | None = None, merge_threshold: str | None = None) -> list[Span]:
     """The spans of ``cut_for``, for callers that need only where."""
-    return (await cut_for(runtime, content, source, chunking, profile, episode=episode)).spans
+    return (await cut_for(runtime, content, source, chunking, profile, episode=episode,
+                          merge_threshold=merge_threshold)).spans
 
 
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record], *,
@@ -532,6 +584,9 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
     results: list[Added | _DupOf | None] = []
     fresh: list[_Pending] = []
     seen: dict[str, int] = {}  # content hash -> index into results
+    # Episodes past their forget_after that a write here replaces: the slot
+    # of the write, the episode, and when it was due.
+    overdue: list[tuple[int, int, str]] = []
     for record in records:
         new = await _validated_record(runtime, space, record, when)
         digest = new.content_hash
@@ -541,9 +596,17 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
             results[-1] = _DupOf(fresh_or_dup)  # resolved after inserts
             continue
         existing = await runtime.documents.episode_by_hash(space, digest)
+        if (existing is not None and runtime.forget_overdue is not None
+                and forget_after.is_due(existing.metadata, parse_rfc3339(when))):
+            # Forgotten once the whole batch is validated and embedded, just
+            # before it is written, so a refused batch forgets nothing early.
+            overdue.append((len(results), existing.episode_id, existing.metadata[forget_after.KEY]))
+            existing = None
         if existing is not None:
             seen[digest] = len(results)
-            results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
+            # The schedule the stored episode holds, which this write did not change.
+            results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate",
+                                 forget_after=existing.metadata.get(forget_after.KEY)))
             continue
         seen[digest] = len(results)
         results.append(None)
@@ -551,14 +614,24 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
 
     if fresh:
         vectors, reused = await embed_pending_counted(runtime, space, fresh)
+        forgot: dict[int, ScheduledForget] = {}
+        for slot, episode_id, stamp in overdue:
+            receipt = await cast(Callable[[str, int], Awaitable[ForgetReceipt]], runtime.forget_overdue)(space, episode_id)
+            forgot[slot] = ScheduledForget(episode_id=episode_id, forget_after=stamp, outcome="forgotten",
+                                           reason=forget_after.reason(stamp, when), receipt=receipt)
         await write_batch(runtime, space, fresh, vectors, results, reused=reused)
         await runtime.documents.bump_revision(space)
+        for slot, taken in forgot.items():
+            # The receipt names the memory this write forgot, so the caller
+            # does not learn of it only from a 410 later.
+            results[slot] = cast(Added, results[slot]).model_copy(update={"forgot_overdue": taken})
 
     resolved: list[Added] = []
     for r in results:
         if isinstance(r, _DupOf):
             target = cast(Added, results[r.slot])
-            resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
+            resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate",
+                                  forget_after=target.forget_after))
         else:
             resolved.append(cast(Added, r))
     return resolved
@@ -632,7 +705,8 @@ async def write_batch(
             results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks),
                                           embeddings_reused=reused[index] if reused is not None else 0,
                                           chunking=pending.chunking, structure=pending.structure,
-                                          embedding_context=pending.embedding_context)
+                                          embedding_context=pending.embedding_context,
+                                          forget_after=pending.new.metadata.get(forget_after.KEY))
     except Exception:
         # Undo the partial batch so a retry starts clean.
         for episode_id in written:
@@ -676,7 +750,8 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
             )
             if not chunks:
                 spans = await spans_for(runtime, episode.content, episode.source, episode.metadata.get("chunking"),
-                                        episode.metadata.get("chunking_profile"), episode=as_new)
+                                        episode.metadata.get("chunking_profile"), episode=as_new,
+                                        merge_threshold=episode.metadata.get("semantic_merge_threshold"))
                 chunks = await runtime.documents.insert_chunks(
                     [
                         NewChunk(

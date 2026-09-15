@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Iterator, Optional, Sequence
 
 from ..memory.engine import MemoryEngine, check_space, normalise_term
+from ..core import forget_after
 from ..core.errors import InvalidInput, SconeError
 from ..providers.llm import ChatModel, StructuredChatModel
 from ..core.models import Episode, Fact
@@ -454,8 +455,11 @@ class Distiller:
         counts = await documents.counts(space)
         episodes = await documents.recent_episodes(space, max(counts.episodes, 1))
         referenced = {f.source_episode_id for f in await documents.list_facts(space, include_closed=True)}
+        # A memory past its forget_after is as good as forgotten: no model reads it.
+        moment = parse_rfc3339(self.engine.clock())
         fresh = [
             e for e in episodes if e.content.strip() and e.episode_id not in referenced and (space, e.episode_id) not in self._done
+            and not forget_after.is_due(e.metadata, moment)
         ]
         return sorted(fresh, key=lambda e: (parse_rfc3339(e.created_at), e.episode_id))
 
@@ -657,8 +661,7 @@ def _grounding_reason(triple: Extracted, source: str) -> Optional[str]:
         return "missing_quote"
     if len(quote) > MAX_QUOTE:
         return "quote_too_long"
-    starts = list(_occurrences(source, quote))
-    if not starts:
+    if quote not in source:
         return "quote_not_in_source"
     if triple.statement_type != "observation":
         return "not_an_observation"
@@ -666,11 +669,7 @@ def _grounding_reason(triple: Extracted, source: str) -> Optional[str]:
         return "subject_not_in_quote"
     if not _mentions(quote, triple.object):
         return "object_not_in_quote"
-    contexts = [_clause_around(source, start, start + len(quote)) for start in starts]
-    # The extraction format carries a quote, not a byte offset. If the same
-    # quote appears in both asserted and non-asserted contexts, accepting the
-    # first occurrence would invent certainty the model did not provide.
-    if any(_is_non_asserted(context) for context in contexts):
+    if _hedged_somewhere(source, quote):
         return "context_not_asserted"
     if not _predicate_mentioned(quote, triple.predicate):
         return "predicate_not_in_quote"
@@ -707,18 +706,57 @@ def _word_forms(word: str) -> set[str]:
     return forms
 
 
-def _occurrences(source: str, quote: str) -> Iterator[int]:
-    start = source.find(quote)
-    while start >= 0:
-        yield start
-        start = source.find(quote, start + 1)
+def _hedged_somewhere(source: str, quote: str) -> bool:
+    """Whether any place in ``source`` holding the quote's words reads them
+    in a clause that does not assert them.
+
+    The extraction format carries a quote, not a byte offset. If the same
+    words appear in both asserted and non-asserted contexts, accepting one
+    occurrence would invent certainty the model did not provide.
+    """
+    return any(_is_non_asserted(_clause_around(source, start, end)) for start, end in _occurrences(source, quote))
+
+
+def _occurrences(source: str, quote: str) -> Iterator[tuple[int, int]]:
+    """Every span of ``source`` holding the quote's words with any runs of
+    whitespace between them, overlapping spans included: a hard-wrapped
+    text writes the same words across a line break in one place and not in
+    another, and a quote does not say which place it copied."""
+    words = r"\s+".join(re.escape(word) for word in quote.split())
+    for found in re.finditer(rf"(?=({words}))", source):
+        yield found.start(1), found.end(1)
+
+
+#: The start of a line that begins a block of its own: a blank line, a list
+#: item, a heading or a table row.
+_BLOCK_LINE = re.compile(r"[ \t]*(?:$|[-*][ \t]|#|\|)", re.MULTILINE)
+#: The start of a line that is a block by itself: a heading or a table row.
+_ONE_LINE_BLOCK = re.compile(r"[ \t]*[#|]")
+
+
+def _ends_clause(source: str, newline: int) -> bool:
+    """Whether the line break at ``newline`` ends a clause. Inside running
+    text it is where a hard-wrapped document wrapped, not an end."""
+    line = source.rfind("\n", 0, newline) + 1
+    return bool(_BLOCK_LINE.match(source, newline + 1) or _ONE_LINE_BLOCK.match(source, line))
 
 
 def _clause_around(source: str, start: int, end: int) -> str:
-    left = max(source.rfind(mark, 0, start) for mark in ".?!;\n") + 1
-    boundaries = [position for mark in ".?!;\n" if (position := source.find(mark, end)) >= 0]
-    right = min(boundaries) + 1 if boundaries else len(source)
-    return source[left:right]
+    left = max(source.rfind(mark, 0, start) for mark in ".?!;")
+    newline = source.rfind("\n", left + 1, start)
+    while newline >= 0 and not _ends_clause(source, newline):
+        newline = source.rfind("\n", left + 1, newline)
+    left = max(left, newline) + 1
+    # From the quote's last character: a quote that copies its sentence's
+    # full stop ends its clause there, not at the end of the next sentence.
+    boundaries = [position for mark in ".?!;" if (position := source.find(mark, end - 1)) >= 0]
+    right = min(boundaries) if boundaries else len(source)
+    newline = source.find("\n", end - 1, right)
+    while newline >= 0 and not _ends_clause(source, newline):
+        newline = source.find("\n", newline + 1, right)
+    if newline >= 0:
+        right = newline
+    return source[left:right + 1]
 
 
 def _is_non_asserted(context: str) -> bool:

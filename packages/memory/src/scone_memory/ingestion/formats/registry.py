@@ -9,6 +9,7 @@ from typing import Protocol
 from ...core.errors import InvalidInput
 from ...ocr.process import python_worker, run_bounded
 from ..extraction_checkpoint import CheckpointedDocumentParser, CheckpointedPdfParser, ExtractionCheckpoints, checkpoint_dispatch_allowed
+from ...ocr.table_cells import page_table_cells
 from ..pdf import PdfLimits, PdfParser, PypdfParser, validate_pdf
 from ..text_layer import unreadable
 from .types import DocumentLimits, DocumentSegment, DocumentTextRegion, ParsedDocument, validate_document
@@ -74,6 +75,9 @@ class BuiltinDocumentParser:
             encoded = pdf.text.encode()
             # Kept, never dropped: named, so a reader knows the page's text is not the page.
             unreadable_pages = [p.number for p in pdf.pages if unreadable(encoded[p.start:p.end].decode())]
+            tables = {p.number: page_table_cells(p.regions, [(r.start - p.start, r.end - p.start) for r in p.regions],
+                                                 encoded[p.start:p.end], f'page:{p.number}')
+                      for p in pdf.pages if p.regions}
             parsed = ParsedDocument(format='pdf', parser=pdf.parser, segments=tuple(
                 DocumentSegment(text=encoded[p.start:p.end].decode(), locator=f'page:{p.number}',
                     metadata={'page': str(p.number), 'extraction': p.extraction,
@@ -82,11 +86,17 @@ class BuiltinDocumentParser:
                               'rotation': str(p.rotation),
                               **({'ocr_reading_order': p.reading_order.model_dump_json()} if p.reading_order else {}),
                               **({'ocr_engine': p.ocr_engine} if p.ocr_engine else {}),
+                              **({'layout_labels': p.labels.model_dump_json()} if p.labels else {}),
+                              **({'tables': str(tables[p.number].proposed),
+                                  'tables_unreadable': str(tables[p.number].unreadable)}
+                                 if p.number in tables and tables[p.number].proposed else {}),
                               **({'section': _section(p.section)} if p.section else {})},
                     regions=tuple(DocumentTextRegion(text=r.text, box=r.box, score=r.score,
-                        block=r.block, paragraph=r.paragraph, line=r.line, start=r.start - p.start, end=r.end - p.start,
+                        block=r.block, paragraph=r.paragraph, line=r.line, label=r.label,
+                        start=r.start - p.start, end=r.end - p.start,
                         provider_index=r.provider_index, reading_column=r.reading_column,
-                        coordinate_space=p.region_geometry) for r in p.regions))
+                        coordinate_space=p.region_geometry) for r in p.regions),
+                    table_cells=tables[p.number].cells if p.number in tables else ())
                 for p in pdf.pages if not p.empty),
                 metadata={'empty_pages': ','.join(str(p.number) for p in pdf.pages if p.empty),
                           **({'unreadable_pages': ','.join(map(str, unreadable_pages))} if unreadable_pages else {}),
