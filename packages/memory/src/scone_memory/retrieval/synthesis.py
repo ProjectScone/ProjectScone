@@ -31,7 +31,8 @@ the passages again -- and the new round's passages, and returns the whole
 answer rewritten. A rewritten sentence survives only if its quote is
 found in a passage read so far, and a readable rewrite replaces the
 answer; a sentence of the answer so far whose citation the rewrite does
-not carry is counted in ``refine_dropped_carried``, with a reason. A
+not carry is counted in ``refine_dropped_carried``, with a reason, and a
+sentence it repeats (same passage, same quote) in ``notes_carried``. A
 rewrite that cannot be read, or whose every sentence fails the check,
 leaves the answer as it stood, and ``refine_kept_prior`` counts those
 rounds. The rounds are packed by bytes as above, except that a round
@@ -169,6 +170,9 @@ class SynthesisRound:
     status: RoundStatus
     #: Bytes of the answer so far a refine round carried beside its passages; 0 in any other round.
     answer_bytes: int = 0
+    #: Kept notes of a refine rewrite that repeat a sentence of the answer so far (same passage and quote), so
+    #: ``notes_kept - notes_carried`` is what the round added; 0 in any other round.
+    notes_carried: int = 0
 
 
 @dataclass(frozen=True)
@@ -205,6 +209,8 @@ class Synthesis:
     refine_kept_prior: int = 0
     #: Checked sentences of the answer so far that a readable refine rewrite left out, over every round.
     refine_dropped_carried: int = 0
+    #: Kept notes that repeat the answer so far, over every refine round: ``notes_kept`` counts them again.
+    notes_carried: int = 0
     #: The quotes were checked against their passages; the sentences were not checked against anything.
     verified_accuracy: Literal[False] = False
 
@@ -231,11 +237,11 @@ class Synthesis:
             "passages": {"given": self.passages_given, "read": self.passages_read,
                          "unread": self.passages_unread, "oversize": self.passages_oversize,
                          "cited": self.passages_cited},
-            "notes": {"kept": self.notes_kept, "dropped_unquoted": self.notes_dropped_unquoted,
+            "notes": {"kept": self.notes_kept, "carried": self.notes_carried, "dropped_unquoted": self.notes_dropped_unquoted,
                       "dropped_unknown": self.notes_dropped_unknown, "dropped_malformed": self.notes_dropped_malformed},
             "rounds": [{"round": r.round_number, "passages": r.passage_count, "bytes": r.passage_bytes,
                         "answer_bytes": r.answer_bytes, "notes_returned": r.notes_returned,
-                        "notes_kept": r.notes_kept, "status": r.status}
+                        "notes_kept": r.notes_kept, "notes_carried": r.notes_carried, "status": r.status}
                        for r in self.rounds],
             "refine_kept_prior": self.refine_kept_prior, "refine_dropped_carried": self.refine_dropped_carried,
             "model_calls": self.model_calls, "reasons": list(self.reasons), "verified_accuracy": False,
@@ -466,13 +472,14 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
             reasons.append(f"round {number}: the reply could not be read as notes{stands}")
             continue
         returned, kept = parsed
-        rounds.append(SynthesisRound(number, len(group), size, returned, len(kept), "noted", carried))
         pool.update(held)
         read += len(group)
+        repeated = 0
         if not refining:
             notes.extend(kept)
         elif kept:
             left_out = _left_out(notes, kept)
+            repeated = len(notes) - left_out
             if left_out:
                 dropped_carried += left_out
                 reasons.append(f"round {number}: {left_out} sentence(s) of the answer so far left out of the rewrite")
@@ -480,6 +487,7 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
         else:
             kept_prior += 1
             reasons.append(f"round {number}: no refined sentence kept a checked quote; the answer so far stands")
+        rounds.append(SynthesisRound(number, len(group), size, returned, len(kept), "noted", carried, repeated))
     folded = False
     fold_uncited = 0
     fold_attempted = False
@@ -532,7 +540,8 @@ def _finish(question: str, given: Sequence[Passage], rounds: Sequence[SynthesisR
     kept = sum(r.notes_kept for r in rounds)
     return Synthesis(question, status, shown, tuple(rounds), len(given), read, unread, oversize, kept,
                      tally.unquoted, tally.unknown, tally.malformed, folded, fold_uncited, offered, truncated,
-                     calls.count, tuple(reasons), mode, kept_prior, dropped_carried)
+                     calls.count, tuple(reasons), mode, kept_prior, dropped_carried,
+                     sum(r.notes_carried for r in rounds))
 
 
 def passages_from_recall(items: Sequence[RecallItem]) -> tuple[Passage, ...]:
