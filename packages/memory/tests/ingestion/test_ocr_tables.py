@@ -281,3 +281,53 @@ def test_a_statement_s_caption_and_years_above_the_grid_are_its_header_rows():
     titled=[*(line(f'Title line {n}',.02,.3,n) for n in range(4)),*statement(top=.24,rows=3)]
     found=infer_tables(titled)
     assert MAX_HEADER_ROWS==3 and found.tables[0].rows==6 and found.unassigned==(0,)
+
+
+def test_a_bulleted_or_enumerated_list_is_not_a_table_but_an_enumerated_column_of_labels_is():
+    from scone_memory.ocr.tables import infer_tables
+    def item(mark,text,row,right=.9):
+        y=.1+row*.05
+        return [OcrRegion(text=mark,box=(.05,y,.07,y+.03)),OcrRegion(text=text,box=(.15,y,right,y+.03))]
+    # Bullets before short items: the marks say list, whatever the items'
+    # width; a dash before the same items stands for none, and the grid
+    # is a table.
+    short=[c for row,text in enumerate(('Driver Classification','State Unemployment Taxes','Google v. Levandowski','Other matters'))
+           for c in item('•',text,row,right=.25)]
+    found=infer_tables(short)
+    assert found.tables==() and len(found.unassigned)==8
+    dashed=[c for row,text in enumerate(('Driver Classification','State Unemployment Taxes','Google v. Levandowski','Other matters'))
+            for c in item('-',text,row,right=.25)]
+    assert infer_tables(dashed).tables[0].rows==4
+    # Enumerators before lines of prose, with a wrapped line between: a numbered list.
+    numbered=[*item('1.','I have reviewed this Quarterly Report on Form 10-Q of the registrant;',0),
+              *item('2.','Based on my knowledge, this report does not contain any untrue',1),
+              OcrRegion(text='statements made, in light of the circumstances, not misleading;',box=(.15,.2,.85,.23)),
+              *item('3.','Based on my knowledge, the financial statements fairly present',3),
+              *item('(a)','Designed such disclosure controls and procedures to ensure that',4)]
+    found=infer_tables(numbered)
+    assert found.tables==() and len(found.unassigned)==9
+    # Enumerators before short labels are a table's first column, as a
+    # column of plain numbers is.
+    labelled=[c for row,text in enumerate(('Mobility','Delivery','Freight','Total')) for c in item(f'{row+1}.',text,row,right=.25)]
+    [table]=infer_tables(labelled).tables
+    assert (table.rows,table.columns)==(4,2)
+    plain=[c for row,text in enumerate(('Mobility','Delivery','Freight','Total')) for c in item(str(row+1),text,row,right=.25)]
+    assert infer_tables(plain).tables[0].rows==4
+
+
+def test_the_layout_says_when_the_rows_above_a_grid_were_read_up_to_their_bound():
+    from scone_memory.ocr.tables import MAX_HEADER_ROWS, infer_tables
+    def line(text,row):
+        return OcrRegion(text=text,box=(.02,.08+row*.04,.3,.105+row*.04))
+    grid=statement(top=.24,rows=3)
+    four=infer_tables([*(line(f'Title line {n}',n) for n in range(4)),*grid])
+    assert four.tables[0].rows==3+MAX_HEADER_ROWS and 'header_rows_limit' in four.notes, "a fourth title was dropped by the cap"
+    three=infer_tables([*(line(f'Title line {n}',n+1) for n in range(3)),*grid])
+    assert three.tables[0].rows==6 and 'header_rows_limit' not in three.notes
+    broken=infer_tables([line('Title line 0',0),line('Title line 1',1),line('This sentence ends the chain.',2),line('Title line 3',3),*grid])
+    assert broken.tables[0].rows==4 and 'header_rows_limit' not in broken.notes, "the chain broke before the cap mattered"
+    # A row of too many cells to be a grid's clears the rows held above
+    # it, and the cap that bit before it is forgotten with them.
+    scattered=[OcrRegion(text=str(n),box=(.02+n*.07,.24,.03+n*.07,.265)) for n in range(13)]
+    cleared=infer_tables([*(line(f'Title line {n}',n) for n in range(4)),*scattered,line('Title line 5',5),line('Title line 6',6),*statement(top=.36,rows=3)])
+    assert cleared.tables[0].rows==5 and 'header_rows_limit' not in cleared.notes
