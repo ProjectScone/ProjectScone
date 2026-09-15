@@ -3029,7 +3029,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
 | `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
 | `html` | one page: the drawing, search by name, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
-| `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate; what the graph names but never reads (`typing`, a package) hidden until the legend shows it, then drawn small; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
+| `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate, and read as a module tree (directories, files, what each defines) whose entries choose their entity; what the graph names but never reads (`typing`, a package) hidden until the legend shows it, then drawn small; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
@@ -3054,7 +3054,18 @@ How each format places values and escapes its own syntax:
   `json`, imported everywhere, are drawn last and hidden by default);
   every name reaches the page as text through one JSON block, and the
   page's content security policy allows only its own style and code,
-  pinned by hash.
+  pinned by hash. Beside the legend, a module tree lists the drawn
+  codebase as a person reads it: directories made from the files'
+  paths, the files in them, and what each defines nested as the code
+  nests it (`Box` under `x.py`, `open` under `Box`), a declaration
+  placed by its `defines` relation from its file or another declaration
+  or, when none is drawn, under its file by name; a chain of definitions
+  is followed at most 32 deep, and a loop or a deeper chain sits under
+  the file, so nothing drawn is lost. An entry chooses its entity in the
+  drawing and shows a hidden community again. A person, a package or a cited record is not
+  in the tree, and a graph with no file has none. At most 200 entries
+  are listed under one directory or file; the rest fold into `+N more`
+  and the page's notes say how many were folded.
 - **The drawings** (`svg`, `canvas`, and the canvas in the vault) are laid
   out by construction, not simulated, so the same graph always draws
   the same way.

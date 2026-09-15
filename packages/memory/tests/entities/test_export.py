@@ -857,6 +857,85 @@ def test_explorer_draws_the_codebases_own_first_and_says_what_it_left_out(monkey
     assert "relations left out of the page" in data["about"]
 
 
+def test_explorer_lists_the_codebase_as_a_tree_of_directories_files_and_definitions(projection, monkeypatch):
+    from scone_memory.entities import explorer
+
+    rows = [fact(1, "pkg/a.py", "defines", "pkg/a.py:Thing"), fact(2, "pkg/a.py:Thing", "defines", "pkg/a.py:Thing.run"),
+            fact(3, "pkg/sub/b.py", "imports", "pkg/a.py"), fact(4, "top.py", "defines", "top.py:main"),
+            fact(5, "pkg/a.py", "imports", "typing"), fact(6, "alice chen", "works_at", "Acme"),
+            fact(7, "pkg/sub/b.py", "defines", "pkg/sub/b.py:Outer.Inner"), fact(8, "pkg/a.py", "calls", "pkg/a.py:Thing.run")]
+    code = project_entities("alpha", rows, revision=1)
+    data = json.loads(_page(export_graph(code, "explorer").body).data["graph-data"])
+    tree = data["tree"]
+
+    def shape(item):
+        return (item["name"], [shape(child) for child in item.get("children", [])]) if "more" not in item else ("+more", [])
+
+    assert shape(tree) == ("", [("pkg/", [("sub/", [("b.py", [("Outer.Inner", [])])]), ("a.py", [("Thing", [("run", [])])])]),
+                                ("top.py", [("main", [])])]), \
+        "directories first, then files, then what each defines, nested as the code nests it; a person and `typing` are not files"
+    ids = {entity.label: entity.entity_id for entity in code.entities}
+    named = {item["name"]: item for item in tree["children"][0]["children"][1]["children"]}
+    assert named["Thing"]["id"] == ids["pkg/a.py:Thing"] and tree["children"][0]["children"][1]["id"] == ids["pkg/a.py"]
+    assert tree["count"] == 7 and tree["children"][0]["count"] == 5, "a count is the entries beneath"
+    page = export_graph(code, "explorer").body.decode()
+    assert 'id="tree"' in page and 'id="unfold"' in page and "the module tree" not in data["about"]
+    assert "tree" not in json.loads(_page(export_graph(projection, "explorer").body).data["graph-data"])["about"]
+    assert json.loads(_page(export_graph(projection, "explorer").body).data["graph-data"])["tree"] is None
+    assert 'id="tree"' not in export_graph(projection, "explorer").body.decode(), "a graph of people has no module tree"
+    monkeypatch.setattr(explorer, "MAX_TREE_CHILDREN", 1)
+    data = json.loads(_page(export_graph(code, "explorer").body).data["graph-data"])
+    top = data["tree"]["children"]
+    assert [item.get("name") for item in top] == ["pkg/", "+1 more"] and top[1]["more"] == 1
+    assert "folded" in data["about"] and "lists 1 entries per directory or file" in data["about"]
+
+
+def test_a_module_tree_places_a_declaration_by_its_relation_first_and_by_its_name_when_none_says():
+    from scone_memory.entities.explorer import module_tree
+
+    entities = [("f", "src/x.py"), ("c", "src/x.py:Box"), ("m", "src/x.py:Box.open"), ("s", "src/x.py:stray"),
+                ("o", "other.txt"), ("p", "a person"), ("w", "web/app.ts"), ("d", "web/app.ts:App")]
+    tree, folded = module_tree(entities, [("f", "defines", "c"), ("c", "defines", "m"), ("w", "imports", "f")])
+    files = {item["name"]: item for item in tree["children"] if "id" in item}
+    assert set(files) == {"other.txt"} and [d["name"] for d in tree["children"] if "id" not in d] == ["src/", "web/"]
+    [x] = tree["children"][0]["children"]
+    assert [child["name"] for child in x["children"]] == ["Box", "stray"], "a declaration nothing places sits under its file"
+    assert [child["name"] for child in x["children"][0]["children"]] == ["open"], "a nested name is shortened to what it adds"
+    assert tree["children"][1]["children"][0]["children"][0]["name"] == "App", "placed under its file by name when no relation is drawn"
+    assert folded == 0 and module_tree([("p", "a person")], []) == (None, 0)
+
+
+def test_a_module_tree_keeps_every_declaration_reachable_and_bounds_its_depth():
+    from scone_memory.entities import explorer
+    from scone_memory.entities.explorer import module_tree
+
+    def names(item):
+        return [child["name"] for child in item["children"]]
+
+    # A relation from a person, a colon in a person's label, and a loop of
+    # `defines` place nothing: each declaration still sits under its file.
+    entities = [("f", "pkg/a.py"), ("p", "alice chen"), ("t", "pkg/a.py:Thing"), ("d", "alice:note"),
+                ("x", "pkg/a.py:X"), ("y", "pkg/a.py:Y")]
+    tree, _ = module_tree(entities, [("p", "defines", "t"), ("x", "defines", "y"), ("y", "defines", "x")])
+    [pkg] = tree["children"]
+    [a] = pkg["children"]
+
+    def beneath(item):
+        return [child["name"] for child in item["children"]] + [name for child in item["children"] for name in beneath(child)]
+
+    assert sorted(beneath(a)) == ["Thing", "X", "Y"] and tree["count"] == 4, "nothing is lost, and a person's label is not a declaration"
+    assert "Thing" in names(a), "a relation from a person places nothing: the declaration sits under its file"
+    chain = [("f", "pkg/a.py")] + [(f"d{n}", f"pkg/a.py:D{n}") for n in range(1_200)]
+    relations = [("f", "defines", "d0")] + [(f"d{n}", "defines", f"d{n + 1}") for n in range(1_199)]
+    deep, _ = module_tree(chain, relations)
+    assert deep["count"] == 1_201, "a chain of definitions longer than the stack does not crash the export"
+    file_entry = deep["children"][0]["children"][0]
+    assert len(file_entry["children"]) > 1, "declarations held deeper than the bound sit under their file"
+    def depth(item):
+        return 1 + max((depth(child) for child in item.get("children", [])), default=0)
+    assert depth(file_entry) <= explorer.MAX_TREE_DEPTH + 3
+
+
 def test_explorer_pins_its_policy_to_the_bytes_it_emits_and_its_script_parses(projection):
     import base64
     import hashlib
