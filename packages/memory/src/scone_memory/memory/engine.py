@@ -8,6 +8,7 @@ answers, because a thin answer that says it is thin beats a 500.
 
 from __future__ import annotations
 
+import math
 import hashlib
 import time
 from dataclasses import dataclass
@@ -1155,6 +1156,30 @@ class MemoryEngine:
             result.items = [item.model_copy(update={"lessons": found.lessons[item.chunk_id].record()})
                             if item.chunk_id in found.lessons else item for item in result.items]
         return result
+
+    async def record_turn(self, space: str, *, session_id: str, turn_id: str, mode: str,
+                          latency_ms: Mapping[str, float]) -> Optional[Event]:
+        """Append a ``conversation_turn`` event: how long one turn of a
+        text or voice conversation took to prepare memory, to reach its
+        first token, its first audio, and its end, in milliseconds from
+        the moment the question was heard. Only the moments that came are
+        given; nothing is invented. None with no event log attached."""
+        check_space(space)
+        if self.events is None:
+            return None
+        for name, value in (("session_id", session_id), ("turn_id", turn_id)):
+            if not isinstance(value, str) or not 1 <= len(value) <= 128:
+                raise InvalidInput(f"{name} must be a string of 1..=128 chars")
+        if mode not in ("text", "voice"):
+            raise InvalidInput("mode must be 'text' or 'voice'")
+        timings: dict[str, float] = {}
+        for moment, taken in latency_ms.items():
+            if moment not in ("context", "first_token", "first_audio", "total") or isinstance(taken, bool) \
+                    or not isinstance(taken, (int, float)) or not taken >= 0 or not math.isfinite(taken):
+                raise InvalidInput("latency_ms names context, first_token, first_audio or total, each a finite non-negative number")
+            timings[moment] = float(taken)
+        return await self._emit(space, "conversation_turn", {"session_id": session_id, "turn_id": turn_id, "mode": mode,
+                                                             "latency_ms": timings})
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its
