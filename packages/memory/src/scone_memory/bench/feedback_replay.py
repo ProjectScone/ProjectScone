@@ -3,7 +3,10 @@
 Each subject of the fixture has one passage that answers it, two ways of
 asking it and a paraphrase. Every passage is stored once. One half of the
 subjects is judged: each way of asking it is recalled (a day apart) and a
-judge marks what came back. Then, with no further feedback, every subject's
+judge marks what came back. Past the two ways of asking, a replay can pile
+judgements up: day three asks the first way again with its first space
+doubled, day four the second, and so on, each a question of its own to the
+log (its recorded hash differs), as a respelling from another caller would be. Then, with no further feedback, every subject's
 questions are asked with the weight off and at each weight measured, on the
 same engine and the same recorded judgements:
 
@@ -40,6 +43,8 @@ DEPTH = 10
 #: unrelated MRR stayed within 0.01 of off); half b is its held-out check.
 WEIGHTS = (0.00005, 0.0001, 0.0002, 0.0005)
 CHOSEN = 0.0001
+#: The most judging days a replay takes: two ways of asking, each asked three times.
+MAX_JUDGEMENTS = 6
 JUDGES = ("kind", "strict")
 HALVES = ("a", "b")
 START = "2026-05-01T09:00:00.000Z"
@@ -56,6 +61,8 @@ class Replay:
     rose: dict[float, list[str]] = field(default_factory=dict)
     fell: dict[float, list[str]] = field(default_factory=dict)
     feedback_events: int = 0
+    #: weight -> the most candidates of one evaluated recall whose judgements were held to corroboration's weight.
+    held: dict[float, int] = field(default_factory=dict)
 
     def mrr(self, weight: float, kind: str) -> float:
         values = self.ranks[weight][kind]
@@ -76,9 +83,9 @@ def load_subjects(path: Path) -> dict[str, Any]:
 
 async def replay(path: Path, *, judged_half: str, judge: str = "strict", judgements: int = 2,
                  weights: tuple[float, ...] = WEIGHTS) -> Replay:
-    """One replay: judge ``judged_half`` with ``judge`` from its first ``judgements`` ways of asking, then rank."""
-    if judged_half not in HALVES or judge not in JUDGES or judgements not in (1, 2):
-        raise InvalidInput("judged_half is a or b, judge is kind or strict, judgements is 1 or 2")
+    """One replay: judge ``judged_half`` with ``judge`` on ``judgements`` days, then rank."""
+    if judged_half not in HALVES or judge not in JUDGES or judgements not in range(1, MAX_JUDGEMENTS + 1):
+        raise InvalidInput(f"judged_half is a or b, judge is kind or strict, judgements is 1 to {MAX_JUDGEMENTS}")
     data = load_subjects(path)
     clock = Clock(START)
     events = InMemoryEventLog()
@@ -90,7 +97,9 @@ async def replay(path: Path, *, judged_half: str, judge: str = "strict", judgeme
         for day in range(judgements):
             clock.now = f"2026-05-{2 + day:02d}T09:00:00.000Z"
             for subject in judged:
-                shown = await engine.recall(SPACE, subject["asked"][day], limit=SHOWN)
+                # The same words, another recorded question (recall strips a query's ends, not its middle).
+                asked = subject["asked"][day % 2].replace(" ", " " * (1 + day // 2), 1)
+                shown = await engine.recall(SPACE, asked, limit=SHOWN)
                 gold = episodes[subject["gold"]]
                 positions = [item.episode_id for item in shown.items]
                 above = positions.index(gold) if gold in positions else len(positions)
@@ -118,6 +127,8 @@ async def replay(path: Path, *, judged_half: str, judge: str = "strict", judgeme
                 found = await engine.recall(SPACE, question, limit=DEPTH)
                 rank = reciprocal_rank([str(item.episode_id) for item in found.items], {str(episodes[gold_text])})
                 result.ranks[weight][kind].append(rank)
+                if found.feedback_prior is not None:
+                    result.held[weight] = max(result.held.get(weight, 0), int(found.feedback_prior["held"]))  # type: ignore[call-overload]
                 if weight == 0.0:
                     baseline = rank
                 elif rank != baseline:
@@ -148,5 +159,7 @@ def report(replays: list[Replay]) -> str:
     for weight in weights[1:]:
         rose = sum(len(run.rose[weight]) for run in replays)
         fell = [entry for run in replays for entry in run.fell[weight]]
-        lines.append(f"w={weight:g}: {rose} question(s) rose, {len(fell)} fell: {'; '.join(fell) or '-'}")
+        held = max(run.held.get(weight, 0) for run in replays)
+        lines.append(f"w={weight:g}: {rose} question(s) rose, {len(fell)} fell: {'; '.join(fell) or '-'}; "
+                     f"at most {held} candidate(s) of a recall held")
     return "\n".join(lines)

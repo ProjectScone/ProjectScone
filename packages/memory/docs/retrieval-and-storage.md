@@ -264,27 +264,40 @@ SCONE_FEEDBACK_WEIGHT=0.0001 scone recall "what is the throttling threshold on t
 a term to each fused candidate's score, the way recency is added, from the
 judgements of the last 90 days. Zero reads no feedback and leaves recall as
 it was. Needs an event log. The judgements are weighed as lessons weigh them
-(latest per recall, halving every 30 days), with three rules on top:
+(+1 useful, −1 not, halving every 30 days), but per question rather than per
+recall: `feedback` records a hash of the question its recall asked, and
+asking the same question again and judging again replaces the judgement.
+Four rules sit on top:
 
-- useful judgements count only once two of them do. One useful judgement
-  neither lifts a passage nor offsets a judgement against it;
+- useful judgements count only once two questions' do. One useful judgement
+  neither lifts a passage nor offsets a judgement against it. No identity is
+  recorded, so one caller asking two questions, or one question spelled two
+  ways, does corroborate;
+- only the newest two judgements each way count. However many pile up on a
+  popular passage, it weighs what its newest two weigh, and `held` counts
+  the candidates whose older judgements were left out;
 - a judgement against a passage outweighs every useful one older than it,
   so a passage people stopped finding useful has to be corroborated again;
 - `feedback` records a fingerprint of what the judged passage said (its
   text and its episode's content). A judgement whose passage no
   longer matches is dropped as `stale`: a rebuilt store can hand its id to
   other text, to a span of an episode whose content changed, or to a span
-  chunked differently. One recorded before fingerprints existed is
-  dropped as `unverified`.
+  chunked differently. A judgement that cannot be checked is dropped as
+  `unverified`: one recorded before fingerprints and questions were, or one
+  of a candidate whose episode cannot be read now.
 
 The term is the weight times that score, cut at `MAX_FEEDBACK_BOOST` (what
 first place is worth over second under rank fusion when both lanes agree,
-0.000529). A recall with the weight set carries `feedback_prior`: the weight
-and bound, how many candidates were `boosted`, `demoted` and `capped`, the
-`stale`, `unverified` and `tentative` counts, the terms of the returned
-passages, and `events_read` / `events_cut` (the read takes the newest 5,000
-judgements). The same record goes into the recall event. A recall with the
-weight at 0 has no `feedback_prior` field.
+0.000529). The bound is on each candidate's term, not on who it can pass: a
+leader sunk and a follower lifted close twice it, and deeper ranks sit
+closer together than first and second. A recall with the weight set carries
+`feedback_prior` (on `/v1/recall` too): the weight and bound, how many
+candidates were `boosted`, `demoted`, `capped` and `held`, the `stale`,
+`unverified` and `tentative` counts, the terms of the returned passages, and
+`events_read` / `events_cut` (the read takes the newest 5,000 judgements).
+`scone recall` prints a line when the read or the term was cut. The same
+record goes into the recall event. A recall with the weight at 0 has no
+`feedback_prior` field.
 
 The term does not know the question. With queries hashed in the event log
 (the default) there is nothing to compare a new question with. A passage
@@ -292,8 +305,11 @@ judged useful rises for every question it is a candidate for, including
 one it was never judged for. On the replay in
 [`benchmarks/feedback-replay-v1.results.md`](../benchmarks/feedback-replay-v1.results.md),
 0.0001 lifted paraphrases of judged questions (MRR@10 0.7188 to 0.7743) and
-left unrelated questions where they were (0.8692). 0.0002 already cost
-unrelated questions 0.09, mostly questions about a sibling subject worded
+left unrelated questions where they were (0.8692), with two judgements per
+subject and with six, from six questions. It sits near an edge: a term of
+0.0002, which two judgements made the moment before a question reach at
+this weight, cost one unrelated question of 36 on one half. 0.0002 already
+cost unrelated questions 0.09, mostly questions about a sibling subject worded
 like a judged one (another rate tier, another clinic). The weight is a
 near-tie breaker, and its scale is rank fusion's: `fusion="score"` and
 `"distribution"` have scores a hundred times larger, and the replay did not

@@ -1327,11 +1327,12 @@ class MemoryEngine:
             raise InvalidInput(f"chunk {chunk_id} was not returned by recall {recall_event_id}")
         if note is not None and len(note) > 500:
             raise InvalidInput("note must be at most 500 chars")
-        from ..retrieval.feedback_prior import fingerprint
+        from ..retrieval.feedback_prior import fingerprint, question
 
         # What the passage said when it was judged, so a ranking prior can tell
         # when the id now names other text. A passage already gone gets none.
-        marked: dict[str, object] = {}
+        # And which question it was judged for, so asking again is not corroboration.
+        marked: dict[str, object] = {"question": question(recall.payload.get("query"))}
         for chunk in await self.documents.get_chunks(space, [chunk_id]):
             episode = await self.documents.get_episode(space, chunk.episode_id)
             if episode is not None:

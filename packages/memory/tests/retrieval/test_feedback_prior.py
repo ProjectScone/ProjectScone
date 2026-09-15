@@ -3,11 +3,12 @@
 Lessons (``retrieval/lessons.py``) say what people said about a passage and
 leave the order alone. This turns the same judgements into a small additive
 term on the fused score, off unless ``feedback_weight`` is set: each
-judgement is the latest of its recall and halves every half-life; one useful
-judgement gives nothing and two do; a judgement against the passage outweighs
-every useful one older than it; a judgement made of a passage whose content
-has since changed counts for nothing; and the term is cut at
-``MAX_FEEDBACK_BOOST``, with the result saying it was.
+judgement is the latest of its question and halves every half-life; one useful
+judgement gives nothing and two questions' do; only the newest two each way
+count; a judgement against the passage outweighs every useful one older than
+it; a judgement made of a passage whose content has since changed counts for
+nothing; and the term is cut at ``MAX_FEEDBACK_BOOST``, with the result
+saying each of those bounds bit.
 """
 
 from __future__ import annotations
@@ -28,10 +29,14 @@ NOW = "2026-06-01T00:00:00Z"
 PRINT = "fingerprint-of-seven"
 
 
-def judged(event_id: int, ts: str, chunk: int, useful: bool, recall: int, fingerprint: str | None = PRINT) -> Event:
+def judged(event_id: int, ts: str, chunk: int, useful: bool, recall: int, fingerprint: str | None = PRINT,
+           question: str | None = "") -> Event:
+    """A judgement of ``recall``, which asked its own question unless ``question`` names one (None: unrecorded)."""
     payload: dict[str, object] = {"recall_event_id": recall, "chunk_id": chunk, "useful": useful, "note": None}
     if fingerprint is not None:
         payload["fingerprint"] = fingerprint
+    if question is not None:
+        payload["question"] = question or f"question-of-recall-{recall}"
     return Event(event_id=event_id, space="default", kind="feedback", ts=ts, schema_version=1, payload=payload)
 
 
@@ -49,6 +54,40 @@ def test_one_useful_judgement_gives_no_boost_and_two_do():
     assert two.terms == {7: pytest.approx(0.002)} and two.tentative == 0
     again = terms([judged(1, NOW, 7, True, recall=1), judged(2, NOW, 7, True, recall=1)])
     assert again.terms == {}, "one recall judged twice is one judgement"
+
+
+def test_one_question_asked_again_and_judged_again_is_one_judgement():
+    asked_twice = terms([judged(1, NOW, 7, True, recall=1, question="same"), judged(2, NOW, 7, True, recall=2, question="same")])
+    assert asked_twice.terms == {} and asked_twice.tentative == 1, "two recalls of one question do not corroborate"
+    turned = terms([judged(1, "2026-05-30T00:00:00Z", 7, False, recall=1, question="same"),
+                    judged(2, NOW, 7, True, recall=2, question="same"), judged(3, NOW, 7, True, recall=3)])
+    assert turned.terms == {7: pytest.approx(0.002)}, "the latest judgement of a question replaces its earlier one"
+    days = [f"2026-05-{day:02d}T00:00:00Z" for day in (28, 29, 30, 31)]
+    rejudged = terms([judged(1, days[0], 7, True, recall=1, question="a"), judged(2, days[1], 7, False, recall=2, question="b"),
+                      judged(3, days[2], 7, True, recall=3, question="a"), judged(4, days[3], 7, True, recall=4, question="c")])
+    assert rejudged.terms == {7: pytest.approx(0.001 * (-(0.5 ** (3 / 30)) + 0.5 ** (2 / 30) + 0.5 ** (1 / 30)))}, \
+        "a question judged again counts from when it was judged again: after the judgement against"
+    unasked = terms([judged(1, NOW, 7, True, recall=1, question=None), judged(2, NOW, 7, True, recall=2)])
+    assert unasked.terms == {} and unasked.unverified == 1, "a judgement whose question is not recorded is not trusted"
+
+
+def test_a_pile_of_judgements_weighs_no_more_than_the_corroboration_that_lets_it_count():
+    piled = [judged(index, NOW, 7, True, recall=index) for index in range(1, 7)]
+    held = terms(piled)
+    assert held.terms == {7: pytest.approx(0.002)} and held.held == 1 and held.capped == 0
+    assert terms(piled[:2]).held == 0, "two fresh judgements are exactly what corroboration asks"
+    sunk = terms([judged(index, NOW, 7, False, recall=index) for index in range(1, 7)])
+    assert sunk.terms == {7: pytest.approx(-0.002)} and sunk.held == 1
+    aged_against = terms([judged(1, "2026-04-02T00:00:00Z", 7, False, recall=1), *(judged(index, NOW, 7, False, recall=index)
+                                                                               for index in (2, 3))])
+    assert aged_against.terms == {7: pytest.approx(-0.002)}, "the newest two against, not the oldest"
+    assert terms(piled, min_corroboration=3).terms == {7: pytest.approx(0.003)}
+    old = [judged(index, "2026-04-02T00:00:00Z", 7, True, recall=index) for index in range(1, 7)]
+    assert terms(old).terms == {7: pytest.approx(0.001 * 2 * 0.25)}, "held to its newest two, so age still tells"
+    mixed = [judged(1, "2026-05-02T00:00:00Z", 7, True, recall=1), *piled[1:3],
+             judged(9, "2026-04-02T00:00:00Z", 7, True, recall=9)]
+    assert terms(mixed).terms == {7: pytest.approx(0.002)}, "the newest two, not the oldest"
+    assert feedback_prior.PriorTerms({7: 0.002}, held=1).record([7])["held"] == 1
 
 
 def test_judgements_weigh_less_with_age():
@@ -81,13 +120,13 @@ def test_a_judgement_of_content_that_has_changed_counts_for_nothing():
 
 
 def test_the_boost_is_cut_at_its_bound_and_says_so():
-    many = [judged(index, NOW, 7, True, recall=index) for index in range(1, 6)]
+    many = [judged(index, NOW, 7, True, recall=index) for index in range(1, 3)]
     within = terms(many, weight=0.001)
-    assert within.terms == {7: pytest.approx(0.005)} and within.capped == 0
-    cut = terms(many, weight=0.001, max_boost=0.003)
-    assert cut.terms == {7: pytest.approx(0.003)} and cut.capped == 1
-    sunk = terms([judged(index, NOW, 7, False, recall=index) for index in range(1, 6)], weight=0.001, max_boost=0.003)
-    assert sunk.terms == {7: pytest.approx(-0.003)} and sunk.capped == 1
+    assert within.terms == {7: pytest.approx(0.002)} and within.capped == 0
+    cut = terms(many, weight=0.001, max_boost=0.0015)
+    assert cut.terms == {7: pytest.approx(0.0015)} and cut.capped == 1
+    sunk = terms([judged(index, NOW, 7, False, recall=index) for index in range(1, 3)], weight=0.001, max_boost=0.0015)
+    assert sunk.terms == {7: pytest.approx(-0.0015)} and sunk.capped == 1
     assert MAX_FEEDBACK_BOOST == pytest.approx(2 * (1 / 61 - 1 / 62)), "first place over second when both lanes agree"
 
 
@@ -129,11 +168,13 @@ async def test_the_read_skips_what_it_cannot_check_and_what_recall_did_not_find(
 
     for recall, chunk in ((1, 7), (2, 7), (3, 8), (4, 8)):
         await log.append(NewEvent(ts=NOW, space="default", kind="feedback",
-                                  payload={"recall_event_id": recall, "chunk_id": chunk, "useful": True, "fingerprint": "x"}))
+                                  payload={"recall_event_id": recall, "chunk_id": chunk, "useful": True, "fingerprint": "x",
+                                           "question": f"q{recall}"}))
     candidate = Chunk(chunk_id=7, episode_id=70, space="default", ordinal=0, start=0, end=4, text="text", created_at=NOW)
     found = await feedback_prior.read_prior(log, NoEpisodes(), "default", {7: candidate},  # type: ignore[arg-type]
                                             now=NOW, weight=0.0001)
-    assert found.terms == {} and found.events_read == 4 and (found.stale, found.unverified) == (0, 0)
+    assert found.terms == {} and found.events_read == 4 and found.stale == 0
+    assert found.unverified == 2, "a candidate whose episode cannot be read cannot be checked: its judgements say so"
 
 
 def test_bad_weights_are_refused():
@@ -154,8 +195,9 @@ async def engine_with(clock: Clock, *, weight: float, events: InMemoryEventLog |
 
 
 async def judge_twice(engine: MemoryEngine, query: str, chunk: int, useful: bool = True) -> None:
-    for _ in range(2):
-        result = await engine.recall("default", query, lanes=TEXT)
+    """Two judgements, from two questions: the query and the same words in another case."""
+    for asked in (query, query.upper()):
+        result = await engine.recall("default", asked, lanes=TEXT)
         await engine.feedback("default", result.event_id, chunk, useful)
 
 
@@ -201,6 +243,59 @@ async def test_recall_with_the_weight_off_is_as_it_was_and_on_moves_a_corroborat
     assert record["events_read"] == 2 and record["events_cut"] is False and record["capped"] == 0
     assert record["returned_terms"] == {str(second): pytest.approx(0.0004)}
     assert emitted.payload["feedback_prior"]["boosted"] == 1
+
+
+async def test_one_caller_asking_the_same_question_again_corroborates_nothing():
+    clock = Clock("2026-05-01T00:00:00.000Z")
+    engine = await engine_with(clock, weight=0.0002)
+    try:
+        engine.record_queries = True  # even a query kept in the clear is only a hash on the judgement
+        before = await engine.recall("default", QUERY, lanes=TEXT)
+        second = before.items[1].chunk_id
+        marks = []
+        for _ in range(3):
+            shown = await engine.recall("default", QUERY, lanes=TEXT)
+            marks.append(await engine.feedback("default", shown.event_id, second, True))
+        after = await engine.recall("default", QUERY, lanes=TEXT)
+    finally:
+        await engine.close()
+    assert len({mark.payload["question"] for mark in marks}) == 1 and marks[0].payload["question"] != QUERY
+    assert [item.chunk_id for item in after.items] == [item.chunk_id for item in before.items]
+    assert after.feedback_prior is not None and after.feedback_prior["boosted"] == 0 and after.feedback_prior["tentative"] == 1
+
+
+async def test_the_bound_limits_each_term_not_who_a_passage_can_pass():
+    """Both lanes put the leader first; a leader sunk and a follower lifted close twice the bound."""
+    clock = Clock("2026-05-01T00:00:00.000Z")
+    engine = await engine_with(clock, weight=0.0, passages=(
+        "harbour crane survey booked", "harbour crane survey notes about the old paint and the rust"))
+    engine.recency_weight = 0.0
+    query = "harbour crane survey booked"
+    try:
+        lanes = [[item.chunk_id for item in (await engine.recall("default", query, lanes=(lane,))).items]
+                 for lane in ("text", "vector")]
+        lead, follow = lanes[0][:2]
+        first, second = (await engine.recall("default", query)), (await engine.recall("default", query.upper()))
+        await engine.feedback("default", first.event_id, lead, False)
+        await engine.feedback("default", first.event_id, follow, True)
+        await engine.feedback("default", second.event_id, follow, True)
+        engine.feedback_weight = 1.0
+        after = await engine.recall("default", query)
+    finally:
+        await engine.close()
+    assert lanes[1][:2] == [lead, follow], "both lanes agree"
+    assert after.feedback_prior is not None
+    assert after.feedback_prior["returned_terms"] == {str(follow): round(MAX_FEEDBACK_BOOST, 6),
+                                                      str(lead): round(-MAX_FEEDBACK_BOOST, 6)}
+    assert [item.chunk_id for item in after.items][:2] == [follow, lead]
+
+
+def test_the_environment_template_states_the_bound_the_code_cuts_at():
+    from ..paths import REPO_ROOT
+
+    template = (REPO_ROOT / ".env.example").read_text()
+    block = template[:template.index("# SCONE_FEEDBACK_WEIGHT=")].rsplit("\n\n", 1)[-1].rsplit("SCONE_RECENCY_HALF_LIFE_DAYS", 1)[-1]
+    assert f"{MAX_FEEDBACK_BOOST:.6f}" in block and "0.01" not in block, block
 
 
 async def test_the_bound_cuts_the_term_on_the_recall_path_and_says_so(monkeypatch):

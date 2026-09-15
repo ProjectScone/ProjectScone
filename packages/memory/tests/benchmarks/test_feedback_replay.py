@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from scone_memory.bench.feedback_replay import CHOSEN, load_subjects, measure, replay, report
+from scone_memory.bench.feedback_replay import CHOSEN, MAX_JUDGEMENTS, load_subjects, measure, replay, report
 from scone_memory.core.errors import InvalidInput
 
 SUBJECTS = Path(__file__).resolve().parents[2] / "benchmarks" / "feedback-replay-v1.json"
@@ -27,12 +27,22 @@ async def test_the_chosen_weight_lifts_judged_paraphrases_and_leaves_unrelated_q
         for run in runs:
             assert run.mrr(CHOSEN, "judged") > run.mrr(0.0, "judged"), (judge, run.judged_half)
             assert abs(run.mrr(CHOSEN, "unrelated") - run.mrr(0.0, "unrelated")) <= 0.01, (judge, run.judged_half)
-            assert run.fell[CHOSEN] == [], (judge, run.judged_half)
+            assert run.fell[CHOSEN] == [] and run.held[CHOSEN] == 0, (judge, run.judged_half)
             assert run.mrr(0.0002, "unrelated") < run.mrr(0.0, "unrelated") - 0.01, \
                 "twice the weight costs unrelated questions, as the results say"
         assert "unrelated" in report(runs)
     assert recorded["kind"] == [24, 24], "two useful judgements per judged subject"
     assert all(strict > kind for strict, kind in zip(recorded["strict"], recorded["kind"])), "and some against"
+
+
+async def test_judgements_piled_on_a_passage_cost_unrelated_questions_no_more_than_two_do():
+    """Six judgements per subject, from six recorded questions: the term does not grow past corroboration."""
+    for judge in ("kind", "strict"):
+        for run in await measure(SUBJECTS, judge=judge, judgements=6, weights=(CHOSEN,)):
+            assert run.feedback_events >= 6 * 12 and run.held[CHOSEN] > 0, (judge, run.judged_half)
+            assert run.mrr(CHOSEN, "judged") > run.mrr(0.0, "judged"), (judge, run.judged_half)
+            assert run.mrr(CHOSEN, "unrelated") >= run.mrr(0.0, "unrelated") - 0.01, (judge, run.judged_half)
+            assert run.fell[CHOSEN] == [], (judge, run.judged_half)
 
 
 async def test_one_judgement_per_subject_moves_nothing():
@@ -62,6 +72,9 @@ async def test_a_subjects_file_of_another_schema_or_a_bad_replay_is_refused(tmp_
         load_subjects(other)
     with pytest.raises(InvalidInput):
         await replay(SUBJECTS, judged_half="c")
+    for judgements in (0, MAX_JUDGEMENTS + 1):
+        with pytest.raises(InvalidInput, match="judgements"):
+            await replay(SUBJECTS, judged_half="a", judgements=judgements)
 
 
 async def test_a_judge_who_was_not_shown_the_answer_marks_nothing_useful(tmp_path):
