@@ -401,8 +401,9 @@ unless the fourth route is asked for by name:
    `GET /v1/answer?route=synthesize&synthesis_mode=accumulate`,
    `answer_question(..., route="synthesize", synthesis_mode="refine")`.
    Measured on eight multi-session questions with a local 8B model, no
-   mode spoke more often than `evidence`, and `refine`'s second round
-   changed no answer ([results](../benchmarks/synthesis-modes-v1.results.md)).
+   mode spoke more often than `evidence`, and `refine`'s second rounds
+   returned the answer so far with nothing new
+   ([results](../benchmarks/synthesis-modes-v1.results.md)).
 
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
