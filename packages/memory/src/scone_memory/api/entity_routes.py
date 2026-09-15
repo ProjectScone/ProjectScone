@@ -484,20 +484,25 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     @app.get("/v1/graph/export", response_model=None)
     async def get_export(
         format: ExportFormat = "json", status: StatusMode = "current", as_of: Optional[str] = None,
-        space: str = Depends(space_for),
+        usage: bool = False, usage_since: Optional[str] = None, space: str = Depends(space_for),
     ) -> Response:
         """The view's whole graph as a file another tool reads: node-link JSON,
         GraphML, dynamic GEXF, Cypher, CSV, JSON-LD, an Obsidian vault (with a
         canvas of its notes), a wiki an agent can crawl, a Mermaid chart, an
         SVG drawing, an Obsidian canvas, one interactive page of the busiest
-        entities (`html`) or the whole graph on one page (`explorer`). The
-        file says which projection it holds and, when the read was capped,
-        that it is partial."""
+        entities (`html`), the whole graph on one page (`explorer`) or a map by
+        community (`communities`). The file says which projection it holds and,
+        when the read was capped, that it is partial. With ``usage`` (or
+        ``usage_since``) the SVG and the `html` page say on each entity how many
+        recent recalls returned it, and over which recalls; other formats ignore
+        it."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
         reasons = coverage.get("reasons") or []
         about = {"status": status, "as_of": when, "coverage": {**coverage, "truncated": bool(reasons)}}
-        exported = export_graph(projection, format, about=about)
+        recalls = (await recall_usage(engine, space, since=None if usage_since is None else _moment(engine, usage_since))
+                   if usage or usage_since is not None else None)
+        exported = export_graph(projection, format, about=about, usage=recalls)
         return Response(exported.body, media_type=exported.media_type, headers={
             "Content-Disposition": f'attachment; filename="{exported.filename}"',
             "X-Scone-Projection-Digest": projection.digest, "X-Scone-Truncated": "true" if reasons else "false",
