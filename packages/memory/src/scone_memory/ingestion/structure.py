@@ -20,6 +20,34 @@ _SEPARATOR = re.compile(r"^:?-{3,}:?$")
 MAX_STRUCTURE_NODES = 16_384
 
 
+@dataclass(frozen=True)
+class Heading:
+    """A heading the document marked itself, placed in the text it was stored as: a Word
+    paragraph's outline level, an OpenDocument ``text:h``, an HTML ``h2``. The text alone
+    does not say so, which is why it is carried beside it."""
+
+    #: Byte offset of the heading's first byte in the stored content.
+    start: int
+    level: int
+    title: str
+
+
+@dataclass(frozen=True)
+class SourceUnit:
+    """A unit the file's reader named -- a page, a slide, a row, a record -- placed in the
+    text it was stored as. ``label`` is its locator stem (``page:3``, ``table:1/row:2``), or
+    ``text`` for a run of segments the reader put in no unit."""
+
+    #: Byte offsets of its first and one past its last byte in the stored content.
+    start: int
+    end: int
+    label: str
+
+    @property
+    def kind(self) -> str:
+        return self.label.rsplit("/", 1)[-1].split(":", 1)[0]
+
+
 class ByteSpan(BaseModel):
     model_config = ConfigDict(frozen=True)
     start: int

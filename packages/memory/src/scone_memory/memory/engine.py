@@ -15,9 +15,10 @@ from functools import partial
 from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Literal, Mapping, Optional,
                     Sequence, TypedDict, cast)
 
-from . import (archive, catalog, fact_placement, fact_relationships, fact_review, file_claims, retention,
+from . import (archive, catalog, entity_merging, fact_placement, fact_relationships, fact_review, file_claims, retention,
                source_keys, vector_identity)
 from .identity import join_match
+from ..entities.merges import is_decision
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
@@ -148,6 +149,7 @@ ATTACHMENT_TYPES = (
     "application/vnd.ms-powerpoint.slideshow.macroEnabled.12",
     "application/vnd.oasis.opendocument.text", "application/vnd.oasis.opendocument.spreadsheet",
     "application/vnd.oasis.opendocument.presentation", "application/epub+zip",
+    "application/hwp+zip",
 )
 #: Bytes one attachment may carry. Evidence, not a file share.
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
@@ -196,6 +198,7 @@ class MemoryEngine:
         structure_aware: bool = False,
         semantic_aware: bool = False,
         heading_context: bool = False,
+        embedding_budget: bool = False,
         code_graph: bool = False,
         similarity_floor: Optional[float] = None,
         #: How much newer memory is favoured in fusion: the recency term's
@@ -289,6 +292,23 @@ class MemoryEngine:
         #: its file and declarations). Off unless asked for: it changes
         #: vectors, and a space's existing vectors were made without it.
         self.heading_context = heading_context
+        #: Whether the context in front of a chunk is shortened to fit the
+        #: embedder's declared window. Off unless asked for: it changes the
+        #: vectors of chunks whose context would not fit.
+        if embedding_budget:
+            window = getattr(embedder, "max_input_tokens", None)
+            if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+                raise InvalidInput("embedding_budget needs an embedder that declares its input window "
+                                   "(max_input_tokens); this one declares none")
+            counter = getattr(embedder, "count_tokens", None)
+            if callable(counter):
+                # Tried now: the vector writer's name says the tokenizer counted, so it must be able to.
+                try:
+                    counter("")
+                except Exception as error:  # noqa: BLE001 - any failure to count refuses the setting, with its reason
+                    raise InvalidInput(f"embedding_budget counts with the embedder's tokenizer, which failed: "
+                                       f"{type(error).__name__}: {error}") from error
+        self.embedding_budget = embedding_budget
         #: Whether remembering a source file also records what it says about
         #: itself — what it defines, imports and calls — as ordinary claims.
         #: Off unless asked for: it writes to the ledger, and a space's owner
@@ -564,7 +584,8 @@ class MemoryEngine:
         started = time.perf_counter()
         runtime = self._ingestion_runtime()
         configuration = (runtime.embedder.id, runtime.embedder.dim, self.contextual_embeddings, self.chunk_target,
-                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context)
+                         self.code_aware, self.code_graph, self.structure_aware, self.semantic_aware, self.heading_context,
+                         self.embedding_budget)
         try:
             new = ingestion_batch.validated_record(space, record, self.clock())
             digest = new.content_hash
@@ -582,7 +603,7 @@ class MemoryEngine:
                     or self.vectors is not runtime.vectors
                     or (self.embedder.id, self.embedder.dim, self.contextual_embeddings, self.chunk_target,
                         self.code_aware, self.code_graph, self.structure_aware,
-                        self.semantic_aware, self.heading_context) != configuration):
+                        self.semantic_aware, self.heading_context, self.embedding_budget) != configuration):
                 raise InvalidInput("ingestion configuration changed while preparing replacement; retry with current settings")
             current = await self.documents.episode_by_hash(space, digest)
             current_tombstone = await self.documents.tombstone_by_hash(space, digest)
@@ -710,6 +731,7 @@ class MemoryEngine:
         return self._table_context_embeddings
 
     def _ingestion_runtime(self, embedding_checkpoint: EmbeddingCheckpoint | None = None) -> ingestion_batch.IngestionRuntime:
+        from ..ingestion.document_outline import document_outline
         context_inputs = None
         if self.table_context_embeddings:
             from ..ingestion.table_context import embedding_inputs
@@ -720,8 +742,11 @@ class MemoryEngine:
             embedding_cache=self.embedding_cache, code_aware=self.code_aware,
             structure_aware=self.structure_aware,
             semantic_aware=self.semantic_aware, heading_context=self.heading_context,
+            embedding_budget=cast(int, getattr(self.embedder, "max_input_tokens")) if self.embedding_budget else None,
+            count_tokens=getattr(self.embedder, "count_tokens", None) if self.embedding_budget else None,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
             context_lane=self.context_lane,
+            document_outline=partial(document_outline, blobs=self.blobs),
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
@@ -1028,6 +1053,10 @@ class MemoryEngine:
         rerank: bool = True,
         graph_boost: bool = False,
         fusion: str = "rank",
+        lanes: Sequence[str] = ("vector", "text"),
+        require: Sequence[str] = (),
+        exclude: Sequence[str] = (),
+        diversity: Optional[float] = None,
     ) -> RecallResult:
         """``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -1052,6 +1081,19 @@ class MemoryEngine:
         UTF-8 payload and cooperative async time budgets. Scores remain ranking
         signals, not confidence. A failed reranker retains baseline ordering;
         ``rerank=False`` explicitly disables the configured adapter.
+
+        ``lanes`` names the lanes to run, "vector" and "text" by default. A
+        lane not named is not run, and the result's ``lanes`` names the
+        ones that answered.
+
+        ``require`` and ``exclude`` are phrases a passage must all hold, or
+        must hold none of, matched as whole words; they are checked across
+        the fused candidates before the limit, and ``phrases`` says what
+        they dropped and whether the answer came back short.
+
+        ``diversity``, a weight from 0 to 1, fills the answer's places by
+        maximal marginal relevance, so near-copies do not take several;
+        ``diversity`` on the result says how.
 
         ``graph_boost`` adds the entity lane: passages naming the question's
         entities or their neighbours in the knowledge graph. The projection
@@ -1095,7 +1137,8 @@ class MemoryEngine:
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
-                            entity_notes=notes)
+                            entity_notes=notes, lanes=lanes,
+                            require=require, exclude=exclude, diversity=diversity)
 
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its
@@ -1403,6 +1446,19 @@ class MemoryEngine:
     async def close_fact(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         return await fact_review.close_fact(self._review_runtime(), space, fact_id, reason, actor=actor)
 
+    async def merge_entities(self, space: str, alias: str, into: str, *, reason: str,
+                             actor: Optional[str] = None) -> Fact:
+        """Record that ``alias`` names the entity ``into`` names, from now.
+        Every view of the graph, and the walk retrieval takes through it,
+        then treats the two as one entity; see ``memory.entity_merging``."""
+        return await entity_merging.merge_entities(self, space, alias, into, reason=reason, actor=actor)
+
+    async def unmerge_entities(self, space: str, alias: str, *, reason: str,
+                               actor: Optional[str] = None) -> Fact:
+        """Close the merge in force for ``alias``: the names part from now,
+        and a view of an earlier moment still shows them joined."""
+        return await entity_merging.unmerge_entities(self, space, alias, reason=reason, actor=actor)
+
     async def facts(
         self,
         space: str,
@@ -1560,6 +1616,8 @@ def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
     both subjects in one group, so "mark works_at acme" and "acme based_in
     lisbon" meet. Pure; order is by the smallest fact id in each group."""
     parent: dict[str, str] = {}
+    # A merge decision says two names are one; it is not a claim to reason from.
+    facts = [fact for fact in facts if not is_decision(fact)]
 
     key = entity_key
 
