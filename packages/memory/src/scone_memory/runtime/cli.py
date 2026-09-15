@@ -561,6 +561,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "changed, until interrupted or --rounds passes are done")
     p.add_argument("--every", type=float, default=5.0, help="seconds between passes under --watch (default 5)")
     p.add_argument("--rounds", type=int, default=0, help="passes to make under --watch, 0 for until interrupted (default 0)")
+    p.add_argument("--allow-shrink", action="store_true",
+                   help="under --watch, forget every file gone since the last pass however many that is; without "
+                        "this a pass that stops seeing most of the tree keeps those memories and says so")
+    p.add_argument("--shrink-share", type=float, default=SHRINK_SHARE, metavar="SHARE",
+                   help=f"the share of the last pass's files that may go before the guard refuses to forget them "
+                        f"(over 0 to 1, default {SHRINK_SHARE}); fewer than {SHRINK_FLOOR} files gone is always "
+                        f"forgotten, since a share of a handful says nothing")
     p.add_argument("--repo", default=None, metavar="NAME",
                    help="name this repository: every file is held as NAME/path, so several repositories mapped "
                         "into one space keep their files apart, and an import of a package another one "
@@ -959,6 +966,16 @@ async def map_command(args: argparse.Namespace, engine: MemoryEngine, out) -> in
         return code
 
 
+#: A watch pass that stops seeing this share of the files the last pass saw
+#: forgets none of them: a directory that cannot be read this minute -- a
+#: permission changed, a volume not mounted -- looks exactly like one whose
+#: files were deleted, and only one of those should forget a memory.
+SHRINK_SHARE = 0.5
+#: Below this many files gone, the share is not asked: two of three gone is
+#: 67% and an ordinary morning's editing.
+SHRINK_FLOOR = 5
+
+
 async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched: dict[str, set[str]] | None = None) -> int:
     """Remember every source file under a directory, stored under the path
     it was read from. With --graph, also record what each file says about
@@ -1158,15 +1175,28 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     # Under --watch, a file the last pass saw and this one did not is gone:
     # its memory is forgotten and its claims closed, as sync does.
     removed = 0
+    shrink_refused: dict[str, object] | None = None
     if watched is not None:
-        for gone in sorted(watched.get("seen", set()) - seen):
-            try:
-                episode = await engine.episode_by_key(args.space, sync_key(marker, gone))
-            except NotFound:
-                continue
-            await engine.forget(args.space, episode.episode_id, with_claims="exclude")
-            removed += 1
-        watched["seen"] = set(seen)
+        before = watched.get("seen", set())
+        missing = sorted(before - seen)
+        share = getattr(args, "shrink_share", SHRINK_SHARE)
+        if type(share) is not float or not 0 < share <= 1:
+            raise InvalidInput("--shrink-share is over 0 and at most 1")
+        # Kept, not forgotten: what this pass could not see may be gone or
+        # may be unreadable, and the two cannot be told apart from here.
+        if (missing and not getattr(args, "allow_shrink", False)
+                and len(missing) >= SHRINK_FLOOR and len(missing) > share * len(before)):
+            shrink_refused = {"would_forget": len(missing), "seen_before": len(before), "share": share,
+                              "files": missing[:20], "files_truncated": len(missing) > 20}
+        else:
+            for gone in missing:
+                try:
+                    episode = await engine.episode_by_key(args.space, sync_key(marker, gone))
+                except NotFound:
+                    continue
+                await engine.forget(args.space, episode.episode_id, with_claims="exclude")
+                removed += 1
+            watched["seen"] = set(seen)
     # Reported, never asserted. See `code_resolution`: a single matching
     # declaration is a candidate, not evidence, and sampling said so.
     settled = resolve_across_files(sites, declared) if args.graph else None
@@ -1175,6 +1205,10 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
         parts.append(f"{updated} updated")
     if removed:
         parts.append(f"{removed} gone since the last pass, forgotten")
+    if shrink_refused is not None:
+        parts.append(f"{shrink_refused['would_forget']} of {shrink_refused['seen_before']} file(s) seen last pass "
+                     f"are missing: kept, not forgotten (over --shrink-share {shrink_refused['share']:g}; "
+                     f"--allow-shrink forgets them)")
     if again:
         parts.append(f"{again} already here")
     if walked.ignored_files or walked.ignored_directories:
@@ -1226,6 +1260,7 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
                      + ", ".join(where for where, _ in sorted(withheld)))
     if getattr(args, "json", False):
         print(_ledger_json({"read": read, "updated": updated, "removed": removed, "deduplicated": again,
+                            **({"shrink_refused": shrink_refused} if shrink_refused is not None else {}),
                             "embeddings_reused": reused_vectors, "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
