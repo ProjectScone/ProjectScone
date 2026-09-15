@@ -95,6 +95,8 @@
       "consolidation.retry": false,
       "graph.health": true,
       "graph.cycles": true,
+      "graph.stats": true,
+      "graph.hubs": true,
       "recall.graph_boost": true,
       "recall.lessons": true,
       "recall.expand_summaries": true,
