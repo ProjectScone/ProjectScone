@@ -155,6 +155,12 @@ async def test_a_conversation_chooses_which_buckets_stand(engine, include, stati
     if dynamic:
         assert [claim["fact_id"] for claim in block["dynamic"]] == [trip.fact_id]
         assert context["profile_buckets"]["dynamic"]["fact_ids"] == [trip.fact_id]
+    # The dynamic bucket is ordered by weight, and a claim stated often can
+    # lead one stated once more lately: the instruction must not say otherwise.
+    instruction = next(m["content"] for m in model.requests[-1]
+                       if str(m.get("content", "")).startswith("Scone standing")).split("\n")[0]
+    assert "most recently stated first" not in instruction
+    assert "the most often and most lately stated first" in instruction
     assert ("static" in context["profile_buckets"], "dynamic" in context["profile_buckets"]) == (static, dynamic)
     assert context["profile_bytes"] == len(model.requests[-1][
         next(i for i, m in enumerate(model.requests[-1]) if str(m.get("content", "")).startswith("Scone standing"))

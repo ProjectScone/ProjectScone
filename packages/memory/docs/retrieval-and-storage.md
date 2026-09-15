@@ -245,18 +245,28 @@ claim names it in `coverage.placed` with the numbers it read:
    predicate's values never count as changes of one another. The slot's
    first value is not a change, a change on the window's first instant is
    outside it, and the same value stated again after a gap is not a change.
-   Closed and excluded claims count as history; proposed and declined ones
-   never held and do not.
-3. `tenure`: the claim has held for at least
+   Closed and excluded claims count as history, including claims
+   `forget(..., with_claims="exclude")` excluded: exclusion hides a claim
+   from reading, it does not rewrite the ledger's history. Proposed and
+   declined claims never held and do not count, nor does a value closed at
+   the instant it began (the ledger closes a value that way when another
+   supersedes it at the same instant).
+3. `tenure`: the claim's value has held unbroken for at least
    `SCONE_PROFILE_STATIC_AFTER_DAYS` (default 90): static; younger, dynamic.
+   Unbroken counts earlier rows of the same value that reach the claim's
+   start, as when a value is backfilled to an earlier day or stated again
+   from the instant it was closed; a different value or a gap breaks it.
+   `held_days` is that span.
 
 The static bucket keeps the profile's own order (most restated, then
-newest). The dynamic bucket decays: each claim weighs `(1 + restatements) *
-0.5 ** (days since last stated / SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS)`
-(default 30 days), where last stated is the newest of its own start and
-its restatements up to now, so what was said often long ago falls behind
-what was said lately. `placed` carries `last_stated` and `weight` for
-dynamic claims.
+newest). The dynamic bucket decays: each claim weighs `stated * 0.5 **
+(days since last stated / SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS)` (default
+30 days), where `stated` counts the claim and its restatements up to now,
+and last stated is the newest of those. Each statement adds as much weight
+as the first and each half-life halves it, so a claim stated `n` times
+falls behind one stated once only after `log2(n)` more half-lives: at the
+default, six statements two months ago still lead one yesterday.
+`placed` carries `last_stated` and `weight` for dynamic claims.
 
 Each bucket is bounded on its own: `static_limit` and `dynamic_limit` (1 to
 50, default 10) claims, `static_max_bytes` and `dynamic_max_bytes` (100 to
