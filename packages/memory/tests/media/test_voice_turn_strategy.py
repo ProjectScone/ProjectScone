@@ -10,11 +10,12 @@ import time
 
 import pytest
 
-from scone_memory.realtime.audio import SpeechStarted, Transcript
+from scone_memory.realtime.audio import AudioChunk, SpeechStarted, Transcript
 from scone_memory.realtime.keypad import KeypadPolicy, Keypress
 from scone_memory.realtime.turn_strategy import EndOfTurn, KeypadSubmit, MinSpeech
 from scone_memory.realtime.voice import VoiceSession
 
+from .test_voice_idle import LOUD, QUIET, Duplex, Loudness, finish_duplex, frames
 from .test_voice_turn_end import SID, SPACE, Rig, memory  # noqa: F401 - memory is a fixture
 
 
@@ -123,7 +124,8 @@ async def test_keypad_submit_waits_for_the_key_whatever_was_said_and_keyed_befor
         await keys(rig, "#")
         [user] = await rig.users(1)
         assert user.content == "My account number is four one one. [keypad] 5 [keypad] #"
-        assert (user.metadata["turn_end"], user.metadata["keypad_keys"]) == ("keypad", "#")
+        assert (user.metadata["turn_end"], user.metadata["keypad_keys"]) == ("keypad", "5#"), \
+            "the receipt is every key the turn was given, as its text is"
         assert rig.session.last_turn_receipt.fragments == 4
         assert len(rig.model.contexts) == 1
         await rig.finish()
@@ -138,7 +140,13 @@ async def test_keypad_submit_holds_collected_keys_that_timed_out_and_takes_the_t
         await keys(rig, "3", "#")
         [user] = await rig.users(1)
         assert user.content == "[keypad] 12 [keypad] 3#"
-        assert user.metadata["keypad_ended"] == "terminator"
+        started = rig.session.last_keypad_receipt.at[0]
+        metadata = {k: v for k, v in user.metadata.items() if k.startswith("keypad_")}
+        assert (metadata["keypad_keys"], metadata["keypad_ended"], metadata["keypad_sources"]) == ("123#", "terminator", "eeee")
+        assert metadata["keypad_started_ms"] == str(round((started - rig.session._origin) * 1000))
+        gaps = [int(ms) for ms in metadata["keypad_at_ms"].split(",")]
+        assert len(gaps) == 4 and gaps[0] == 0 and gaps[2] >= 300, "timed from the first key, when keying began"
+        assert "keypad_dropped" not in metadata
         await rig.finish()
 
 
@@ -162,6 +170,7 @@ async def test_keys_held_for_a_submit_that_would_outgrow_the_turn_release_it_fir
         await keys(rig, "5")
         [user] = await rig.users(1)
         assert (len(user.content), user.metadata["turn_end"]) == (31995, "max_bytes")
+        assert "keypad_keys" not in user.metadata, "the key did not join the turn it released"
         await rig.finish()
 
 
@@ -183,3 +192,95 @@ async def test_something_that_is_not_a_strategy_is_refused_before_resources(memo
     with pytest.raises(ValueError, match="turn_strategy"):
         VoiceSession(memory, SPACE, SID, transport_factory=object, stt_factory=object, model_factory=object,
                      tts_factory=object, capture=True, turn_strategy=strategy)
+
+
+async def test_keypad_submit_keeps_the_latest_keys_in_the_receipt_and_says_how_many_it_left_out(memory):
+    from scone_memory.realtime.keypad import MAX_DIGITS
+
+    async with Rig(memory, keypad=KeypadPolicy("append"), turn_strategy=KeypadSubmit(), turn_max_duration=5) as rig:
+        await keys(rig, *("1234567890" * 4), "#")
+        [user] = await rig.users(1)
+        assert user.content.count("[keypad]") == 41, "the turn's text keeps every key"
+        assert (len(user.metadata["keypad_keys"]), user.metadata["keypad_dropped"]) == (MAX_DIGITS, str(41 - MAX_DIGITS))
+        assert user.metadata["keypad_keys"] == ("1234567890" * 4 + "#")[-MAX_DIGITS:]
+        assert len(user.metadata["keypad_at_ms"].split(",")) == len(user.metadata["keypad_sources"]) == MAX_DIGITS
+        await rig.finish()
+
+
+async def test_min_speech_times_a_turn_from_its_own_start_not_an_earlier_start_that_gave_no_words(memory):
+    async with Rig(memory, turn_strategy=MinSpeech(.5), turn_hold=1.0) as rig:
+        await rig.say(SpeechStarted())  # a cough the recognizer started on and gave nothing for
+        await asyncio.sleep(.6)
+        await rig.say(SpeechStarted(), Transcript("Mm."))
+        await asyncio.sleep(.15)
+        assert rig.session.stored_count == 0, "a backchannel is held, however long ago the cough was"
+        [user] = await rig.users(1)
+        assert user.metadata["turn_end"] == "strategy_timeout"
+        await rig.finish()
+
+
+async def test_min_speech_times_a_turn_from_its_own_speech_not_a_noise_the_detector_heard_stop(memory):
+    stt = Duplex()
+    async with Rig(memory, stt_factory=lambda: stt, activity_factory=Loudness, turn_strategy=MinSpeech(.5),
+                   turn_hold=1.0) as rig:
+        await frames(rig, LOUD, QUIET, QUIET)  # a knock, with no words
+        await asyncio.sleep(.6)
+        await stt.events.put(SpeechStarted())
+        await stt.events.put(Transcript("Mm."))
+        await asyncio.sleep(.15)
+        assert rig.session.stored_count == 0, "a backchannel is held, however long ago the knock was"
+        [user] = await rig.users(1)
+        assert user.metadata["turn_end"] == "strategy_timeout"
+        await finish_duplex(rig, stt)
+
+
+START, WORDS = SpeechStarted(), Transcript("Yes.")
+#: Signs of one speech, 350 ms from its first to its words, after what came before it.
+ONE_SPEECH = {
+    "detector_stops_before_the_words": [LOUD, .35, QUIET, WORDS],
+    "recognizer_starts_after_the_detector": [LOUD, .2, START, .15, QUIET, WORDS],
+    "after_a_spoken_turn": [START, .35, Transcript("I have a question."), "turn", LOUD, .2, START, .15, QUIET, WORDS],
+    "after_a_cough": [START, Transcript(""), .05, LOUD, .2, START, .15, QUIET, WORDS],
+    "after_a_knock": [LOUD, QUIET, .4, LOUD, .2, START, .15, QUIET, WORDS],
+    "a_partial_after_the_detector_stops": [LOUD, .35, QUIET, Transcript("Ye", final=False), WORDS],
+    "recognizer_starts_again_after_a_partial": [START, .2, Transcript("I", final=False), .15, START, WORDS],
+    "a_held_turn_and_a_start_that_gave_no_words": [START, Transcript("Yes."), .35, START, .05, START,
+                                                   Transcript("the second one.")],
+}
+
+
+@pytest.mark.parametrize("steps", ONE_SPEECH.values(), ids=ONE_SPEECH.keys())
+async def test_min_speech_times_one_speech_from_its_first_sign_to_its_words(memory, steps):
+    stt = Duplex()
+    async with Rig(memory, stt_factory=lambda: stt, activity_factory=Loudness, turn_strategy=MinSpeech(.3),
+                   turn_hold=2.0) as rig:
+        turns = 1
+        for step in steps[:-1]:
+            if step == "turn":
+                await rig.users(turns)
+                turns += 1
+            elif isinstance(step, float):
+                await asyncio.sleep(step)
+            elif isinstance(step, AudioChunk):
+                await frames(rig, step)
+            else:
+                await stt.events.put(step)
+        began = time.perf_counter()
+        await stt.events.put(steps[-1])
+        users = await rig.users(turns)
+        assert time.perf_counter() - began < .5, "timed from its first sign, the speech is long enough"
+        assert (users[-1].metadata["turn_end"], rig.session.last_turn_receipt.cue) == \
+            ("silence", "semantic turn detection off")
+        await finish_duplex(rig, stt)
+
+
+@pytest.mark.parametrize("mode", ["append", "collect"])
+async def test_keys_held_in_a_turn_when_the_session_is_closed_keep_their_receipt(memory, mode):
+    rig = Rig(memory, keypad=KeypadPolicy(mode, timeout=.1), turn_strategy=KeypadSubmit(), turn_max_duration=5)
+    async with rig:
+        await keys(rig, "1", "2")
+        await asyncio.sleep(.3)  # collect: the timeout ends the entry, which is held for the submit key
+        await keys(rig, "3")
+        await asyncio.sleep(.05)
+    [user] = await rig.users(1)
+    assert (user.metadata["turn_end"], user.metadata["keypad_keys"]) == ("session_ended", "123")
