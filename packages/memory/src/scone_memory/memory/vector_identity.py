@@ -98,6 +98,11 @@ def writer_of(engine: "MemoryEngine") -> str:
         # Headings change what is embedded, exactly as table headers do.
         from ..ingestion.batch import HEADING_CONTEXT_VERSION
         writer += ';headings=' + HEADING_CONTEXT_VERSION
+    if engine.embedding_budget:
+        # Shortening context to fit changes what some chunks are embedded with.
+        from ..ingestion.embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION
+        writer += ';budget=' + (TOKENIZER_VERSION if callable(getattr(engine.embedder, "count_tokens", None))
+                                else BUDGET_VERSION)
     return writer
 
 
