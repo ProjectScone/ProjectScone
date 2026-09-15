@@ -105,6 +105,21 @@ per-document counts of pages cut, pages kept whole, and lines left out.
   image is not silently converted into a successful empty document.
 - A mixed document retains page numbering and reports `empty_pages`. Its episode
   has `pdf_coverage=partial`; empty pages may be blank or may require OCR.
+- A page whose text layer is mostly characters no reader can use (private-use
+  code points, `(cid:N)` runs, replacement characters or control bytes, at least
+  8 of them and at least 30% of the page's visible characters) is reported in
+  `unreadable_pages` and in the episode's `pdf_unreadable_pages`, and the
+  coverage is `partial`. Its text is kept, never deleted; with OCR it is
+  recognized instead. A few icon glyphs beside prose do not make a page
+  unreadable, and whitespace is not counted either way.
+- A PDF's bookmarks give each page its section: the titles of the last
+  bookmark at each level that begins on or before the page, outermost first
+  (`page.section`, and `section: "Chapter 2 > Refunds"` on the page's segment
+  in a file import). The text is unchanged. At most 2,000 bookmarks and 8 levels
+  are read, each title cut to 256 characters; past those the outline is read to
+  its bound and `outline` says `capped`, one that cannot be read says
+  `unreadable`, and a PDF without bookmarks says nothing. A segment's section is
+  bounded to one metadata value by dropping its outermost titles (`… > `).
 - `pdf_coverage=text_layer` means every page yielded text. It does **not** certify
   that every visible word, figure or table was understood.
 - Encrypted PDFs, malformed files, absent parser dependencies and exceeded limits
@@ -160,7 +175,7 @@ With the `api,pdf` extras installed, `scone-memory serve` exposes:
 All requests require bearer authentication. Ingestion requires a write/full key;
 page evidence and the returned relative `download_path` allow read keys in the
 same space. Forgotten sources stop resolving. The ingest response contains
-`added`, `original`, `manifest`, and `empty_pages`, matching the Python result.
+`added`, `original`, `manifest`, `empty_pages` and `unreadable_pages`, matching the Python result.
 Retrying identical bytes and parser output reuses the episode.
 
 `documents.pdf` in `/v1/capabilities` reflects parser dependency availability.
