@@ -26,6 +26,8 @@ def test_template_parses_as_actual_local_settings():
     assert settings.keys == {} and not settings.chat_url and not settings.derive
     assert settings.distill_accept_at is None and settings.retention == {}
     assert settings.voice_keypad == "off"
+    assert settings.voice_idle_timeout == 0 and settings.voice_turn_strategy == "end_of_turn"
+    assert settings.voice_idle_end_after == 3 and settings.voice_min_speech is None
     assert values["LANGSMITH_TRACING"] == "false" and values["OPENAI_AGENTS_DISABLE_TRACING"] == "true"
 
 

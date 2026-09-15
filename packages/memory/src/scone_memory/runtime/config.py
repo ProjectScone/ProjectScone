@@ -115,6 +115,15 @@
                                    finishes the user's turn (append), or keys are collected until
                                    #, 3 s without a key or 32 keys into one turn (collect). Off by
                                    default, when the socket refuses a keypad message
+    SCONE_VOICE_IDLE_TIMEOUT (0)   served voice sessions count an idle after this many seconds with no
+                                   user speech while the bot is not speaking; 0 is off
+    SCONE_VOICE_IDLE_PROMPT        what an idle says ("Are you still there?")
+    SCONE_VOICE_IDLE_END_AFTER (3) the idle in a row that ends the session instead; 0 for never. Each
+                                   idle is a conversation_idle event; a prompt is kept as said
+    SCONE_VOICE_TURN_STRATEGY end_of_turn | min_speech | keypad_submit   when the bot may take its
+                                   turn: when the turn ends (default), once its speech lasted
+                                   SCONE_VOICE_MIN_SPEECH seconds (0.8), or when the caller presses #
+                                   (needs SCONE_VOICE_KEYPAD)
 
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)
@@ -137,6 +146,7 @@ if TYPE_CHECKING:
 
 from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
+from ..realtime.idle import END_AFTER as IDLE_END_AFTER, PROMPT as IDLE_PROMPT
 from ..retrieval.followup import REWRITE_TIMEOUT_S
 from ..retrieval.feedback_prior import validate_feedback_weight
 from ..retrieval.fusion import RECENCY_HALF_LIFE_DAYS, W_RECENCY, validate_recency
@@ -363,6 +373,14 @@ class Settings:
     semantic_turn: bool = False
     #: SCONE_VOICE_KEYPAD: off, append (each key finishes the turn) or collect (keys until #).
     voice_keypad: str = "off"
+    #: SCONE_VOICE_IDLE_*: seconds before a quiet user is prompted (0 is off), the prompt, and the
+    #: idle in a row that ends the session (0 for never). See runtime.voice_turns.
+    voice_idle_timeout: float = 0.0
+    voice_idle_prompt: str = IDLE_PROMPT
+    voice_idle_end_after: int = IDLE_END_AFTER
+    #: SCONE_VOICE_TURN_STRATEGY and SCONE_VOICE_MIN_SPEECH: when the bot may take its turn.
+    voice_turn_strategy: str = "end_of_turn"
+    voice_min_speech: Optional[float] = None
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
@@ -372,7 +390,9 @@ class Settings:
         from .conversation_followup import validate_followup_settings
         from .conversation_retrieval import validate_adaptive_settings
         from .conversation_tools import validate_tool_settings
+        from .voice_turns import validate_voice_settings
 
+        validate_voice_settings(self)
         validate_review_settings(self)
         validate_adaptive_settings(self)
         validate_followup_settings(self)
@@ -679,6 +699,12 @@ class Settings:
             followup_timeout=parse_seconds("SCONE_FOLLOWUP_TIMEOUT", env.get("SCONE_FOLLOWUP_TIMEOUT"), REWRITE_TIMEOUT_S),
             semantic_turn=parse_flag("SCONE_SEMANTIC_TURN", env.get("SCONE_SEMANTIC_TURN")),
             voice_keypad=_voice_keypad(env.get("SCONE_VOICE_KEYPAD")),
+            voice_idle_timeout=_environment_seconds("SCONE_VOICE_IDLE_TIMEOUT", env.get("SCONE_VOICE_IDLE_TIMEOUT")) or 0.0,
+            voice_idle_prompt=(env.get("SCONE_VOICE_IDLE_PROMPT") or "").strip() or IDLE_PROMPT,
+            voice_idle_end_after=_environment_integer("SCONE_VOICE_IDLE_END_AFTER",
+                                                      env.get("SCONE_VOICE_IDLE_END_AFTER") or str(IDLE_END_AFTER)),
+            voice_turn_strategy=(env.get("SCONE_VOICE_TURN_STRATEGY") or "").strip().lower() or "end_of_turn",
+            voice_min_speech=_environment_seconds("SCONE_VOICE_MIN_SPEECH", env.get("SCONE_VOICE_MIN_SPEECH")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
@@ -1192,6 +1218,12 @@ def parse_flag(name: str, raw: Optional[str]) -> bool:
 
 #: What a served voice session does with a key the client sends: nothing, or a realtime.keypad mode.
 VOICE_KEYPAD_MODES = ("off", "append", "collect")
+
+
+def _environment_seconds(name: str, raw: Optional[str]) -> Optional[float]:
+    from .voice_turns import environment_seconds
+
+    return environment_seconds(name, raw)
 
 
 def _voice_keypad(raw: Optional[str]) -> str:
