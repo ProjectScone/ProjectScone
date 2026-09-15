@@ -2068,6 +2068,26 @@ lines that put it in force — nothing is written anywhere, and no engine
 reads a tuning file behind anyone's back. It uses its own in-process
 stores per item, so the configured store is neither read nor written.
 
+## Scoring an answer by what it means, with a threshold from its own embedder
+
+Exact match and token F1 score a correct paraphrase as wrong: a one-word
+reference restated in a sentence gets nearly nothing.
+`bench.answer_similarity.answer_similarity` gives the answer's best cosine to
+any of its references. A pass needs a `SimilarityThreshold`, which carries the
+embedder id and width it was measured with; with any other embedder the
+result keeps its score, decides nothing, and says why, because a cosine's
+scale belongs to the model that made it. The reference framework passes at a
+fixed 0.8 for every embedder.
+
+`measure_threshold` takes the threshold without a judge. The scores of
+answers that match their reference exactly are the passes it must allow; the
+scores of answers set against another question's reference are the passes it
+must refuse; the threshold is the lowest that passes at most
+`target_false_pass` (5% by default) of those, with the matched pass rate
+beside it. A threshold that passes no matched answer is not taken. A pass is
+a score above the threshold. The measurement over the public QA rows with
+the local embedder has not been run yet.
+
 ## Measuring on a BEIR dataset
 
 ```bash
