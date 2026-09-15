@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Iterable, Literal, Optional
 
 from ..core.errors import InvalidInput
@@ -77,11 +77,8 @@ def _check(half_life_days: float, min_corroboration: int) -> None:
         raise InvalidInput("min_corroboration must be a whole number from 1")
 
 
-def fold_lessons(events: Iterable[Event], *, now: str, half_life_days: float = 30,
-                 min_corroboration: int = 2) -> dict[int, Lesson]:
-    """One lesson per judged passage, from feedback events up to ``now``."""
-    _check(half_life_days, min_corroboration)
-    moment = parse_rfc3339(now)
+def judgements_by_passage(events: Iterable[Event], moment: datetime) -> dict[int, list[Event]]:
+    """Per judged passage, the latest judgement of each recall made up to ``moment``, oldest first."""
     latest: dict[tuple[int, int], Event] = {}
     for event in sorted(events, key=lambda event: (parse_rfc3339(event.ts), event.event_id)):
         if event.kind != "feedback" or parse_rfc3339(event.ts) > moment:
@@ -90,13 +87,27 @@ def fold_lessons(events: Iterable[Event], *, now: str, half_life_days: float = 3
     by_chunk: dict[int, list[Event]] = {}
     for (_, chunk), event in latest.items():
         by_chunk.setdefault(chunk, []).append(event)
+    for judged in by_chunk.values():
+        judged.sort(key=lambda event: (parse_rfc3339(event.ts), event.event_id))
+    return by_chunk
+
+
+def judgement_weight(event: Event, moment: datetime, half_life_days: float) -> float:
+    """What one judgement weighs at ``moment``: +1 useful, -1 not, halving every half-life."""
+    age = (moment - parse_rfc3339(event.ts)) / timedelta(days=1)
+    return (1.0 if event.payload["useful"] else -1.0) * 0.5 ** (age / half_life_days)
+
+
+def fold_lessons(events: Iterable[Event], *, now: str, half_life_days: float = 30,
+                 min_corroboration: int = 2) -> dict[int, Lesson]:
+    """One lesson per judged passage, from feedback events up to ``now``."""
+    _check(half_life_days, min_corroboration)
+    moment = parse_rfc3339(now)
     folded: dict[int, Lesson] = {}
-    for chunk, judged in by_chunk.items():
+    for chunk, judged in judgements_by_passage(events, moment).items():
         useful = sum(bool(event.payload["useful"]) for event in judged)
         against = len(judged) - useful
-        score = sum((1.0 if event.payload["useful"] else -1.0)
-                    * 0.5 ** ((moment - parse_rfc3339(event.ts)) / timedelta(days=1) / half_life_days)
-                    for event in judged)
+        score = sum(judgement_weight(event, moment, half_life_days) for event in judged)
         state: State = ("contested" if useful and against else "dead_end" if against
                         else "preferred" if useful >= min_corroboration else "tentative")
         latest_judged = max(judged, key=lambda event: parse_rfc3339(event.ts))  # instants, not strings
