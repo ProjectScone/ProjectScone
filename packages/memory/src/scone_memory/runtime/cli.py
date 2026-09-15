@@ -84,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--chunking-profile", choices=tuple(CHUNKING_PROFILES),
                    help="cut at this genre's boundaries (implies --chunking structure)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
+    p.add_argument("--forget-after", help="forget it at this time: RFC 3339, YYYY-MM-DD, or a duration such as 30d or "
+                                          "1d12h; recall leaves it out from then, forget-due forgets it")
 
     p = sub.add_parser("import-chat", help="a WhatsApp, Telegram, Discord or Slack export, one conversation memory per message")
     p.add_argument("file", help="WhatsApp .txt, Telegram result.json, Discord .json, or a Slack .zip export or day .json")
@@ -249,6 +251,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-embed every stored chunk with this embedder and record it as the writer")
     action.add_argument("--adopt", action="store_true",
                         help="vouch that vectors stored before writers were recorded came from this embedder")
+    p = sub.add_parser("forget-due", help="forget what each memory's own --forget-after says is due, "
+                                          "most overdue first (bounded)")
+    p.add_argument("--limit", type=int, default=100, help="episodes one pass forgets (1 to 1000, default 100)")
+    p.add_argument("--dry-run", action="store_true", help="name what is due and forget nothing")
+    p.add_argument("--now", help="judge what is due at this time; earlier than the clock, never later")
+    p.add_argument("--before", type=int, metavar="EPISODE_ID", help="walk on from a previous pass's resume point")
+    p.add_argument("--with-claims", choices=["keep", "exclude"], default="keep",
+                   help="exclude: take the claims only these sources supported out of recall, reversibly")
     p = sub.add_parser("expire", help="forget episodes older than a retention policy (oldest first, bounded); facts never expire")
     p.add_argument("--keep", action="append", default=[], metavar="KIND=DAYS", required=True,
                    help="keep this kind for this many days by the episode's own time (repeatable)")
@@ -1855,6 +1865,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             raise InvalidInput("--image cannot be combined with --jsonl; select a single source note")
         if args.jsonl and (args.chunking or args.chunking_profile):
             raise InvalidInput("--chunking and --chunking-profile are not applied to --jsonl; set them per record")
+        if args.jsonl and args.forget_after:
+            raise InvalidInput("--forget-after is not applied to --jsonl; set forget_after per record")
         raw = read_source(args.file, stdin)
         attachment = None
         if args.jsonl:
@@ -1880,7 +1892,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     created_at=args.created_at, metadata=metadata,
                     attachment_ids=[attachment.attachment_id] if attachment else [],
                     dedup_key=args.dedup_key, replace=args.replace, chunking=args.chunking,
-                    chunking_profile=args.chunking_profile,
+                    chunking_profile=args.chunking_profile, forget_after=args.forget_after,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)
@@ -1899,6 +1911,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             dup = len(added) - fresh - updated
             print(f"remembered {fresh} episode(s)" + (f", {updated} replaced" if updated else "")
                   + (f", {dup} already known" if dup else ""), file=out)
+            for a in added:
+                if a.forget_after is not None:
+                    print(f"  episode {a.episode_id} is to be forgotten after {a.forget_after}", file=out)
             if attachment:
                 print(f"original image linked: {attachment.attachment_id} ({attachment.bytes} bytes)", file=out)
         return 0
@@ -2366,6 +2381,25 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                       f"removed {reembedded.orphans_removed} orphan vector(s)", file=out)
             if vector_state["blocked"]:
                 print(f"  vector lane off: {vector_state['blocked']}", file=out)
+        return 0
+
+    if args.command == "forget-due":
+        swept = await engine.forget_due(space, args.now, limit=args.limit, dry_run=args.dry_run,
+                                        with_claims=args.with_claims, before=args.before)
+        if args.json:
+            emit(swept.model_dump())
+            return 0
+        verb = "would forget" if swept.dry_run else "forgot"
+        print(f"{verb} {len(swept.items) if swept.dry_run else len(swept.forgotten)} episode(s) due at {swept.now}"
+              + (f"; {swept.remaining} due left for the next pass" if swept.remaining else ""), file=out)
+        for taken in swept.items:
+            print(f"  episode {taken.episode_id}: {taken.outcome}, {taken.reason}", file=out)
+        if not swept.scan_complete:
+            print(f"note: the walk stopped after {swept.scanned} episode(s) and older ones were not read; "
+                  f"run again with --before {swept.resume_before}", file=out)
+        if swept.unreadable:
+            print(f"note: {len(swept.unreadable)} episode(s) hold a forget_after that is not a time and were left: "
+                  f"{', '.join(map(str, swept.unreadable))}", file=out)
         return 0
 
     if args.command == "expire":

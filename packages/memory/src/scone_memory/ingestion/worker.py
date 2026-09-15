@@ -23,6 +23,7 @@ from .derive import Deriver
 from .distill import DistillError, Distiller
 from ..memory.engine import MemoryEngine
 from ..core.errors import SconeError
+from ..memory.scheduled_forget import MAX_PASS
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,10 @@ class PassReport:
     rejected_reasons: dict[str, int] = field(default_factory=dict)
     #: Episodes the retention policy forgot in this pass.
     expired: int = 0
+    #: Episodes forgotten in this pass because their own ``forget_after``
+    #: had come, and whether more were due than one pass takes.
+    forgotten_due: int = 0
+    forget_due_limited: bool = False
     #: The derivation pass, when the worker has a deriver: groups sent to
     #: the model, inferences proposed, restated, and rejected by the gate.
     derived_sent: int = 0
@@ -112,7 +117,7 @@ class ConsolidationWorker:
             raise
         finally:
             counts = {name: getattr(report, name, 0) for name in (
-                "episodes", "proposed", "accepted", "parked", "rejected", "expired",
+                "episodes", "proposed", "accepted", "parked", "rejected", "expired", "forgotten_due",
             )}
             logger.log(logging.INFO if outcome == "completed" else logging.WARNING,
                        "consolidation.finished", extra={
@@ -125,6 +130,15 @@ class ConsolidationWorker:
     async def _run_once(self, space: str) -> PassReport:
         started = self.clock()
         report = PassReport(space)
+        sweep_error: Optional[str] = None
+        try:
+            # First, and whatever consolidation then does: forgetting what a
+            # memory's own schedule says is due needs no policy and no model,
+            # and nothing later in the pass should read what is due to go.
+            swept = await self.engine.forget_due(space, limit=max(1, min(self.batch, MAX_PASS)))
+            report.forgotten_due, report.forget_due_limited = len(swept.forgotten), swept.limited or not swept.scan_complete
+        except SconeError as e:
+            sweep_error = f"{type(e).__name__}: {e}"
         try:
             outcomes = await self.distiller.distill_pending(space, limit=self.batch) if self.distiller is not None else []
         except DistillError as e:
@@ -136,6 +150,8 @@ class ConsolidationWorker:
         except Exception as e:  # noqa: BLE001 - a worker must not die on a transport hiccup
             outcomes = []
             report.error = type(e).__name__
+        if sweep_error is not None and report.error is None:
+            report.error = sweep_error
         for o in outcomes:
             if o.error is not None and o.episode_id is not None:
                 report.episode_errors[str(o.episode_id)] = o.error[:500]

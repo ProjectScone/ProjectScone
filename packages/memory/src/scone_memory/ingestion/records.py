@@ -40,11 +40,15 @@ class Record:
     #: paper, manual, qa, resume); implies ``chunking="structure"``. Kept
     #: on the episode's metadata under ``chunking_profile``.
     chunking_profile: Optional[str] = None
+    #: When this memory is to be forgotten: an RFC 3339 time, a date, or a
+    #: duration from the engine's clock (``core.forget_after``). Kept, as the
+    #: resolved instant, on the episode's metadata under ``forget_after``.
+    forget_after: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Mapping) -> "Record":
         known = {k: data[k] for k in ("content", "kind", "source", "tags", "created_at", "metadata", "dedup_key", "content_hash", "chunking",
-                                      "chunking_profile") if k in data}
+                                      "chunking_profile", "forget_after") if k in data}
         if "content" not in known:
             raise InvalidInput("a record needs content")
         return cls(**known)
