@@ -44,6 +44,7 @@ FILE_MEDIA_TYPES = {
     '.xlsb': 'application/vnd.ms-excel.sheet.binary.macroEnabled.12',
     '.odt': 'application/vnd.oasis.opendocument.text', '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
     '.odp': 'application/vnd.oasis.opendocument.presentation', '.epub': 'application/epub+zip',
+    '.hwpx': 'application/hwp+zip',
     '.pdf': 'application/pdf', '.json': 'application/json', '.ipynb': 'application/json', '.jsonl': 'application/x-ndjson',
     '.ndjson': 'application/x-ndjson', '.xml': 'application/xml', '.html': 'text/html', '.htm': 'text/html',
     '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.eml': 'message/rfc822', '.mbox': 'application/mbox',
@@ -226,10 +227,13 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
                          manifest: DocumentManifest, *,
                          source: DocumentSource | None = None,
                          embedding_checkpoint: EmbeddingCheckpoint | None = None,
-                         metadata: Mapping[str, str] | None = None) -> DocumentIngested:
+                         metadata: Mapping[str, str] | None = None,
+                         chunking: str | None = None) -> DocumentIngested:
     """Index prepared extraction. Replays repair links using content identities.
     ``metadata`` is what the caller knows about where the bytes came from
-    (a URL, a moment); the document's own keys are written after it and win."""
+    (a URL, a moment); the document's own keys are written after it and win.
+    ``chunking`` is how this file's episode is cut, as for ``remember``; unset
+    keeps the engine's rule."""
     validate_document(manifest.parsed, DocumentLimits())
     if original.attachment_id != manifest.original_sha256:
         raise InvalidInput('document extraction does not match its original')
@@ -257,7 +261,7 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
     else:
         added = await memory.remember(space, content, kind='file', source=f'attachment:{original.attachment_id}',
             dedup_key=key, attachment_ids=(original.attachment_id, retained.attachment_id),
-            embedding_checkpoint=embedding_checkpoint, metadata=metadata)
+            embedding_checkpoint=embedding_checkpoint, metadata=metadata, chunking=chunking)
     # A source file or manifest stored as a document says what it defines,
     # imports, calls and depends on, as one remembered through `map` does.
     claims = await record_document_claims(memory, space, added, manifest.parsed, manifest.filename)
@@ -268,7 +272,8 @@ async def store_document(memory: MemoryEngine, space: str, original: Attachment,
 async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, filename: str,
                            parser: DocumentParser | None = None,
                            limits: DocumentLimits = DocumentLimits(),
-                           metadata: Mapping[str, str] | None = None) -> DocumentIngested:
+                           metadata: Mapping[str, str] | None = None,
+                           chunking: str | None = None) -> DocumentIngested:
     """Parse, retain, index and link a file. Use the workflow for durable retries."""
     check_space(space)
     if len(data) > memory.max_attachment_bytes:
@@ -278,7 +283,7 @@ async def ingest_document(memory: MemoryEngine, space: str, data: bytes, *, file
         raise InvalidInput('document manifest exceeds its attachment byte limit')
     original = await memory.attach(space, data, FILE_MEDIA_TYPES.get(extension(filename), 'application/octet-stream'),
                                    filename=filename)
-    return await store_document(memory, space, original, manifest, metadata=metadata)
+    return await store_document(memory, space, original, manifest, metadata=metadata, chunking=chunking)
 
 
 async def document_provenance(memory: MemoryEngine, space: str, episode_id: int, *,

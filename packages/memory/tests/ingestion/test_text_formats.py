@@ -373,3 +373,72 @@ def test_a_json_array_of_flat_objects_is_a_table_with_cells() -> None:
     assert json.loads(west.metadata["table_columns"]) == ["region", "revenue"] and west.metadata["header_basis"] == "json_object_keys"
     plain = [s for s in doc.segments if s.metadata["json_pointer"] in ("/title", "/tags/0", "/nested/0/x/y")]
     assert plain and all(not s.table_cells for s in plain), "scalars, arrays of scalars and nested objects are not tables"
+
+
+NOTE = """---
+title: Harbour plan
+tags: [harbour, boats]
+aliases:
+  - Harbour
+  - "The plan"
+date: 2024-03-12
+Layout-Kind: note
+source: my head
+draft: false # set true to hide the page
+
+# a vault comment
+summary: >
+  a folded scalar the reader does not follow
+extra: {nested: mapping}
+empty: []
+people:
+  - name: Ann
+  - name: Bob
+skipped: 4
+---
+# Harbour plan
+
+The harbour closes in November.
+"""
+
+
+def test_a_notes_front_matter_becomes_metadata_and_its_lines_are_not_the_notes_text() -> None:
+    doc = parse_text(NOTE.encode(), "harbour.md", DocumentLimits())
+    assert doc.metadata["title"] == "Harbour plan" and doc.metadata["tags"] == "harbour,boats" and doc.metadata["aliases"] == "Harbour,The plan"
+    assert doc.metadata["frontmatter_date"] == "2024-03-12" and doc.metadata["frontmatter_layout_kind"] == "note"
+    assert doc.metadata["frontmatter_source"] == "my head", "a note's own keys are prefixed so they cannot pass for the engine's"
+    assert doc.metadata["frontmatter_draft"] == "false", "a trailing comment is not the value"
+    assert doc.metadata["frontmatter_extra"] == "{nested: mapping}", "an inline mapping is a scalar the reader keeps as written"
+    assert "frontmatter_summary" not in doc.metadata and "frontmatter_people" not in doc.metadata and "frontmatter_empty" not in doc.metadata
+    assert doc.metadata["frontmatter_keys"] == "8" and doc.metadata["frontmatter_skipped"] == "3", \
+        "the block scalar, the list of mappings and the note's own `skipped` key are lost data; a blank line, a comment and an empty list are not"
+    assert [s.locator for s in doc.segments] == ["line:22", "line:24"], "the front matter's lines are not segments; the note's lines keep their numbers"
+    assert doc.segments[0].text == "# Harbour plan" and "November" in doc.segments[1].text
+
+
+def test_front_matter_takes_the_shapes_notes_write_and_counts_lines_as_the_reader_does() -> None:
+    zero_indent = parse_text(b"---\ntitle: Plan\ntags:\n- harbour\n- boats\n...\r\n# Plan\r\nbody\r\n", "z.md", DocumentLimits())
+    assert zero_indent.metadata["tags"] == "harbour,boats" and "frontmatter_skipped" not in zero_indent.metadata, "the YAML dumpers' own list form, closed by ..., with CRLF lines"
+    assert [s.locator for s in zero_indent.segments] == ["line:7", "line:8"]
+    odd = parse_text("---\ntitle: Plan\x0cdraft\n---\n# Heading\n\nBody\n".encode(), "odd.md", DocumentLimits())
+    assert [s.text for s in odd.segments] == ["# Heading", "Body"], "a separator str.splitlines knows and the line reader does not cannot shift the first line"
+    twice = parse_text(b"---\ntitle: One\ntitle: Two\n---\nbody\n", "twice.md", DocumentLimits())
+    assert twice.metadata["title"] == "One" and twice.metadata["frontmatter_skipped"] == "1", "a repeated key is counted, not overwritten"
+    only = parse_text(b"---\ntitle: Ann Patel\ntags: [people]\n---\n", "ann.md", DocumentLimits())
+    assert only.metadata["title"] == "Ann Patel" and [s.text for s in only.segments] == ["---", "title: Ann Patel", "tags: [people]", "---"], \
+        "a note that is only front matter is still a document: the block is its text"
+
+
+def test_front_matter_is_only_a_block_that_opens_the_note_and_closes_within_the_bound() -> None:
+    plain = parse_text(b"# Title\n---\nnot: front matter\n---\n", "plain.md", DocumentLimits())
+    assert "frontmatter_keys" not in plain.metadata and len(plain.segments) == 4, "a rule after the first line is a rule"
+    unclosed = parse_text(b"---\ntitle: x\n" + b"line\n" * 300, "open.md", DocumentLimits())
+    assert "title" not in unclosed.metadata and unclosed.segments[0].text == "---", "a block that never closes within 200 lines is text"
+    from scone_memory.ingestion.formats import text as module
+    many = "---\n" + f"big: {'x' * 300}\n" + "".join(f"k{i}: v{i}\n" for i in range(20)) + "---\nbody\n"
+    doc = parse_text(many.encode(), "many.md", DocumentLimits())
+    assert "frontmatter_big" not in doc.metadata and doc.metadata["frontmatter_k15"] == "v15" and "frontmatter_k16" not in doc.metadata
+    assert doc.metadata["frontmatter_keys"] == str(module.MAX_FRONTMATTER_KEYS) and doc.metadata["frontmatter_skipped"] == "5", \
+        "the over-long value first, then sixteen keys kept and four past the bound counted"
+    txt = parse_text(NOTE.encode(), "harbour.txt", DocumentLimits())
+    assert "title" not in txt.metadata and txt.segments[0].text == "---", "only a note (Markdown) has front matter"

@@ -14,7 +14,8 @@ from pydantic import Field
 try:
     from langchain_core.chat_history import BaseChatMessageHistory
     from langchain_core.documents import Document
-    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, message_to_dict, messages_from_dict
+    from langchain_core.messages import (AIMessage, BaseMessage, ChatMessage, HumanMessage, SystemMessage, message_to_dict,
+                                         messages_from_dict)
     from langchain_core.retrievers import BaseRetriever
 except ImportError as e:  # pragma: no cover - exercised only without the extra
     raise ImportError("scone_memory.integrations.langchain needs langchain-core: pip install 'scone-memory[langchain]'") from e
@@ -26,6 +27,9 @@ from ..retrieval.reranking import MAX_CANDIDATE_LIMIT
 from .turns import Turn, item_metadata, next_seq, read_turn, turn_records
 
 PLAIN = {"human": HumanMessage, "ai": AIMessage, "system": SystemMessage}
+#: How a plain speaker written by another adapter reads here: the Agents SDK and LlamaIndex
+#: write user and assistant.
+READ = {**PLAIN, "user": HumanMessage, "assistant": AIMessage, "developer": SystemMessage}
 
 
 def message_turn(message: BaseMessage) -> Turn:
@@ -41,12 +45,16 @@ def message_turn(message: BaseMessage) -> Turn:
 
 
 def turn_message(turn: Turn) -> BaseMessage:
-    if turn.text is not None and turn.role in PLAIN:
-        return PLAIN[turn.role](content=turn.text)
-    if turn.payload is not None:
+    """The message a turn holds. A speaker with no LangChain class keeps its role in a
+    ChatMessage rather than being read as the human, and so does a structured item another
+    adapter wrote, carrying its JSON."""
+    if turn.text is not None:
+        known = READ.get(turn.role)
+        return known(content=turn.text) if known is not None else ChatMessage(content=turn.text, role=turn.role)
+    if isinstance(turn.payload, dict) and set(turn.payload) == {"type", "data"}:
         [message] = messages_from_dict([turn.payload])
         return message
-    return HumanMessage(content=turn.text or "")
+    return ChatMessage(content=turn.content, role=turn.role)
 
 
 def facts_document(result: RecallResult) -> Optional[Document]:

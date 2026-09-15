@@ -240,6 +240,8 @@ class Settings:
     document_ocr_language: str = 'eng'
     document_ocr_psm: int = 3
     document_ocr_dpi: int = 150
+    #: Turn a page Tesseract's orientation detection is sure is turned before reading it.
+    document_ocr_orientation: bool = False
     conversations_journal: Optional[str] = None
     conversations_model_factory: Optional[str] = None
     # A persona catalog (JSON array of Persona documents) needs a registry
@@ -476,6 +478,7 @@ class Settings:
             document_ocr_language=env.get('SCONE_DOCUMENT_OCR_LANGUAGE', 'eng'),
             document_ocr_psm=int(env.get('SCONE_DOCUMENT_OCR_PSM', '3')),
             document_ocr_dpi=int(env.get('SCONE_DOCUMENT_OCR_DPI', '150')),
+            document_ocr_orientation=env.get('SCONE_DOCUMENT_OCR_ORIENTATION') == '1',
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
