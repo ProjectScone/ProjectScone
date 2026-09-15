@@ -249,6 +249,8 @@ _HIDDEN = frozenset({'script', 'style', 'template', 'noscript'})
 _P_CLOSERS = _BLOCKS - {'li', 'tr', 'thead', 'tbody', 'tfoot', 'title', 'body'}
 _SCOPE_BOUNDARIES = frozenset({'applet', 'caption', 'html', 'table', 'td', 'th',
                               'marquee', 'object', 'template'})
+_HEADINGS = frozenset({'h1', 'h2', 'h3', 'h4', 'h5', 'h6'})
+_LISTS = frozenset({'ul', 'ol', 'menu'})
 
 
 class _HTML(HTMLParser):
@@ -263,6 +265,10 @@ class _HTML(HTMLParser):
         self.has_content = False
         self.title_parts: list[str] = []
         self.tables = HtmlTables(out, prefix, metadata)
+        #: What the element holding the pending text declares it to be.
+        self.role: dict[str, str] = {}
+        #: Outermost lists opened so far; an item names the one it is in.
+        self.lists = 0
 
     def flush(self) -> None:
         text = ''.join(self.parts)
@@ -270,7 +276,27 @@ class _HTML(HTMLParser):
             text = re.sub(r'[ \t\r\f]+', ' ', text).strip(' \t\r\n\f')
         self.parts.clear()
         self.has_content = False
-        self.out.add(text, f'{self.prefix}line:{self.line}', self.metadata)
+        role, self.role = self.role, {}
+        self.out.add(text, f'{self.prefix}line:{self.line}', {**(self.metadata or {}), **role} if role else self.metadata)
+
+    def declared_role(self) -> dict[str, str]:
+        """The innermost heading, list item, figure caption or preformatted
+        element around the text; outside all of them, nothing."""
+        for index in range(len(self.stack) - 1, -1, -1):
+            tag = self.stack[index][0]
+            if tag in _HEADINGS:
+                return {'block_role': 'heading', 'heading_level': tag[1]}
+            if tag == 'pre':
+                return {'block_role': 'code'}
+            if tag == 'figcaption':
+                return {'block_role': 'caption'}
+            if tag == 'li':
+                lists = [name for name, _ in self.stack[:index] if name in _LISTS]
+                role = {'block_role': 'list_item', 'list_level': str(max(0, len(lists) - 1))}
+                if lists:
+                    role.update(list_id=str(self.lists), list_kind='ordered' if lists[-1] == 'ol' else 'bullet')
+                return role
+        return {}
 
     def preformatted(self) -> bool:
         return any(tag == 'pre' for tag, _ in self.stack)
@@ -287,6 +313,8 @@ class _HTML(HTMLParser):
             if not hidden:
                 self.tables.boundary()
         self.tables.start(tag, values, hidden)
+        if tag in _LISTS and not any(name in _LISTS for name, _ in self.stack):
+            self.lists += 1
         if tag == 'br' and not hidden:
             self.parts.append('\n')
             self.tables.data('\n')
@@ -348,6 +376,9 @@ class _HTML(HTMLParser):
         if any(item[0] == 'title' for item in self.stack):
             self.title_parts.append(data)
         if not self.has_content:
+            # Read where the text starts: an implied end tag (a second <li>)
+            # has already closed the element by the time the text is flushed.
+            self.role = self.declared_role()
             self.line = self.getpos()[0]
             if not self.preformatted() and (first := re.search(r'[^ \t\r\n\f]', data)):
                 self.line += data[:first.start()].count('\n')

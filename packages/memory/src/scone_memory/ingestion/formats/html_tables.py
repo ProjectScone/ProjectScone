@@ -347,7 +347,8 @@ class HtmlTables:
         for row in range(len(table.rows) + 1):
             for position, caption in table.captions:
                 if position == row:
-                    self.out.add(_visible_text(caption), f'{table.locator}/caption', dict(self.metadata) or None)
+                    self.out.add(_visible_text(caption), f'{table.locator}/caption',
+                                 {**self.metadata, 'block_role': 'caption', 'caption_target': table.locator})
             values = by_row.get(row, [])
             if not any(cell.text.strip() for cell in values):
                 continue
