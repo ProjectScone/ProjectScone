@@ -104,3 +104,63 @@ async def test_the_command_line_refuses_the_route_without_a_configured_model(mon
     code = await run(build_parser().parse_args(["--space", SPACE, "answer", QUESTION, "--route", "synthesize"]),
                      engine, io.StringIO(""), out)
     assert code == 2 and "SCONE_CHAT_URL" in err.getvalue()
+
+
+async def test_the_synthesize_route_takes_a_mode_and_records_it():
+    engine = await memory()
+    model = CitingChat()
+    answered = await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=model, limit=3,
+                                     synthesis_mode="accumulate")
+    assert model.calls == 3, "accumulate asks once per passage"
+    assert answered.detail["mode"] == "accumulate" and answered.detail["model_calls"] == 3
+    assert answered.detail["passages"]["cited"] == 3
+    default = await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=CitingChat(), limit=3)
+    assert default.detail["mode"] == "evidence"
+
+
+async def test_a_mode_is_refused_when_unknown_or_without_the_synthesize_route():
+    engine = await memory()
+    with pytest.raises(InvalidInput, match="mode"):
+        await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=CitingChat(), synthesis_mode="tree")
+    model = CitingChat()
+    with pytest.raises(InvalidInput, match="mode"):
+        await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=model, synthesis_mode="")
+    assert model.calls == 0, "an empty mode is refused like any unknown one, not read as the default"
+    with pytest.raises(InvalidInput, match="synthesize route"):
+        await answer_question(engine, SPACE, QUESTION, synthesis_mode="refine")
+
+
+def test_over_http_the_mode_is_a_query_parameter():
+    from fastapi.testclient import TestClient
+
+    from scone_memory.api import create_app
+
+    engine = asyncio.run(memory())
+    auth = {"Authorization": "Bearer key-a"}
+    with TestClient(create_app(engine, {"key-a": SPACE}, synthesis_factory=CitingChat)) as client:
+        said = client.get("/v1/answer", params={"q": QUESTION, "route": "synthesize", "limit": 2,
+                                                "synthesis_mode": "refine"}, headers=auth).json()
+        assert said["detail"]["mode"] == "refine" and said["detail"]["status"] == "synthesized"
+        refused = client.get("/v1/answer", params={"q": QUESTION, "route": "synthesize", "synthesis_mode": "tree"},
+                             headers=auth)
+        assert refused.status_code == 422 and "mode" in refused.json()["error"]
+        empty = client.get("/v1/answer", params={"q": QUESTION, "route": "synthesize", "synthesis_mode": ""},
+                           headers=auth)
+        assert empty.status_code == 422 and "mode" in empty.json()["error"]
+
+
+async def test_the_command_line_passes_the_mode(monkeypatch):
+    import io
+
+    from scone_memory.runtime import config as runtime_config
+    from scone_memory.runtime.cli import build_parser, run
+
+    model = CitingChat()
+    monkeypatch.setattr(runtime_config, "build_chat", lambda settings: model)
+    engine = await memory()
+    out = io.StringIO()
+    args = build_parser().parse_args(["--space", SPACE, "--json", "answer", QUESTION, "--route", "synthesize",
+                                      "--limit", "2", "--synthesis-mode", "accumulate"])
+    code = await run(args, engine, io.StringIO(""), out)
+    assert code == 0 and model.calls == 2
+    assert json.loads(out.getvalue())["detail"]["mode"] == "accumulate"
