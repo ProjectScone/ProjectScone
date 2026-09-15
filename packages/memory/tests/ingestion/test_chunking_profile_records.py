@@ -1,8 +1,8 @@
 """A record chooses a chunking profile the way it chooses chunking.
 
 The profile is a parameter of structure chunking, so it is its own field
-rather than a fifth chunking mode: ``chunking`` stays the closed set of
-four ways to cut, and ``chunking_profile`` names the boundaries one of
+rather than another chunking mode: ``chunking`` stays the closed set of
+ways to cut, and ``chunking_profile`` names the boundaries one of
 them cuts at. It is kept on the episode's metadata beside ``chunking`` so
 a recovery re-cuts with it, it is refused before anything is stored when
 it names nothing, and the receipt says which profile cut and what its
@@ -97,9 +97,10 @@ async def test_a_partial_batch_answers_an_unknown_profile_for_that_record_alone(
     assert (await engine.status("default")).episodes == 1
 
 
-async def test_a_profile_with_another_chunking_is_refused(engine):
+@pytest.mark.parametrize("chunking", ["length", "unit"])
+async def test_a_profile_with_another_chunking_is_refused(engine, chunking):
     with pytest.raises(InvalidInput, match="structure"):
-        await engine.remember("default", STATUTE, chunking="length", chunking_profile="statute")
+        await engine.remember("default", STATUTE, chunking=chunking, chunking_profile="statute")
     assert (await engine.status("default")).episodes == 0
 
 
@@ -204,3 +205,46 @@ async def test_a_jsonl_batch_refuses_a_chunking_flag_rather_than_ignoring_it(eng
         await run(build_parser().parse_args(["--json", "remember", str(path), "--jsonl", *flag]), engine, io.StringIO(""),
                   io.StringIO())
     assert (await engine.status("default")).episodes == 0
+
+
+PARA = ("The shop takes back anything unopened, and says so on the receipt and on the wall behind the "
+        "counter, in letters large enough to read from the door. ") * 4
+MARKED = "\n\n".join(["Terms", PARA, "Refunds", PARA, "Shipping", PARA])
+
+
+def marked_headings():
+    from scone_memory.ingestion.structure import Heading
+
+    encoded = MARKED.encode()
+    return (Heading(0, 1, "Terms"), Heading(encoded.index(b"Refunds"), 2, "Refunds"),
+            Heading(encoded.index(b"Shipping"), 2, "Shipping"))
+
+
+def test_a_profile_cuts_at_the_headings_a_file_marked_and_counts_them():
+    """Structure chunking cuts at the headings an imported file marked itself;
+    a profile is structure chunking, so it cuts there too."""
+    assert profiled_spans(MARKED, 800, profile="paper").units == 0, "the text alone carries no structure"
+    assert "document_headings" not in profiled_spans(MARKED, 800, profile="paper").record()
+    cut = profiled_spans(MARKED, 800, profile="paper", headings=marked_headings())
+    starts = [MARKED[span.start:span.end].split("\n", 1)[0] for span in cut.spans]
+    assert starts == ["Terms", "Refunds", "Shipping"], starts
+    assert cut.record()["document_headings"] == 3 and cut.record()["profile"] == "paper"
+    assert profiled_spans(MARKED, 800, profile="paper", headings=()).record()["document_headings"] == 0
+    bounded = profiled_spans(MARKED, 800, profile="paper", headings=marked_headings(), units_max=2)
+    assert bounded.capped and bounded.document_headings == 2
+
+
+async def test_an_imported_file_with_a_profile_is_cut_at_its_marked_headings():
+    from scone_memory.ingestion.files import ingest_document
+
+    html = f"<h1>Terms</h1><p>{PARA}</p><h2>Refunds</h2><p>{PARA}</p><h2>Shipping</h2><p>{PARA}</p>".encode()
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=800).open()
+    try:
+        result = await ingest_document(memory, "default", html, filename="terms.html",
+                                       metadata={"chunking_profile": "paper"})
+        chunks = await memory.documents.chunks_of("default", result.added.episode_id)
+        assert [chunk.text.split("\n", 1)[0] for chunk in chunks] == ["Terms", "Refunds", "Shipping"]
+        assert result.added.structure is not None and result.added.structure["profile"] == "paper"
+        assert result.added.structure["document_headings"] == 3
+    finally:
+        await memory.close()
