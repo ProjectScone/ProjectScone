@@ -9,6 +9,8 @@ from scone_memory.ingestion.pdf_ocr import assemble_ocr_pdf
 from scone_memory.ocr.table_cells import page_table_cells
 from scone_memory.ocr.types import OcrRegion, OcrResult
 
+from .test_pdf_layout import placed, table_page
+
 
 def grid_regions(label='table'):
     made = []
@@ -16,7 +18,7 @@ def grid_regions(label='table'):
         top = 0.2 + row * 0.05
         for column, (text, left, right) in enumerate(zip(texts, (0.1, 0.4, 0.65), (0.28, 0.5, 0.75))):
             if text:
-                width = right if not (row == 4 and column == 1) else 0.75
+                width = right if not (row == 4 and column == 1) else 0.5  # the total's number fills its column
                 made.append(OcrRegion(text=text, box=(left, top, width, top + 0.03), line=row, label=label))
     return made
 
@@ -32,7 +34,7 @@ def test_a_page_s_grid_becomes_cells_cited_to_its_text_and_validated_as_the_offi
     tables = page_table_cells(page.regions, [(r.start - page.start, r.end - page.start) for r in page.regions], text, 'page:1')
     assert tables.proposed == 1 and tables.unreadable == 0 and len(tables.cells) == 11
     by_place = {(c.row, c.column): c for c in tables.cells}
-    assert by_place[(0, 0)].text == 'Item' and by_place[(3, 1)].text == '38' and by_place[(3, 1)].column_span == 2
+    assert by_place[(0, 0)].text == 'Item' and by_place[(3, 1)].text == '38' and by_place[(3, 1)].column_span == 1
     assert all(text[c.start:c.end].decode() == c.text for c in tables.cells), "every cell is the page's own text"
     assert by_place[(0, 0)].table_locator == 'page:1/table:1' and by_place[(0, 0)].locator == 'page:1/table:1/cell:0,0'
     segment = DocumentSegment(text=text.decode(), locator='page:1', table_cells=tables.cells,
@@ -71,3 +73,20 @@ def test_cells_come_in_the_page_s_text_order_and_a_table_cited_wrongly_is_left_o
         assert tables.proposed == 0 and tables.cells == (), "a page whose labels name no table carries none, whatever the grid says"
     with pytest.raises(ValueError, match='span'):
         page_table_cells(regions, spans[:-1], page_text, 'page:2')
+
+
+async def test_a_text_layer_page_s_table_reaches_the_document_as_cells():
+    from scone_memory.ingestion.formats.registry import BuiltinDocumentParser
+    from scone_memory.ingestion.formats.types import DocumentLimits
+    rows = [("Revenue", "2,903", "6,854"), ("Cost of revenue", "1,650", "2,720"), ("Operations and support", "574", "718"),
+            ("Sales and marketing", "1,263", "4,789"), ("Research and development", "587", "2,054"), ("Total costs", "4,074", "10,281")]
+    parsed = await BuiltinDocumentParser().parse(placed(table_page(rows)), 'quarter.pdf', DocumentLimits())
+    [segment] = parsed.segments
+    assert segment.metadata['tables'] == '1' and segment.metadata['tables_unreadable'] == '0'
+    encoded = segment.text.encode()
+    assert all(encoded[c.start:c.end].decode() == c.text for c in segment.table_cells), "every cell is the page's own bytes"
+    by_row = {}
+    for cell in segment.table_cells:
+        by_row.setdefault(cell.row, []).append(cell.text)
+    assert by_row[max(by_row)] == ["Total costs", "4,074", "10,281"] and len(by_row) >= len(rows)
+    assert [c.start for c in segment.table_cells] == sorted(c.start for c in segment.table_cells)

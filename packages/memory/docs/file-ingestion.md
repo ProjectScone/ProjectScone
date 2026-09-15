@@ -317,7 +317,9 @@ interpreted.
 ### PDF table evidence
 
 A PDF page's tables, inferred from the geometry of the recognized or
-laid-out regions labelled `table` (see [pdf-ocr.md](pdf-ocr.md#inspect-possible-tables-without-repeating-ocr)),
+text-layer regions labelled `table` -- a text-layer page kept whole
+carries its runs as regions when a table is among them (see
+[pdf-ingestion.md](pdf-ingestion.md)) -- (see [pdf-ocr.md](pdf-ocr.md#inspect-possible-tables-without-repeating-ocr)),
 reach `segment.table_cells` with the same record: row, column,
 `column_span` where a cell reaches across the grid's columns, and the
 cell's exact byte span of the page's text. No header or row span is

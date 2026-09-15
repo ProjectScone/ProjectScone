@@ -26,6 +26,29 @@ MAX_REGIONS = 5000
 _NOTE_MARK = re.compile(r'^[*†‡§¹²³⁴⁵⁶⁷⁸⁹]')
 #: What a sentence ends with, and a title does not.
 _SENTENCE_END = ('.', '!', '?', ';', ':', ',')
+#: A citation closing a sentence, as in "history.[28]".
+_CITATION = re.compile(r'(?:\s*\[\d{1,4}\])+\s*$')
+#: Cells at least this wide, as a share of the page, can be prose.
+MIN_PROSE_WIDTH = 0.15
+
+
+def _is_title(text: str) -> bool:
+    """Whether a line above a grid reads as its title rather than a sentence."""
+    return not _CITATION.sub('', text).rstrip().endswith(_SENTENCE_END)
+
+
+def _is_prose(text: str) -> bool:
+    """Whether a cell's text reads as a line of prose -- a sentence, or long
+    enough to be one -- rather than a label, a number or a wrapped word."""
+    return not _is_title(text) or len(text.split()) >= 6 or len(text) >= 40
+
+
+def _reads_as_prose(boxes: Sequence[Box]) -> bool:
+    """Whether a column's cells read as lines of prose: three or more, wide
+    enough, and about as wide as each other -- a table's column is narrow or
+    ragged."""
+    widths = [right - left for left, _, right, _ in boxes]
+    return len(widths) >= 3 and max(widths) >= MIN_PROSE_WIDTH and median(widths) >= 0.5 * max(widths)
 RegionIndex = Annotated[int, Field(ge=0, lt=MAX_REGIONS)]
 Box = tuple[float, float, float, float]
 
@@ -199,6 +222,11 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
         text_bytes += sum(len(indices) - 1 for band in group for indices in band.cells)
         if text_bytes > 2_000_000:
             raise InvalidInput('OCR table analysis exceeds its text limit')
+        # Two columns of prose side by side align as a grid of two does; a
+        # table's first column is narrow or ragged. Neither column is.
+        if len(group[full[0]].cells) == 2 and all(
+                _reads_as_prose([_box(regions, group[position].cells[column]) for position in full]) for column in (0, 1)):
+            return
         cells: list[TableCell] = []
         for row, band in enumerate(group):
             places = spanning.get(row) or tuple((column, 1) for column in range(len(band.cells)))
@@ -214,22 +242,23 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
         nonlocal group, spanning, lead
         if not group:
             return
-        # A row of one cell at the foot of the grid is its note or the
-        # prose below it, and a row opening with a footnote's mark is its
-        # note: neither is its last row. A total beside its numbers is.
-        while len(group) - 1 in spanning and (len(group[-1].cells) == 1
-                                              or _NOTE_MARK.match(_text(group[-1].cells[0]))):
+        # At the foot of the grid, a row of fewer cells that opens with a
+        # footnote's mark or holds a line of prose is the table's note or
+        # the prose below it, not its last row. A total beside its numbers,
+        # a subtotal across them or a wrapped word is.
+        while len(group) - 1 in spanning and (_NOTE_MARK.match(_text(group[-1].cells[0]))
+                                              or any(_is_prose(_text(cell)) for cell in group[-1].cells)):
             del spanning[len(group) - 1]
             group.pop()
         # A row of fewer cells just above the first full row -- a title
         # across the table -- is placed now that the grid is known. A
-        # sentence is not a title.
+        # sentence is not a title, and neither is a wrapped word over a
+        # column short of the first.
         full = [position for position in range(len(group)) if position not in spanning]
-        if lead is not None and len(full) >= 3 and lead.bottom <= group[0].top and not _text(
-                lead.cells[0]).rstrip().endswith(_SENTENCE_END) and (
+        if lead is not None and len(full) >= 3 and lead.bottom <= group[0].top and _is_title(_text(lead.cells[0])) and (
                 group[0].top - lead.bottom <= 2 * max(lead.bottom - lead.top, group[0].bottom - group[0].top)):
             spans = placed(lead)
-            if spans is not None:
+            if spans is not None and spans[0][0] == 0:
                 group.insert(0, lead)
                 spanning = {position + 1: places for position, places in spanning.items()}
                 spanning[0] = spans
@@ -256,6 +285,11 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
         if compatible:
             gutters = joined
             group.append(row)
+        elif spans is not None and len(group) >= 2 and len(group) - 1 in spanning and len(group) - 2 in spanning:
+            # A third row of fewer cells in a row is prose beside the grid,
+            # not wrapped cells of it: the grid ended before them.
+            close()
+            gutters = row.gutters
         elif spans is not None:
             spanning[len(group)] = spans
             group.append(row)
