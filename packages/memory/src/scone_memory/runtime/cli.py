@@ -148,7 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how --compress scores a sentence: the question's words it names, or cosine under the embedder")
     p.add_argument("--withhold", metavar="KINDS",
                    help="withhold matches of these kinds from the answer, comma separated "
-                        "(email,phone,ip,card,secret); a net of patterns, never a guarantee")
+                        "(email,phone,ip,card,secret, or person,organisation,place for the names the "
+                        "space's graph holds); a net, never a guarantee")
     p.add_argument("--code-context", action="store_true",
                    help="for a passage of code, also quote the signature it sits inside and the "
                         "imports of its file; the passage itself is not changed")
@@ -1824,6 +1825,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             raise InvalidInput("--lessons cannot be combined with --merge: a merged passage joins chunks "
                                "judged separately, and one lesson cannot stand for them; ask for one or the other")
         policy: tuple[str, ...] = ()
+        names_read = None
         if args.merge_min_share is not None and not args.merge:
             raise InvalidInput("--merge-min-share is a floor under a merge; ask for --merge with it")
         if args.compress is not None:
@@ -1838,13 +1840,14 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             if args.parts:
                 raise InvalidInput("--compress cannot be combined with --parts, which answers without it")
         if args.withhold:
-            from ..retrieval.withhold import chosen_kinds
+            from ..retrieval.withhold import chosen_kinds, names_for
 
             # Checked before the search, as the HTTP route does: a policy
             # naming a kind that does not exist is a mistake in the
             # request, and searching first spends the work for an answer
             # nobody receives.
             policy = chosen_kinds(tuple(k.strip() for k in args.withhold.split(",") if k.strip()))
+            names_read = await names_for(engine, space, policy, as_of=args.as_of)
             # Everything refused here re-reads the episode from the store
             # *after* withholding and prints source verbatim, which hands
             # back what was just withheld: --code-context quotes the raw
@@ -1855,7 +1858,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             # combination; the CLI refusing a different set would be the
             # same hole wearing different clothes.
             clashes = [name for name, asked_for in (
-                ("--code-context", args.code_context), ("--parts", args.parts)) if asked_for]
+                ("--code-context", args.code_context), ("--parts", args.parts),
+                ("--graph-boost", args.graph_boost)) if asked_for]
             if clashes:
                 raise InvalidInput(
                     f"--withhold cannot be combined with {', '.join(clashes)}: each of those "
@@ -1932,7 +1936,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             # Facts and history too. Fixing this on the HTTP route and
             # not here left the same address reachable through the CLI.
             kept = withhold(result.items, facts=list(result.facts) + list(result.history),
-                            kinds=policy)
+                            kinds=policy, names=names_read.names if names_read else None,
+                            names_capped=bool(names_read and names_read.capped))
             result = result.model_copy(update={
                 "items": list(kept.items),
                 "facts": list(kept.facts[:len(result.facts)]),
