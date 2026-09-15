@@ -67,6 +67,7 @@ class InMemoryDocumentStore:
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
         #: The context lane: what each chunk is under, indexed beside its text.
         self._context: dict[str, Bm25] = defaultdict(Bm25)
+        self._questions: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
         #: Fact writes per space, only ever growing: the ledger stamp.
         self._fact_writes: dict[str, int] = defaultdict(int)
@@ -103,6 +104,7 @@ class InMemoryDocumentStore:
         for key in [key for key in self._chunks_by_episode if key[0] == space]:
             del self._chunks_by_episode[key]
         self._bm25.pop(space, None)
+        self._questions.pop(space, None)
         if fact_ids:
             self._fact_writes[space] += 1
         for fact_id in fact_ids:
@@ -205,6 +207,7 @@ class InMemoryDocumentStore:
         for chunk_id in removed:
             self._bm25[space].remove(chunk_id)
             self._context[space].remove(chunk_id)
+            self._questions[space].remove(chunk_id)
             del self._chunks[chunk_id]
         self._chunks_by_episode.pop((space, episode_id), None)
         if episode is not None:
@@ -253,6 +256,8 @@ class InMemoryDocumentStore:
     narrows_metadata = True
     #: This store keeps a context index beside chunk text (see ContextIndex).
     context_lane = True
+    #: This store keeps the questions each chunk answers (see QuestionIndex).
+    question_lane = True
     #: This store can search a term's family by prefix (see PrefixSearch).
     prefix_terms = True
 
@@ -271,6 +276,19 @@ class InMemoryDocumentStore:
 
     async def search_context(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
         return self._context[space].search(query, limit, self._allowed(space, filter))
+
+    async def index_questions(self, space: str, chunk_id: int, questions: Sequence[str]) -> bool:
+        chunk = self._chunks.get(chunk_id)
+        if chunk is None or chunk.space != space:
+            return False
+        index = self._questions[space]
+        index.remove(chunk_id)
+        if questions:
+            index.add(chunk_id, "\n".join(questions))
+        return True
+
+    async def search_questions(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        return self._questions[space].search(query, limit, self._allowed(space, filter))
 
     def _allowed(self, space: str, filter: TextFilter) -> list[int] | None:
         if (filter.as_of or filter.tags or filter.where or filter.conditions

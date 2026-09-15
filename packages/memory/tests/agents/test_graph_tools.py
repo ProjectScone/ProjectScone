@@ -31,9 +31,10 @@ async def box():
 
 
 def test_the_graph_tools_are_offered_with_the_others():
-    assert [tool.name for tool in MEMORY_TOOLS][-16:] == ["graph_context", "explain_entity", "connect_entities",
+    assert [tool.name for tool in MEMORY_TOOLS][-18:] == ["graph_context", "explain_entity", "connect_entities",
                                                           "graph_schema", "graph_match", "graph_overview",
                                                           "graph_changes", "find_duplicates", "graph_cycles",
+                                                          "graph_stats", "graph_hubs",
                                                           "graph_health", "graph_affected", "temporal_answer",
                                                           # The tree, which a toolbox offers read only
                                                           # unless its owner allowed writing.
@@ -232,3 +233,10 @@ async def test_the_blast_radius_tool_answers_with_the_record_the_command_gives(b
     assert nothing["ok"] is True and nothing["status"] == "nothing" and "nothing in this graph rests on" in nothing["why"]
     unknown = await box.run("graph_affected", {"name": "nowhere.py:thing"})
     assert unknown["ok"] is True and unknown["status"] == "unknown", "an unknown name is an answer the model can read"
+
+
+async def test_the_stats_and_hubs_tools_answer_with_the_same_records_as_the_routes(box):
+    counted = await box.run("graph_stats", {})
+    assert counted["totals"]["entities"] >= 2 and counted["facts"]["origin"] and counted["text"].startswith("stats:")
+    ranked = await box.run("graph_hubs", {"limit": 2})
+    assert 1 <= len(ranked["hubs"]) <= 2 and ranked["hubs"][0]["degree"] >= 1 and ranked["text"].startswith("hubs:")
