@@ -423,8 +423,10 @@ def build_parser() -> argparse.ArgumentParser:
     graph.add_parser("merges", help="the merges the current graph applies, and any it refused")
     g = graph.add_parser("export", help="the whole graph as a file another tool reads")
     g.add_argument("--format", default="json", choices=["json", "graphml", "gexf", "cypher", "csv", "jsonld", "obsidian", "wiki",
-                                                               "mermaid", "svg", "canvas", "html", "explorer"])
+                                                               "mermaid", "svg", "canvas", "html", "explorer", "communities", "tree"])
     g.add_argument("--out", help="write here instead of standard output (needed for the zip formats)")
+    g.add_argument("--usage", action="store_true",
+                   help="on the svg and html drawings, say how many recent recalls returned each entity")
     g.add_argument("--into", metavar="VAULT", help="obsidian only: write the notes into this vault directory under scone/, "
                                                   "keeping the vault's own notes and removing notes written earlier for "
                                                   "entities since forgotten")
@@ -1696,7 +1698,12 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
                               projection=projection.digest)
         print(json.dumps(receipt.record()), file=out)
         return 0
-    exported = export_graph(projection, args.format, about=about)
+    recalls = None
+    if args.usage:
+        from ..entities.usage import recall_usage
+
+        recalls = await recall_usage(engine, space)
+    exported = export_graph(projection, args.format, about=about, usage=recalls)
     if args.out:
         with open(args.out, "wb") as file:
             file.write(exported.body)
