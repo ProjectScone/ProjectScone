@@ -13,6 +13,7 @@ from ..ingestion.web import WebLimits
 
 from ..ingestion.files import document_provenance, extraction_filename, prepare_document, store_document, digest
 from ..ocr.tables import infer_tables
+from ..core import forget_after as schedule
 from ..core.errors import InvalidInput
 from ..ingestion.document_media import DocumentMedia, MEDIA_DOCUMENT_EXTENSIONS
 from ..ingestion.document_ocr import DocumentOcr, PdfOcrSelection, ocr_choices
@@ -25,9 +26,16 @@ from .video_documents import mount_video_frame_routes
 from .video_catalogue import mount_video_catalogue_route
 
 
+#: A body's ``forget_after``: any JSON value, so ``core.forget_after`` refuses
+#: one that is not a schedule -- a number included -- with 422, as ``POST
+#: /v1/episodes`` does; a typed field would answer 400 before it is read.
+Schedule = object
+
+
 class _UrlBody(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid')
     url: str = Field(min_length=1, max_length=4096)
+    forget_after: Schedule = None
 
 
 class _FileBody(BaseModel):
@@ -37,6 +45,7 @@ class _FileBody(BaseModel):
     pdf_ocr: PdfOcrSelection | None = None
     video_ocr: bool = False
     chunking: Literal['length', 'code', 'structure', 'semantic', 'unit'] | None = None
+    forget_after: Schedule = None
 
 
 def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
@@ -80,13 +89,15 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
             if document_ocr is None:
                 raise InvalidInput('document OCR is not configured on this server')
             parser = document_ocr.parser(body.pdf_ocr)
+        # Refused before the file is parsed, as the write would refuse it after.
+        when = schedule.asked(body.forget_after, engine.clock())
         async with ingest_slot(1):
             original, raw = await engine.attachment(space, body.attachment_id)
             assert_current_space(request, space)
             filename = extraction_filename(original, body.filename)
             manifest = await prepare_document(raw, filename, parser=parser, limits=DocumentLimits())
             assert_current_space(request, space)
-            saved = await store_document(engine, space, original, manifest, chunking=body.chunking)
+            saved = await store_document(engine, space, original, manifest, chunking=body.chunking, forget_after=when)
         assert_current_space(request, space)
         return JSONResponse(jsonable_encoder({**asdict(saved),
             **({'video_ocr': True} if body.video_ocr else {}),
@@ -113,8 +124,9 @@ def mount_file_document_routes(app: FastAPI, engine: MemoryEngine,
             return JSONResponse({'error': 'invalid URL import request'}, status_code=400)
         assert_current_space(request, space)
         parser: DocumentParser = document_media.parser() if document_media else BuiltinDocumentParser()
+        when = schedule.asked(body.forget_after, engine.clock())
         async with ingest_slot(1):
-            imported = await ingest_url(engine, space, body.url, limits=url_import, parser=parser)
+            imported = await ingest_url(engine, space, body.url, limits=url_import, parser=parser, forget_after=when)
         assert_current_space(request, space)
         return JSONResponse(jsonable_encoder(imported.record()))
 

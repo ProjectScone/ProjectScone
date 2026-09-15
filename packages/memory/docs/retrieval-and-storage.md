@@ -3315,7 +3315,12 @@ scone sync ~/work/notes                          # a plan: nothing is written
 
 scone sync ~/work/notes --apply                  # writes the added and changed
 scone sync ~/work/notes --apply --remove         # also forgets what is gone
+scone sync ~/work/notes --apply --forget-after 30d  # every file written is forgotten in 30 days
 ```
+
+`--forget-after` is resolved once, so the run writes one instant; an unchanged
+file keeps the schedule it holds, and the receipt counts those in
+`schedule_kept` ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
 
 An unchanged file is **not a write**: the space's revision does not move,
 so a sync on a timer does not churn the store. A changed file is an

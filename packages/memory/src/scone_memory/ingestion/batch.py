@@ -655,7 +655,7 @@ async def _retain_visual(runtime: IngestionRuntime, space: str, record: Record) 
     await runtime.documents.bump_revision(space)
     await runtime.documents.clear_inflight(space, new.content_hash)
     return Added(episode_id=episode.episode_id, deduplicated=duplicate, chunks=0,
-                 outcome='duplicate' if duplicate else 'accepted')
+                 outcome='duplicate' if duplicate else 'accepted', forget_after=episode.metadata.get(forget_after.KEY))
 
 
 async def write_batch(

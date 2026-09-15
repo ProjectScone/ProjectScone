@@ -21,6 +21,8 @@ class StartSync(BaseModel):
     collection_id: Identifier
     delete_missing: bool = False
     expected_configuration: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    #: Read by ``core.forget_after``, which refuses as ``POST /v1/episodes`` does.
+    forget_after: str | None = None
 
 
 class ControlSync(BaseModel):
@@ -64,7 +66,7 @@ def _failure(error: WorkflowError | ValueError | OSError) -> JSONResponse:
         'sync_busy': 429, 'sync_owned_elsewhere': 409, 'sync_request_conflict': 409,
         'sync_configuration_changed': 409, 'sync_result_terminal': 409,
         'sync_result_unavailable': 409, 'sync_resume_required': 409,
-        'sync_attempt_limit': 409, 'sync_cancelled': 409,
+        'sync_attempt_limit': 409, 'sync_cancelled': 409, 'sync_schedule_passed': 409,
         'sync_not_found': 404, 'sync_collection_not_found': 404, 'space_deleted': 404,
         'sync_delete_forbidden': 403, 'sync_request_limit': 413, 'sync_store_limit': 429,
     }
@@ -93,7 +95,8 @@ def mount_directory_sync_routes(app: FastAPI, service: DirectorySyncService,
             body = await _decode(request, StartSync)
             assert_current_space(request, space)
             value = await service.start(space, body.run_id, collection_id=body.collection_id,
-                delete_missing=body.delete_missing, expected_configuration=body.expected_configuration, admission_guard=lambda: assert_current_space(request, space))
+                delete_missing=body.delete_missing, expected_configuration=body.expected_configuration, admission_guard=lambda: assert_current_space(request, space),
+                forget_after=body.forget_after)
             assert_current_space(request, space)
             return _response(asdict(value), 202)
         except (WorkflowError, ValueError, OSError) as error:

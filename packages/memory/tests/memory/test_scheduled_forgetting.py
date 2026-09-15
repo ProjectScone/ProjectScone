@@ -135,6 +135,47 @@ async def test_writing_the_same_words_over_an_overdue_memory_stores_them_afresh(
     assert (await memory.episode("s", again.episode_id)).content == "the words come back"
 
 
+async def test_writing_over_an_overdue_memory_keeps_the_attachments_the_new_write_links(memory):
+    # The caller stores the bytes before the write; the overdue memory's forget
+    # must not release them from under the episode that is about to carry them.
+    original = await memory.attach("s", b"the scanned receipt", "text/plain", filename="receipt.txt")
+    first = await memory.remember("s", "a receipt kept for an hour", attachment_ids=[original.attachment_id],
+                                  forget_after="1h")
+    at(memory, "2026-09-15T14:00:00.000Z")
+    again_bytes = await memory.attach("s", b"the scanned receipt", "text/plain", filename="receipt.txt")
+    again = await memory.remember("s", "a receipt kept for an hour", attachment_ids=[again_bytes.attachment_id])
+    assert again.forgot_overdue is not None and again.forgot_overdue.episode_id == first.episode_id
+    stored = await memory.episode("s", again.episode_id)
+    assert [a.attachment_id for a in stored.attachments] == [original.attachment_id]
+    assert (await memory.attachment("s", original.attachment_id))[1] == b"the scanned receipt"
+
+
+async def test_a_write_over_a_memory_not_yet_due_reads_no_attachment_bytes(memory, monkeypatch):
+    original = await memory.attach("s", b"a large scan", "text/plain", filename="scan.txt")
+    reads: list[str] = []
+    real_get = memory.blobs.get
+
+    async def counted(space, attachment_id):
+        reads.append(attachment_id)
+        return await real_get(space, attachment_id)
+
+    monkeypatch.setattr(memory.blobs, "get", counted)
+    await memory.remember("s", "a scan kept for a day", attachment_ids=[original.attachment_id], forget_after="1d")
+    again = await memory.remember("s", "a scan kept for a day", attachment_ids=[original.attachment_id])
+    assert again.outcome == "duplicate"
+    assert reads == [original.attachment_id] * 2, "only linking reads the hold; no bytes are read to be put back"
+    lookups: list[str] = []
+    real_lookup = memory.documents.episode_by_hash
+
+    async def looked_up(space, digest):
+        lookups.append(digest)
+        return await real_lookup(space, digest)
+
+    monkeypatch.setattr(memory.documents, "episode_by_hash", looked_up)
+    await memory.remember("s", "a write with nothing to link")
+    assert len(lookups) == 1, "a write that links nothing does not look its identity up ahead of the write"
+
+
 async def test_a_refused_batch_forgets_no_overdue_memory_early(memory):
     first = await memory.remember("s", "words the batch would replace", forget_after="1h")
     at(memory, "2026-09-15T14:00:00.000Z")

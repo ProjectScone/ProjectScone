@@ -39,6 +39,7 @@ from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..core import forget_after as schedule
 from ..core.errors import InvalidInput
 from .files import DocumentIngested, ingest_document
 from .formats.types import DocumentLimits
@@ -195,15 +196,20 @@ class UrlIngested:
         return {"episode_id": self.document.added.episode_id, "url": self.url, "final_url": self.final_url,
                 "media_type": self.media_type, "fetched_at": self.fetched_at, "bytes": self.bytes,
                 "redirects": list(self.redirects), "format": self.document.format, "segments": self.document.segments,
-                "original": self.document.original.attachment_id, "manifest": self.document.manifest.attachment_id}
+                "original": self.document.original.attachment_id, "manifest": self.document.manifest.attachment_id,
+                "forget_after": self.document.added.forget_after}
 
 
 async def ingest_url(engine, space: str, url: str, *, limits: Optional[WebLimits] = None,
                      parser: DocumentParser | None = None, document_limits: DocumentLimits = DocumentLimits(),
-                     tags: Sequence[str] = ()) -> UrlIngested:
-    """Fetch the page and read it as the document its media type says it is."""
+                     tags: Sequence[str] = (), forget_after: str | schedule.Resolved | None = None) -> UrlIngested:
+    """Fetch the page and read it as the document its media type says it is.
+    ``forget_after`` schedules the episode's forgetting as for ``remember``;
+    a refused schedule is refused before anything is fetched."""
+    when = schedule.asked(forget_after, engine.clock())
     page = await fetch_page(url, limits)
     ingested = await ingest_document(engine, space, page.data, filename=page.filename, parser=parser, limits=document_limits,
                                      metadata={"document_url": page.url[:2000], "document_final_url": page.final_url[:2000],
-                                               "document_media_type": page.media_type, "document_fetched_at": page.fetched_at})
+                                               "document_media_type": page.media_type, "document_fetched_at": page.fetched_at},
+                                     forget_after=when)
     return UrlIngested(ingested, page.url, page.final_url, page.media_type, page.fetched_at, len(page.data), page.redirects)
