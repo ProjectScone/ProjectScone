@@ -213,6 +213,9 @@ class Settings:
     embedding_cache: str | None = None
     demote_restated: bool = True
     context_lane: bool = False
+    #: SCONE_QUESTION_LANE: recall searches the questions each chunk answers
+    #: (ingestion/chunk_questions.py), and the pass that writes them may run.
+    question_lane: bool = False
     lexical_stems: bool = True
     vector_weight: Optional[float] = None
     many_valued: tuple[str, ...] = ()
@@ -495,6 +498,7 @@ class Settings:
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
             context_lane=parse_flag("SCONE_CONTEXT_LANE", env.get("SCONE_CONTEXT_LANE")),
+            question_lane=parse_flag("SCONE_QUESTION_LANE", env.get("SCONE_QUESTION_LANE")),
             lexical_stems=(parse_flag("SCONE_LEXICAL_STEMS", env["SCONE_LEXICAL_STEMS"])
                            if env.get("SCONE_LEXICAL_STEMS") else True),
             vector_weight=_vector_weight(env.get("SCONE_VECTOR_WEIGHT")),
@@ -833,7 +837,7 @@ def build_vectors(settings: Settings, documents=None):
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
 ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
-                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "lexical_stems",
+                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "question_lane", "lexical_stems",
                    "vector_weight", "recency_weight", "recency_half_life_days")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy", "synonyms")
@@ -955,7 +959,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
         synonyms=build_synonyms(settings),
-        context_lane=settings.context_lane,
+        context_lane=settings.context_lane, question_lane=settings.question_lane,
         lexical_stems=settings.lexical_stems,
         vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
@@ -1157,7 +1161,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         abstention=build_abstention(settings),
         synonyms=build_synonyms(settings),
         context_lane=settings.context_lane,
-        lexical_stems=settings.lexical_stems,
+        question_lane=settings.question_lane, lexical_stems=settings.lexical_stems,
         vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
         blobs=blobs,

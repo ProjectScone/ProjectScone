@@ -68,6 +68,12 @@ CREATE TRIGGER IF NOT EXISTS chunk_context_ai AFTER INSERT ON chunk_context BEGI
     INSERT INTO chunk_context_fts(rowid, text) VALUES (new.chunk_id, new.text); END;
 CREATE TRIGGER IF NOT EXISTS chunk_context_ad AFTER DELETE ON chunk_context BEGIN
     INSERT INTO chunk_context_fts(chunk_context_fts, rowid, text) VALUES ('delete', old.chunk_id, old.text); END;
+CREATE TABLE IF NOT EXISTS chunk_questions (chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE, text TEXT NOT NULL);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_questions_fts USING fts5(text, content='chunk_questions', content_rowid='chunk_id');
+CREATE TRIGGER IF NOT EXISTS chunk_questions_ai AFTER INSERT ON chunk_questions BEGIN
+    INSERT INTO chunk_questions_fts(rowid, text) VALUES (new.chunk_id, new.text); END;
+CREATE TRIGGER IF NOT EXISTS chunk_questions_ad AFTER DELETE ON chunk_questions BEGIN
+    INSERT INTO chunk_questions_fts(chunk_questions_fts, rowid, text) VALUES ('delete', old.chunk_id, old.text); END;
 CREATE TABLE IF NOT EXISTS facts (
     id INTEGER PRIMARY KEY, space TEXT NOT NULL,
     subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL,
@@ -445,8 +451,8 @@ class SqliteDocumentStore:
             r["id"] for r in self.conn.execute("SELECT id FROM chunks WHERE episode_id = ? AND space = ?", (episode_id, space))
         ]
         with self.conn:
-            # chunk_context goes with its chunk by cascade, and the cascade
-            # fires the context index's delete trigger (proven by mutation).
+            # chunk_context and chunk_questions go with their chunk by cascade,
+            # and the cascade fires each index's delete trigger (proven by mutation).
             self.conn.execute("DELETE FROM chunks WHERE episode_id = ? AND space = ?", (episode_id, space))
             self.conn.execute("DELETE FROM episodes WHERE id = ? AND space = ?", (episode_id, space))
         return removed
@@ -517,6 +523,8 @@ class SqliteDocumentStore:
     narrows_metadata = True
     #: This store keeps a context index beside chunk text (see ContextIndex).
     context_lane = True
+    #: This store keeps the questions each chunk answers (see QuestionIndex).
+    question_lane = True
     #: This store can search a term's family by prefix (see PrefixSearch).
     prefix_terms = True
 
@@ -563,6 +571,30 @@ class SqliteDocumentStore:
             " JOIN chunks c ON c.id = cc.chunk_id"
             " JOIN episodes e ON e.id = c.episode_id"
             " WHERE chunk_context_fts MATCH ? AND c.space = ?"
+        )
+        return self._ranked(sql, [match, space], filter, limit)
+
+    async def index_questions(self, space: str, chunk_id: int, questions: Sequence[str]) -> bool:
+        with self.conn:
+            # Checked in the same transaction as the write: a chunk forgotten
+            # while the model was answering takes no question.
+            if self.conn.execute("SELECT 1 FROM chunks WHERE id = ? AND space = ?", (chunk_id, space)).fetchone() is None:
+                return False
+            self.conn.execute("DELETE FROM chunk_questions WHERE chunk_id = ?", (chunk_id,))
+            if questions:
+                self.conn.execute("INSERT INTO chunk_questions(chunk_id, text) VALUES (?, ?)", (chunk_id, "\n".join(questions)))
+        return True
+
+    async def search_questions(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        match = _match(query)
+        if match is None:
+            return []
+        sql = (
+            "SELECT c.id AS id, bm25(chunk_questions_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
+            " FROM chunk_questions_fts JOIN chunk_questions cq ON cq.chunk_id = chunk_questions_fts.rowid"
+            " JOIN chunks c ON c.id = cq.chunk_id"
+            " JOIN episodes e ON e.id = c.episode_id"
+            " WHERE chunk_questions_fts MATCH ? AND c.space = ?"
         )
         return self._ranked(sql, [match, space], filter, limit)
 
