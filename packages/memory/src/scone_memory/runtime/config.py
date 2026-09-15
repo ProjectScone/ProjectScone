@@ -83,9 +83,11 @@
     SCONE_FOLLOWUP_URL, SCONE_FOLLOWUP_MODEL, SCONE_FOLLOWUP_API_KEY, SCONE_FOLLOWUP_TIMEOUT (5)
                                    rewrite only: its own self-hosted endpoint, never another setting's key
     SCONE_SEMANTIC_TURN 1 | 0      served voice sessions judge each final transcript: one that stops
-                                   mid-clause ("book a table for") is held up to 1.5 s more for the
-                                   rest of it, instead of being answered at the recognizer's pause
-                                   (default 0; no model; `scone serve` voice personas only)
+                                   mid-clause ("book a table for") is held 1.5 s more for the rest
+                                   of it, instead of being answered at the recognizer's pause; speech
+                                   (or noise) starting while it is held extends the wait to 10 s
+                                   after its first transcript (default 0; no model; `scone serve`
+                                   voice personas only)
 
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)

@@ -338,3 +338,111 @@ async def test_a_released_turn_that_cannot_be_stored_fails_the_session(memory):
     with pytest.raises(RuntimeError, match="store down"):
         await running
     assert all(resource.closes == 1 for resource in rig.resources)
+
+
+def spy_on_timing(memory):
+    latencies = []
+    record_turn = memory.record_turn
+
+    async def spy(space, **options):
+        latencies.append(options["latency_ms"])
+        return await record_turn(space, **options)
+
+    memory.record_turn = spy
+    return latencies
+
+
+async def first_timing(latencies):
+    async with asyncio.timeout(3):
+        while not latencies:
+            await asyncio.sleep(.005)
+    return latencies[0]
+
+
+async def test_a_held_turn_s_recorded_latency_counts_the_hold(memory):
+    latencies = spy_on_timing(memory)
+    async with Rig(memory, turn_detector_factory=LexicalEndOfTurn, turn_hold=.3) as rig:
+        await rig.say(Transcript("sure I'd love to"))
+        timing = await first_timing(latencies)
+        assert rig.session.last_turn_receipt.reason == "semantic_incomplete_timeout"
+        assert timing["first_audio"] >= 300 and timing["total"] >= 300, \
+            "a person waited through the hold; the turn's timing starts when their words were heard"
+        await rig.finish()
+
+
+async def test_a_detector_s_own_time_counts_in_the_turn_s_latency(memory):
+    class Deliberate(Resource):
+        async def judge(self, text):
+            await asyncio.sleep(.2)
+            return Judgement(COMPLETE, "model")
+
+    made = Deliberate()
+    latencies = spy_on_timing(memory)
+    async with Rig(memory, turn_detector_factory=lambda: made, turn_judge_timeout=1) as rig:
+        await rig.say(Transcript("Book it."))
+        timing = await first_timing(latencies)
+        assert rig.session.last_turn_receipt.reason == "semantic_complete"
+        assert timing["first_audio"] >= 200, "the detector judged after the words were heard"
+        await rig.finish()
+
+
+async def held(rig, text):
+    await rig.say(Transcript(text))
+    async with asyncio.timeout(3):
+        while not rig.session._turns.pending:  # the transcript has reached the hold
+            await asyncio.sleep(.005)
+    assert rig.session.stored_count == 0
+
+
+async def _hold_then_stop(rig, how):
+    await held(rig, "Please cancel my card ending in four two and")
+    if how == "close":
+        await rig.session.close()
+    await asyncio.gather(rig.running, return_exceptions=True)
+
+
+@pytest.mark.parametrize("how, options", [("close", {}), ("session_timeout", {"session_timeout": 1})])
+async def test_a_session_that_stops_keeps_the_transcript_it_was_holding(memory, how, options):
+    rig = Rig(memory, turn_detector_factory=LexicalEndOfTurn, turn_hold=5, **options)
+    async with rig:
+        await _hold_then_stop(rig, how)
+    [user] = await rig.users(1)
+    assert user.content == "Please cancel my card ending in four two and"
+    assert user.metadata["turn_end"] == "session_ended" and rig.session.last_turn_receipt.reason == "session_ended"
+    assert rig.model.contexts == [] and rig.transport.sent == [], "a stopping session records the words, answers nothing"
+
+
+async def test_a_held_transcript_that_cannot_be_kept_at_close_is_not_lost_quietly(memory):
+    async def refuse(*args, **kwargs):
+        raise RuntimeError("store down")
+
+    rig = Rig(memory, turn_detector_factory=LexicalEndOfTurn, turn_hold=5)
+    async with rig:
+        await held(rig, "Please cancel my card and")
+        memory.remember_many = refuse
+        with pytest.raises(RuntimeError, match="store down"):
+            await rig.session.close()
+
+
+async def test_a_failing_provider_keeps_its_own_error_and_names_a_held_transcript_it_could_not_keep(memory):
+    async def refuse(*args, **kwargs):
+        raise RuntimeError("store down")
+
+    class Dies(Script):
+        async def transcribe(self, audio):
+            async for _ in audio:
+                while (event := await self.events.get()) is not None:
+                    if isinstance(event, Exception):
+                        raise event
+                    yield event
+
+    stt = Dies()
+    rig = Rig(memory, stt_factory=lambda: stt, turn_detector_factory=LexicalEndOfTurn, turn_hold=5)
+    rig.stt = stt
+    async with rig:
+        await held(rig, "Please cancel my card and")
+        memory.remember_many = refuse
+        await rig.say(ConnectionError("recognizer lost"))
+        with pytest.raises(ConnectionError, match="recognizer lost") as failed:
+            await asyncio.wait_for(rig.running, 3)
+    assert any("held transcript was not stored" in note for note in getattr(failed.value, "__notes__", []))

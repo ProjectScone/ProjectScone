@@ -91,21 +91,26 @@ session = VoiceSession(memory, "authorized-space", "voice-session-1", ...,
 
 | Verdict | When (lexical rules, in order) | What the session does |
 | --- | --- | --- |
-| `incomplete` | open `(` or quote; trailing filler (`um`, `uh`, `er`, `hmm`); trailing `,` `...` `;` `:` or dash; trailing conjunction (`and`, `but`, `or`, `because`, `if`, …), article (`the`, `a`, `my`, …) or preposition (`to`, `for`, `of`, `from`, …) unless a wh-word opens the question | holds the turn up to `turn_hold` seconds past the recognizer's pause |
-| `complete` | ends in `?`, `.` or `!` (closing quotes allowed); or opens with a question word | ends the turn at the pause, as before |
-| `unsure` | anything else, including unpunctuated text with no cue | ends the turn at the pause, as before |
+| `incomplete` | open `(` or quote; trailing filler (`um`, `uh`, `er`, `hmm`); trailing `,` `...` `;` `:` or dash; trailing conjunction (`and`, `but`, `or`, `because`, `if`, …), article (`the`, `a`, `my`, …) or preposition (`to`, `for`, `of`, `from`, …) | holds the turn up to `turn_hold` seconds past the recognizer's pause |
+| `complete` | ends in `?`, `.` or `!` (closing quotes allowed) | ends the turn at the pause, as before |
+| `unsure` | anything else: unpunctuated text with no cue, a last word that is a number or in another script (`set a timer for 20`), and a trailing preposition after a wh-phrase that can be its object (`who`, `what`, `which`, `where`, `how much`, …: `who is this for`) | ends the turn at the pause, as before |
 
 The rules are conservative on purpose: `on`, `in`, `up` and `that` end ordinary
 sentences, so they never hold a turn, and unpunctuated text is only held on a
-positive cue. While a turn is held, speech starting again (from the recognizer or
-the activity detector) keeps it open until `turn_max_duration`; the next final
+positive cue. A question word first is not such a cue (`what I really need is`),
+and `when`, `why` and a bare `how` cannot take a trailing preposition as their
+object, so `how do I get from` is held. While a turn is held, speech starting
+again (from the recognizer or the activity detector, including a noise onset
+that never becomes words) keeps it open until `turn_max_duration` after its first
+final transcript, not `turn_hold`; the next final
 transcript joins it and the joined text is judged again. A held turn is never
 recorded or answered until it is released, and new speech still interrupts any
 reply that is playing.
 
 Every user turn records why it ended, as `metadata["turn_end"]` on its stored
 episode and as `session.last_turn_receipt` (`reason`, `verdict`, `cue`,
-`fragments`, `held_ms` after the last words, `turn_ms` from the first):
+`fragments`, `held_ms` after its last final transcript arrived, `turn_ms` from its
+first; both start after the recognizer's pause, not at the first spoken word):
 
 | `reason` | Meaning |
 | --- | --- |
@@ -116,6 +121,11 @@ episode and as `session.last_turn_receipt` (`reason`, `verdict`, `cue`,
 | `max_bytes` | joining the next transcript would pass 32 000 bytes; the held turn was released first |
 | `speaker_changed` | another speaker's transcript arrived; the held turn was released first |
 | `input_ended` | audio input ended while a turn was held; it is answered before the session ends |
+| `session_ended` | the session stopped (closed, timed out or failed) while a turn was held; its words are recorded and not answered. If they cannot be stored, that is the session's error, or a note on the error that stopped it |
+
+A turn's timing (`conversation_turn` `latency_ms`) is measured from its last final
+transcript's arrival, so a held turn's latency includes the hold and the
+detector's own time.
 
 A detector that returns something other than a `Judgement` fails the session, as a
 malformed activity detector does. `ChatEndOfTurn(chat)` puts any `ChatModel`

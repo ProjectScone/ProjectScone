@@ -247,7 +247,7 @@ class VoiceSession:
                     # output of a newer transcript while either task awaits.
                     async with control:
                         await self._interrupt(transport)
-                        self._turns.speech_started(now=time.monotonic())  # heard by the local detector
+                        self._turns.speech_started(now=time.perf_counter())  # heard by the local detector
                     continue
                 yield chunk
             input_drained = True
@@ -258,17 +258,21 @@ class VoiceSession:
                     async with control:
                         if isinstance(event, SpeechStarted):
                             await self._interrupt(transport)
-                            self._turns.speech_started(now=time.monotonic())  # heard by the recognizer
+                            self._turns.speech_started(now=time.perf_counter())  # heard by the recognizer
                         elif is_question(event):
                             heard = time.perf_counter()
                             await self._interrupt(transport)  # new words supersede output, even while held
                             judgement = await self._judge(detector, self._turns.text_with(event.text, event.speaker))
-                            for end in self._turns.heard(event.text, event.speaker, judgement, time.monotonic()):
+                            # The hold keeps the process clock the turn's timing reads,
+                            # and counts from when the transcript arrived, so a
+                            # detector's own time is part of the wait it reports.
+                            for end in self._turns.heard(event.text, event.speaker, judgement, heard):
                                 await self._begin(end, heard, transport, model, tts)
                             held.set()
             async with control:
-                for end in self._turns.drain(time.monotonic()):
-                    await self._begin(end, time.perf_counter(), transport, model, tts)
+                now = time.perf_counter()
+                for end in self._turns.drain(now):
+                    await self._begin(end, now, transport, model, tts)
 
         async def hold():
             # Releases a held turn when its deadline comes. Waking early is
@@ -277,11 +281,12 @@ class VoiceSession:
                 held.clear()
                 deadline = self._turns.deadline
                 with suppress(TimeoutError):
-                    async with asyncio.timeout(None if deadline is None else deadline - time.monotonic()):
+                    async with asyncio.timeout(None if deadline is None else deadline - time.perf_counter()):
                         await held.wait()
                 async with control:
-                    for end in self._turns.expire(time.monotonic()):
-                        await self._begin(end, time.perf_counter(), transport, model, tts)
+                    now = time.perf_counter()
+                    for end in self._turns.expire(now):
+                        await self._begin(end, now, transport, model, tts)
 
         feeder, listener, holder = asyncio.create_task(feed()), asyncio.create_task(listen()), asyncio.create_task(hold())
         try:
@@ -305,8 +310,24 @@ class VoiceSession:
                                                  or self._reply.exception() is not None):
                 await transport.clear(self._output_turn)
             failure = next((e for e in results if isinstance(e, Exception)), None)
+            await self._keep_held(failure)
             if failure is not None:
                 raise failure
+
+    async def _keep_held(self, failure):
+        # A session that stops with a turn held has transcribed words it has
+        # not stored; without a detector they would already be stored. They
+        # are recorded, not answered. When they cannot be, that is said:
+        # alone as the session's error, or as a note on the error that
+        # stopped it.
+        for end in self._turns.drain(time.perf_counter(), reason="session_ended"):
+            self.last_turn_receipt = end.receipt  # before the record, so a failed one still says why
+            try:
+                await self._record(uuid4().hex, "user", end.text, speaker=end.speaker, turn_end=end.receipt.reason)
+            except Exception as error:
+                if failure is None:
+                    raise
+                failure.add_note(f"a held transcript was not stored: {type(error).__name__}")
 
     async def _judge(self, detector, text) -> Judgement:
         # A detector that cannot answer in time, or at all, is no evidence:
@@ -328,9 +349,11 @@ class VoiceSession:
             raise ValueError("end-of-turn detector must return a Judgement")
         return judgement
 
-    async def _begin(self, end: TurnEnd, heard, transport, model, tts):
+    async def _begin(self, end: TurnEnd, now: float, transport, model, tts):
         # Callers hold the controller, so a released turn and new speech
-        # cannot interleave.
+        # cannot interleave. The turn was heard when its last transcript
+        # arrived, before any hold: a person waited from then.
+        heard = now - end.receipt.held_ms / 1000
         await self._interrupt(transport)  # a second turn released at once supersedes the first
         messages = [*self._history, {"role": "user", "content": end.text}]
         if _bytes(messages) > self._max_history:

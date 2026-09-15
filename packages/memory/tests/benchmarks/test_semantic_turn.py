@@ -47,6 +47,11 @@ def test_a_complete_turn_the_rules_mistake_for_open_is_held_and_charged():
     assert held.premature == 0 and held.added_ms == 1500
 
 
+def test_a_complete_turn_ending_on_a_number_is_answered_at_the_pause():
+    run = replay(utterance(["set a timer for 20"], [], kind="complete"), semantic=True)
+    assert run.added_ms == 0 and run.released[0][1].receipt.reason == "silence"
+
+
 def test_a_malformed_utterance_is_refused(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text('{"utterances": [{"id": "x", "kind": "cut", "fragments": ["a", "b"], "pauses_ms": []}]}')
@@ -62,6 +67,11 @@ def test_the_fixture_measurement():
     assert tally.answered_early["semantic"] == ["cut-04", "cut-09", "cut-11", "cut-15", "cut-16"]
     assert sum(value > 0 for value in tally.complete_added_ms["semantic"]) == 2
     assert all(value == 0 for value in tally.complete_added_ms["silence"])
+    assert tally.reasons == {"silence": {"silence": 49},
+                             "semantic": {"semantic_complete": 24, "silence": 10, "semantic_incomplete_timeout": 3}}
+    [cut04] = [u for u in load(FIXTURE) if u["id"] == "cut-04"]
+    first = replay(cut04, semantic=True).released[0][1].receipt
+    assert (first.reason, first.cue) == ("silence", "no cue"), "cut-04 was released for want of a cue, not as complete"
     assert "premature endings" in report(tally)
     assert len(judge_cost_ns(FIXTURE, repeats=1, loops=1)) == 1
 
