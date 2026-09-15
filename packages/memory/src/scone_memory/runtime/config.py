@@ -45,8 +45,8 @@
     SCONE_LEXICAL_STEMS=0          turn off the text lane's stem-prefix families (bill* for billing); on by
                                    default, measured; the index is untouched either way
     SCONE_VECTOR_WEIGHT=0.5        the vector lane's voice in rank fusion against the text lane's 1.0 (a number
-                                   above 0 and at most 4); unset, a hashed-token embedder gets 0.25 and any
-                                   other embedder 1.0, measured
+                                   above 0 and at most 4); unset, a hashed-token embedder gets 0.01 and any
+                                   other embedder 1.0, measured (0.25 was the hashed default before)
     SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
     SCONE_PROFILE_WITHOUT          predicates a profile never shows
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
@@ -54,6 +54,12 @@
                                  alternatively load preprovisioned CPU model files; both required
     SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS, *_THREADS, *_BATCH_SIZE
                                  optional offline tuning (defaults 512, 2, 8); no model downloads
+    SCONE_RERANKER_LISTWISE=1     alternatively the chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL) orders the
+                                 candidates listwise, a window at a time, with a receipt of its calls
+    SCONE_RERANKER_LISTWISE_WINDOW, *_STEP, *_PASSAGE_BYTES, *_TIMEOUT
+                                 passages per call 2..20 (default 20), step 1..window-1 (default half the
+                                 window), bytes per passage 64..8192 (default 1024), seconds for the whole
+                                 pass >0..600 (default 60; SCONE_RERANK_TIMEOUT does not apply to it)
     SCONE_EVENTS      memory | sqlite | mongo | postgres | elasticsearch | none  (default follows SCONE_DOCUMENTS)
                       (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
@@ -61,6 +67,7 @@
     SCONE_EVENTS_MAX     in-memory sink ring size (default 10000)
 
     SCONE_CHAT_URL, SCONE_CHAT_MODEL   OpenAI-compatible chat model for consolidation; unset = no distiller
+                                       (also the listwise reranker's model; setting it for that starts the distiller)
     SCONE_CHAT_API_KEY                 optional bearer
     SCONE_CHAT_THINK   true | false    for Ollama reasoning models; unset leaves the field out
     SCONE_CHAT_TIMEOUT                 seconds one chat call may take (default 180)
@@ -82,6 +89,14 @@
                                    history-only serving refuses it, and voice sessions do not take it
     SCONE_FOLLOWUP_URL, SCONE_FOLLOWUP_MODEL, SCONE_FOLLOWUP_API_KEY, SCONE_FOLLOWUP_TIMEOUT (5)
                                    rewrite only: its own self-hosted endpoint, never another setting's key
+    SCONE_SEMANTIC_TURN 1 | 0      served voice sessions judge each final transcript: one that stops
+                                   mid-clause ("book a table for") is held 1.5 s more for the rest
+                                   of it, instead of being answered at the recognizer's pause; speech
+                                   starting while it is held extends the wait to 10 s after its
+                                   first transcript; an empty transcription (a cough) is the HTTP
+                                   recognizer's error, which ends the session with a held turn
+                                   stored, not answered (default 0; no model; `scone serve` voice
+                                   personas only)
 
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)
@@ -106,6 +121,7 @@ from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
 from ..retrieval.followup import REWRITE_TIMEOUT_S
 from ..retrieval.fusion import RECENCY_HALF_LIFE_DAYS, W_RECENCY, validate_recency
+from ..retrieval.listwise import DEFAULT_PASSAGE_BYTES, DEFAULT_TIMEOUT, DEFAULT_WINDOW, validate_listwise_options
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 
 
@@ -197,6 +213,9 @@ class Settings:
     embedding_cache: str | None = None
     demote_restated: bool = True
     context_lane: bool = False
+    #: SCONE_QUESTION_LANE: recall searches the questions each chunk answers
+    #: (ingestion/chunk_questions.py), and the pass that writes them may run.
+    question_lane: bool = False
     lexical_stems: bool = True
     vector_weight: Optional[float] = None
     many_valued: tuple[str, ...] = ()
@@ -221,6 +240,13 @@ class Settings:
     reranker_cross_encoder_max_pair_tokens: int | None = None
     reranker_cross_encoder_threads: int | None = None
     reranker_cross_encoder_batch_size: int | None = None
+    #: Whether the chat model orders recall's candidates listwise
+    #: (retrieval/listwise.py); the tuning below is None for its defaults.
+    reranker_listwise: bool = False
+    reranker_listwise_window: int | None = None
+    reranker_listwise_step: int | None = None
+    reranker_listwise_passage_bytes: int | None = None
+    reranker_listwise_timeout: float | None = None
     rerank_limit: int = 32
     rerank_max_bytes: int = 64000
     rerank_timeout: float = 1.0
@@ -290,6 +316,8 @@ class Settings:
     followup_model: str | None = None
     followup_api_key: str | None = field(default=None, repr=False)
     followup_timeout: float = REWRITE_TIMEOUT_S
+    #: SCONE_SEMANTIC_TURN: voice turns end on what was said as well as the pause.
+    semantic_turn: bool = False
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
@@ -357,6 +385,30 @@ class Settings:
                 raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} must be an integer in {minimum}..{maximum}")
             if self.reranker_cross_encoder_dir is None:
                 raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} requires the cross encoder directory and model")
+        self._validate_listwise()
+
+    def _validate_listwise(self) -> None:
+        if type(self.reranker_listwise) is not bool:
+            raise InvalidInput("SCONE_RERANKER_LISTWISE must be 1 or 0")
+        tuning = {"WINDOW": self.reranker_listwise_window, "STEP": self.reranker_listwise_step,
+                  "PASSAGE_BYTES": self.reranker_listwise_passage_bytes, "TIMEOUT": self.reranker_listwise_timeout}
+        if not self.reranker_listwise:
+            for name, value in tuning.items():
+                if value is not None:
+                    raise InvalidInput(f"SCONE_RERANKER_LISTWISE_{name} requires SCONE_RERANKER_LISTWISE=1")
+            return
+        if self.reranker_factory is not None or self.reranker_cross_encoder_dir is not None:
+            raise InvalidInput("SCONE_RERANKER_LISTWISE cannot be combined with SCONE_RERANKER_FACTORY "
+                               "or SCONE_RERANKER_CROSS_ENCODER_DIR")
+        if not (self.chat_url and self.chat_model):
+            raise InvalidInput("SCONE_RERANKER_LISTWISE orders with the chat model and needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+        try:
+            validate_listwise_options(*listwise_options(self))
+        except InvalidInput as error:
+            message = str(error)
+            for word in ("window", "step", "passage_bytes", "timeout"):
+                message = message.replace(f"listwise {word}", f"SCONE_RERANKER_LISTWISE_{word.upper()}")
+            raise InvalidInput(message) from None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
@@ -446,6 +498,7 @@ class Settings:
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
             context_lane=parse_flag("SCONE_CONTEXT_LANE", env.get("SCONE_CONTEXT_LANE")),
+            question_lane=parse_flag("SCONE_QUESTION_LANE", env.get("SCONE_QUESTION_LANE")),
             lexical_stems=(parse_flag("SCONE_LEXICAL_STEMS", env["SCONE_LEXICAL_STEMS"])
                            if env.get("SCONE_LEXICAL_STEMS") else True),
             vector_weight=_vector_weight(env.get("SCONE_VECTOR_WEIGHT")),
@@ -476,6 +529,16 @@ class Settings:
                 env["SCONE_RERANKER_CROSS_ENCODER_THREADS"]) if "SCONE_RERANKER_CROSS_ENCODER_THREADS" in env else None),
             reranker_cross_encoder_batch_size=(_environment_integer("SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE",
                 env["SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE"]) if "SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE" in env else None),
+            reranker_listwise=parse_flag("SCONE_RERANKER_LISTWISE", env.get("SCONE_RERANKER_LISTWISE")),
+            reranker_listwise_window=(_environment_integer("SCONE_RERANKER_LISTWISE_WINDOW", env["SCONE_RERANKER_LISTWISE_WINDOW"])
+                                      if env.get("SCONE_RERANKER_LISTWISE_WINDOW") else None),
+            reranker_listwise_step=(_environment_integer("SCONE_RERANKER_LISTWISE_STEP", env["SCONE_RERANKER_LISTWISE_STEP"])
+                                    if env.get("SCONE_RERANKER_LISTWISE_STEP") else None),
+            reranker_listwise_passage_bytes=(_environment_integer("SCONE_RERANKER_LISTWISE_PASSAGE_BYTES",
+                                                                  env["SCONE_RERANKER_LISTWISE_PASSAGE_BYTES"])
+                                             if env.get("SCONE_RERANKER_LISTWISE_PASSAGE_BYTES") else None),
+            reranker_listwise_timeout=(parse_seconds("SCONE_RERANKER_LISTWISE_TIMEOUT", env["SCONE_RERANKER_LISTWISE_TIMEOUT"], 0.0)
+                                       if env.get("SCONE_RERANKER_LISTWISE_TIMEOUT") else None),
             rerank_limit=_environment_integer("SCONE_RERANK_LIMIT", env.get("SCONE_RERANK_LIMIT", "32")),
             rerank_max_bytes=_environment_integer("SCONE_RERANK_MAX_BYTES", env.get("SCONE_RERANK_MAX_BYTES", "64000")),
             rerank_timeout=parse_seconds("SCONE_RERANK_TIMEOUT", env.get("SCONE_RERANK_TIMEOUT"), 1.0),
@@ -527,6 +590,7 @@ class Settings:
             followup_model=env.get("SCONE_FOLLOWUP_MODEL") or None,
             followup_api_key=env.get("SCONE_FOLLOWUP_API_KEY") or None,
             followup_timeout=parse_seconds("SCONE_FOLLOWUP_TIMEOUT", env.get("SCONE_FOLLOWUP_TIMEOUT"), REWRITE_TIMEOUT_S),
+            semantic_turn=parse_flag("SCONE_SEMANTIC_TURN", env.get("SCONE_SEMANTIC_TURN")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
@@ -773,7 +837,7 @@ def build_vectors(settings: Settings, documents=None):
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
 ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
-                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "lexical_stems",
+                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "question_lane", "lexical_stems",
                    "vector_weight", "recency_weight", "recency_half_life_days")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy", "synonyms")
@@ -809,6 +873,16 @@ def _reranker_spec(spec: str) -> tuple[str, str]:
     return module, name
 
 
+def listwise_options(settings: Settings) -> tuple[int, int, int, float]:
+    """The listwise pass's window, step, passage bytes and deadline, defaults filled in."""
+    window = DEFAULT_WINDOW if settings.reranker_listwise_window is None else settings.reranker_listwise_window
+    step = window // 2 if settings.reranker_listwise_step is None else settings.reranker_listwise_step
+    passage_bytes = (DEFAULT_PASSAGE_BYTES if settings.reranker_listwise_passage_bytes is None
+                     else settings.reranker_listwise_passage_bytes)
+    timeout = DEFAULT_TIMEOUT if settings.reranker_listwise_timeout is None else settings.reranker_listwise_timeout
+    return window, step, passage_bytes, timeout
+
+
 def build_reranker(settings: Settings) -> Reranker | None:
     """Load an explicit offline model or trusted code; no default is selected.
 
@@ -829,6 +903,12 @@ def build_reranker(settings: Settings) -> Reranker | None:
                 batch_size=settings.reranker_cross_encoder_batch_size or 8)
         except Exception:
             raise InvalidInput("SCONE_RERANKER_CROSS_ENCODER requires valid preprovisioned model files and scone-memory[offline-rerank]") from None
+    if settings.reranker_listwise:
+        from ..retrieval.listwise import ListwiseReranker
+
+        window, step, passage_bytes, timeout = listwise_options(settings)
+        return ListwiseReranker(build_chat(settings), window=window, step=step, passage_bytes=passage_bytes,
+                                timeout=timeout)
     if settings.reranker_factory is None:
         return None
     module, name = _reranker_spec(settings.reranker_factory)
@@ -879,7 +959,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
         synonyms=build_synonyms(settings),
-        context_lane=settings.context_lane,
+        context_lane=settings.context_lane, question_lane=settings.question_lane,
         lexical_stems=settings.lexical_stems,
         vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
@@ -1081,7 +1161,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         abstention=build_abstention(settings),
         synonyms=build_synonyms(settings),
         context_lane=settings.context_lane,
-        lexical_stems=settings.lexical_stems,
+        question_lane=settings.question_lane, lexical_stems=settings.lexical_stems,
         vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
         blobs=blobs,

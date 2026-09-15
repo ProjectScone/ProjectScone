@@ -58,4 +58,27 @@ def test_summaries_are_served_with_a_model_and_refused_without():
         assert whole.status_code == 200, whole.text
         assert whole.json()["communities_reported"] == 2 and whole.json()["text"]
         assert client.get("/v1/graph/communities/nope/summary", headers=auth).status_code == 422
+
+
+class NamingChat:
+    async def complete(self, system: str, user: str) -> str:
+        return "Acme Robotics staff" if "Acme" in user else "People in Porto"
+
+
+def test_community_names_are_served_with_a_model_and_refused_without():
+    engine = asyncio.run(seeded())
+    auth = {"Authorization": "Bearer key-a"}
+    with TestClient(create_app(engine, {"key-a": "alpha"})) as client:
+        refused = client.get("/v1/graph/communities/names", headers=auth)
+        assert refused.status_code == 422 and "need a model" in refused.json()["error"]
+    with TestClient(create_app(engine, {"key-a": "alpha"}, synthesis_factory=NamingChat)) as client:
+        named = client.get("/v1/graph/communities/names", headers=auth, params={"limit": 1})
+        assert named.status_code == 200, named.text
+        record = named.json()
+        assert record["communities_asked"] == 1 and record["communities_named"] == 1 and record["verified_accuracy"] is False
+        [one] = record["names"]
+        assert one["name"] in ("Acme Robotics staff", "People in Porto") and one["label"] and one["why"] == "named"
+        assert record["timeout_s"] == 120.0 and record["communities_timed_out"] == 0 == record["communities_failed"]
+        assert client.get("/v1/graph/communities/names", headers=auth, params={"limit": 0}).status_code == 422
+        assert client.get("/v1/graph/communities/names", headers=auth, params={"timeout_s": 601}).status_code == 422
         assert client.get("/v1/graph/summary", headers=auth, params={"reports": 1}).status_code == 422

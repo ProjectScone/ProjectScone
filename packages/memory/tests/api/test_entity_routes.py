@@ -1086,3 +1086,23 @@ def test_a_structured_question_can_ask_for_what_follows_over_http(meant):
     assert found["status"] == "matched" and found["filters"]["follows"] is True
     [row] = found["rows"]
     assert row["follows"] == ["inverse"] and row["fact_ids"] == [1]
+
+
+async def test_stats_and_hubs_count_the_graph_and_rank_its_most_linked(seeded):
+    client, _ = seeded
+    counted = client.get("/v1/graph/stats", headers=auth()).json()
+    assert counted["space"] == "alpha" and counted["totals"]["entities"] >= 2 and counted["totals"]["facts"] >= 1
+    assert set(counted["facts"]) == {"origin", "grounding", "standing"} and counted["text"].startswith("stats: space alpha")
+    assert sum(counted["facts"]["origin"].values()) == counted["totals"]["facts"]
+    ranked = client.get("/v1/graph/hubs", params={"limit": 2}, headers=auth()).json()
+    assert ranked["space"] == "alpha" and 1 <= len(ranked["hubs"]) <= 2 and ranked["hubs"][0]["degree"] >= 1
+    assert ranked["hubs"][0]["degree"] >= ranked["hubs"][-1]["degree"], "most linked first"
+    held = client.get("/v1/graph/hubs", params={"above": 90}, headers=auth()).json()
+    # Three own entities have nothing above their 90th percentile of degree.
+    assert held["totals"]["above"] == 90.0 and held["hubs"] == [] and "no hub above the 90th" in held["text"]
+    assert client.get("/v1/graph/hubs", params={"limit": 0}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/hubs", params={"above": 10}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/stats", params={"max_bytes": 100}, headers=auth()).status_code == 422
+    assert client.get("/v1/graph/stats", headers=auth("key-b")).json()["totals"]["entities"] >= 0
+    features = client.get("/v1/capabilities", headers=auth()).json()["features"]
+    assert features["graph.stats"] is True and features["graph.hubs"] is True

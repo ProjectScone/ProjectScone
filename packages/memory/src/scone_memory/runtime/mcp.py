@@ -645,6 +645,53 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error(str(refused))
         return ok_text(found.text)
 
+    @tool(server, "memory_graph_stats")
+    async def memory_graph_stats(
+        max_bytes: Annotated[
+            Optional[StrictInt], Field(description="Byte budget for the answer (512..=64000); defaults to 8000")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """The knowledge graph counted: entities, relations, attributes,
+        communities and modularity, isolated and external entities, kinds,
+        predicates, and the facts by origin, grounding and standing. Counts
+        over recorded data; it changes nothing."""
+        from ..entities.stats import MAX_BYTES as STATS_BYTES, StatsError, graph_stats
+
+        try:
+            found = await graph_stats(engine, space or default_space,
+                                      max_bytes=max_bytes if max_bytes is not None else STATS_BYTES)
+        except (StatsError, InvalidInput) as refused:
+            return tool_error(str(refused))
+        return ok_text(found.text)
+
+    @tool(server, "memory_graph_hubs")
+    async def memory_graph_hubs(
+        limit: Annotated[
+            Optional[StrictInt], Field(description="Hubs shown, most linked first (1..=100); defaults to 10")
+        ] = None,
+        above: Annotated[
+            Optional[float], Field(description="Only the hubs above this degree percentile (50..=100), as the "
+                                               "report holds them apart; defaults to none")
+        ] = None,
+        max_bytes: Annotated[
+            Optional[StrictInt], Field(description="Byte budget for the answer (512..=64000); defaults to 8000")
+        ] = None,
+        space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
+    ) -> CallToolResult:
+        """The entities with the most neighbours, the graph's core abstractions
+        or its utility hubs, each with its degree, fact weight, PageRank and
+        community. It changes nothing."""
+        from ..entities.stats import DEFAULT_HUBS, MAX_BYTES as STATS_BYTES, StatsError, graph_hubs
+
+        try:
+            found = await graph_hubs(engine, space or default_space, above=above,
+                                     limit=limit if limit is not None else DEFAULT_HUBS,
+                                     max_bytes=max_bytes if max_bytes is not None else STATS_BYTES)
+        except (StatsError, InvalidInput) as refused:
+            return tool_error(str(refused))
+        return ok_text(found.text)
+
     @tool(server, "memory_graph_health")
     async def memory_graph_health(
         limit: Annotated[
@@ -715,6 +762,16 @@ def create_server(engine: MemoryEngine, space: str = "default",
     async def health_lines_of(space: str) -> str:
         return (await graph_health(engine, readable(space), max_bytes=8_000)).text
 
+    async def stats_lines_of(space: str) -> str:
+        from ..entities.stats import graph_stats
+
+        return (await graph_stats(engine, readable(space), max_bytes=8_000)).text
+
+    async def hubs_lines_of(space: str) -> str:
+        from ..entities.stats import graph_hubs
+
+        return (await graph_hubs(engine, readable(space), max_bytes=8_000)).text
+
     # The report and schema as resources a client can attach as context:
     # the server's own space at a fixed address, any other by name.
     @server.resource("scone://graph/report", name="graph-report", mime_type="text/markdown",
@@ -737,6 +794,23 @@ def create_server(engine: MemoryEngine, space: str = "default",
 
     server.resource("scone://{space}/graph/health", name="space-graph-health", mime_type="text/plain",
                     description="What in one space's graph wants attention.")(health_lines_of)
+
+    @server.resource("scone://graph/stats", name="graph-stats", mime_type="text/plain",
+                     description="The server's space's graph counted: entities, relations, attributes, communities, "
+                                 "kinds, predicates, and the facts by origin, grounding and standing.")
+    async def own_stats() -> str:
+        return await stats_lines_of(default_space)
+
+    @server.resource("scone://graph/hubs", name="graph-hubs", mime_type="text/plain",
+                     description="The server's space's most linked entities, with degree, facts, PageRank and "
+                                 "community.")
+    async def own_hubs() -> str:
+        return await hubs_lines_of(default_space)
+
+    server.resource("scone://{space}/graph/stats", name="space-graph-stats", mime_type="text/plain",
+                    description="One space's graph counted.")(stats_lines_of)
+    server.resource("scone://{space}/graph/hubs", name="space-graph-hubs", mime_type="text/plain",
+                    description="One space's most linked entities.")(hubs_lines_of)
 
     server.resource("scone://{space}/graph/report", name="space-graph-report", mime_type="text/markdown",
                     description="The knowledge report of one space.")(report_markdown)
