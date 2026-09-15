@@ -40,6 +40,8 @@ import posixpath
 import re
 from typing import Callable, Optional, Sequence
 
+from .mcp_config import WALKED_DOT_NAMES, is_mcp_config
+
 #: Read in every directory, in this order: the tree's own exclusions,
 #: then ours.
 GIT_IGNORE = ".gitignore"
@@ -356,8 +358,14 @@ def walk_files(root: str | Path, *, keep: Callable[[Path], bool], ignore: Option
                 continue
             relative = entry.relative_to(top).as_posix()
             # A dot-name is skipped whether directory or file, as `sync`
-            # skips it: the two commands walk one tree the same way.
-            if entry.name.startswith(".") or entry.name in ALWAYS_SKIPPED:
+            # skips it: the two commands walk one tree the same way. The
+            # exceptions are the MCP configurations, which live in dot-names
+            # by every tool's convention, and the directories that hold one;
+            # from those directories only the configuration is read.
+            if (entry.name.startswith(".") and entry.name.lower() not in WALKED_DOT_NAMES) or entry.name in ALWAYS_SKIPPED:
+                continue
+            dotted = any(part.startswith(".") for part in relative.split("/"))
+            if dotted and not directory and not is_mcp_config(relative):
                 continue
             if directory:
                 if ignore is not None and ignore.ignored(relative, directory=True):
