@@ -16,7 +16,7 @@ The native provider interfaces live in `scone_memory.realtime.audio`:
 
 | Interface | Host adapter implements |
 | --- | --- |
-| `AudioTransport` | `receive()` audio stream, `send(chunk, turn_id)`, `clear(turn_id)`, `aclose()` |
+| `AudioTransport` | `receive()` audio stream (which may carry `Keypress` events, see [Keys from the phone](#keys-from-the-phone-dtmf)), `send(chunk, turn_id)`, `clear(turn_id)`, `aclose()` |
 | `SpeechRecognizer` | `transcribe(audio)` yielding speech-start and transcript events, `aclose()` |
 | `VoiceModel` | `respond(messages)` yielding public text deltas and explicit completion, `aclose()` |
 | `SpeechSynthesizer` | `synthesize(text)` yielding PCM chunks, `aclose()` |
@@ -135,6 +135,7 @@ from its first; both start after the recognizer's pause, not at the first spoken
 | `speaker_changed` | another speaker's transcript arrived; the held turn was released first |
 | `input_ended` | audio input ended while a turn was held; it is answered before the session ends |
 | `session_ended` | the session stopped (closed, timed out or failed) while a turn was held; its words are recorded and not answered. If they cannot be stored, that is the session's error, or a note on the error that stopped it |
+| `keypad` | keys from the phone joined the turn and finished it (see [Keys from the phone](#keys-from-the-phone-dtmf)) |
 
 A turn's timing (`conversation_turn` `latency_ms`) is measured from its last final
 transcript's arrival, so a held turn's latency includes the hold and the
@@ -166,6 +167,126 @@ local activity detector deliver them. With a duplex recognizer that reports new
 speech before the transcript of the old, that speech start finds nothing held; the
 hold then runs from the transcript although the speaker is already talking, and a
 continuation longer than `turn_hold` is released as `semantic_incomplete_timeout`.
+
+### Keys from the phone (DTMF)
+
+A caller can answer with the keypad as well as the voice: "press 1 for sales", an
+account number, a PIN ended with `#`. A transport may yield
+`realtime.keypad.Keypress(key, source, offset_ms, tone_ms)` events among its audio
+chunks; `key` is one of the sixteen DTMF keys `0-9 * # A-D`, `source` is `event`
+(the transport's own message) or `inband` (tones heard in the audio), and
+`offset_ms` places the key in the caller's audio from the start of the call. Keys
+never reach the recognizer. A session without a keypad policy (the default)
+counts them in `session.keypad_ignored` and does nothing else.
+
+```python
+from scone_memory.realtime.keypad import KeypadPolicy
+
+session = VoiceSession(memory, "authorized-space", "call-1", ...,
+                       keypad=KeypadPolicy("collect", terminator="#", timeout=3, max_digits=32,
+                                           speech_wait=5))
+```
+
+| Mode | What a key does |
+| --- | --- |
+| `append` | each key is given to the user's turn at once, as `[keypad] 5`: it joins whatever the caller has said and not finished (a held clause) and the turn is answered |
+| `collect` | keys are held until the terminator (included in the entry), `timeout` seconds with no key, or `max_digits` keys, then given to the turn as one entry, `[keypad] 1234#` |
+
+`template` (default `[keypad] {keys}`) is the text the turn is given. The first key
+of an entry stops a reply that is playing, as speech starting does. While keys are
+being collected a held spoken clause waits for them (as it does while the caller
+speaks), so "my card number is um" and `4111#` are one turn. Keys held when input
+ends are answered (`input_ended`); keys held when the session stops are stored and
+not answered (`session_ended`). Keys that would take a held turn past 32 000 bytes
+release it first (`max_bytes`).
+
+Keys and words are put in the order the caller made them, not the order they
+reached the session. A key arrives at once; the words arrive only when the
+recognizer has heard the caller stop and transcribed them. So the session marks
+when speech began (the recognizer's `SpeechStarted`, a partial transcript, or the
+session's own activity detector) and, when the words come:
+
+* keys being collected that were pressed before that speech began are given to the
+  turn first (ended by `speech`), and the words are their own turn;
+* an entry finished after that speech began waits for its words, and is given to
+  the turn after them: it joins them when a detector holds them as an open clause,
+  and is the next turn otherwise. Keys still being collected carry on, and hold the
+  clause open until they end.
+
+An entry waits at most `speech_wait` seconds (default 5, at most 60) for the words.
+When that bound cuts, the entry is given on its own and those words are no longer
+waited for; speech that ends with no words, input ending and the session stopping
+also let it go. A recognizer that gives no sign that speech began gives the session
+nothing to order by, and keys go to the turn as they arrive. `Keypress.offset_ms`
+cannot order keys against words: a transcript does not say where in the audio it was
+spoken.
+
+A user turn that keys finished has `metadata["turn_end"] = "keypad"` and says how
+and when each key came; `session.last_keypad_receipt` keeps the whole entry,
+audio offsets and tone lengths included:
+
+| Metadata | Meaning |
+| --- | --- |
+| `keypad_keys` | the keys, in order, `12#` |
+| `keypad_ended` | `key` (append), `terminator`, `timeout`, `max_digits` (the bound bit), `speech`, `input_ended` or `session_ended` |
+| `keypad_sources` | one letter per key: `e` from the transport's event, `i` heard in the audio |
+| `keypad_started_ms` | the first key, in milliseconds from the start of the conversation |
+| `keypad_at_ms` | each key from the first, comma-separated: `0,812,1604` |
+| `keypad_waited` | only for an entry that waited for words spoken before it: `words` (given after them), `no_words` (speech, input or the session ended without them) or `timeout` (`speech_wait` cut the wait) |
+
+`timeout` is at most 60 seconds and `max_digits` at most 32, so the longest entry
+still fits one metadata value (256 characters).
+
+A voice pipeline (`pipeline.voice`) does not act on keys: `CallerStage` feeds each
+`Keypress` down the line as a frame of its own, where a stage that takes keys can
+read it, and the call goes on.
+
+#### Carrier calls
+
+`telephony.CarrierTransport(socket, dialect, rate=16000, keypad="off")` yields
+keys to the session when `keypad` is on:
+
+| `keypad` | Keys the session gets |
+| --- | --- |
+| `off` (default) | none; carrier digits are still kept in `transport.digits` (at most 64, then counted in `dropped_digits`) |
+| `events` | the carrier's `dtmf` messages (Twilio, Telnyx, Plivo and Exotel put the key in `dtmf.digit`) |
+| `inband` | keys heard as tones in the caller's audio; carrier messages are not taken |
+| `both` | both, with a press heard both ways reported once |
+
+A carrier digit that is not a keypad key (`"12"`, `"x"`, an empty value) is not
+passed on and is counted in `transport.stream.unreadable_digits`. With `both`, a
+key reported one way is paired with the same key heard the other way within
+`DUPLICATE_WINDOW_MS` (1000 ms) of the call's audio, counted from where a key's
+tones were last heard, so a key held down and reported by the carrier when it is
+let go is still one key; a paired hearing is used up,
+so a key pressed twice is still two keys, and `transport.stream.duplicates` counts
+the second hearings. At most `MAX_UNPAIRED` (64) reported keys wait to be paired;
+past that the oldest is forgotten and counted in `unpaired_forgotten`.
+
+In-band detection (`audio.dtmf.ToneDetector`) runs Goertzel's recurrence at the
+eight DTMF frequencies over 25.6 ms blocks (205 samples at 8 kHz) started a quarter
+block apart, on the line's audio before any resampling. A block is a key when both
+tones are at least -35 dBFS, they hold at least 60 % of the block's energy, the high
+tone is at most 4 dB louder than the low and the low at most 8 dB louder than the
+high (ITU-T Q.24 twist), each tone is 10 dB above the next strongest in its group,
+and each is stronger at its nominal frequency than 5 % either side of it. A key is
+reported once, when agreeing blocks span `min_tone_ms` (40), and not again until
+two blocks in a row are not that key. The tones are not removed: the recognizer
+still hears them, and what it makes of them is its own.
+
+Measured on synthesized calls companded to mu-law
+([`dtmf-inband-v1.results.md`](../benchmarks/dtmf-inband-v1.results.md), replayed by
+`benchmarks/dtmf_inband.py`): every key heard down to 6 dB SNR, 483 of 500 at 3 dB,
+4 of 500 at 0 dB, and no wrong or phantom key at any SNR; every 40 ms press and no
+20 ms one; every tone 1.5 % off nominal and none 3.5 % off; no key in noise, a
+440 Hz tone or steady synthesized vowels. With the detector on, reading a call cost
+33.1 ms of CPU per second of audio against 3.3 ms off. The signals are synthesized;
+real lines, codecs other than G.711 and recorded speech were not measured.
+
+`scone serve` does not accept phone calls. Its browser audio socket takes keys
+when `SCONE_VOICE_KEYPAD=append` or `collect` (default `off`): the client sends
+`{"type": "keypad", "key": "5"}` and the served session uses that mode with the
+defaults above; `GET /v1/conversations/capabilities` reports `voice_keypad`.
 
 ## Personas and independent provider selection
 

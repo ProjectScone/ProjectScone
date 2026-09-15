@@ -184,7 +184,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                                    synthesis_factory=synthesis_factory, url_import=url_import,
                                    answer_review=answer_review, adaptive_retriever=adaptive_retriever,
                                    tool_retrieval=conversation_tools, followup=build_followup(settings),
-                                   semantic_turn=settings.semantic_turn))
+                                   semantic_turn=settings.semantic_turn, voice_keypad=settings.voice_keypad))
 
 
 def build_server(settings: Settings, app):

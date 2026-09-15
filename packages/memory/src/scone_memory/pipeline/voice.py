@@ -29,6 +29,7 @@ from ..realtime.audio import (AudioChunk, AudioTransport, Reply, SpeechRecognize
                               SpeechSynthesizer, Transcript, VoiceModel, check_audio, is_question,
                               sentences)
 from ..realtime.events import ReplyCompleted, TextDelta
+from ..realtime.keypad import Keypress
 from .core import Feed, Interrupted
 from .memory import Prompt
 
@@ -69,7 +70,9 @@ class CallerStage:
 
     Essential, because a call without it is not a call. It reads on a
     task of its own, so the run learns of a dead line through the same
-    path as any other fault."""
+    path as any other fault. Keys a transport yields among the audio
+    (``realtime.keypad.Keypress``) are fed on as they are; no stage here
+    acts on them."""
 
     essential = True
 
@@ -100,6 +103,11 @@ class CallerStage:
         try:
             async with _closing_stream(self.transport.receive()) as incoming:
                 async for chunk in incoming:
+                    if isinstance(chunk, Keypress):
+                        # A key from the phone is not audio: it goes down the
+                        # line as a frame of its own, for a stage that takes keys.
+                        await feed(chunk)
+                        continue
                     await feed(check_audio(chunk, self.max_bytes))
         except asyncio.CancelledError:
             raise

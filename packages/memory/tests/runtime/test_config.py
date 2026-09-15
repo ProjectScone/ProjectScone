@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from scone_memory import InvalidInput
+from scone_memory import InMemoryDocumentStore, InMemoryVectorIndex, InvalidInput, MemoryEngine
 from scone_memory.runtime.config import Settings, build_engine, parse_keys
 from scone_memory.embedders.hash import HashEmbedder
 
@@ -338,6 +338,40 @@ async def test_a_token_chunk_target_is_a_number_that_reaches_every_engine():
 def test_a_token_chunk_target_that_cannot_work_is_refused_by_name(env, match):
     with pytest.raises(InvalidInput, match=match):
         Settings.from_env(env)
+
+
+def test_voice_keypad_is_off_by_default_and_read_as_a_mode():
+    assert Settings.from_env({}).voice_keypad == "off"
+    assert Settings.from_env({"SCONE_VOICE_KEYPAD": "collect"}).voice_keypad == "collect"
+    assert Settings.from_env({"SCONE_VOICE_KEYPAD": " Append "}).voice_keypad == "append"
+    with pytest.raises(InvalidInput, match="SCONE_VOICE_KEYPAD"):
+        Settings.from_env({"SCONE_VOICE_KEYPAD": "1"})
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.mark.parametrize("value, expected", [(None, "off"), ("collect", "collect")])
+def test_serve_hands_the_voice_keypad_to_the_conversation_service(tmp_path, monkeypatch, value, expected):
+    import asyncio
+
+    from scone_memory.api import __main__ as serve
+
+    captured: dict[str, object] = {}
+
+    def create(*args, **options):
+        captured.update(options)
+        raise _Stop()
+
+    monkeypatch.setattr("scone_memory.api.conversations.create_conversation_app", create)
+    env = {"SCONE_API_KEY": "solo", "SCONE_CONVERSATIONS_JOURNAL": str(tmp_path / "sessions.db")}
+    if value is not None:
+        env["SCONE_VOICE_KEYPAD"] = value
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with pytest.raises(_Stop):
+        serve.build_app(Settings.from_env(env), engine)
+    assert captured["voice_keypad"] == expected
 
 
 async def test_a_semantic_merge_threshold_is_a_similarity_that_reaches_every_engine():

@@ -114,3 +114,54 @@ def test_a_reply_before_the_call_starts_is_refused_rather_than_addressed_to_nobo
     with pytest.raises(ValueError, match="no stream"):
         stream.outbound(AudioChunk(pcm=tone(440, 20, 8000), sample_rate=8000))
     assert stream.clear() is None, "and there is nothing to clear"
+
+
+def test_each_carrier_reports_a_keypress_in_its_own_dtmf_message():
+    """The shapes pipecat's serializers read: Twilio, Telnyx, Plivo and
+    Exotel all put the key under ``dtmf.digit`` beside their own fields."""
+    messages = {
+        "twilio": {"event": "dtmf", "streamSid": "MZ1", "sequenceNumber": "5",
+                   "dtmf": {"track": "inbound_track", "digit": "7"}},
+        "telnyx": {"event": "dtmf", "stream_id": "st-1", "sequence_number": "4",
+                   "occurred_at": "2026-09-15T10:00:00Z", "dtmf": {"digit": "#"}},
+        "plivo": {"event": "dtmf", "streamId": "pl-1", "dtmf": {"digit": "0"}},
+        "exotel": {"event": "dtmf", "stream_sid": "ex-1", "dtmf": {"digit": "*", "duration": "120"}},
+    }
+    for name, message in messages.items():
+        [digit] = MediaStream(DIALECTS[name]).inbound(json.dumps(message))
+        assert isinstance(digit, Dtmf) and digit.source == "event", name
+        assert digit.digit == message["dtmf"]["digit"], name
+
+
+def test_a_digit_says_where_in_the_call_it_was_pressed():
+    stream = MediaStream(DIALECTS["twilio"])
+    stream.inbound(json.dumps({"event": "start", "streamSid": "MZ1", "start": {"streamSid": "MZ1"}}))
+    [first] = stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": "1"}}))
+    assert first.offset_ms == 0.0, "no audio yet: pressed at the start of the call"
+    payload = base64.b64encode(g711.ulaw_encode(tone(440, 20, 8000))).decode()
+    for _ in range(3):
+        stream.inbound(json.dumps({"event": "media", "media": {"payload": payload}}))
+    [second] = stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": "2"}}))
+    assert second.offset_ms == pytest.approx(60.0), "after 60 ms of the caller's audio, at the line's rate"
+    assert second.tone_ms is None, "a carrier event does not say how long the key was held"
+
+
+def test_a_key_that_is_not_on_a_keypad_is_counted_and_not_passed_on():
+    """A keypad has sixteen keys. Anything else in a dtmf message is not a
+    keypress; the call survives it and the stream says how many it refused."""
+    stream = MediaStream(DIALECTS["twilio"])
+    for value in ("12", "x", "", " ", 7.5, None):
+        assert stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": value}})) == []
+    assert stream.unreadable_digits == 6
+    [lower] = stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": "a"}}))
+    assert lower.digit == "A", "the fourth column is one key whichever case a carrier writes it in"
+    [number] = stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": 9}}))
+    assert number.digit == "9"
+    assert stream.unreadable_digits == 6
+
+
+def test_a_stream_can_be_told_not_to_report_carrier_digits():
+    stream = MediaStream(DIALECTS["twilio"], digits="off")
+    assert stream.inbound(json.dumps({"event": "dtmf", "dtmf": {"digit": "1"}})) == []
+    with pytest.raises(ValueError, match="digits"):
+        MediaStream(DIALECTS["twilio"], digits="sometimes")
