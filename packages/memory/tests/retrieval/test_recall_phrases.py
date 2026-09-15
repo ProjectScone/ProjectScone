@@ -180,3 +180,21 @@ async def test_an_answer_short_after_drops_is_short_only_when_a_lane_filled_its_
         await engine.close()
     assert text_only.phrases.short is True
     assert len(narrow.items) < 3 and narrow.phrases.dropped_required > 0
+
+
+async def test_a_vector_lane_under_a_date_bound_is_full_only_at_its_own_deeper_window():
+    engine = await stored()
+    try:
+        # A date bound post-filters the vector lane, which then looks deeper
+        # than the text lane's window of four. All six passages came back
+        # from it, well short of its own window, so none went unchecked.
+        bounded = await engine.recall("default", "crane survey jib", limit=1, since="2000-01-01T00:00:00Z",
+                                      lanes=("vector",), require=["telescope"])
+    finally:
+        await engine.close()
+    assert bounded.narrowing is not None and bounded.narrowing.vector_lane == "postfiltered"
+    assert bounded.narrowing.vector_returned == len(NOTES) < bounded.narrowing.vector_window
+    assert bounded.narrowing.vector_returned >= bounded.narrowing.text_window, \
+        "the fixture must fill the text lane's window to reach the case"
+    assert bounded.items == [] and bounded.phrases.dropped_required == len(NOTES)
+    assert bounded.phrases.short is False and "window" not in bounded.phrases.why

@@ -56,8 +56,12 @@ names the lanes that answered, so with both asked and one failed it
 names the other, and the recall event records the same list. A vector
 lane that did not run judges no confidence: `top_similarity` and
 `low_confidence` are `null`. `lanes` names only these two; the entity
-lane is asked for with `graph_boost`, and whether it ran shows on the
-items (`lanes.entity`) and in `degraded`, not in `lanes`. When the only lane asked for fails, recall
+lane is asked for with `graph_boost` and the context lane with
+`SCONE_CONTEXT_LANE`, whatever `lanes` says, and whether either ran shows
+on the items (`lanes.entity`, `lanes.context`) and in `degraded`, not in
+`lanes`. A note in `degraded` about a lane that still answered, such as
+a text lane whose lexical index is behind, does not take it out of
+`lanes`. When the only lane asked for fails, recall
 fails rather than returning an empty answer that reads as nothing found.
 Advertised as `recall.lanes`.
 
@@ -75,7 +79,9 @@ the answer (and the recall event) says how many candidates were checked,
 how many each rule dropped, and `short: true` when fewer passages came
 back than the limit after the phrases dropped some while a lane filled
 its candidate window, because passages beyond that window were never
-checked. When no lane filled its window every passage was a candidate,
+checked. Each lane is judged against its own window: a narrowed recall
+that post-filters the vector lane gives it a deeper one than the text
+lane's. When no lane filled its window every passage was a candidate,
 and a short answer is only a small space. Facts are not filtered.
 A phrase both required and excluded, one with no word to match, more than
 20 phrases or one over 200 characters is refused. Advertised as
