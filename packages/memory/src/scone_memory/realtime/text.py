@@ -144,7 +144,7 @@ class TextConversation:
                  evidence_answer_policy: Literal["when_available", "required"] = "when_available",
                  tool_model_factory: Callable[[], ToolModel] | None = None,
                  tool_limits: ToolLoopLimits | None = None, tool_initial_search: bool = False,
-                 tool_compute: bool = False, history_policy: str = "refuse",
+                 tool_compute: bool = False, tool_tables: bool = False, history_policy: str = "refuse",
                  standing_profile: "ProfilePolicy | None" = None, profile_limit: int = 10,
                  max_profile_bytes: int = 1000):
         check_space(space)

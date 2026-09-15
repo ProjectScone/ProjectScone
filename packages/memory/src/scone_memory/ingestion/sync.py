@@ -90,9 +90,8 @@ class SyncReceipt:
     applied: bool
     removing: bool
     #: Files under the root matching the suffixes, or package manifests
-    #: when any suffix is code. What is there.
-    #: Files under the root matching the suffixes and not excluded by the
-    #: ignore rules. What is there to read.
+    #: when any suffix is code, and not excluded by the ignore rules. What
+    #: is there to read.
     files_found: int = 0
     #: Files this sync actually read, which is fewer when capped. What we
     #: looked at, which is never reported as what is there.
@@ -172,11 +171,10 @@ class SyncReceipt:
                 "applied": self.applied, "removing": self.removing,
                 "files_found": self.files_found, "files_read": self.files_read,
                 "capped": self.capped, "added": self.added, "updated": self.updated,
-                "unchanged": self.unchanged, "removed": self.removed,
+                "unchanged": self.unchanged, "embeddings_reused": self.embeddings_reused, "removed": self.removed,
                 "ignored": self.ignored, "ignored_directories": self.ignored_directories,
                 "ignore_files": list(self.ignore_files), "ignore_truncated": self.ignore_truncated,
                 "ignore_unusable": list(self.ignore_unusable), "ignored_memories": self.ignored_memories,
-                "unchanged": self.unchanged, "embeddings_reused": self.embeddings_reused, "removed": self.removed,
                 "out_of_scope": self.out_of_scope, "unreadable": self.unreadable,
                 "links": self.links, "special": self.special,
                 "forgotten": self.forgotten, "empty": self.empty, "cut": self.cut,
@@ -191,7 +189,8 @@ class SyncReceipt:
         did = "synced" if self.applied else "would sync"
         lines = [f"{did} {self.marker}: {self.files_read} of {self.files_found} file(s) read"
                  + (" (capped)" if self.capped else "")
-                 + f"; {self.added} added, {self.updated} updated, {self.unchanged} unchanged"]
+                 + f"; {self.added} added, {self.updated} updated, {self.unchanged} unchanged"
+                 + (f"; {self.embeddings_reused} chunk embedding(s) reused" if self.embeddings_reused else "")]
         if self.ignored or self.ignored_directories:
             lines.append(f"{self.ignored} file(s) and {self.ignored_directories} directory(ies) left unread by "
                          f"{', '.join(self.ignore_files) or 'the ignore rules'}; pass --no-ignore to read them")
@@ -204,8 +203,6 @@ class SyncReceipt:
         if self.ignore_unusable:
             lines.append(f"{len(self.ignore_unusable)} ignore pattern(s) could not be read and were passed over: "
                          + "; ".join(self.ignore_unusable[:5]))
-                 + f"; {self.added} added, {self.updated} updated, {self.unchanged} unchanged"
-                 + (f"; {self.embeddings_reused} chunk embedding(s) reused" if self.embeddings_reused else "")]
         if self.unreadable:
             lines.append(f"{self.unreadable} directory(ies) under the root could not be read, so "
                          f"this run cannot say what is gone and forgot nothing")

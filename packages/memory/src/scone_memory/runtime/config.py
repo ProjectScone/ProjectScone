@@ -725,7 +725,7 @@ def build_vectors(settings: Settings, documents=None):
 
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
-ENGINE_SETTINGS = ("contextual_embeddings", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
+ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "lexical_stems",
                    "vector_weight")
 #: Settings carried into an engine that are read from a file, not a value.

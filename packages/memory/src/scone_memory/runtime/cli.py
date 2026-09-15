@@ -786,6 +786,7 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     from ..ingestion.code_resolution import file_resolver
     from ..ingestion.sync import default_marker, sync_key
     from ..ingestion.code_graph import DEFINES, code_claims, record_claims, unresolved_call_sites
+    from ..ingestion.doc_graph import doc_links, is_document
     from ..ingestion.sensitive import screen
     from ..ingestion.code_resolution import REACHABLE_DEPTH, unmistakable, resolve_across_files
 
@@ -805,15 +806,9 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     from ..ingestion.ignore import Ignore, walk_files
 
     rules = None if args.no_ignore else Ignore.load(root)
-    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES)
-                        or is_manifest(path.name), ignore=rules)
+    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES, *DOC_SUFFIXES)
+                        or is_manifest(path.relative_to(root).as_posix()) or is_schema(path.name), ignore=rules)
     found = list(walked.files)
-    found = [path for path in sorted(root.rglob("*"))
-             if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES)
-                                    or is_manifest(path.relative_to(root).as_posix()))
-             if path.is_file() and (path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES) or is_manifest(path.name) or is_schema(path.name))
-             and not any(part.startswith(".") or part == "__pycache__"
-                         for part in path.relative_to(root).parts)]
     # Resolution belongs here, because this is what knows which files
     # exist: a relative import is followed only to a file actually read,
     # and one that leads anywhere else is left out rather than guessed at.
@@ -1013,7 +1008,8 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
         parts.append(f"{len(withheld)} withheld as sensitive: "
                      + ", ".join(where for where, _ in sorted(withheld)))
     if getattr(args, "json", False):
-        print(_ledger_json({"read": read, "updated": updated, "removed": removed, "deduplicated": again, "claims": claims,
+        print(_ledger_json({"read": read, "updated": updated, "removed": removed, "deduplicated": again,
+                            "embeddings_reused": reused_vectors, "claims": claims,
                             "claims_closed": closed, "claims_unread": unread_claims, "quiet": quiet,
                             "unread": unread, "unbound_calls": sorted(unbound),
                             "ignored": walked.ignored_files, "ignored_directories": walked.ignored_directories,
@@ -1574,7 +1570,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     space = args.space
     emit = lambda obj: print(json.dumps(obj, ensure_ascii=False), file=out)  # noqa: E731
     if args.command == "graph":
-        return await graph_command(args, engine, out)
+        return await graph_command(args, engine, out, stdin)
     if args.command == "import-url":
         from ..ingestion.web import WebLimits, ingest_url
 
@@ -1608,15 +1604,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         if tree.root is not None:
             print(tree.root.text, file=out)
         return 0
-        return await graph_command(args, engine, out, stdin)
 
     if args.command == "sync-directory":
         from .directory_cli import run_directory_sync
         return await run_directory_sync(args, engine, out)
 
     if args.command == "import-chat":
-        from dataclasses import asdict
-
         from ..ingestion.chat_exports import ingest_chat_export
 
         import math
@@ -1627,26 +1620,26 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             export = pathlib.Path(args.file).read_bytes()
         except OSError as exc:
             raise InvalidInput(f"cannot read {args.file}: {exc.strerror or exc}") from None
-        imported = await ingest_chat_export(engine, space, export, filename=pathlib.Path(args.file).name, chat=args.chat,
-                                           time_zone=args.time_zone, date_order=args.date_order,
-                                           gap_seconds=int(args.gap_hours * 3600), metadata=parse_pairs(args.meta, "--meta"))
+        chat_imported = await ingest_chat_export(engine, space, export, filename=pathlib.Path(args.file).name, chat=args.chat,
+                                                time_zone=args.time_zone, date_order=args.date_order,
+                                                gap_seconds=int(args.gap_hours * 3600), metadata=parse_pairs(args.meta, "--meta"))
         if args.json:
-            emit({k: v for k, v in asdict(imported).items() if k != "episode_ids"} | {"episodes": len(imported.episode_ids)})
+            emit({k: v for k, v in asdict(chat_imported).items() if k != "episode_ids"} | {"episodes": len(chat_imported.episode_ids)})
         else:
-            print(f"imported {imported.stored} of {imported.messages} messages from the {imported.platform} chat {imported.chat!r} "
-                  f"as {imported.sessions} session(s), {imported.speakers} speaker(s)"
-                  + (f", {imported.duplicates} already known" if imported.duplicates else "")
-                  + (f", {imported.failed} refused ({imported.failed_reason})" if imported.failed else ""), file=out)
-            tallies = [(imported.system_messages, "system line(s)"), (imported.media_only_messages, "media-only message(s)"),
-                       (imported.attachments_skipped, "attachment(s)"), (imported.unparsed_lines, "unparsed line(s)"),
-                       (imported.messages_unread, "message(s) past the bound")]
+            print(f"chat_imported {chat_imported.stored} of {chat_imported.messages} messages from the {chat_imported.platform} chat {chat_imported.chat!r} "
+                  f"as {chat_imported.sessions} session(s), {chat_imported.speakers} speaker(s)"
+                  + (f", {chat_imported.duplicates} already known" if chat_imported.duplicates else "")
+                  + (f", {chat_imported.failed} refused ({chat_imported.failed_reason})" if chat_imported.failed else ""), file=out)
+            tallies = [(chat_imported.system_messages, "system line(s)"), (chat_imported.media_only_messages, "media-only message(s)"),
+                       (chat_imported.attachments_skipped, "attachment(s)"), (chat_imported.unparsed_lines, "unparsed line(s)"),
+                       (chat_imported.messages_unread, "message(s) past the bound")]
             if any(count for count, _ in tallies):
                 print("counted, not stored: " + ", ".join(f"{count} {what}" for count, what in tallies if count), file=out)
-            if imported.date_order_told:
-                print(f"dates read {imported.date_order} as told; the file itself did not decide", file=out)
-            if imported.time_zone:
-                print(f"clock times read in {imported.time_zone}", file=out)
-        return 1 if imported.failed and not imported.stored and not imported.duplicates else 0
+            if chat_imported.date_order_told:
+                print(f"dates read {chat_imported.date_order} as told; the file itself did not decide", file=out)
+            if chat_imported.time_zone:
+                print(f"clock times read in {chat_imported.time_zone}", file=out)
+        return 1 if chat_imported.failed and not chat_imported.stored and not chat_imported.duplicates else 0
 
     if args.command == "remember":
         if args.image is not None and args.jsonl:
