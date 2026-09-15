@@ -50,7 +50,13 @@ EDGE_ROWS = 2
 
 GRID: Literal['grid-columns-v1'] = 'grid-columns-v1'
 
-_RUN = re.compile(rf"\S(?:\S| {{1,{RUN_GAP - 1}}}(?=\S))*")
+#: A run of text: anything but the grid's own spaces. The layout grid is
+#: drawn with ASCII spaces, so any other space -- the no-break space in a
+#: table's "$62.0\xa0billion", a thin space in "1\u2009000" -- is text. A
+#: currency sign after a space opens a run of its own: a statement sets
+#: the next column's sign as close to a number as its own words sit.
+_CURRENCY = "$\u20ac\u00a3\u00a5"
+_RUN = re.compile(rf"[^ \n](?:[^ \n]| {{1,{RUN_GAP - 1}}}(?=[^ \n{_CURRENCY}]))*")
 _PAGE_NUMBER = re.compile(r"(?:page\s+)?[-–—]?\s*\d{1,4}(?:\s*[-–—]|\s*(?:of|/)\s*\d{1,4})?", re.IGNORECASE)
 
 
@@ -138,7 +144,9 @@ def lay_out_page(rows: Sequence[str], offset: int, *, drop: dict[int, str] | Non
     drop = drop or {}
     kept = [row for index, row in enumerate(rows) if index not in drop]
     running = tuple(drop[index] for index in sorted(drop))
-    as_extracted = "\n".join(kept).rstrip()
+    # Only the grid's own spaces are stripped: a row ending in a no-break
+    # space keeps it, as its run does, so the spans below stay inside the text.
+    as_extracted = "\n".join(kept).rstrip(' \n')
     runs = [(row, match.start(), match.end()) for row, line in enumerate(kept) for match in _RUN.finditer(line)]
     if not runs:
         return PageLayout(as_extracted, (), None, running)
@@ -163,7 +171,21 @@ def lay_out_page(rows: Sequence[str], offset: int, *, drop: dict[int, str] | Non
                           accept=lambda indices: _reads_as_prose(runs, indices))
     receipt = order.receipt.model_copy(update={'strategy': GRID})
     if not receipt.columns:
-        return PageLayout(as_extracted, (), receipt, running)
+        # A page whose order is kept carries its regions when the rules
+        # find a table among them, so the grid can be carried as cells;
+        # a page of prose stays as extracted, with nothing to carry.
+        labelled, labels = infer_labels(regions, first_page=first_page, running=running, sized=False)
+        if 'table' not in labelled:
+            return PageLayout(as_extracted, (), receipt, running)
+        starts = [0]
+        for line in kept:
+            starts.append(starts[-1] + len(line.encode('utf-8')) + 1)
+        kept_regions = tuple(
+            PdfTextRegion(**regions[index].model_dump(), provider_index=index, reading_column=0,
+                          start=offset + starts[row] + len(kept[row][:start].encode('utf-8')),
+                          end=offset + starts[row] + len(kept[row][:end].encode('utf-8'))).model_copy(update={'label': label})
+            for index, ((row, start, end), label) in enumerate(zip(runs, labelled)))
+        return PageLayout(as_extracted, kept_regions, receipt, running, labels)
     parts: list[str] = []
     ordered: list[PdfTextRegion] = []
     previous: tuple[int, int, int] | None = None

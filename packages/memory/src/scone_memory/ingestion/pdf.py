@@ -91,6 +91,22 @@ class PdfPage(BaseModel):
         return value
 
 
+#: What an owner password can restrict, in the PDF's own terms.
+Restriction = Literal['print', 'modify', 'extract', 'annotate', 'fill_forms', 'extract_for_accessibility',
+                      'assemble', 'print_high_quality']
+
+
+class PdfEncryption(BaseModel):
+    """How an encrypted PDF was opened: with the empty password, which the
+    file's user or owner password matched, and what the owner password
+    restricted -- named so a caller who must honour the restrictions can.
+    A file whose user password is not empty is refused, not opened."""
+    model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
+    opened_with: Literal['empty_password'] = 'empty_password'
+    matched: Literal['user', 'owner']
+    restricted: tuple[Restriction, ...] = Field(default=(), max_length=8)
+
+
 class ParsedPdf(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid')
     text: str
@@ -98,12 +114,16 @@ class ParsedPdf(BaseModel):
     pages: tuple[PdfPage, ...] = Field(min_length=1, max_length=1000)
     #: Whether the PDF's bookmarks were read whole, read to their bound, could not be read, or are absent.
     outline: Literal['none', 'read', 'capped', 'unreadable'] = 'none'
+    #: How an encrypted file was opened; None for a file that was not encrypted.
+    encryption: PdfEncryption | None = None
 
     @model_serializer(mode='wrap')
     def omit_absent_outline(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)
         if self.outline == 'none':
             value.pop('outline', None)
+        if self.encryption is None:
+            value.pop('encryption', None)
         return value
 
 

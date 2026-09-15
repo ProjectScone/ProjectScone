@@ -219,3 +219,23 @@ def test_keys_that_would_outgrow_a_held_turn_release_it_first():
     first, second = turns.keyed("[keypad] 123456", 1.0)
     assert (first.text, first.receipt.reason) == ("I would like to pay", "max_bytes")
     assert (second.text, second.receipt.reason) == ("[keypad] 123456", "keypad")
+
+
+def test_the_entries_a_turn_was_given_have_one_receipt_with_the_latest_keys():
+    from scone_memory.core.validation import MAX_METADATA_VALUE
+    from scone_memory.realtime.keypad import MAX_DIGITS, KeypadEntry, joined
+
+    first = KeypadEntry("[keypad] 12", (Keypress("1"), Keypress("2", "inband")), (10.0, 10.5), "timeout")
+    last = KeypadEntry("[keypad] #", (Keypress("#"),), (14.0,), "terminator", "words")
+    assert joined([last]) == last
+    entry = joined([first, last])
+    assert (entry.text, entry.keys, entry.at, entry.ended_by, entry.waited, entry.dropped) == \
+        ("[keypad] 12 [keypad] #", "12#", (10.0, 10.5, 14.0), "terminator", "words", 0)
+    assert entry.metadata(9.0) == {"keypad_keys": "12#", "keypad_ended": "terminator", "keypad_sources": "eie",
+                                   "keypad_started_ms": "1000", "keypad_at_ms": "0,500,4000", "keypad_waited": "words"}
+    many = [KeypadEntry(f"[keypad] {n % 10}", (Keypress(str(n % 10)),), (n * 3.0,), "key") for n in range(MAX_DIGITS + 3)]
+    cut = joined(many)
+    assert (cut.dropped, len(cut.presses), cut.at[0]) == (3, MAX_DIGITS, 9.0), "the latest keys are kept"
+    metadata = cut.metadata(0.0)
+    assert metadata["keypad_dropped"] == "3" and metadata["keypad_started_ms"] == "9000"
+    assert all(len(value) <= MAX_METADATA_VALUE for value in metadata.values())

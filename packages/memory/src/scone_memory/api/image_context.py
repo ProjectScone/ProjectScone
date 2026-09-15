@@ -10,15 +10,28 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from ..core import forget_after as schedule
 from ..core.errors import InvalidInput
 from ..ingestion.images import ImageContext, ingest_image, recall_images
 from ..memory.engine import MemoryEngine
+
+
+class _RebuildBody(BaseModel):
+    """Unknown fields are refused: a pass told something it silently ignores did not do what was asked."""
+    model_config = ConfigDict(extra='forbid')
+    #: File episodes this pass reads, 1..1000.
+    limit: int = 100
+    #: Walk on from a previous pass's ``resume_before``.
+    before: int | None = None
 
 
 class _ImageBody(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid', hide_input_in_errors=True)
     attachment_id: str = Field(pattern=r'^[a-f0-9]{64}$')
     context: ImageContext
+    #: Any JSON value, so ``core.forget_after`` refuses one that is not a
+    #: schedule -- a number included -- with 422, as ``POST /v1/episodes`` does.
+    forget_after: object = None
 
 
 def mount_image_context_routes(app: FastAPI, engine: MemoryEngine,
@@ -35,14 +48,27 @@ def mount_image_context_routes(app: FastAPI, engine: MemoryEngine,
             body = _ImageBody.model_validate_json(data)
         except ValidationError:
             return JSONResponse({'error': 'invalid image context or attachment ID'}, status_code=400)
+        when = schedule.asked(body.forget_after, engine.clock())
         async with ingest_slot(1):
             attachment, raw = await engine.attachment(space, body.attachment_id)
             if attachment.media_type not in ('image/png', 'image/jpeg', 'image/webp'):
                 raise InvalidInput('image context supports still PNG, JPEG and WebP images')
             media_type = cast(Literal['image/png', 'image/jpeg', 'image/webp'], attachment.media_type)
             saved = await ingest_image(engine, space, raw, media_type=media_type,
-                context=body.context, filename=attachment.filename)
+                context=body.context, filename=attachment.filename, forget_after=when)
         return JSONResponse(jsonable_encoder(asdict(saved)))
+
+    @app.post('/v1/images/reembed')
+    async def reembed_images(body: _RebuildBody, space: str = Depends(space_for)) -> JSONResponse:
+        """One bounded pass of embedding the space's stored images again with the
+        image lane's embedder (``MemoryEngine.reembed_images``); the report says
+        where to walk on and what the image index records."""
+        async with ingest_slot(1):  # a pass embeds as an ingest does, so it waits its turn
+            report = await engine.reembed_images(space, limit=body.limit, before=body.before)
+        # The image index is shared by every space, but a key reaches only its
+        # own: other spaces still pending are said to exist, never named.
+        return JSONResponse({**report.model_dump(), 'spaces_pending': [space] if space in report.spaces_pending else [],
+                             'pending_elsewhere': any(name != space for name in report.spaces_pending)})
 
     @app.get('/v1/images/search')
     async def search_images(query: str = Query(min_length=1, max_length=16_000),

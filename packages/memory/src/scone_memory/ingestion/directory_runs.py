@@ -86,7 +86,7 @@ class DirectoryRunStore:
             row = db.execute('SELECT payload FROM directory_runs WHERE token=?', (token,)).fetchone()
             if row:
                 prior = self._decode(token, row[0], space)
-                if prior.spec != saved.spec:
+                if not prior.spec.same_request(saved.spec):
                     raise WorkflowError('sync_request_conflict')
                 return prior
             if db.execute('SELECT COUNT(*) FROM directory_runs WHERE length(token)=129').fetchone()[0] >= self._maximum:
@@ -163,7 +163,7 @@ class DirectoryRunStore:
                 'collection_instance': result.collection_id, 'source_count': len(result.receipts),
                 'issue_count': len(result.issues), 'outcome_count': len(result.receipts) + len(result.issues),
                 'skipped': result.skipped, 'claims': result.claims, 'claims_closed': result.claims_closed,
-                'claims_unread': result.claims_unread})
+                'claims_unread': result.claims_unread, 'schedule_kept': result.schedule_kept})
             for index, source in enumerate(result.receipts):
                 outcome = SyncOutcome(index=index, source=SyncSourceOutcome.model_validate(asdict(source)))
                 self._insert_outcome(db, token, outcome)

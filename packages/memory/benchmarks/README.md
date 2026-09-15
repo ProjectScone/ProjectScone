@@ -52,6 +52,19 @@ checked on 100 items outside the frozen 50. It set the hashed-token
 embedder's default vector weight to 0.01, and records why the other
 winning rows did not become defaults. `northstar_defaults.py` reruns it.
 
+The same script runs with a real model on both sides
+(`--embedder bge-small-en-v1.5`). Both sides embed through one vector cache
+(`--embedding-cache PATH`), so each text is embedded once for the whole run,
+and the result records what each side embedded, how long the model took,
+and how many texts ran past the model's input window. With a model that
+counts its tokens, LlamaIndex's splitter counts in them, as the engine's
+token chunks do, and `over_window` says when a text still runs past.
+`--chunks` also accepts token targets (`512t`). The
+[first real-embedder run](northstar-real-embedder-2026-09-15.results.md)
+was stopped at item 5 of the frozen 50 on a shared machine. It records
+the rule set in advance, the embedding costs measured and the commands,
+but no scores.
+
 ## Public QA experiments
 
 The completed [8 September 2026 baseline](public-qa-v1.results.md) records

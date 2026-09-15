@@ -317,14 +317,26 @@ interpreted.
 ### PDF table evidence
 
 A PDF page's tables, inferred from the geometry of the recognized or
-laid-out regions labelled `table` (see [pdf-ocr.md](pdf-ocr.md#inspect-possible-tables-without-repeating-ocr)),
+text-layer regions labelled `table` -- a text-layer page kept whole
+carries its runs as regions when a table is among them (see
+[pdf-ingestion.md](pdf-ingestion.md)) -- (see [pdf-ocr.md](pdf-ocr.md#inspect-possible-tables-without-repeating-ocr)),
 reach `segment.table_cells` with the same record: row, column,
 `column_span` where a cell reaches across the grid's columns, and the
-cell's exact byte span of the page's text. No header or row span is
-inferred, so `is_header` is false and `headers` empty; the segment's
-`tables` and `tables_unreadable` metadata count the grids proposed and
-those left out because their cells did not read together. The cells
-come in the page's text order, each with its row and column.
+cell's exact byte span of the page's text (a cell's text is the page's
+bytes, spaces and all: a statement's `$` stands apart from its number).
+The first row filling every column, or every column but the first (a
+statement's years over its blank label column), is the header when none
+of its cells is a value -- a number, a loss in parentheses, a percentage
+or a dash, while a bare year is a label -- and a column below it is
+mostly values: its cells say
+`is_header`, the cells below carry `column` header references, and the
+segment says `header_basis: pdf_first_row` and counts `tables_headed`,
+so the [table query](#table-query) names the columns; a table of words
+alone, or one continued from an earlier page, gets none. No row span is
+inferred. The segment's `tables` and `tables_unreadable` metadata count
+the grids proposed and those left out because their cells did not read
+together. The cells come in the page's text order, each with its row
+and column.
 
 ### HTML table evidence
 
@@ -663,7 +675,14 @@ past `max_redirects` (5) is refused, and the fetch has a deadline; a media
 type the document lane does not read is refused, not guessed at. Only
 `http` and `https` are fetched, and a URL carrying credentials is not
 sent. `scone import-url --json` prints the record: episode, URLs, media
-type, bytes, redirects, format and segment count.
+type, bytes, redirects, format, segment count and `forget_after`.
+
+`--forget-after 30d` (`"forget_after"` in the body, `forget_after=` in code)
+schedules the page's memory to be forgotten; a past or unreadable schedule is
+refused before anything is fetched. `POST /v1/documents`, `ingest_document` and
+`store_document` take it too, refused before the file is parsed or its manifest
+stored; a parse that outlasts it still stores the instant resolved then, due at
+once ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
 
 ## Durable extraction checkpoints
 
