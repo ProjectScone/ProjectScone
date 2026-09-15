@@ -15,7 +15,7 @@ from typing import Sequence, cast
 from ..core.errors import InvalidInput, SconeError
 from ..core.models import Added, MAX_CONTENT_BYTES
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
-from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
+from ..core.validation import KINDS, MAX_METADATA_KEYS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
 from .semantic_chunks import semantic_spans
 from .structure_chunks import structured_spans
@@ -188,6 +188,11 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
         # Whether the mode exists and fits the source is `cut_for`'s to say,
         # and it says so before anything is stored.
         clean_meta["chunking"] = mode
+    if len(clean_meta) > MAX_METADATA_KEYS:
+        # Counted after both are added, or the episode is stored with more
+        # keys than its own export may carry back in.
+        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys, counting chunking and "
+                           f"chunking_profile, which are stored on the episode when a record names them")
     try:
         for value in (record.source or '', *clean_tags, *clean_meta.values()):
             value.encode('utf-8')

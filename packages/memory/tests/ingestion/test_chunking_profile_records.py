@@ -172,3 +172,35 @@ async def test_a_jsonl_record_names_its_profile(engine, tmp_path):
     assert code == 0, out.getvalue()
     [held] = await engine.episodes("default", {"chunking_profile": "qa"})
     assert await texts(engine, held.episode_id) == by_profile(QA, "qa", engine.chunk_target)
+
+
+async def test_the_keys_a_profile_adds_count_toward_the_metadata_cap(engine):
+    """An episode is stored with ``chunking`` and ``chunking_profile`` on its
+    metadata, so a record is refused if those would take it past the cap its
+    own export is imported under -- not stored and then unimportable."""
+    with pytest.raises(InvalidInput, match="chunking_profile"):
+        await engine.remember("default", QA, metadata={f"k{n}": "v" for n in range(15)}, chunking_profile="qa")
+    with pytest.raises(InvalidInput, match="chunking"):
+        await engine.remember("default", QA, metadata={f"k{n}": "v" for n in range(16)}, chunking="structure")
+    assert (await engine.status("default")).episodes == 0
+    await engine.remember("default", QA, metadata={f"k{n}": "v" for n in range(14)}, chunking_profile="qa")
+    rows = [row async for row in engine.export("default")]
+    copy = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        assert (await copy.import_records("default", rows)).episodes == 1
+        [held] = await copy.episodes("default", {"chunking_profile": "qa"})
+        assert len(held.metadata) == 16
+    finally:
+        await copy.close()
+
+
+@pytest.mark.parametrize("flag", [["--chunking-profile", "qa"], ["--chunking", "structure"]], ids=["profile", "chunking"])
+async def test_a_jsonl_batch_refuses_a_chunking_flag_rather_than_ignoring_it(engine, tmp_path, flag):
+    from scone_memory.runtime.cli import build_parser, run
+
+    path = tmp_path / "records.jsonl"
+    path.write_text(json.dumps({"content": QA}) + "\n")
+    with pytest.raises(InvalidInput, match="per record"):
+        await run(build_parser().parse_args(["--json", "remember", str(path), "--jsonl", *flag]), engine, io.StringIO(""),
+                  io.StringIO())
+    assert (await engine.status("default")).episodes == 0

@@ -20,7 +20,9 @@ tree instead of a list:
 - **A heading travels with its first child.** When a subtree is too big,
   its own text goes into the first chunk of its children if it is only a
   marker or the two fit together, so ``Article 2`` never ends a chunk
-  while ``(a)`` begins the next.
+  while ``(a)`` begins the next. A marker shorter than ``MIN_CHUNK`` stays
+  with a child that fits the target alone even when the two do not: that
+  chunk is over by less than ``MIN_CHUNK``, and counted.
 - **An ``alone`` unit never shares a chunk with a sibling**: each
   question-and-answer pair, each paper or resume section, the references.
 - **Structure that is not there is not invented.** A named marker must
@@ -48,9 +50,13 @@ from .structure_chunks import MAX_SECTIONS, Structured, Unit, units
 #: Where a rule's own ranks start, so that a Markdown heading (depth 1..6)
 #: outranks any marker a profile infers from plain text.
 _BELOW_HEADINGS = 6
-#: A named marker must be followed by the end of the line, punctuation or a
-#: title -- not by a lowercase word, which makes it a sentence.
-_TITLED = r"(?=[ \t]*$|[ \t]*[.:\-–—]|[ \t]+[A-Z\"'‘“(\[])"
+#: A named marker must be followed by the end of the line, or by punctuation
+#: or a title -- not by a lowercase word, which makes it a sentence. The
+#: point in ``3.2`` is not punctuation, a lowercase word after punctuation is
+#: still a sentence (``Chapter 3. of``), and so is one after a sub-reference
+#: (``Article 6 (1) of``).
+_TITLED = (r"(?=[ \t]*$|[ \t]*[.:\-–—](?![ \t]*[a-z\d])"
+           r"|[ \t]+(?:[A-Z\"'‘“\[]|\((?![\da-z]{1,5}\)[ \t]+[a-z])))")
 #: An enumerator is followed by text, or ends its line.
 _THEN = r"(?=[ \t]+\S|[ \t]*$)"
 _CJK_NUMBER = "[〇零一二三四五六七八九十百千0-9]+"
@@ -97,25 +103,46 @@ class ProfileReader:
         self._open: list[tuple[int, str]] = []
         #: Enumerator styles in the order this article first used them.
         self._styles: dict[str, int] = {}
+        #: The last letter enumerator read in this article.
         self._letter = ""
+        #: The depth each rule rank last took as a Markdown heading.
+        self._placed: dict[int, int] = {}
         ranked = [rule.level for rule in profile.rules if rule.level is not None]
         self._enumerators = _BELOW_HEADINGS + max(ranked, default=0) + 1
 
     def heading(self, title: str, level: int) -> tuple[str, int]:
         rule = self._rule(title, True)
         kind = "heading" if rule is None else rule.name
-        self._styles.clear()
-        return kind, self._push(level, kind)
+        if rule is not None and rule.level is not None:
+            self._placed[rule.level] = level
+        return self._opens(level, kind)
 
     def line(self, text: str, opens_paragraph: bool) -> tuple[str, int] | None:
         rule = self._rule(text, opens_paragraph)
         if rule is None or not rule.cuts:
             return None
         if rule.level is not None:
-            self._styles = {}
-            return rule.name, self._push(_BELOW_HEADINGS + rule.level, rule.name)
+            return self._opens(self._ranked(rule.level), rule.name)
         rank = self._styles.setdefault(rule.name, len(self._styles))
         return rule.name, self._push(self._enumerators + rank, rule.name)
+
+    def _opens(self, depth: int, name: str) -> tuple[str, int]:
+        """A heading or a ranked marker: the enumerators under it start again,
+        in their order and in which letter came last."""
+        self._styles, self._letter = {}, ""
+        return name, self._push(depth, name)
+
+    def _ranked(self, level: int) -> int:
+        """Where a plain line of this rank sits: where the rank sat as a
+        heading, or just above the nearest deeper rank that did, so
+        ``References`` after ``## Conclusion`` is its sibling and not its
+        child. With neither, below every heading."""
+        if level in self._placed:
+            return self._placed[level]
+        deeper = [below for below in self._placed if below > level]
+        if deeper:
+            return self._placed[min(deeper)] - (min(deeper) - level)
+        return _BELOW_HEADINGS + level
 
     def _rule(self, text: str, opens_paragraph: bool) -> Rule | None:
         for rule in self.profile.rules:
@@ -130,10 +157,13 @@ class ProfileReader:
         return None
 
     def _letter_or_numeral(self, rule: Rule, text: str) -> Rule:
-        """``(i)`` after ``(h)`` is the ninth letter, not the first numeral."""
+        """``(i)`` after ``(h)`` in the same article is the ninth letter, not
+        the first numeral -- unless the innermost open unit is a capital, as in the
+        United States code's (h)(1)(A)(i), where it is a clause."""
         if rule.name == "letter":
             self._letter = text.lstrip("(")[0]
-        elif rule.name == "roman" and self._letter and text[1:3] == chr(ord(self._letter) + 1) + ")":
+        elif (rule.name == "roman" and self._letter and text[1:3] == chr(ord(self._letter) + 1) + ")"
+              and not (self._open and self._open[-1][1] == "capital")):
             return next(other for other in self.profile.rules if other.name == "letter")
         return rule
 
@@ -308,10 +338,12 @@ class _Packer:
             if unit.kind == "table":
                 # Over the target, and still whole: its header is what its rows mean.
                 self.whole(start, end, kind)
-            elif end - start > self.target:
+            elif end - unit.start > self.target:
                 self.descend(index, start, kind)
             else:
-                self.whole(start, end, kind)  # alone, and it fits
+                # Alone, and it fits; or it fits without the heading before
+                # it, which is then shorter than MIN_CHUNK and comes along.
+                self.whole(start, end, kind)
         if group:
             self.whole(*group)
 
@@ -356,8 +388,9 @@ class _Packer:
         if self.tables:
             why += f"; {self.tables} table(s) were kept whole, header with rows"
         if over:
-            why += (f"; {over} chunk(s) are longer than {self.target}: a table kept whole, or a last piece "
-                    f"shorter than {MIN_CHUNK} joined to the one before it")
+            why += (f"; {over} chunk(s) are longer than {self.target}: a table kept whole, a heading shorter "
+                    f"than {MIN_CHUNK} kept with the unit under it, or a last piece shorter than {MIN_CHUNK} "
+                    f"joined to the one before it")
         if self.capped:
             why += (f"; the document holds more than {self.units_max} structural units and this read "
                     f"{self.units_max} of them, not all of them -- the rest was split by size")

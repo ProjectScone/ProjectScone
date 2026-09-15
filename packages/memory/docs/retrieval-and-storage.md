@@ -905,7 +905,8 @@ await engine.remember(space, text, chunking_profile="statute")
 
 `scone remember --chunking-profile statute`, `"chunking_profile": "statute"`
 on `POST /v1/episodes` and in each batch record, or the same key in a
-`--jsonl` record. The profiles are `statute`, `paper`, `manual`, `qa` and
+`--jsonl` record (the `--chunking` and `--chunking-profile` flags are
+refused with `--jsonl` rather than silently not applied to its records). The profiles are `statute`, `paper`, `manual`, `qa` and
 `resume` (`ingestion/chunking_profiles.py`, `PROFILES`).
 
 **Why a field and not a fifth chunking mode.** A profile is a set of
@@ -921,7 +922,10 @@ Each profile is data: a tuple of named rules, each a line pattern with a rank.
 The structure chunker's line scan asks the profile what each line is, so
 Markdown and setext headings, tables, fences and front matter are read
 exactly as without one, and a heading whose title matches a rule is named by
-it (`## References` is `references`).
+it (`## References` is `references`). A plain line matching a rule sits where
+that rank sat as a heading, or just above the nearest deeper rank that did,
+so a plain `References` after `## Conclusion` is its sibling and kept apart
+from it, and a plain `Chapter 3` after `## Article 5` is not its child.
 
 | profile | rules (rank) | kept apart |
 | --- | --- | --- |
@@ -940,7 +944,10 @@ The units are then packed as a tree rather than a list:
   its own text goes into the first chunk of its children if it is only a
   marker (shorter than `MIN_CHUNK`) or the two fit together; otherwise it is
   its own chunk, so a long introduction cannot drag a question over the
-  target and split it from its answer.
+  target and split it from its answer. A marker stays with a first child
+  that fits the target on its own even when the two together do not: that
+  chunk is over the target by less than `MIN_CHUNK` and counted in
+  `over_target`, rather than a pair that fits being split.
 - **Kept-apart units never share a chunk with a sibling.**
 - **A table is never cut**, as without a profile.
 - **A unit longer than the target is split by size**, the first piece at the
@@ -959,7 +966,8 @@ unit each chunk began at:
 ```
 
 `over_target` under a profile counts every chunk longer than the target,
-whatever put it there: a table kept whole, or a last piece shorter than
+whatever put it there: a table kept whole, a heading shorter than
+`MIN_CHUNK` kept with the unit under it, or a last piece shorter than
 `MIN_CHUNK` that the size chunker joins to the one before it. The unit bound
 (`MAX_SECTIONS`) is the structure chunker's, reported the same way in
 `capped`.
@@ -971,11 +979,17 @@ profile, one that is not text, a profile with another chunking, or a
 metadata key that says otherwise is refused while the record is validated,
 before anything is stored. That includes a record whose content is already
 stored and would come back as a duplicate, and one record of a partial
-batch, which is answered as failed on its own.
+batch, which is answered as failed on its own. The `chunking` and
+`chunking_profile` keys count toward the 16 metadata keys an episode may
+hold, so a record whose own keys leave no room for them is refused rather
+than stored with more keys than its export can be imported with.
 
 **Structure that is not there is not invented.** A named marker must be
 followed by the end of the line, punctuation or a capitalised title, so
-`Section 3 of this Act applies` is a sentence; a paper or resume section
+`Section 3 of this Act applies` is a sentence, and so are `Section 3.2 of
+this Agreement` (the point in a number is not punctuation), `Chapter 3. of`
+and `Article 6 (1) of this Regulation` (a lowercase word after punctuation or
+a sub-reference); a paper or resume section
 name must be the whole line, so `Experience shows that…` and `Results were
 mixed` are prose; a question without `Q:` must open a paragraph (after a blank
 line, a heading or a rule), so a rhetorical question inside an answer does
@@ -1027,8 +1041,11 @@ counts, which move whenever these documents are edited, are in the results
 file.
 
 **Limits.** English markers, plus 第…章 and 第…条. A `(i)` is read as a roman
-numeral unless it follows `(h)` (likewise `(v)` after `(u)`, `(x)` after
-`(w)`). A hard-wrapped line that happens to begin with `(a)` or `12.` reads
+numeral unless it follows `(h)` in the same article (likewise `(v)` after
+`(u)`, `(x)` after `(w)`) and no capital `(A)` is the innermost open
+enumerator: in the United States code's `(h)(1)(A)(i)` it is a clause, and
+after `(h)(1)(2)` the letter. A roman list directly under `(h)` reads its
+`(i)` as the letter. A hard-wrapped line that happens to begin with `(a)` or `12.` reads
 as a marker, as it does in plain structure. The title path is not prepended
 to a chunk as the reference implementation does, because stored text stays
 an exact excerpt; `heading_context` is the way to put Markdown headings into

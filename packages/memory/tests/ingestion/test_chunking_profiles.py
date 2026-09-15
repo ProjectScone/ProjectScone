@@ -24,7 +24,7 @@ from __future__ import annotations
 import pytest
 
 from scone_memory.core.errors import InvalidInput
-from scone_memory.ingestion.chunker import DEFAULT_TARGET, chunk_spans
+from scone_memory.ingestion.chunker import DEFAULT_TARGET, MIN_CHUNK, chunk_spans
 from scone_memory.ingestion.chunking_profiles import PROFILES, profile_named, profiled_spans
 from scone_memory.ingestion.structure_chunks import structured_spans, units
 
@@ -194,6 +194,34 @@ def test_a_letter_after_h_is_a_letter_and_after_a_clause_a_numeral():
     assert [unit.kind for unit in first] == ["article", "paragraph", "roman", "roman"]
 
 
+def test_a_numeral_under_a_capital_after_h_is_a_numeral():
+    """The United States code nests (h)(1)(A)(i): a clause under a
+    subparagraph, not the letter after (h), however long ago (h) was read."""
+    body = " ".join(["word"] * 40)
+    content = "".join(f"{marker} {body}\n" for marker in ["Section 5 Definitions", "(g)", "(h)", "(1)", "(A)", "(i)", "(ii)", "(iii)"])
+    reader = profile_named("statute").reader()
+    found = units(content, reader=reader)
+    assert [unit.kind for unit in found] == ["article", "letter", "letter", "numbered", "capital", "roman", "roman", "roman"]
+    capital, first, second = found[4], found[5], found[6]
+    assert capital.depth < first.depth == second.depth
+    assert reader.matched == {"article": 1, "letter": 2, "numbered": 1, "capital": 1, "roman": 3}
+    spans = profiled_spans(content, 1300, profile="statute").spans
+    assert chunk_holding(spans, content.index("(A)")) == chunk_holding(spans, content.index("(i)"))
+
+
+def test_a_letter_after_h_is_still_a_letter_below_a_numbered_paragraph():
+    content = "Section 5 Definitions\n(h) x\n(1) y\n(2) z\n(i) the ninth letter\n"
+    found = units(content, reader=profile_named("statute").reader())
+    assert [(unit.kind, unit.depth) for unit in found][-1] == ("letter", found[1].depth)
+
+
+def test_the_letter_h_is_forgotten_at_the_next_article():
+    for heading in ["Article 2 Scope", "## Article 2 Scope"]:
+        content = "Article 1 Terms\n(g) x\n(h) y\n\n" + heading + "\n\n1. z\n(i) a numeral under a paragraph\n"
+        found = units(content, reader=profile_named("statute").reader())
+        assert found[-1].kind == "roman" and found[-1].depth > found[-2].depth, (heading, [(u.label, u.kind) for u in found])
+
+
 def test_enumerators_nest_in_the_order_the_document_uses_them():
     """The United States code puts (a) above (1); the European Union puts 1. above (a)."""
     us = units("§ 552 Public information\n(a) Each agency\n(1) shall publish\n", reader=profile_named("statute").reader())
@@ -266,6 +294,23 @@ def test_a_long_introduction_does_not_drag_the_first_pair_over_the_target():
     assert chunks[0].startswith("# FAQ") and "Q: First?" not in chunks[0]
 
 
+def test_a_short_heading_does_not_split_a_pair_that_fits_the_target_alone():
+    """A marker travels with its first child even when the two come to more
+    than the target: a chunk over by less than MIN_CHUNK, counted, rather
+    than a pair that fits cut in two or a heading left as its own chunk."""
+    words = "Open Settings, choose Security and follow the reset link that arrives. "
+    head = "## Account and sign-in\n\nQuestions about signing in, passwords and the addresses we write to.\n\n"
+    pair = "Q: How do I reset my password?\nA: " + words * 4 + "\n\n" + words * 4 + "It is quick and safe.\n\n"
+    content = head + pair + "Q: Can I change my email?\nA: Yes, from the Profile page. " + words * 3 + "\n\n"
+    assert len(head) < MIN_CHUNK and len(pair) <= DEFAULT_TARGET < len(head) + len(pair)
+    found = profiled_spans(content, profile="qa")
+    chunks = texts(content, found.spans)
+    assert chunks[0] == head + pair.rstrip() or chunks[0] == head + pair, [len(chunk) for chunk in chunks]
+    assert chunks[1].startswith("Q: Can I change")
+    assert found.by_size == 0 and found.over_target == 1, found.record()
+    assert "a heading shorter than 120 kept with the unit under it" in found.why, found.why
+
+
 def test_a_heading_with_a_short_body_packs_with_its_first_clause_when_both_fit():
     body = "This article applies to every record kept under this Act and to every copy of one. " * 2
     content = ("Article 7 Scope\n" + body + "\n(a) first clause " + "a " * 40 + "\n"
@@ -315,6 +360,29 @@ def test_a_markdown_heading_is_named_by_the_rule_its_title_matches():
     assert reader.matched == {"abstract": 1, "references": 1, "reference": 1}
 
 
+def test_a_plain_references_line_after_markdown_sections_is_their_sibling():
+    """A rule sits where it sat as a heading, so mixing heading styles does
+    not put the references list inside the section before it."""
+    words = "We measured the effect on recall across three corpora. "
+    content = ("## Results\n\n" + words * 8 + "\n\n## Conclusion\n\n" + words * 3 + "\n\nReferences\n\n"
+               "[1] A. Author. A paper. 2020.\n[2] B. Author. Another paper. 2021.\n")
+    found = units(content, reader=profile_named("paper").reader())
+    depth = {unit.label: unit.depth for unit in found}
+    assert depth["References"] == depth["## Conclusion"] < depth["[1] A. Author. A paper. 2020."]
+    profiled = profiled_spans(content, profile="paper")
+    chunks = texts(content, profiled.spans)
+    references = next(chunk for chunk in chunks if "[1] A. Author" in chunk)
+    assert references.startswith("References") and "Conclusion" not in references
+    assert profiled.record()["began"] == {"section": 2, "references": 1}
+
+
+def test_a_plain_marker_ranked_above_a_markdown_one_is_not_its_child():
+    content = "## Article 5 Principles\n\n1. Data shall be kept.\n\nChapter 3 Rights\n\nArticle 6 Access\n\n1. Each person.\n"
+    found = units(content, reader=profile_named("statute").reader())
+    depth = {unit.label: unit.depth for unit in found}
+    assert depth["Chapter 3 Rights"] < depth["## Article 5 Principles"] == depth["Article 6 Access"], depth
+
+
 def test_a_setext_heading_is_ranked_by_its_underline():
     content = "Experience\n==========\nAnalyst.\n\nNotes\n-----\nMore.\n"
     found = units(content, reader=profile_named("resume").reader())
@@ -334,6 +402,20 @@ def test_each_statute_marker_reads_as_its_kind():
     for prose in ["Section 3 of this Act applies", "Part of the fee is refundable", "Chapter and verse",
                   "1984 was a year", "e.g. something", "Article twelve says"]:
         assert reader().line(prose, True) is None, prose
+
+
+def test_a_dotted_or_parenthesised_cross_reference_is_not_a_marker():
+    """A decimal point is not the punctuation after a marker, and a
+    sub-reference followed by a lowercase word is a sentence."""
+    reader = profile_named("statute").reader
+    for prose in ["Section 3.2 of this Agreement applies", "§ 12.1 of the Code", "Part 2.3 of the Schedule",
+                  "Article 6 (1) of this Regulation shall apply", "Chapter 3. of", "Article 4 (a) and (b) apply"]:
+        assert reader().line(prose, True) is None, prose
+    for line, kind in [("Section 3.2. Transfers", "article"), ("Section 1.—Short title", "article"),
+                       ("§ 552. (a) Each agency shall publish", "article"), ("Section 5 (a) Each agency", "article"),
+                       ("Section 12 (Repealed)", "article"), ("PART 2. GENERAL", "part"), ("Article 3.2", "article")]:
+        found = reader().line(line, True)
+        assert found is not None and found[0] == kind, (line, found)
 
 
 def test_each_manual_heading_reads_as_its_kind():

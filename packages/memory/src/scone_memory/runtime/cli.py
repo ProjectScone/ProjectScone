@@ -1647,6 +1647,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "remember":
         if args.image is not None and args.jsonl:
             raise InvalidInput("--image cannot be combined with --jsonl; select a single source note")
+        if args.jsonl and (args.chunking or args.chunking_profile):
+            raise InvalidInput("--chunking and --chunking-profile are not applied to --jsonl; set them per record")
         raw = read_source(args.file, stdin)
         attachment = None
         if args.jsonl:
