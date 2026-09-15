@@ -46,10 +46,14 @@ class ImageIngested:
     #: Whether the image lane holds a vector for this image: ``indexed``;
     #: ``not_configured`` when the engine has no image embedder and index;
     #: ``blocked`` when the index records another image embedder as its writer,
-    #: and nothing was written there.
-    image_lane: Literal['indexed', 'not_configured', 'blocked'] = 'not_configured'
+    #: and nothing was written there; ``failed`` when the image embedder or
+    #: the image index failed: the image and its caption are stored and found
+    #: by the text lanes, and an exact retry writes the vector.
+    image_lane: Literal['indexed', 'not_configured', 'blocked', 'failed'] = 'not_configured'
     #: Why the image lane is ``blocked``, naming both embedders.
     image_lane_blocked: str | None = None
+    #: What failed, when the image lane ``failed``: the error's type and message.
+    image_lane_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,8 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
     With the image lane configured, an episode forgotten while its image is
     embedded raises ``Gone`` (``NotFound`` mid-forget) and keeps no image vector;
     an index recording another image embedder gets no vector (``blocked``).
+    Any other failure to embed or write the image's vector is returned as
+    ``failed`` with ``image_lane_error``, since the image is stored by then.
 
     ``forget_after`` schedules the episode's forgetting as ``remember``'s does
     (``core.forget_after``), resolved before the image is stored: a refused
@@ -151,6 +157,11 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
     except VectorsNotComparable as blocked:
         # The episode and its attachments are stored; only the image's vector is not.
         return ImageIngested(added, image, retained, 'blocked', str(blocked))
+    except NotFound:
+        # Forgotten while it was embedded (Gone is a NotFound): nothing is stored to report on.
+        raise
+    except Exception as error:  # noqa: BLE001 - stored already; the receipt carries the failure
+        return ImageIngested(added, image, retained, 'failed', image_lane_error=f'{type(error).__name__}: {error}')
     return ImageIngested(added, image, retained, 'indexed')
 
 

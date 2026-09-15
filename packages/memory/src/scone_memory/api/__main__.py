@@ -133,6 +133,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
     from ..runtime.conversation_review import build_conversation_review
     from ..runtime.conversation_retrieval import build_adaptive_retrieval
     from ..runtime.conversation_followup import build_followup
+    from ..runtime.voice_turns import build_voice_turns
     from ..runtime.conversation_tools import build_conversation_tools
 
     journal = journal_path(settings, settings.conversations_journal)
@@ -184,7 +185,8 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                                    synthesis_factory=synthesis_factory, url_import=url_import,
                                    answer_review=answer_review, adaptive_retriever=adaptive_retriever,
                                    tool_retrieval=conversation_tools, followup=build_followup(settings),
-                                   semantic_turn=settings.semantic_turn, voice_keypad=settings.voice_keypad))
+                                   semantic_turn=settings.semantic_turn, voice_keypad=settings.voice_keypad,
+                                   **build_voice_turns(settings)))
 
 
 def build_server(settings: Settings, app):

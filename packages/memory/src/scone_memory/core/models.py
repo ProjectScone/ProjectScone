@@ -412,6 +412,43 @@ class ForgetDueReport(BaseModel):
     unreadable: list[int] = Field(default_factory=list)
 
 
+class ImageRebuildReport(BaseModel):
+    """One pass of re-embedding a space's stored images (``retrieval.image_lane.reembed_images``).
+
+    The walk reads at most ``limit`` file episodes, newest id first;
+    ``scan_complete`` false says it stopped at that bound, and
+    ``resume_before`` is where the next pass walks on. ``reembedded`` counts
+    the images given a new vector; ``forgotten`` names images forgotten while
+    they were re-embedded (no vector is kept), and ``failed`` those whose
+    bytes could not be read or embedded or whose vector was not taken, with
+    the first such ``error``. A failed image keeps whatever vector it had.
+
+    ``writer`` is what the image index holds once the pass ends: ``recorded``
+    when it records this image embedder as the writer of every vector (the
+    lane is on); ``rebuilding`` when it holds this embedder's rebuild marker
+    (the lane is refused until a pass completes with no space pending);
+    ``refused`` when it records another writer; ``tagged`` when the index
+    cannot record a writer, and the lane ignores vectors another model tagged.
+    The pass that completes the walk removes the space's vectors whose chunk
+    is gone (``orphans_removed``, None when the index cannot list what it
+    holds) and, under a marker, names in ``spaces_pending`` every space still
+    holding a vector this embedder did not tag."""
+
+    space: str
+    embedder: str
+    limit: int
+    scanned: int = 0
+    scan_complete: bool = True
+    resume_before: Optional[int] = None
+    reembedded: int = 0
+    forgotten: list[int] = Field(default_factory=list)
+    failed: list[int] = Field(default_factory=list)
+    error: Optional[str] = None
+    orphans_removed: Optional[int] = None
+    writer: Literal["recorded", "rebuilding", "refused", "tagged"] = "tagged"
+    spaces_pending: list[str] = Field(default_factory=list)
+
+
 class RecallItem(BaseModel):
     chunk_id: int
     episode_id: int

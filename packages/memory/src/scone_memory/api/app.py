@@ -34,6 +34,7 @@ from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as 
                                   MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT, MAX_LIMIT as TEMPORAL_MAX_LIMIT,
                                   MIN_BYTES as TEMPORAL_MIN_BYTES, temporal_answer)
 from ..memory.engine import Record, MemoryEngine
+from ..memory.vector_identity import VectorWriterChanged
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..retrieval.recall import LANES
@@ -485,6 +486,11 @@ def create_app(
     async def _moved(_: Request, e: Conflict) -> JSONResponse:
         return JSONResponse({"error": str(e), "revision": e.revision}, status_code=409)
 
+    @app.exception_handler(VectorWriterChanged)
+    async def _writer_changed(_: Request, e: VectorWriterChanged) -> JSONResponse:
+        # Another writer moved the vectors while this request settled them: running it again is the answer.
+        return JSONResponse({"error": str(e), "code": "writer_changed"}, status_code=409)
+
     @app.exception_handler(Gone)
     async def _gone(_: Request, e: Gone) -> JSONResponse:
         return JSONResponse({"error": str(e), "forgotten_at": e.forgotten_at}, status_code=410)
@@ -520,6 +526,8 @@ def create_app(
             "facts.reconsider": True, "facts.reopen": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
+            # Served always; an engine without the image lane, or a store that cannot list episodes, refuses.
+            "images.reembed": engine.image_vectors is not None and callable(getattr(engine.documents, "page_episodes", None)),
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
             "documents.files": True, "documents.provenance": True, "documents.ocr.tables": True,
             "chats.imports": True,
@@ -1581,10 +1589,23 @@ def create_app(
         return {"closed": closed.fact_id, "reason": closed.closed_reason}
 
     @app.get("/v1/profile")
-    async def get_profile(limit: int = 10, space: str = Depends(space_for)) -> dict:
-        profile = await engine.profile(space, limit)
-        return {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
+    async def get_profile(limit: int = 10, buckets: Optional[str] = None, static_limit: Optional[int] = None,
+                          dynamic_limit: Optional[int] = None, static_max_bytes: Optional[int] = None,
+                          dynamic_max_bytes: Optional[int] = None, space: str = Depends(space_for)) -> dict:
+        """With ``buckets`` (static, dynamic or both), the claims also come
+        in static and dynamic buckets, each with its own bounds."""
+        from ..memory.profile_buckets import requested
+
+        bounds = requested(buckets, static_limit=static_limit, dynamic_limit=dynamic_limit,
+                           static_max_bytes=static_max_bytes, dynamic_max_bytes=dynamic_max_bytes)
+        profile = await engine.profile(space, limit, buckets=bounds)
+        body = {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
                 "recent": [asdict(r) for r in profile.recent], "coverage": profile.coverage}
+        if profile.buckets is not None:
+            body["buckets"] = {"static": [fact_json(f) for f in profile.buckets.static],
+                               "dynamic": [fact_json(f) for f in profile.buckets.dynamic],
+                               "coverage": profile.buckets.coverage}
+        return body
 
     @app.get("/v1/tags")
     async def get_tags(space: str = Depends(space_for)) -> dict:

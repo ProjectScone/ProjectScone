@@ -52,8 +52,11 @@ GRID: Literal['grid-columns-v1'] = 'grid-columns-v1'
 
 #: A run of text: anything but the grid's own spaces. The layout grid is
 #: drawn with ASCII spaces, so any other space -- the no-break space in a
-#: table's "$62.0\xa0billion", a thin space in "1\u2009000" -- is text.
-_RUN = re.compile(rf"[^ \n](?:[^ \n]| {{1,{RUN_GAP - 1}}}(?=[^ \n]))*")
+#: table's "$62.0\xa0billion", a thin space in "1\u2009000" -- is text. A
+#: currency sign after a space opens a run of its own: a statement sets
+#: the next column's sign as close to a number as its own words sit.
+_CURRENCY = "$\u20ac\u00a3\u00a5"
+_RUN = re.compile(rf"[^ \n](?:[^ \n]| {{1,{RUN_GAP - 1}}}(?=[^ \n{_CURRENCY}]))*")
 _PAGE_NUMBER = re.compile(r"(?:page\s+)?[-–—]?\s*\d{1,4}(?:\s*[-–—]|\s*(?:of|/)\s*\d{1,4})?", re.IGNORECASE)
 
 

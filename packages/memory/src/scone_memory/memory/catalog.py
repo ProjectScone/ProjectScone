@@ -17,6 +17,7 @@ from ..core.errors import InvalidInput
 from ..core.models import Episode, Fact, Status
 from ..core.ports import DocumentStore, SourcePage
 from ..core.validation import (KINDS, STATUSES, check_space, normalise_metadata, normalise_term, normalise_time)
+from .profile_buckets import BucketBounds as BucketBounds, BucketRules as BucketRules, ProfileBuckets, bucketed
 
 if TYPE_CHECKING:
     from .engine import MemoryEngine
@@ -51,6 +52,9 @@ class Profile:
     #: read left out, the policy it kept to, and how often each shown
     #: claim was stated again.
     coverage: dict = field(default_factory=dict)
+    #: The claims in static and dynamic buckets, when a reader asked for
+    #: them; None otherwise (see ``memory.profile_buckets``).
+    buckets: Optional[ProfileBuckets] = None
 
 
 #: Facts read for one profile; past this the oldest are not read.
@@ -128,7 +132,8 @@ async def facts(
 
 
 async def profile(engine: "MemoryEngine", space: str, limit: int = 10, *,
-                  policy: Optional[ProfilePolicy] = None) -> Profile:
+                  policy: Optional[ProfilePolicy] = None, buckets: Optional[BucketBounds] = None,
+                  rules: Optional[BucketRules] = None) -> Profile:
     """Who the space is about, without being asked a question: the claims
     that hold, what the space says most often and most recently first,
     each with the evidence it rests on; then its recent activity.
@@ -141,25 +146,29 @@ async def profile(engine: "MemoryEngine", space: str, limit: int = 10, *,
     them would answer with a claim from before a write beside a count
     from after it. That answer was never true at any moment, so it is
     read again; a ledger that will not hold still is said rather than
-    passed off as a settled one."""
+    passed off as a settled one.
+
+    With ``buckets``, the same claims are also placed in static and
+    dynamic buckets by ``rules``, each bucket bounded on its own."""
     check_space(space)
     limit = max(1, min(limit, 50))
     kept = policy or ProfilePolicy()
     answer = None
     for _ in range(ATTEMPTS):
-        answer, settled = await _one_revision(engine, space, limit, kept)
+        answer, settled = await _one_revision(engine, space, limit, kept, buckets, rules or BucketRules())
         if settled:
             return answer
     said = cast(list[str], answer.coverage["reasons"]) if answer else []
     return Profile(static_facts=answer.static_facts if answer else [],
                    dynamic=answer.dynamic if answer else [],
                    recent=answer.recent if answer else [],
+                   buckets=answer.buckets if answer else None,
                    coverage={**(answer.coverage if answer else {}),
                              "reasons": [*said, "ledger_moved_during_read"]})
 
 
-async def _one_revision(engine: "MemoryEngine", space: str, limit: int,
-                        kept: ProfilePolicy) -> tuple[Profile, bool]:
+async def _one_revision(engine: "MemoryEngine", space: str, limit: int, kept: ProfilePolicy,
+                        buckets: Optional[BucketBounds], rules: BucketRules) -> tuple[Profile, bool]:
     """One profile, and whether the ledger held still while it was made."""
     from ..entities.read import read_ledger
 
@@ -176,15 +185,21 @@ async def _one_revision(engine: "MemoryEngine", space: str, limit: int,
     # each count is a read of its own.
     active.sort(key=lambda fact: (fact.valid_from, fact.fact_id), reverse=True)
     said: dict[int, int] = {}
+    restated: dict[int, list[str]] = {}
     affirmations = affirmation_store(documents)
     for fact in active[:MAX_PROFILE_CANDIDATES]:
-        said[fact.fact_id] = len(await affirmations.affirmations(space, fact.fact_id)) if affirmations else 0
+        found = await affirmations.affirmations(space, fact.fact_id) if affirmations else []
+        said[fact.fact_id] = len(found)
+        restated[fact.fact_id] = [affirmation.valid_from for affirmation in found]
     # Newest first, then stably by how often each was stated again, so the
     # newer of two claims said as often still leads.
     ranked = sorted(active[:MAX_PROFILE_CANDIDATES],
                     key=lambda fact: (fact.valid_from, fact.fact_id), reverse=True)
     ranked.sort(key=lambda fact: -said[fact.fact_id])
     shown = ranked[:limit]
+    placed = None if buckets is None else bucketed(
+        ranked, read.facts, restated=restated, rules=rules, bounds=buckets, now=now,
+        many_valued=engine.many_valued, candidates_truncated=len(active) > MAX_PROFILE_CANDIDATES)
     recent = [RecentActivity(e.episode_id, e.content[:200], e.created_at)
               for e in await documents.recent_episodes(space, limit)]
     ended = await documents.revision(space)
@@ -196,6 +211,7 @@ async def _one_revision(engine: "MemoryEngine", space: str, limit: int,
             coverage={"facts_read": len(read.facts), "reasons": list(read.reasons), "policy": kept.record(),
                       "restatements": {str(fact.fact_id): said[fact.fact_id] for fact in shown},
                       "candidates": min(len(active), MAX_PROFILE_CANDIDATES), "revision": began},
+            buckets=placed,
         ),
         began == ended,
     )
