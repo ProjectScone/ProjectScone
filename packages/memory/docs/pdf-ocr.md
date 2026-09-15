@@ -222,9 +222,18 @@ its value columns ("Three Months Ended March 31," with the years below,
 placed loosely: a caption centred over two columns falls short of half
 of the last, so a tenth of its own width claims one), the years over a
 blank label column -- placed the nearest first, each just above the one
-below, up to three (`MAX_HEADER_ROWS`); a run of two rows too short to
+below, up to four (`MAX_HEADER_ROWS`); a run of two rows too short to
 be a grid is read that way as well, so a row of years displaced by the
-three-column row beneath it heads that grid. Prose is kept out by its
+three-column row beneath it heads that grid. A lone cell from the first
+column closed by a colon is a section's heading ("Basic net loss per
+share:") when it is short and opens with a capital or a digit, and the
+chain runs through it to the years above; a sentence's tail on a line
+of its own ("were as follows:") is not. A header's cells run over the
+columns in order, so a cell of such a row that reaches no band -- a
+column's name set beside a narrow column of digits ("Useful Life -
+Years" over single digits) -- claims the one unclaimed band between
+its neighbours' claims, the row's ends counting as claims; a lone cell
+over no band, or one with two bands to choose from, is not placed. Prose is kept out by its
 shape: a sentence above the grid (a citation like `[28]` closing it
 counts) is not its title, nor is a wrapped word over a later column
 (a lone cell over one column short of the first); at the grid's foot a
