@@ -285,6 +285,12 @@ class ForgetReceipt(BaseModel):
     claims_kept_other_support: list[int] = Field(default_factory=list)
     claims_kept_not_in_ledger: list[int] = Field(default_factory=list)
     claims_already_excluded: list[int] = Field(default_factory=list)
+    #: What happens to the image lane's vector (``retrieval.image_lane``):
+    #: ``none`` when the episode carries no image from ``ingest_image``;
+    #: ``removed`` when this engine has the lane and deletes it; ``not_reached``
+    #: when it has not, so an image index it cannot see may keep the image's
+    #: vector until an engine with the lane opens on it or meets it in a recall.
+    image_vector: Literal["none", "removed", "not_reached"] = "none"
 
 
 class BulkForgetReport(BaseModel):

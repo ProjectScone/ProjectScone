@@ -30,6 +30,7 @@ from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.vector_writers import VectorsNotComparable, after_write, vouches
+from .location import local_identity
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
 from .sqlite_lexical import initialize_lexical, lexical_match, synchronize_lexical
@@ -1045,7 +1046,7 @@ class SqliteVectorIndex:
         """Where the rows live: the database file, or None for an in-memory database, which no other handle reaches."""
         if ":memory:" in str(self.path):
             return None
-        return (Path(self.path).expanduser().resolve(),)
+        return (local_identity(Path(self.path).expanduser()),)
 
     async def ensure(self, dim: int) -> None:
         if self.dim is not None and self.dim != dim:

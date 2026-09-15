@@ -161,7 +161,7 @@ async def impact(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
     are reported, not closed: a source being gone is a fact about the
     evidence."""
     check_space(space)
-    await runtime.episode_or_gone(space, episode_id)
+    episode = await runtime.episode_or_gone(space, episode_id)
     carried = [a.attachment_id for a in await runtime.blobs.for_episode(space, episode_id)]
     released = await runtime.blobs.released_by(space, episode_id)
     facts = await runtime.documents.list_facts(space, include_closed=True)
@@ -180,6 +180,8 @@ async def impact(runtime: RetentionRuntime, space: str, episode_id: int) -> Forg
         facts_citing=sorted(f.fact_id for f in facts if f.source_episode_id == episode_id),
         links_citing=sorted(citing_links),
         affirmations_citing=sorted(a.affirmation_id for a in kept if a.source_episode_id == episode_id),
+        image_vector=("none" if "image_original" not in episode.metadata
+                      else "removed" if runtime.image_vectors is not None else "not_reached"),
     )
 
 

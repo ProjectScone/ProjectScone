@@ -11,6 +11,7 @@ ones. Nothing here connects to a server: the handles are only built.
 from __future__ import annotations
 
 import importlib.util
+import os
 from typing import Callable
 
 import pytest
@@ -206,3 +207,45 @@ def test_an_index_that_cannot_say_where_it_lives_is_recognised_only_as_itself():
     from scone_memory.backends.langchain import LangChainVectorIndex
     # A bridge with no store yet holds nothing to share; bind() gives each its own later.
     assert not refused(LangChainVectorIndex(), LangChainVectorIndex())
+
+
+def test_a_local_store_is_compared_as_the_file_it_is(tmp_path):
+    """A hard link is two paths to one file on every filesystem; SQLite refuses to open one, so the file is plain here."""
+    from scone_memory.backends.location import local_identity
+
+    (tmp_path / "memory.db").write_bytes(b"rows")
+    os.link(tmp_path / "memory.db", tmp_path / "alias.db")
+    (tmp_path / "image-vectors.db").write_bytes(b"rows")
+    assert local_identity(tmp_path / "alias.db") == local_identity(tmp_path / "memory.db")
+    assert local_identity(tmp_path / "image-vectors.db") != local_identity(tmp_path / "memory.db")
+    # Nothing there yet: the path as resolved, so two spellings of it through ".." still agree.
+    (tmp_path / "sub").mkdir()
+    assert local_identity(tmp_path / "sub" / ".." / "later.db") == local_identity(tmp_path / "later.db")
+
+
+def _sqlite_cased(tmp_path):
+    from scone_memory.backends import SqliteVectorIndex
+    return SqliteVectorIndex(tmp_path / "memory.db"), SqliteVectorIndex(tmp_path / "MEMORY.db")
+
+
+def _chroma_cased(tmp_path):
+    from scone_memory.backends.chroma import ChromaVectorIndex
+    return ChromaVectorIndex(path=str(tmp_path / "chroma")), ChromaVectorIndex(path=str(tmp_path / "CHROMA"))
+
+
+def _lancedb_cased(tmp_path):
+    from scone_memory.backends.lancedb import LanceDBVectorIndex
+    return LanceDBVectorIndex(str(tmp_path / "lance")), LanceDBVectorIndex(str(tmp_path / "LANCE"))
+
+
+@pytest.mark.parametrize("backend", [
+    pytest.param(_sqlite_cased),
+    pytest.param(_chroma_cased, marks=pytest.mark.skipif(not _installed("chromadb"), reason="chroma extra")),
+    pytest.param(_lancedb_cased, marks=pytest.mark.skipif(not _installed("lancedb"), reason="lancedb extra")),
+], ids=lambda build: build.__name__.strip("_"))
+def test_another_spelling_of_the_text_index_path_on_a_case_insensitive_filesystem_is_refused(backend, tmp_path):
+    (tmp_path / "Probe").mkdir()
+    if not (tmp_path / "probe").exists():
+        pytest.skip("this filesystem tells letter case apart, so the two spellings are two stores")
+    text, same = backend(tmp_path)
+    assert refused(text, same)

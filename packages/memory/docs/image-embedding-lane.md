@@ -55,15 +55,29 @@ for item in result.items:
   | `LanceDBVectorIndex` | another table: `table="scone_images"` |
   | `RedisVectorIndex`, `ElastiCacheVectorIndex` | another prefix: `prefix="scone_images"` |
 
-  The comparison is of the configuration as written (a URL, a path, a schema)
-  or of an injected client's identity. Two spellings of one server
+  A local file or directory (SQLite, Chroma, LanceDB) is compared as the file it
+  is, by device and inode, so another letter case on a case-insensitive
+  filesystem (macOS's default), a hard or symbolic link, or `..` is recognised
+  as the same storage. A server's configuration is compared as written (a URL, a
+  schema) or by an injected client's identity. Two spellings of one server
   (`localhost` and `127.0.0.1`), or two client objects on one server, are not
   recognised; neither is an index that names no location (the in-memory index,
   a custom one), except as the same object, nor a `LangChainVectorIndex` whose
-  store is bound after the engine is built. The
-  index records which image embedder wrote it, as the text index does; a recall
-  through a different image embedder is refused by the lane and named in
-  `degraded` (`image lane: VectorsNotComparable: ...`), and the other lanes answer.
+  store is bound after the engine is built.
+- **The image embedder that wrote it.** The index records its writer, as the text
+  index does. An engine whose image embedder is not the recorded one (another
+  model, or the same width under another id) is told so when it opens:
+  `engine.image_block` names both embedders. It writes nothing there:
+  `ingest_image` stores the episode and its attachments, reads the record again
+  just before it would write, and returns `image_lane="blocked"` with the reason
+  in `image_lane_blocked`, so one ingest cannot record the index as mixed and
+  leave it unusable by every embedder. Its recalls are refused by the lane and
+  named in `degraded` (`image lane: VectorsNotComparable: ...`), and the other
+  lanes answer. To move to another image model, give it an image index of its
+  own and run `ingest_image` again for each image: an exact retry writes the
+  image's vector. The record is read, then the vector written, in two steps, so
+  a write by another embedder between them in another process can still record
+  the index as mixed.
 - **The episode's tags, metadata and time** on every vector, so `tags`, `where`
   and `as_of` narrow the lane in the index. `conditions` narrow it in the index
   when the index evaluates conditions itself (the in-memory and SQLite indexes
@@ -103,9 +117,33 @@ not tuned: there is no image retrieval benchmark here and no model to run one.
 
 ## Forgetting
 
-Forgetting an episode deletes its image vector with its text vectors, by the same
-chunk ids, including a forget resumed by `recover()`, an expiry, `forget_matching`
-and a keyed `replace`. Deleting a space sweeps the image index too.
+Forgetting an episode through an engine with the lane deletes its image vector
+with its text vectors, by the same chunk ids, including a forget resumed by
+`recover()`, an expiry, `forget_matching` and a keyed `replace`. Deleting a space
+through it sweeps the image index too.
+
+Only an engine with the lane can reach its index. The HTTP server, the CLI,
+directory sync and any engine built without `image_vectors` forget the episode,
+its chunks, text vectors and attachments, but leave the image's vector and its
+metadata (`image_original`, `image_manifest`) in the image index. The forget's
+receipt says which happened: `image_vector` is `removed` from an engine with the
+lane, `not_reached` from one without it for an episode `ingest_image` stored, and
+`none` for any other episode. An engine with the lane removes what those forgets
+and space deletions left:
+
+- **When it opens**, every image vector whose chunk is gone, in every space;
+  `engine.image_vectors_removed` counts them (None when the image index cannot
+  list what it holds, as a custom index may not). This reads every id the image
+  index holds, one page of chunks at a time.
+- **When a recall meets one.** A forget through another engine while this one is
+  open leaves vectors that would still rank in the lane and fill its window. A
+  hit whose chunk is gone is removed and the index searched again, up to
+  `IMAGE_SEARCHES = 2` times; `degraded` says `image lane: removed N vectors of
+  images already forgotten`, and adds that forgotten images still filled the
+  window when the last search met some too, so the lane ranked fewer images than
+  it looks for. Removed vectors are never candidates, but they count in
+  `image_returned`, and a window they filled sets `window_exhausted` and
+  `phrases.short` as any full window does: images deeper than it went unseen.
 
 The image vector is written after the episode is stored, so a forget can land
 while `ingest_image` is still embedding the image. Forgetting deletes the chunks
@@ -152,8 +190,13 @@ forgetting), not retrieval quality. **How well a real image model retrieves imag
 here is unmeasured.**
 
 Known limits: the lane is configured and asked for from Python only; no `SCONE_*`
-setting, CLI flag or HTTP parameter builds or runs it. The image index is not covered by `doctor`, `check_vectors` or
-`reembed_vectors`; a space merge or an archive import stores the image episodes
+setting, CLI flag or HTTP parameter builds or runs it, so forgets through those
+leave image vectors until an engine with the lane opens or recalls (see
+Forgetting). A forget's `image_vector` is decided by the engine that starts it;
+when an engine of the other kind finishes it through `recover()`, the receipt and
+`forget_status` still show the first engine's answer, and an engine with the lane
+still removes the vector when it next opens. The image index is not covered by `doctor`, `check_vectors` or
+`reembed_vectors`, and nothing rebuilds it under another image embedder; a space merge or an archive import stores the image episodes
 again but does not write their image vectors; a crash between storing an image's
 episode and writing its vector leaves the image without a vector until
 `ingest_image` is retried. Captions made from one template ("Scan 0001, shelf A",

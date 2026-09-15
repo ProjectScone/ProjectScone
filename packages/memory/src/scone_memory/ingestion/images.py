@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..core.errors import Gone, InvalidInput, NotFound
 from ..core.models import Added, Attachment, RecallResult
 from ..core.ports import ImageEmbedder
+from ..core.vector_writers import VectorsNotComparable
 from ..core.validation import check_space
 from ..providers.vision import SUPPORTED_IMAGE_TYPES
 from ..ocr.process import python_worker, run_bounded
@@ -41,9 +42,13 @@ class ImageIngested:
     added: Added
     image: Attachment
     manifest: Attachment
-    #: Whether the image lane holds a vector for this image: ``indexed``, or
-    #: ``not_configured`` when the engine has no image embedder and index.
-    image_lane: Literal['indexed', 'not_configured'] = 'not_configured'
+    #: Whether the image lane holds a vector for this image: ``indexed``;
+    #: ``not_configured`` when the engine has no image embedder and index;
+    #: ``blocked`` when the index records another image embedder as its writer,
+    #: and nothing was written there.
+    image_lane: Literal['indexed', 'not_configured', 'blocked'] = 'not_configured'
+    #: Why the image lane is ``blocked``, naming both embedders.
+    image_lane_blocked: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,7 +97,8 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
     Writes use existing primitives, not a transaction. Exact retries repair links.
     Same bytes in different source occurrences share a blob, not their descriptions.
     With the image lane configured, an episode forgotten while its image is
-    embedded raises ``Gone`` (``NotFound`` mid-forget) and keeps no image vector.
+    embedded raises ``Gone`` (``NotFound`` mid-forget) and keeps no image vector;
+    an index recording another image embedder gets no vector (``blocked``).
     """
     check_space(space)
     if not isinstance(data, bytes) or not 0 < len(data) <= min(10_000_000, memory.max_attachment_bytes):
@@ -127,8 +133,12 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
     if memory.image_vectors is None:
         return ImageIngested(added, image, retained)
     episode = await memory.episode(space, added.episode_id)
-    await index_image(memory.documents, cast(ImageEmbedder, memory.image_embedder), memory.image_vectors,
-                      space, episode, data)
+    try:
+        await index_image(memory.documents, cast(ImageEmbedder, memory.image_embedder), memory.image_vectors,
+                          space, episode, data)
+    except VectorsNotComparable as blocked:
+        # The episode and its attachments are stored; only the image's vector is not.
+        return ImageIngested(added, image, retained, 'blocked', str(blocked))
     return ImageIngested(added, image, retained, 'indexed')
 
 
