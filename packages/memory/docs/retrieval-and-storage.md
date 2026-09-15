@@ -293,8 +293,10 @@ leader sunk and a follower lifted close twice it, and deeper ranks sit
 closer together than first and second. A recall with the weight set carries
 `feedback_prior` (on `/v1/recall` too): the weight and bound, how many
 candidates were `boosted`, `demoted`, `capped` and `held`, the `stale`,
-`unverified` and `tentative` counts, the terms of the returned passages, and
-`events_read` / `events_cut` (the read takes the newest 5,000 judgements).
+`unverified` and `tentative` counts, the terms of the returned passages, the
+`window_days`, `half_life_days` and `min_corroboration` it read and folded
+with, and `events_read` / `events_cut` (the read takes the newest 5,000
+judgements).
 `scone recall` prints a line when the read or the term was cut. The same
 record goes into the recall event. A recall with the weight at 0 has no
 `feedback_prior` field.
