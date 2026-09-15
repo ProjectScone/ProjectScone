@@ -91,6 +91,8 @@ class RecallRuntime:
     synonyms: "Synonyms | None" = None
     #: Whether the words a chunk is under are searched as a lane of their own.
     context_lane: bool = False
+    #: Whether the questions each chunk answers, kept in the same index, are searched.
+    question_lane: bool = False
     #: Whether a query term's family is searched by stem prefix in the text lane.
     lexical_stems: bool = False
     #: The vector lane's voice in rank fusion, against the text lane's 1.0.
@@ -310,6 +312,7 @@ async def recall(
         "synonyms": (None if expansion is None
                      else {"matched": len(expansion.matched), "added": len(expansion.added), "capped": expansion.capped}),
         "context_lane": runtime.context_lane,
+        "question_lane": runtime.question_lane,
         "prefixes": ({"added": len(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
         "fusion_weights": {"vector": runtime.vector_weight, "text": 1.0},
         "similarity_floor": runtime.similarity_floor,
@@ -386,11 +389,15 @@ async def recall(
     # The context lane: what each passage is under, searched with the same
     # query the text lane got, fused at a lower weight so a passage that
     # says the words comes before one that is only under them.
+    # The question lane is kept in the same index (ingestion.chunk_questions),
+    # so either flag searches it, and a store without it is named by the lane asked for.
     context_hits: list[tuple[int, float]] = []
-    if runtime.context_lane:
+    context_searched = runtime.context_lane or runtime.question_lane
+    if context_searched:
         keeper = context_index(runtime.documents)
         if keeper is None:
-            degraded.append(f"context lane: not kept by the {runtime.documents.name} document store")
+            asked_for = "context lane" if runtime.context_lane else "question lane"
+            degraded.append(f"{asked_for}: not kept by the {runtime.documents.name} document store")
         else:
             try:
                 t0 = time.perf_counter()
@@ -459,7 +466,7 @@ async def recall(
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
         lane_hits.append(entity_hits)
         weights.append(ENTITY_WEIGHT)
-    if runtime.context_lane:
+    if context_searched:
         ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
         lane_hits.append(context_hits)
         weights.append(CONTEXT_WEIGHT)

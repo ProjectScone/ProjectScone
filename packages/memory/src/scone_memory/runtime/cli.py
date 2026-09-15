@@ -540,6 +540,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fan-in", type=int, default=6, help="nodes one summary is written from (2 to 24, default 6)")
     p.add_argument("--max-levels", type=int, default=5, help="levels above the chunks (1 to 5, default 5)")
     p.add_argument("--dry-run", action="store_true", help="write the tree and print it without storing it")
+    p = sub.add_parser("chunk-questions", help="write the question lane with the configured chat model (SCONE_CHAT_URL, "
+                                               "SCONE_CHAT_MODEL): questions each chunk answers, kept only with a quote "
+                                               "from the chunk; needs SCONE_QUESTION_LANE=1")
+    p.add_argument("--per-chunk", type=int, default=3, help="questions asked of one chunk (1 to 5, default 3)")
+    p.add_argument("--max-chunks", type=int, default=2000, help="chunks one pass asks about (1 to 2000, default 2000)")
+    p.add_argument("--after-chunk", type=int, default=None,
+                   help="start after this chunk id: the resume_after a pass cut by --max-chunks reported")
+    p.add_argument("--episode", type=int, action="append", dest="episodes", default=None,
+                   help="only this episode's chunks; repeat for more")
     p = sub.add_parser("bench-questions",
                        help="write questions a corpus answers with the local model, anchored to quotes, "
                             "or measure retrieval on the corpus with a set written before")
@@ -1740,6 +1749,21 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(f"  {reason}", file=out)
         if tree.root is not None:
             print(tree.root.text, file=out)
+        return 0
+
+    if args.command == "chunk-questions":
+        from .config import build_chat
+
+        model = build_chat(settings) if settings is not None else None
+        if model is None:
+            raise InvalidInput("chunk-questions needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+        lane = await engine.build_chunk_questions(space, model, model_name=settings.chat_model or "",
+                                                  max_chunks=args.max_chunks, per_chunk=args.per_chunk,
+                                                  after_chunk=args.after_chunk, episode_ids=args.episodes)
+        if args.json:
+            emit(lane.record())
+        else:
+            print(lane.text(), file=out)
         return 0
 
     if args.command == "sync-directory":
