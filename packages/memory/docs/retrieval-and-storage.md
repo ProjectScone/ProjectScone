@@ -491,16 +491,25 @@ unless the fourth route is asked for by name:
      with its quote, never the passages -- and every sentence must name
      the facts it uses (`f1`, `f2`, ...). A sentence that names none of the
      facts it was given is dropped and counted, and a shown sentence
-     carries the quotes of the facts it names. That call holds at most one
-     round's bytes of facts, in the order they were found; the facts past
-     it are not sent, are counted, and the answer is `truncated`. An answer
-     that cannot be read, fails or cites nothing, or a first fact too
-     large for the round, leaves the facts shown as they are, with a
-     reason, and the answer is `partial`. `detail.facts` gives
+     carries the quotes of the facts it names; a sentence whose fact ids
+     are not a list of strings is dropped as malformed. That call holds at
+     most one round's bytes of facts, in the order they were found; the
+     facts past it are not sent, and when the answer is written they are
+     counted and the answer is `truncated`. An answer that cannot be read
+     or fails, or has no sentence left, or a first fact too large for the
+     round, leaves every fact shown as it is, with a reason that says which
+     (for a reply with no sentence left: it held none, none cited a known
+     fact, or none could be read). The answer is then `partial`, and the
+     answer's bound makes it `truncated` only when an answer was written,
+     since otherwise every fact is shown. `detail.facts` gives
      `extracted` (facts kept with a checked quote), `used` (distinct facts
-     the shown sentences name), `unsent` and `sentences_dropped_uncited`;
-     `folded` says the answer was written. In the other modes
-     `detail.facts` is `null`.
+     the shown sentences of a written answer name), `unsent` (facts the
+     written answer's call could not hold), `sentences_dropped_uncited` and
+     `sentences_dropped_malformed`; `used` and `unsent` are 0 when the
+     facts are shown unmerged, and `folded` says the answer was written.
+     In the other modes `detail.facts` is `null`; `detail.fold_dropped_uncited`
+     and `detail.fold_dropped_malformed` count `evidence`'s fold sentences
+     the same way.
 
    In every mode the calls are bounded by the rounds bound (six by
    default; `evidence` may add its one fold and `facts` its one answer),
@@ -531,13 +540,23 @@ unless the fourth route is asked for by name:
    returned the answer so far with nothing new
    ([results](../benchmarks/synthesis-modes-v1.results.md)). At the route's
    limits those passages fit one round, and `refine` makes no second.
-   At the same limits, three runs on those eight questions (with the
-   passages today's retrieval returns) gave `facts` a text on 8 of 8
-   against `evidence`'s 7. `facts` wrote an answer on 7, the same as
-   `evidence`, and `evidence`'s missing item was a call that ran to the
-   deadline. `facts` spent 104 calls to `evidence`'s 16, and the judge
-   scored its texts less faithful, 0.762 against 0.905: the answer pass
-   can write sums and claims its cited facts do not make
+   `facts` was measured at the modes run's limits too (6,000-byte rounds,
+   a bound of 16 and a 600 s deadline), not at the route's. At the route's
+   limits it reads six of the twelve passages and is `partial`, as above,
+   and that was not measured. At the measured limits one item's `facts`
+   synthesis took a median of 36 to 124 s over three runs on a shared box,
+   against the route's 120 s deadline for a whole synthesis. Three runs on
+   those eight questions (with the passages today's retrieval returns)
+   gave `facts` a text on 8 of 8 against `evidence`'s 7. `facts` wrote an
+   answer on 7, the same as `evidence`, and `evidence`'s missing item was
+   a call that ran to the deadline. `facts` spent 104 calls to
+   `evidence`'s 16. The judge scored its texts less faithful, 0.762
+   against 0.905, but each mean leaves out a different item. On the six
+   items judged on both sides it is 0.722 against 0.889, and the whole
+   gap is one item, `c18a7dc8`, where no evidence session was among the
+   passages: `evidence`'s off-topic sentences scored 1.0 and `facts`'s
+   answer 0.0. The sums its answer wrote on another item cost it 0.167
+   there, and a third item gave that back
    ([results](../benchmarks/synthesis-facts-v1.results.md)).
 
 An ordinary answer shows each passage to its first 200 characters, and

@@ -64,7 +64,8 @@ async def test_each_passage_is_one_extraction_call_and_the_answer_is_written_fro
     assert result.model_calls == 3 and result.notes_kept == 2
     record = result.record()
     assert record["mode"] == "facts" and record["model_calls"] == 3
-    assert record["facts"] == {"extracted": 2, "used": 2, "unsent": 0, "sentences_dropped_uncited": 0}
+    assert record["facts"] == {"extracted": 2, "used": 2, "unsent": 0, "sentences_dropped_uncited": 0,
+                               "sentences_dropped_malformed": 0}
     assert record["passages"]["cited"] == 2 and record["reasons"] == []
 
 
@@ -111,8 +112,38 @@ async def test_an_answer_sentence_citing_no_fact_is_dropped_and_counted():
     model = FakeChat([facts(F1), facts(F2), written])
     result = await synthesize_passages(model, QUESTION, [P1, P2], mode="facts")
     assert [s.text for s in result.sentences] == ["Kept."]
-    assert result.fold_dropped_uncited == 3 and result.status == "synthesized"
-    assert result.record()["facts"] == {"extracted": 2, "used": 1, "unsent": 0, "sentences_dropped_uncited": 3}
+    assert result.fold_dropped_uncited == 2 and result.fold_dropped_malformed == 1 and result.status == "synthesized"
+    assert result.record()["facts"] == {"extracted": 2, "used": 1, "unsent": 0, "sentences_dropped_uncited": 2,
+                                        "sentences_dropped_malformed": 1}
+
+
+async def test_a_sentence_whose_fact_ids_are_not_a_list_of_strings_is_malformed_not_uncited():
+    rows = [{"sentence": "Kept.", "facts": ["f1"]}, {"sentence": "A string.", "facts": "f1"},
+            {"sentence": "Numbers.", "facts": [1]}, {"sentence": "Mixed.", "facts": ["f1", 1]},
+            {"sentence": "Misnamed.", "fact_ids": ["f1"]}, {"sentence": 7, "facts": ["f1"]}, "not a sentence",
+            {"sentence": "Named none.", "facts": ["f9"]}]
+    model = FakeChat([facts(F1), json.dumps({"answer": rows})])
+    result = await synthesize_passages(model, QUESTION, [P1], mode="facts")
+    assert [s.text for s in result.sentences] == ["Kept."]
+    assert result.fold_dropped_malformed == 6 and result.fold_dropped_uncited == 1
+    record = result.record()
+    assert record["fold_dropped_malformed"] == 6 and record["fold_dropped_uncited"] == 1
+    assert record["facts"]["sentences_dropped_malformed"] == 6 and record["facts"]["sentences_dropped_uncited"] == 1
+
+
+async def test_when_no_sentence_stands_the_reason_says_whether_none_was_written_none_cited_or_none_was_well_formed():
+    cases = [({"answer": []}, 0, 0, "answer: the reply held no sentence; facts shown unmerged"),
+             ({"answer": [{"sentence": "Moved.", "facts": "f1"}]}, 0, 1,
+              "answer: no sentence could be read (1 malformed); facts shown unmerged"),
+             ({"answer": [{"sentence": "Moved.", "facts": ["f9"]}]}, 1, 0,
+              "answer: no sentence cited a known fact; facts shown unmerged"),
+             ({"answer": [{"sentence": "Moved.", "facts": ["f9"]}, {"sentence": "Moved.", "facts": [1]}]}, 1, 1,
+              "answer: no sentence cited a known fact, and 1 were malformed; facts shown unmerged")]
+    for reply, uncited, malformed, reason in cases:
+        result = await synthesize_passages(FakeChat([facts(F1), json.dumps(reply)]), QUESTION, [P1], mode="facts")
+        assert result.reasons == (reason,), reply
+        assert (result.fold_dropped_uncited, result.fold_dropped_malformed) == (uncited, malformed), reply
+        assert [s.text for s in result.sentences] == [F1[0]] and result.status == "partial" and result.facts_used == 0
 
 
 async def test_facts_used_counts_distinct_facts_the_shown_sentences_cite_not_distinct_quotes():
@@ -142,7 +173,8 @@ async def test_no_fact_means_no_answer_call_and_no_evidence():
     assert result.model_calls == 2 and len(model.calls) == 2
     assert result.status == "no_evidence" and result.sentences == () and result.folded is False
     assert result.reasons == (), "no facts is not an answer that failed to fit or be read"
-    assert result.record()["facts"] == {"extracted": 0, "used": 0, "unsent": 0, "sentences_dropped_uncited": 0}
+    assert result.record()["facts"] == {"extracted": 0, "used": 0, "unsent": 0, "sentences_dropped_uncited": 0,
+                                        "sentences_dropped_malformed": 0}
 
 
 async def test_an_answer_that_cannot_be_read_shows_the_facts_unmerged_and_says_so():
@@ -152,7 +184,7 @@ async def test_an_answer_that_cannot_be_read_shows_the_facts_unmerged_and_says_s
     assert [s.text for s in result.sentences] == [F1[0], F2[0]]
     assert [s.citations[0].quote for s in result.sentences] == [F1[1], F2[1]]
     assert result.reasons == ("answer: the reply could not be read as an answer; facts shown unmerged",)
-    assert result.facts_used == 2
+    assert result.facts_used == 0 and result.record()["facts"]["used"] == 0, "no answer was written, so none used a fact"
 
 
 async def test_an_answer_whose_every_sentence_cites_nothing_shows_the_facts_unmerged():
@@ -161,6 +193,7 @@ async def test_an_answer_whose_every_sentence_cites_nothing_shows_the_facts_unme
     assert [s.text for s in result.sentences] == [F1[0]] and result.status == "partial"
     assert result.fold_dropped_uncited == 1
     assert result.reasons == ("answer: no sentence cited a known fact; facts shown unmerged",)
+    assert result.facts_used == 0
 
 
 async def test_a_failing_answer_call_shows_the_facts_unmerged():
@@ -189,7 +222,22 @@ async def test_the_answer_call_holds_facts_inside_the_round_bound_and_counts_tho
     assert result.fold_dropped_uncited == 1 and result.facts_unsent == 1
     assert result.truncated is True and result.status == "partial"
     assert "answer: 1 fact(s) left out: the facts past 70 bytes did not fit the answer's round" in result.reasons
-    assert result.record()["facts"] == {"extracted": 2, "used": 1, "unsent": 1, "sentences_dropped_uncited": 1}
+    assert result.record()["facts"] == {"extracted": 2, "used": 1, "unsent": 1, "sentences_dropped_uncited": 1,
+                                        "sentences_dropped_malformed": 0}
+
+
+async def test_facts_left_out_of_an_answer_that_was_not_written_cut_nothing_that_is_shown():
+    limits = SynthesisLimits(max_round_bytes=70)
+    for last in ("nope", ChatError("down"), answer(("Named none.", ["f9"]))):
+        model = FakeChat([facts(F1), facts(F2), last])
+        result = await synthesize_passages(model, QUESTION, [P1, P2], limits=limits, mode="facts")
+        assert F2[0] not in model.calls[2][1], "the bound still kept the second fact out of the call"
+        assert [s.text for s in result.sentences] == [F1[0], F2[0]], "every fact is shown unmerged"
+        assert result.truncated is False and result.status == "partial"
+        assert result.facts_unsent == 0 and result.facts_used == 0
+        assert not any("left out" in reason for reason in result.reasons), result.reasons
+        record = result.record()["facts"]
+        assert record["used"] + record["unsent"] <= record["extracted"]
 
 
 async def test_when_no_fact_fits_the_answer_round_no_answer_is_asked_for_and_the_facts_are_shown():
@@ -198,9 +246,9 @@ async def test_when_no_fact_fits_the_answer_round_no_answer_is_asked_for_and_the
     result = await synthesize_passages(model, QUESTION, [P1], limits=SynthesisLimits(max_round_bytes=70), mode="facts")
     assert len(model.calls) == 1 and result.model_calls == 1, "no answer call is sent over the bound"
     assert [s.text for s in result.sentences] == [long[0]] and result.folded is False
-    assert result.facts_unsent == 1 and result.truncated and result.status == "partial"
-    assert result.reasons == ("answer: 1 fact(s) left out: the facts past 70 bytes did not fit the answer's round",
-                              "answer: no fact fit the answer's round; facts shown unmerged")
+    assert result.facts_unsent == 0 and result.facts_used == 0, "every fact is shown, so none was left out of it"
+    assert result.truncated is False and result.status == "partial"
+    assert result.reasons == ("answer: no fact fit the answer's round of 70 bytes; facts shown unmerged",)
 
 
 async def test_other_modes_record_no_facts():
@@ -208,6 +256,20 @@ async def test_other_modes_record_no_facts():
     result = await synthesize_passages(model, QUESTION, [P1])
     assert result.record()["facts"] is None, "a mode that extracts no facts must not read as having used none"
     assert result.facts_used == 0 and result.facts_unsent == 0
+
+
+async def test_a_brace_inside_a_quote_does_not_make_the_reply_unreadable():
+    code = Passage("chunk:9", "To list pools, send query { pools { id name } and add fields as needed.")
+    opened = json.dumps({"facts": [{"fact": "The query starts with query {.", "quote": "send query { pools"}]})
+    model = FakeChat([f"Here are the facts: {opened} Done.", answer(("Send a pools query.", ["f1"]))])
+    result = await synthesize_passages(model, "How do I list pools?", [code], mode="facts")
+    assert [r.status for r in result.rounds] == ["noted"] and result.notes_kept == 1
+    assert result.status == "synthesized" and result.sentences[0].citations[0].quote == "send query { pools"
+    closed = json.dumps({"facts": [{"fact": "It ends.", "quote": "name } and"}], "more": {"x": 1}})
+    assert module._object(f"prose {closed} prose") == json.loads(closed)
+    assert module._object('{"a": "}"} {"facts": []}') == {"a": "}"}, "the first object, read as JSON reads it"
+    assert module._object("{not json} {\"facts\": []}") == {"facts": []}
+    assert module._object("no object { here") is None and module._object(None) is None
 
 
 async def test_the_answer_rounds_bytes_count_the_newlines_between_facts_and_every_byte_of_them():

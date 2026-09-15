@@ -259,7 +259,8 @@ async def test_at_the_routes_own_limits_facts_reads_six_passages_and_writes_one_
     detail = answered.detail
     assert detail["mode"] == "facts" and detail["model_calls"] == 7
     assert detail["passages"]["read"] == 6 and detail["passages"]["unread"] == 6
-    assert detail["facts"] == {"extracted": 6, "used": 6, "unsent": 0, "sentences_dropped_uncited": 0}
+    assert detail["facts"] == {"extracted": 6, "used": 6, "unsent": 0, "sentences_dropped_uncited": 0,
+                               "sentences_dropped_malformed": 0}
     assert detail["status"] == "partial" and detail["truncated"] is True
     (sentence,) = detail["sentences"]
     cited = [citation["passage"] for citation in sentence["citations"]]
@@ -294,4 +295,5 @@ def test_over_http_the_facts_mode_is_a_query_parameter():
         said = client.get("/v1/answer", params={"q": QUESTION, "route": "synthesize", "limit": 2, "synthesis_mode": "facts"},
                           headers={"Authorization": "Bearer key-a"}).json()
     assert said["detail"]["mode"] == "facts" and said["detail"]["status"] == "synthesized"
-    assert said["detail"]["facts"] == {"extracted": 2, "used": 2, "unsent": 0, "sentences_dropped_uncited": 0}
+    assert said["detail"]["facts"] == {"extracted": 2, "used": 2, "unsent": 0, "sentences_dropped_uncited": 0,
+                                       "sentences_dropped_malformed": 0}

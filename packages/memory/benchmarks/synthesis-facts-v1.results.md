@@ -12,7 +12,9 @@ In short: `facts` gave a text on 8 of 8 items and `evidence` on 7 of 8,
 and `facts` wrote an answer (its second pass) on 7 of 8. The one item
 `evidence` missed is a 600-second model call that never returned, not a
 note list that came back empty. `facts` spent 6.5 times the calls, and
-the judge scored its texts less faithful (0.762 against 0.905).
+the judge scored its texts less faithful (0.762 against 0.905). Those two
+means leave out different items. On the six items judged on both sides
+it is 0.722 against 0.889, and the whole gap is one item, `c18a7dc8`.
 Relevancy was 0.000 for every side on every item, so this judge does not
 separate the sides on relevancy.
 
@@ -87,8 +89,11 @@ faithful in the first run and 1.0 in the other two.
   8 were dropped because the quote was not in the passage and 7 as
   malformed. None could name the wrong passage, since the code, not the
   model, names it.
-- Facts used: 48 distinct facts named by the shown sentences.
-- Answer sentences dropped for citing no fact: 3.
+- Facts used: 38 distinct facts named by the shown sentences of the seven
+  written answers. The first record said 48: it counted `2318644b`'s 10
+  facts, shown unmerged after its answer was dropped, as used.
+- Answer sentences dropped for citing no fact: 3, all well formed (none
+  malformed; see "After review").
 - Facts left out by the answer call's byte bound: 0.
 - Statuses: 7 synthesized and 1 partial.
 
@@ -97,7 +102,8 @@ did not hold, 6 malformed), folded on one item, and was 7 synthesized
 and 1 unavailable. Unverified judgments: one `facts` faithfulness, on
 `gpt4_2ba83207` (the verdict had no claims list).
 
-Per item (run 1; runs 2 and 3 are the same):
+Per item (run 1; runs 2 and 3 are the same; `used` as the post-review
+rerun records it, which differs from run 1 only on `2318644b`):
 
 | item | evidence | facts: facts returned / kept / used, sentences dropped | facts status |
 |---|---|---|---|
@@ -107,7 +113,7 @@ Per item (run 1; runs 2 and 3 are the same):
 | a4996e51 | 1 sentence, f 1.0 | 28 / 27 / 8, 0 | answer written, 7 sentences, f 1.0 |
 | a3332713 | 5 sentences, f 1.0 | 23 / 23 / 9, 0 | answer written, 12 sentences, f 0.833 |
 | 60bf93ed | 1 sentence, f 1.0 | 18 / 16 / 3, 0 | answer written, 4 sentences, f 1.0 |
-| 2318644b | nothing: the first round's call ran to the 600 s deadline | 15 / 10 / 10, 2 | partial: the answer's 2 sentences cited no fact, so the 10 facts are shown unmerged, f 1.0 |
+| 2318644b | nothing: the first round's call ran to the 600 s deadline | 15 / 10 / 0, 2 | partial: the answer's 2 sentences cited no fact, so the 10 facts are shown unmerged, f 1.0 |
 | 00ca467f | 2 sentences (folded), f 0.833 | 28 / 28 / 5, 0 | answer written, 3 sentences, f 1.0 |
 
 ## The answer prompt was revised before this run
@@ -148,16 +154,28 @@ changed after the measurement's results were seen.
   checked quote, against 58% of `evidence`'s notes. The facts' shown
   sentences reach more evidence sessions (cited evidence share 0.708
   against 0.427). It costs 6.5 times the calls.
-- The answer pass is where the faithfulness goes. A shown sentence
-  carries the quotes of the facts it names, but nothing checks that the
-  sentence says what those facts say. On `a3332713` the answer cites
-  real facts ($100, $100, $20, $75) and then writes "You spent a total of
-  $295 + $305 = $600 on gifts" and "you still owe $305". The judge scored
-  both unsupported. On `c18a7dc8` (no evidence session among the
-  passages) it wrote "I am now some number of years older than that",
-  scored 0.0. Repeats survive too: on `gpt4_2ba83207` one sentence
-  appears twice despite "say each thing once". `verified_accuracy` stays
-  false for that reason.
+- The faithfulness gap is one item. Each side's mean is over seven
+  judged texts, but not the same seven: `evidence`'s leaves out
+  `2318644b` (no text), and `facts`'s leaves out `gpt4_2ba83207` (the
+  verdict was unverified) and takes in `2318644b` (1.0). On the six items
+  judged on both sides the means are 0.889 (`evidence`) and 0.722
+  (`facts`). Per item they are equal on three, and the whole net gap is
+  `c18a7dc8`: no evidence session was among its passages, `evidence`
+  wrote three off-topic sentences (the Waldorf Theatre, the Cowboys) that
+  the judge scored 1.0, and `facts` wrote "I graduated from college. I am
+  now some number of years older than that", scored 0.0. Neither answers
+  the question.
+- The answer pass does write claims its facts do not make, but that is
+  not what the gap is made of. A shown sentence carries the quotes of
+  the facts it names, and nothing checks that the sentence says what
+  those facts say. On `a3332713` the answer cites real facts ($100,
+  $100, $20, $75) and then writes "You spent a total of $295 + $305 =
+  $600 on gifts" and "you still owe $305". The judge scored both
+  unsupported, and the item cost `facts` 0.167 against `evidence`
+  (0.833 against 1.0); `00ca467f` gives the same 0.167 back (1.0 against
+  0.833). Repeats survive too: on `gpt4_2ba83207` one sentence appears
+  twice despite "say each thing once". `verified_accuracy` stays false
+  for that reason.
 - The extraction still pads. On `2318644b` the shown facts include "You
   can add more fields to the GraphQL query for each pool", for a question
   about hotel prices. On `gpt4_2ba83207` the answer opens with "There is
@@ -183,10 +201,35 @@ changed after the measurement's results were seen.
   names Thrive Market only as a grocery store.
 - Eight items, one judge that is also the writer, and one model. The
   faithfulness gap (0.905, 0.762, 0.730) rests on seven or eight judged
-  texts each, and one judge call on an unchanged TreeSummarize text
-  moved its run from 0.605 to 0.730.
+  texts each, not the same ones, and between `evidence` and `facts` on
+  one item. One judge call on an unchanged TreeSummarize text moved its
+  run from 0.605 to 0.730.
+
+## After review
+
+Review found that the record could misstate what the answer pass did.
+`facts.used` counted the facts shown unmerged when no answer was written.
+A sentence whose fact ids were not a list of strings was counted as
+citing no fact, and an answer with no sentence got the same reason. With
+some facts unsent, an answer call that failed still left the synthesis
+`truncated`. Once these were fixed (and a brace inside a quoted string
+no longer makes a reply unreadable), `facts` was run once more, alone,
+on the same eight items and passages, from the fixed code, on 15
+September from 11:36 to 11:56 CDT.
+
+Every text was byte-identical to runs 1 to 3, and so was every score,
+status and count, except `facts_used`: 38 (0 on `2318644b`), where the
+first record said 48. The three dropped answer sentences (two on
+`2318644b`, one on `c18a7dc8`) are all well formed, uncited rather than
+malformed (`fold_dropped_malformed` 0 on every item), so the reading of
+`2318644b` above stands. No round of either run was unreadable, so the
+brace fix changes nothing here. `facts.unsent` was 0 on every item, so
+the `truncated` fix changes nothing here either. Output:
+`~/.scone-fable/w4-fact-first-runs/review/out` (not committed).
 
 Not measured: correctness as a score; another model or judge; a sample
 larger than eight; the route's own limits (12,000-byte rounds, six
-rounds), where `facts` would read six of twelve passages and be
-`partial`.
+rounds, a 120 s deadline for the whole synthesis), where `facts` would
+read six of twelve passages and be `partial`. At the measured limits one
+item's `facts` synthesis took a median of 36 to 124 s over the three
+runs on a shared box.

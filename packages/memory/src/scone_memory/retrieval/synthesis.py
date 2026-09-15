@@ -59,16 +59,19 @@ passage its call held is dropped and counted in ``notes_dropped_unquoted``
 call writes the answer from the checked facts alone -- each fact with its
 quote, never the passages -- and every sentence must name the facts it
 uses; a sentence that names none it was given is dropped and counted in
-``fold_dropped_uncited``, and a shown sentence carries the quotes of the
+``fold_dropped_uncited`` (one whose ids are not a list of strings in
+``fold_dropped_malformed``), and a shown sentence carries the quotes of the
 facts it names. The call asks for at most ``max_sentences`` sentences,
 the bound that cuts what is shown. It holds at most ``max_round_bytes`` of facts, in
-the order they were found: the facts past the bound are not sent, are
-counted in ``facts_unsent``, and the answer is ``truncated``. An answer
-that cannot be read, fails, or cites nothing, or a first fact too large
-to send, leaves the facts shown as they are, and the synthesis is
-``partial``. ``facts_used`` counts the distinct facts the shown sentences
-name (two facts with one quote are two; with no answer written, the facts
-shown), and ``folded`` says the answer was written.
+the order they were found: the facts past the bound are not sent, and
+when the answer is written they are counted in ``facts_unsent`` and it
+is ``truncated``. An answer that cannot be read, fails, or has no
+sentence citing a fact, or a first fact too large to send, leaves every
+fact shown as it is: nothing shown was cut, ``facts_unsent`` and
+``facts_used`` are 0, and the synthesis is ``partial``. ``facts_used``
+counts the distinct facts the shown sentences of a written answer name
+(two facts with one quote are two), and ``folded`` says the answer was
+written.
 
 In every mode the calls are bounded by ``max_rounds`` (``evidence`` may
 add its fold and ``facts`` its answer), every call is counted in
@@ -249,11 +252,15 @@ class Synthesis:
     refine_dropped_carried: int = 0
     #: Kept notes that repeat the answer so far, over every refine round: ``notes_kept`` counts them again.
     notes_carried: int = 0
-    #: Distinct facts the shown sentences name, in ``facts`` mode (with no answer written, the facts shown); 0 in any
-    #: other mode.
+    #: Distinct facts the shown sentences of a written answer name, in ``facts`` mode; 0 when no answer was written
+    #: and in any other mode.
     facts_used: int = 0
-    #: Checked facts left out of the answer call by its byte bound, in ``facts`` mode; 0 in any other mode.
+    #: Checked facts a written answer's call left out by its byte bound, in ``facts`` mode; 0 when no answer was
+    #: written (every fact is then shown) and in any other mode.
     facts_unsent: int = 0
+    #: Fold or answer sentences dropped because their ids were not a list of strings, or the sentence was not text;
+    #: ``fold_dropped_uncited`` counts only well-formed sentences that named nothing they were given.
+    fold_dropped_malformed: int = 0
     #: The quotes were checked against their passages; the sentences were not checked against anything.
     verified_accuracy: Literal[False] = False
 
@@ -277,6 +284,7 @@ class Synthesis:
                                          for c in sentence.citations]} for sentence in self.sentences],
             "sentences_offered": self.sentences_offered, "truncated": self.truncated,
             "folded": self.folded, "fold_dropped_uncited": self.fold_dropped_uncited,
+            "fold_dropped_malformed": self.fold_dropped_malformed,
             "passages": {"given": self.passages_given, "read": self.passages_read,
                          "unread": self.passages_unread, "oversize": self.passages_oversize,
                          "cited": self.passages_cited},
@@ -289,30 +297,30 @@ class Synthesis:
             "refine_kept_prior": self.refine_kept_prior, "refine_dropped_carried": self.refine_dropped_carried,
             # Only a mode that extracts facts has counts of them; elsewhere zeros would read as none found.
             "facts": ({"extracted": self.notes_kept, "used": self.facts_used, "unsent": self.facts_unsent,
-                       "sentences_dropped_uncited": self.fold_dropped_uncited} if self.mode == "facts" else None),
+                       "sentences_dropped_uncited": self.fold_dropped_uncited,
+                       "sentences_dropped_malformed": self.fold_dropped_malformed} if self.mode == "facts" else None),
             "model_calls": self.model_calls, "reasons": list(self.reasons), "verified_accuracy": False,
         }
 
 
+_DECODER = json.JSONDecoder()
+
+
 def _object(reply: object) -> Optional[dict[str, object]]:
-    """The first JSON object in the reply, or None; a model may wrap it in prose, not omit it."""
+    """The first JSON object in the reply, or None; a model may wrap it in prose, not omit it.
+
+    Each ``{`` is decoded as JSON decodes it rather than matched by counting braces, so a brace inside a
+    string (a quoted passage of code) neither ends the object nor hides it."""
     if not isinstance(reply, str):
         return None
     start = reply.find("{")
     while start >= 0:
-        depth = 0
-        for index in range(start, len(reply)):
-            if reply[index] == "{":
-                depth += 1
-            elif reply[index] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        value = json.loads(reply[start:index + 1])
-                    except ValueError:
-                        break
-                    return value if isinstance(value, dict) else None
-        start = reply.find("{", start + 1)
+        try:
+            value: dict[str, object] = _DECODER.raw_decode(reply, start)[0]
+        except ValueError:
+            start = reply.find("{", start + 1)
+            continue
+        return value
     return None
 
 
@@ -432,6 +440,17 @@ class _Cited:
     sentences: list[Sentence]
     uses: list[frozenset[int]]
     uncited: int
+    malformed: int = 0
+
+    def none_stood(self, kind: str) -> str:
+        """Why no sentence stands: none was written, none cited a known ``kind``, or none was well formed."""
+        if not self.uncited and not self.malformed:
+            return "the reply held no sentence"
+        if not self.uncited:
+            return f"no sentence could be read ({self.malformed} malformed)"
+        if not self.malformed:
+            return f"no sentence cited a known {kind}"
+        return f"no sentence cited a known {kind}, and {self.malformed} were malformed"
 
 
 def _read_fold(reply: str, notes: Sequence[_Note], *, rows_key: str = "summary", ids_key: str = "notes",
@@ -447,10 +466,11 @@ def _read_fold(reply: str, notes: Sequence[_Note], *, rows_key: str = "summary",
     for row in rows:
         text = row.get("sentence") if isinstance(row, dict) else None
         ids = row.get(ids_key) if isinstance(row, dict) else None
-        if not isinstance(text, str) or not text.strip() or len(text) > MAX_SENTENCE_CHARS or not isinstance(ids, list):
-            cited.uncited += 1
+        if (not isinstance(text, str) or not text.strip() or len(text) > MAX_SENTENCE_CHARS or not isinstance(ids, list)
+                or not all(isinstance(i, str) for i in ids)):
+            cited.malformed += 1
             continue
-        named = [by_id[i] for i in ids if isinstance(i, str) and i in by_id]
+        named = [by_id[i] for i in ids if i in by_id]
         if not named:
             cited.uncited += 1
             continue
@@ -602,7 +622,7 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
             reasons.append(f"round {number}: no refined sentence kept a checked quote; the answer so far stands")
         rounds.append(SynthesisRound(number, len(group), size, returned, len(kept), "noted", carried, repeated))
     folded = False
-    fold_uncited = 0
+    fold_uncited = fold_malformed = 0
     fold_attempted = False
     sentences: list[Sentence] = [Sentence(note.sentence, (note.citation,)) for note in notes]
     # The notes each sentence stands on; unmerged, a sentence is its own note.
@@ -618,21 +638,18 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
         elif merged is None:
             reasons.append("fold: the reply could not be read as a summary; notes shown unmerged")
         elif not merged.sentences:
-            fold_uncited = merged.uncited
-            reasons.append("fold: no sentence cited a known note; notes shown unmerged")
+            fold_uncited, fold_malformed = merged.uncited, merged.malformed
+            reasons.append(f"fold: {merged.none_stood('note')}; notes shown unmerged")
         else:
-            sentences, uses, fold_uncited = merged.sentences, merged.uses, merged.uncited
+            sentences, uses, fold_uncited, fold_malformed = merged.sentences, merged.uses, merged.uncited, merged.malformed
             folded = True
     if mode == "facts" and notes:
         fold_attempted = True
         lines = _fact_lines(notes)
         sent = _lines_within(lines, limits.max_round_bytes)
-        unsent = len(notes) - sent
-        if unsent:
-            reasons.append(f"answer: {unsent} fact(s) left out: the facts past {limits.max_round_bytes} bytes did not "
-                           "fit the answer's round")
         if not sent:
-            reasons.append("answer: no fact fit the answer's round; facts shown unmerged")
+            reasons.append(f"answer: no fact fit the answer's round of {limits.max_round_bytes} bytes; "
+                           "facts shown unmerged")
         else:
             prompt = (f"Question: {question}\n\nFacts:\n" + "\n".join(lines[:sent])
                       + f"\n\nAnswer in at most {limits.max_sentences} sentence(s).")
@@ -644,23 +661,31 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
             elif written is None:
                 reasons.append("answer: the reply could not be read as an answer; facts shown unmerged")
             elif not written.sentences:
-                fold_uncited = written.uncited
-                reasons.append("answer: no sentence cited a known fact; facts shown unmerged")
+                fold_uncited, fold_malformed = written.uncited, written.malformed
+                reasons.append(f"answer: {written.none_stood('fact')}; facts shown unmerged")
             else:
                 sentences, uses, fold_uncited = written.sentences, written.uses, written.uncited
+                fold_malformed = written.malformed
                 folded = True
-    used = len(frozenset().union(*uses[:limits.max_sentences])) if mode == "facts" else 0
+                # Only a written answer lacks the facts its call could not hold; unmerged, every fact is shown.
+                unsent = len(notes) - sent
+                if unsent:
+                    reasons.append(f"answer: {unsent} fact(s) left out: the facts past {limits.max_round_bytes} bytes "
+                                   "did not fit the answer's round")
+    # Unmerged facts are shown, not used: only the sentences of a written answer use facts.
+    used = len(frozenset().union(*uses[:limits.max_sentences])) if mode == "facts" and folded else 0
     return _finish(question, given, rounds, tally, calls, reasons, read, oversize, folded=folded,
                    fold_uncited=fold_uncited, fold_attempted=fold_attempted, limits=limits, refused=False,
                    sentences=sentences, capped=capped or crowded or bool(unsent), mode=mode, kept_prior=kept_prior,
-                   dropped_carried=dropped_carried, facts_used=used, facts_unsent=unsent)
+                   dropped_carried=dropped_carried, facts_used=used, facts_unsent=unsent, fold_malformed=fold_malformed)
 
 
 def _finish(question: str, given: Sequence[Passage], rounds: Sequence[SynthesisRound],
             tally: _Tally, calls: _Calls, reasons: list[str], read: int, oversize: int, *, folded: bool,
             fold_uncited: int, fold_attempted: bool, limits: SynthesisLimits, refused: bool,
             sentences: Sequence[Sentence] = (), capped: bool = False, mode: Mode = "evidence",
-            kept_prior: int = 0, dropped_carried: int = 0, facts_used: int = 0, facts_unsent: int = 0) -> Synthesis:
+            kept_prior: int = 0, dropped_carried: int = 0, facts_used: int = 0, facts_unsent: int = 0,
+            fold_malformed: int = 0) -> Synthesis:
     offered = len(sentences)
     cut = offered > limits.max_sentences
     shown = tuple(sentences[:limits.max_sentences])
@@ -684,7 +709,7 @@ def _finish(question: str, given: Sequence[Passage], rounds: Sequence[SynthesisR
     return Synthesis(question, status, shown, tuple(rounds), len(given), read, unread, oversize, kept,
                      tally.unquoted, tally.unknown, tally.malformed, folded, fold_uncited, offered, truncated,
                      calls.count, tuple(reasons), mode, kept_prior, dropped_carried,
-                     sum(r.notes_carried for r in rounds), facts_used, facts_unsent)
+                     sum(r.notes_carried for r in rounds), facts_used, facts_unsent, fold_malformed)
 
 
 def passages_from_recall(items: Sequence[RecallItem]) -> tuple[Passage, ...]:

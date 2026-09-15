@@ -19,7 +19,7 @@ share is of sentences the model wrote new and compares across modes.
 For ``facts`` the notes are the facts, so the share is facts kept with a
 checked quote over facts returned; its row also counts the facts the
 shown answer used, the facts the answer call's bound left unsent, and
-the answer sentences dropped for citing no fact.
+the answer sentences dropped for citing no fact or as malformed.
 Rows are appended to run<r>/rows.jsonl as they finish, so a stopped run
 keeps what it measured. With runs > 1 the whole protocol repeats, each
 item's side order rotated one further per run, and report.json gives
@@ -100,6 +100,7 @@ async def one(item, model, judge, k, order):
                          "notes_dropped_malformed": made.notes_dropped_malformed,
                          "quoted_share": round((made.notes_kept - made.notes_carried) / fresh, 3) if fresh else None,
                          "folded": made.folded, "fold_dropped_uncited": made.fold_dropped_uncited,
+                         "fold_dropped_malformed": made.fold_dropped_malformed,
                          "facts_used": made.facts_used, "facts_unsent": made.facts_unsent,
                          "refine_kept_prior": made.refine_kept_prior, "reasons": list(made.reasons),
                          "round_notes": [[r.notes_returned, r.notes_kept, r.notes_carried] for r in made.rounds],
@@ -134,6 +135,7 @@ def aggregate(rows, sides=SIDES):
                           "refine_kept_prior": sum(s["refine_kept_prior"] for s in present),
                           "folded": sum(1 for s in present if s["folded"]),
                           "fold_dropped_uncited": sum(s["fold_dropped_uncited"] for s in present),
+                          "fold_dropped_malformed": sum(s.get("fold_dropped_malformed", 0) for s in present),
                           "facts_used": sum(s["facts_used"] for s in present),
                           "facts_unsent": sum(s["facts_unsent"] for s in present),
                           "statuses": {k: sum(1 for s in present if s["status"] == k)
@@ -147,7 +149,8 @@ def aggregate(rows, sides=SIDES):
 
 MEDIAN_KEYS = ("items_with_answer", "faithfulness", "relevancy", "quoted_share", "model_calls", "passages_read",
                "passages_cited", "cited_evidence_share", "refine_kept_prior", "refine_dropped_carried", "notes_carried",
-               "notes_kept", "notes_dropped", "folded", "fold_dropped_uncited", "facts_used", "facts_unsent")
+               "notes_kept", "notes_dropped", "folded", "fold_dropped_uncited", "fold_dropped_malformed", "facts_used",
+               "facts_unsent")
 
 
 def medians(aggregates, sides=SIDES):
