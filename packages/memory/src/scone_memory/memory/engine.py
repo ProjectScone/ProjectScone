@@ -52,7 +52,7 @@ from ..retrieval.overview import OverviewResult
 from ..retrieval.synonyms import Synonyms
 
 #: The vector lane's default voice when the embedder is a hash of tokens (see MemoryEngine).
-HASHED_VECTOR_WEIGHT = 0.25
+HASHED_VECTOR_WEIGHT = 0.01
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core import extracted
@@ -234,10 +234,15 @@ class MemoryEngine:
     ) -> None:
         if vector_weight is None:
             # A hashed-token embedder ranks by word overlap, badly: a weak
-            # echo of the text lane. Measured on LongMemEval-S, giving it a
-            # quarter voice moved the fused ranking from behind the text lane
-            # alone to level with the reference's best; a real embedder knows
-            # things the text lane does not and keeps its full voice.
+            # echo of the text lane. Measured on LongMemEval-S (the frozen
+            # 50 and 100 items outside them), every voice it had in the order
+            # cost the fused ranking; at a hundredth it still runs -- the
+            # confidence signal, a failed text lane, passages the text lane
+            # did not find -- and on both samples the fused ranking scored as
+            # the text lane alone did (benchmarks/northstar-defaults-2026-09-14.results.md;
+            # SCONE_VECTOR_WEIGHT=0.25 is the previous default). A real
+            # embedder knows things the text lane does not and keeps its
+            # full voice.
             vector_weight = HASHED_VECTOR_WEIGHT if embedder.id.startswith("hash-") else 1.0
         if isinstance(vector_weight, bool) or not isinstance(vector_weight, (int, float)) or not 0 < vector_weight <= 4:
             raise InvalidInput("vector_weight must be a number above 0 and at most 4")

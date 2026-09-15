@@ -45,8 +45,8 @@
     SCONE_LEXICAL_STEMS=0          turn off the text lane's stem-prefix families (bill* for billing); on by
                                    default, measured; the index is untouched either way
     SCONE_VECTOR_WEIGHT=0.5        the vector lane's voice in rank fusion against the text lane's 1.0 (a number
-                                   above 0 and at most 4); unset, a hashed-token embedder gets 0.25 and any
-                                   other embedder 1.0, measured
+                                   above 0 and at most 4); unset, a hashed-token embedder gets 0.01 and any
+                                   other embedder 1.0, measured (0.25 was the hashed default before)
     SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
     SCONE_PROFILE_WITHOUT          predicates a profile never shows
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker

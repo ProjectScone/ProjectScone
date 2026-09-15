@@ -12,6 +12,16 @@ two restarts and deletion. It records the initial SIGTERM cleanup failure and
 the subsequent 54-check successful run; its hash embeddings are an operational
 fixture, not an answer-quality benchmark.
 
+## Retrieval defaults against LlamaIndex
+
+The [north star defaults sweep](northstar-defaults-2026-09-14.results.md)
+compares the engine with LlamaIndex's BM25 retriever fused with its vector
+retriever. Both run on LongMemEval-S with the same hashed vectors, and the
+sweep covers fusion mode, vector weight, chunk size and diversity. It is
+checked on 100 items outside the frozen 50. It set the hashed-token
+embedder's default vector weight to 0.01, and records why the other
+winning rows did not become defaults. `northstar_defaults.py` reruns it.
+
 ## Public QA experiments
 
 The completed [8 September 2026 baseline](public-qa-v1.results.md) records
