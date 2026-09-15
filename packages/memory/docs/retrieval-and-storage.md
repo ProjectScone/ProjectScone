@@ -1412,6 +1412,29 @@ web/shelf.ts:Shelf  inherits  Store                   # extends
 web/shelf.ts:Shelf  mixes_in  Face                    # implements
 ```
 
+**What a signature names.** A call edge says what a function runs;
+nothing said what it takes or returns, so "what uses `Receipt`?" found only
+its constructors. A Python function's parameters (including `*args` and
+`**kwargs`), its return and its annotated locals, and a class's annotated
+attributes, now give `uses_type` edges, through generics (`list[Receipt]`)
+and quoted forward references (`"Shelf.Label"`) alike:
+
+```
+pkg/shelf.py:put          uses_type  pkg/shelf.py:Shelf     # a class this file declares
+pkg/shelf.py:put          uses_type  pkg.receipts.Receipt   # a name imported from the project
+pkg/shelf.py:later.inner  uses_type  pkg.models.Paper       # a nested function, named as defines names it
+```
+
+A name in a class body means that class's member first. The standard library
+and built-ins are left out as noise (`str`, `Optional`, `datetime.date`), and
+so is a local function named in an annotation, since a function is not a
+type. A name taken out of a module (`from pkg import models`) and then used
+as `models.Paper` is not followed, for the same reason calls are not: a
+file cannot tell a module from an object. The edges are not part of a blast
+radius (`affected` walks `calls`, `imports`, `inherits` and `mixes_in`).
+Over this package's 408 files they add 4,139 edges beside 14,446 call
+edges, in the same pass.
+
 **Extending a class and satisfying an interface are different relations,
 and collapsing them loses the question people ask.** "What is a Shelf?"
 has one answer; "what can be used as a Face?" has many, and a graph with a
@@ -1689,8 +1712,8 @@ ledger kept the last claim of each kind and called the rest history.
 
 The predicates the framework extracts -- `defines`, `imports`,
 `imports_when_called`, `imports_for_types`, `calls`, `inherits`,
-`mixes_in`, `notes`, `flags`, `cites`, `depends_on`, `develops_with` --
-are many-valued by their nature, declared so in the
+`mixes_in`, `uses_type`, `notes`, `flags`, `cites`, `depends_on`,
+`develops_with` -- are many-valued by their nature, declared so in the
 core (`scone_memory.core.extracted.MANY_VALUED`), and no configuration
 takes one out of that set. `SCONE_MANY_VALUED` still adds predicates a
 person names; `GET /v1/graph/schema` marks both kinds as `many`.
