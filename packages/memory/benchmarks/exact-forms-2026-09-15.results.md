@@ -21,7 +21,7 @@ by default, and `SCONE_LEXICAL_EXACT_FORMS=0` turns it off.
 
 | engine defaults, frozen n=50 (seed 42) | R@5 | all@5 | R@15 | MRR |
 |---|---|---|---|---|
-| before: exact forms off (main `e8ff7965`) | 0.90 | 0.76 | 1.00 | 0.8379 |
+| before: exact forms off on this branch (main's ranking) | 0.90 | 0.76 | 1.00 | 0.8379 |
 | **after: exact forms on** | **0.90** | **0.76** | **1.00** | **0.8444** |
 | LlamaIndex 0.14.24 BM25 + vector, reciprocal rank | 0.88 | 0.74 | 0.98 | 0.8307 |
 
@@ -89,7 +89,8 @@ python benchmarks/northstar_defaults.py --data ../../bench-data/longmemeval_s.js
   engine defaults, which were still off at the time. Its numbers matched
   the off rows exactly: frozen 0.90 / 0.76 / 1.00 / 0.8379, second sample
   0.96 / 0.84 / 0.99 / 0.8854. These are the northstar results file's
-  numbers at 0.01. After the default was turned on, `--exact-forms default
+  numbers at 0.01 on main, so the off rows are main's ranking; main itself
+  was not re-run. After the default was turned on, `--exact-forms default
   --check` ran again on both samples. `compare()` gave 0.90 / 0.76 / 1.00 / 0.8444
   on the frozen sample and 0.97 / 0.87 / 0.99 / 0.9042 on the second, the
   on rows exactly. LlamaIndex gave 0.8307 and 0.8099 (0.8098 in the first

@@ -2623,7 +2623,8 @@ of `bm25()` to the word's idf, computed as FTS5 computes it. That part is
 read only for rows holding the word (the `bm25()` of the family AND the
 word, less that of the word), two small index reads per query word a
 family holds. It does nothing without `SCONE_LEXICAL_STEMS`, and the
-result's `prefixes.exact_forms` says whether it ran. On by default;
+result's `prefixes.exact_forms` says whether it was on; like the prefixes
+themselves, it takes effect only where `prefixes.applied` is true. On by default;
 `SCONE_LEXICAL_EXACT_FORMS=0` turns it off. Measured on LongMemEval-S at
 today's defaults, against LlamaIndex's BM25 + vector retrieval
 ([results](../benchmarks/exact-forms-2026-09-15.results.md)):
