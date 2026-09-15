@@ -119,6 +119,9 @@ class EpisodeBody(BaseModel):
     created_at: Optional[str] = None
     #: How this record is cut; unset keeps the server's rule.
     chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
+    #: The genre whose boundaries structure chunking cuts at; an unknown
+    #: name is refused by the engine, which owns the list.
+    chunking_profile: Optional[str] = Field(default=None, max_length=64)
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
@@ -505,8 +508,10 @@ def create_app(
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
             "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.export_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
-            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "recall.graph_boost": True, "recall.lessons": True, "graph.knowledge_paging": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "graph.stats": True, "graph.hubs": True, "recall.graph_boost": True, "recall.lessons": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
+            # The route is served; without a configured model it refuses.
+            "chat.openai_compatible": True,
         }
         if agent_catalog is not None and agent_plan_store is not None:
             features["agents.catalog"] = True
@@ -576,6 +581,9 @@ def create_app(
         mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
     mount_entity_routes(app, engine, space_for, actor_for, synthesis_factory=synthesis_factory)
+    from .openai_proxy import mount_openai_proxy_routes
+    mount_openai_proxy_routes(app, engine, space_for, synthesis_factory,
+                              assert_current_space=assert_current_space)
     from .filesystem_routes import mount_filesystem_routes
     mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)
 
@@ -639,6 +647,7 @@ def create_app(
             dedup_key=body.dedup_key,
             replace=body.replace,
             chunking=body.chunking,
+            chunking_profile=body.chunking_profile,
         )
         return added.model_dump()
 
@@ -664,7 +673,7 @@ def create_app(
                         "job": job_json(replayed), "replayed": True}
         records = [
             Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
-                   chunking=r.chunking)
+                   chunking=r.chunking, chunking_profile=r.chunking_profile)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
@@ -776,6 +785,25 @@ def create_app(
                                         store=True, model_name=getattr(model, "model", type(model).__name__))
         return JSONResponse(tree.record())
 
+    @app.post("/v1/chunk-questions")
+    async def post_chunk_questions(per_chunk: int = Query(default=3, ge=1, le=5),
+                                   max_chunks: int = Query(default=2000, ge=1, le=2000),
+                                   after_chunk: Optional[int] = Query(default=None, ge=0),
+                                   episode_id: Optional[list[int]] = Query(default=None),
+                                   space: str = Depends(space_for)) -> JSONResponse:
+        """Write the question lane with the synthesis model: questions each
+        chunk answers, kept only with a sentence quoted from the chunk, indexed
+        apart from its context. Refused while SCONE_QUESTION_LANE is off; a store
+        without the question index answers with a report that says so."""
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            return JSONResponse({"error": "no synthesis model configured to write questions with (SCONE_CHAT_URL and "
+                                          "SCONE_CHAT_MODEL)"}, status_code=501)
+        report = await engine.build_chunk_questions(space, model, per_chunk=per_chunk, max_chunks=max_chunks,
+                                                    after_chunk=after_chunk, episode_ids=episode_id,
+                                                    model_name=getattr(model, "model", type(model).__name__))
+        return JSONResponse(report.record())
+
     @app.get("/v1/episodes/{episode_id}/summaries")
     async def get_episode_summaries(episode_id: int, space: str = Depends(space_for)) -> dict:
         """The summaries stored for the episode, top level first, each saying whether the document has changed since."""
@@ -851,6 +879,8 @@ def create_app(
         route: Optional[str] = Query(default=None,
                                      description="Insist on temporal, graph, recall or synthesize instead of the rule."),
         whole: bool = Query(False, description="Show each passage whole instead of its first 200 characters."),
+        synthesis_mode: Optional[str] = Query(default=None,
+                                              description="With route=synthesize: evidence (default), refine or accumulate."),
         space: str = Depends(space_for),
     ) -> dict:
         """One question answered by whichever machinery suits it, saying
@@ -860,13 +890,15 @@ def create_app(
         ordinary search. Naming a route overrides it, and the answer says
         the route was asked for. The synthesize route, which the rule never
         chooses, reads up to ``limit`` passages and has the server's model
-        write cited sentences; it is refused when the server has no model."""
+        write cited sentences; it is refused when the server has no model.
+        ``synthesis_mode`` chooses how it reads them: evidence, refine or
+        accumulate, each keeping only sentences with a checked quote."""
         from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
         synthesis = synthesis_factory() if route == "synthesize" and synthesis_factory is not None else None
         return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
                                       max_item_chars=0 if whole else DEFAULT_ITEM_CHARS,
-                                      synthesis=synthesis)).record(space)
+                                      synthesis=synthesis, synthesis_mode=synthesis_mode)).record(space)
 
     @app.get("/v1/recall/parts")
     async def get_recall_parts(
@@ -1580,7 +1612,7 @@ class Unauthorized(Exception):
 MAX_IDS = 100
 
 
-async def read_bounded(request: Request, limit: int) -> bytes:
+async def read_bounded(request: Request, limit: int, noun: str = "an attachment") -> bytes:
     """The request body, refused as soon as it passes ``limit``.
 
     Reading it whole and then measuring it lets the caller decide how much
@@ -1589,12 +1621,12 @@ async def read_bounded(request: Request, limit: int) -> bytes:
     """
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > limit:
-        raise InvalidInput(f"an attachment takes at most {limit} bytes, got {declared}")
+        raise InvalidInput(f"{noun} takes at most {limit} bytes, got {declared}")
     read, total = [], 0
     async for chunk in request.stream():
         total += len(chunk)
         if total > limit:
-            raise InvalidInput(f"an attachment takes at most {limit} bytes")
+            raise InvalidInput(f"{noun} takes at most {limit} bytes")
         read.append(chunk)
     return b"".join(read)
 

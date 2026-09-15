@@ -45,6 +45,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..core.models import Chunk
     from ..retrieval.feedback_prior import PriorTerms
     from ..retrieval.lessons import Lessons
+    from ..ingestion.chunk_questions import QuestionLaneReport
+    from ..providers.llm import ChatModel
 from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
@@ -236,6 +238,7 @@ class MemoryEngine:
         context_lane: bool = False,
         lexical_stems: bool = True,
         vector_weight: Optional[float] = None,
+        question_lane: bool = False,
     ) -> None:
         if vector_weight is None:
             # A hashed-token embedder ranks by word overlap, badly: a weak
@@ -260,6 +263,11 @@ class MemoryEngine:
         #: Whether what each chunk is under is indexed beside its text and
         #: searched as a lane of its own. Stored text never changes.
         self.context_lane = context_lane
+        if type(question_lane) is not bool:
+            raise InvalidInput("question_lane must be a boolean")
+        #: Whether recall searches the questions ``build_chunk_questions``
+        #: wrote into the context index, and whether that pass may run.
+        self.question_lane = question_lane
         if type(table_context_embeddings) is not bool:
             raise InvalidInput('table_context_embeddings must be a boolean')
         self._table_context_embeddings = table_context_embeddings
@@ -554,17 +562,19 @@ class MemoryEngine:
         replace: bool = False,
         *, embedding_checkpoint: EmbeddingCheckpoint | None = None,
         chunking: Optional[str] = None,
+        chunking_profile: Optional[str] = None,
     ) -> Added:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
         ``replace``) instead of a duplicate. ``chunking`` names how this
         record is cut (length, code, structure, semantic); None keeps the
-        engine's rule."""
+        engine's rule. ``chunking_profile`` names a genre (statute, paper,
+        manual, qa, resume) whose boundaries structure chunking cuts at."""
         await self._living(space)
         if replace and embedding_checkpoint is not None:
             raise InvalidInput('embedding checkpoints apply to append ingestion, not replacement')
         record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key,
-                        chunking=chunking)
+                        chunking=chunking, chunking_profile=chunking_profile)
         if replace:
             added = (await self.replace(space, record)).added
         else:
@@ -1149,6 +1159,7 @@ class MemoryEngine:
             vector_block=self.vector_block,
             synonyms=self.synonyms,
             context_lane=self.context_lane,
+            question_lane=self.question_lane,
             lexical_stems=self.lexical_stems,
             vector_weight=self.vector_weight,
             feedback_prior=self._feedback_prior if self.feedback_weight > 0 else None,
@@ -1274,6 +1285,19 @@ class MemoryEngine:
             return await self._emit(space, "agent", p, dedup_key=dedup_key)  # type: ignore[return-value]
         except DuplicateEvent as e:
             raise InvalidInput(f"source_event_id {source_event_id!r} was already recorded with a different payload (event {e.existing.event_id})") from e
+
+    async def build_chunk_questions(self, space: str, chat: "ChatModel", *, per_chunk: int = 3,
+                                    max_chunks: int = 2_000, after_chunk: Optional[int] = None,
+                                    episode_ids: Optional[Sequence[int]] = None,
+                                    model_name: str = "") -> "QuestionLaneReport":
+        """Write the question lane for the space's chunks with ``chat``: up to
+        ``per_chunk`` questions a chunk answers, kept only with a sentence
+        quoted from it, in an index of their own (ingestion.chunk_questions).
+        Refused while ``question_lane`` is off."""
+        from ..ingestion.chunk_questions import build_chunk_questions
+
+        return await build_chunk_questions(self, space, chat, per_chunk=per_chunk, max_chunks=max_chunks,
+                                           after_chunk=after_chunk, episode_ids=episode_ids, model_name=model_name)
 
     async def graph(
         self,

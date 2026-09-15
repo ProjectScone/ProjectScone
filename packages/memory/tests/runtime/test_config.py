@@ -271,6 +271,23 @@ async def test_the_context_lane_is_a_flag_that_reaches_every_engine():
         Settings.from_env({"SCONE_CONTEXT_LANE": "maybe"})
 
 
+async def test_the_question_lane_is_a_flag_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_QUESTION_LANE": "1"})
+    assert settings.question_lane is True and Settings.from_env({}).question_lane is False
+    assert "question_lane" in ENGINE_SETTINGS
+    engine = await build_engine(settings)
+    try:
+        assert engine.question_lane is True
+    finally:
+        await engine.close()
+    assert (await build_in_process_engine(settings, HashEmbedder())).question_lane is True
+    with pytest.raises(InvalidInput, match="SCONE_QUESTION_LANE"):
+        Settings.from_env({"SCONE_QUESTION_LANE": "maybe"})
+
+
 async def test_the_vector_weight_is_a_number_that_reaches_every_engine():
     from scone_memory import HashEmbedder
     from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine

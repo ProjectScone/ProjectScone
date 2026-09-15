@@ -34,6 +34,7 @@ from ..memory.engine import MemoryEngine, Record
 from ..core.errors import InvalidInput, NotFound, SconeError
 from ..retrieval.filters import read_conditions
 from ..ingestion.chunker import DEFAULT_TARGET as DEFAULT_CHUNK_TARGET
+from ..ingestion.chunking_profiles import PROFILES as CHUNKING_PROFILES
 
 CLI_DEFAULTS = {"SCONE_DOCUMENTS": "sqlite", "SCONE_VECTORS": "sqlite"}
 
@@ -80,6 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jsonl", action="store_true", help="input is one JSON record per line, ingested as a batch")
     p.add_argument("--chunking", choices=("length", "code", "structure", "semantic", "unit"),
                    help="how this record is cut; unset keeps the engine's rule (code for code sources, length otherwise)")
+    p.add_argument("--chunking-profile", choices=tuple(CHUNKING_PROFILES),
+                   help="cut at this genre's boundaries (implies --chunking structure)")
     p.add_argument("--image", help="explicit original PNG/JPEG/GIF/WebP file, up to 25 MB; not with --jsonl")
 
     p = sub.add_parser("import-chat", help="a WhatsApp, Telegram, Discord or Slack export, one conversation memory per message")
@@ -288,6 +291,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import-url", help="fetch a page by URL and read it as the document its media type says it is "
                                           "(needs SCONE_URL_IMPORT=1; private hosts need SCONE_URL_IMPORT_PRIVATE=1)")
     p.add_argument("url", help="an http or https URL")
+    from .document_markdown import add_document_markdown_parser
+    add_document_markdown_parser(sub)
 
     p = sub.add_parser("import", help="load JSON lines (an export) from a file or stdin")
     p.add_argument("file", nargs="?", default="-")
@@ -402,6 +407,14 @@ def build_parser() -> argparse.ArgumentParser:
                                         "and the loops held apart only by imports that run when called or never")
     g.add_argument("--limit", type=int, default=None, help="groups shown of each kind (1 to 100; default 20)")
     g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
+    g = graph.add_parser("stats", help="the graph counted: entities, relations, communities, kinds, predicates, "
+                                       "and the facts by origin, grounding and standing")
+    g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
+    g = graph.add_parser("hubs", help="the entities with the most neighbours, with degree, facts, pagerank and community")
+    g.add_argument("--limit", type=int, default=None, help="hubs shown (1 to 100; default 10)")
+    g.add_argument("--above", type=float, default=None,
+                   help="only the hubs above this degree percentile (50 to 100), as the report holds them apart")
+    g.add_argument("--max-bytes", type=int, default=None, help="byte budget for the answer (512 to 64000; default 8000)")
 
     g = graph.add_parser("duplicates", help="entities that may be one thing under two names, and why (nothing merged)")
     g.add_argument("--limit", type=int, default=50, help="pairs to suggest (1 to 500)")
@@ -463,6 +476,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="insist on one route instead of letting the rule choose; synthesize is never chosen "
                         "by the rule and needs a model (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
     p.add_argument("--limit", type=int, default=5, help="passages an ordinary search answers with, or a synthesis reads")
+    p.add_argument("--synthesis-mode", choices=("evidence", "refine", "accumulate"),
+                   help="with --route synthesize: notes folded into a summary (evidence, the default), one answer "
+                        "refined round by round (refine), or one answer per passage joined (accumulate); every "
+                        "mode shows only sentences with a quote found in a passage")
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
     p.add_argument("--whole", action="store_true",
                    help="show each passage whole instead of its first 200 characters")
@@ -542,6 +559,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fan-in", type=int, default=6, help="nodes one summary is written from (2 to 24, default 6)")
     p.add_argument("--max-levels", type=int, default=5, help="levels above the chunks (1 to 5, default 5)")
     p.add_argument("--dry-run", action="store_true", help="write the tree and print it without storing it")
+    p = sub.add_parser("chunk-questions", help="write the question lane with the configured chat model (SCONE_CHAT_URL, "
+                                               "SCONE_CHAT_MODEL): questions each chunk answers, kept only with a quote "
+                                               "from the chunk; needs SCONE_QUESTION_LANE=1")
+    p.add_argument("--per-chunk", type=int, default=3, help="questions asked of one chunk (1 to 5, default 3)")
+    p.add_argument("--max-chunks", type=int, default=2000, help="chunks one pass asks about (1 to 2000, default 2000)")
+    p.add_argument("--after-chunk", type=int, default=None,
+                   help="start after this chunk id: the resume_after a pass cut by --max-chunks reported")
+    p.add_argument("--episode", type=int, action="append", dest="episodes", default=None,
+                   help="only this episode's chunks; repeat for more")
     p = sub.add_parser("bench-questions",
                        help="write questions a corpus answers with the local model, anchored to quotes, "
                             "or measure retrieval on the corpus with a set written before")
@@ -890,7 +916,10 @@ async def map_pass(args: argparse.Namespace, engine: MemoryEngine, out, watched:
     from ..ingestion.ignore import Ignore, walk_files
 
     rules = None if args.no_ignore else Ignore.load(root)
-    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES, *DOC_SUFFIXES)
+    from ..ingestion.code_tree import TREE_SUFFIXES
+
+    walked = walk_files(root, keep=lambda path: path.suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES, *TREE_SUFFIXES,
+                                                                *DOC_SUFFIXES)
                         or is_manifest(path.relative_to(root).as_posix()) or is_schema(path.name), ignore=rules)
     found = list(walked.files)
     # Resolution belongs here, because this is what knows which files
@@ -1528,6 +1557,21 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
               if getattr(args, "json", False) else found_cycles.text, file=out)
         return 0
 
+    if command in ("stats", "hubs"):
+        from ..entities.stats import DEFAULT_HUBS, MAX_BYTES as STATS_BYTES, StatsError, graph_hubs, graph_stats
+
+        when = engine.clock()
+        max_bytes = args.max_bytes if args.max_bytes is not None else STATS_BYTES
+        try:
+            found_stats = (await graph_stats(engine, space, as_of=when, max_bytes=max_bytes) if command == "stats"
+                           else await graph_hubs(engine, space, as_of=when, max_bytes=max_bytes, above=args.above,
+                                                 limit=args.limit if args.limit is not None else DEFAULT_HUBS))
+        except StatsError as refused:
+            raise InvalidInput(str(refused)) from None
+        print(_ledger_json(found_stats.record(space, status="current", as_of=when))
+              if getattr(args, "json", False) else found_stats.text, file=out)
+        return 0
+
     if command == "meanings":
         meanings = engine.relation_meanings
         if getattr(args, "json", False):
@@ -1749,6 +1793,21 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             print(tree.root.text, file=out)
         return 0
 
+    if args.command == "chunk-questions":
+        from .config import build_chat
+
+        model = build_chat(settings) if settings is not None else None
+        if model is None:
+            raise InvalidInput("chunk-questions needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+        written = await engine.build_chunk_questions(space, model, model_name=settings.chat_model or "",
+                                                     max_chunks=args.max_chunks, per_chunk=args.per_chunk,
+                                                     after_chunk=args.after_chunk, episode_ids=args.episodes)
+        if args.json:
+            emit(written.record())
+        else:
+            print(written.text(), file=out)
+        return 0
+
     if args.command == "sync-directory":
         from .directory_cli import run_directory_sync
         return await run_directory_sync(args, engine, out)
@@ -1788,6 +1847,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
     if args.command == "remember":
         if args.image is not None and args.jsonl:
             raise InvalidInput("--image cannot be combined with --jsonl; select a single source note")
+        if args.jsonl and (args.chunking or args.chunking_profile):
+            raise InvalidInput("--chunking and --chunking-profile are not applied to --jsonl; set them per record")
         raw = read_source(args.file, stdin)
         attachment = None
         if args.jsonl:
@@ -1813,6 +1874,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                     created_at=args.created_at, metadata=metadata,
                     attachment_ids=[attachment.attachment_id] if attachment else [],
                     dedup_key=args.dedup_key, replace=args.replace, chunking=args.chunking,
+                    chunking_profile=args.chunking_profile,
                 )]
                 if attachment:
                     episode = await engine.episode(space, added[0].episode_id)
@@ -2240,7 +2302,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 return 2
         routed = await answer_question(engine, space, args.question, now=args.now, limit=args.limit,
                                        route=args.route, max_item_chars=0 if args.whole else DEFAULT_ITEM_CHARS,
-                                       synthesis=synthesis)
+                                       synthesis=synthesis, synthesis_mode=args.synthesis_mode)
         if getattr(args, "json", False):
             print(_ledger_json(routed.record(space)), file=out)
             return 0
@@ -2515,6 +2577,9 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
                                    model_factory=args.model_factory)
     if args.command == "bench-graph":
         return graph_bench_command(args, out or sys.stdout)
+    if args.command == "doc-markdown":
+        from .document_markdown import document_markdown_command
+        return document_markdown_command(args, out or sys.stdout)
     settings = settings_for_cli(env)
     if args.command == "serve":
         from ..api.__main__ import main as serve
