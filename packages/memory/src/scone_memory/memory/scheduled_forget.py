@@ -38,6 +38,14 @@ PAGE = 200
 #: Episodes one pass may forget, at most.
 MAX_PASS = 1_000
 
+#: Why a store cannot be swept, in the words the sweep refuses with.
+NO_INVENTORY = "this document store does not implement source inventory, which the sweep walks"
+
+
+def can_sweep(documents: object) -> bool:
+    """Whether the store can walk its sources, which a sweep needs."""
+    return callable(getattr(documents, "page_episodes", None))
+
 
 async def forget_due(engine: "MemoryEngine", space: str, *, now: Optional[str] = None, limit: int = 100,
                      dry_run: bool = False, with_claims: Literal["keep", "exclude"] = "keep",
@@ -56,9 +64,9 @@ async def forget_due(engine: "MemoryEngine", space: str, *, now: Optional[str] =
     if moment > clock:
         raise InvalidInput(f"now ({format_rfc3339(moment)}) is later than the engine clock ({format_rfc3339(clock)}); "
                            f"a sweep forgets what is due, not what will be")
-    page = getattr(engine.documents, "page_episodes", None)
-    if not callable(page):
-        raise InvalidInput("this document store does not implement source inventory, which the sweep walks")
+    if not can_sweep(engine.documents):
+        raise InvalidInput(NO_INVENTORY)
+    page = getattr(engine.documents, "page_episodes")
 
     due: list[tuple[datetime, int, str]] = []
     unreadable: list[int] = []
@@ -92,7 +100,7 @@ async def forget_due(engine: "MemoryEngine", space: str, *, now: Optional[str] =
                              due=len(due), limited=len(due) > limit, unreadable=sorted(unreadable))
     skipped = 0
     for _, episode_id, stamp in due[:limit]:
-        reason = f"forget_after {stamp} had passed at {at}"
+        reason = forget_after.reason(stamp, at)
         if dry_run:
             report.items.append(ScheduledForget(episode_id=episode_id, forget_after=stamp, reason=reason,
                                                 outcome="would_forget"))
@@ -110,7 +118,9 @@ async def forget_due(engine: "MemoryEngine", space: str, *, now: Optional[str] =
                                             outcome="forgotten", receipt=receipt))
         report.forgotten.append(episode_id)
     report.remaining = len(due) - len(report.forgotten) - skipped
-    if not dry_run:
+    if not dry_run and report.items:
+        # Only a pass that took something is recorded: a worker sweeps every
+        # space on every pass, and empty passes would fill the log.
         await engine._emit(space, "forget_due", {
             "now": at, "due": report.due, "forgotten": len(report.forgotten), "skipped": skipped,
             "remaining": report.remaining, "limit": limit, "limited": report.limited, "scanned": scanned,

@@ -15,7 +15,7 @@ from typing import Sequence, cast
 from ..core import forget_after
 from ..core.errors import InvalidInput, SconeError
 from ..core.timeutil import parse_rfc3339
-from ..core.models import Added, MAX_CONTENT_BYTES
+from ..core.models import Added, ForgetReceipt, MAX_CONTENT_BYTES, ScheduledForget
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, MAX_METADATA_KEYS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
@@ -177,7 +177,7 @@ class IngestionRuntime:
     #: that memory first and is stored afresh: the overdue one is as good as
     #: gone, and a duplicate of it would go with it at the next sweep. None
     #: leaves such a write a duplicate.
-    forget_overdue: Callable[[str, int], Awaitable[object]] | None = None
+    forget_overdue: Callable[[str, int], Awaitable[ForgetReceipt]] | None = None
 
 
 def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False,
@@ -552,7 +552,9 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
     results: list[Added | _DupOf | None] = []
     fresh: list[_Pending] = []
     seen: dict[str, int] = {}  # content hash -> index into results
-    overdue: list[int] = []  # episodes past their forget_after that a write here replaces
+    # Episodes past their forget_after that a write here replaces: the slot
+    # of the write, the episode, and when it was due.
+    overdue: list[tuple[int, int, str]] = []
     for record in records:
         new = await _validated_record(runtime, space, record, when)
         digest = new.content_hash
@@ -566,7 +568,7 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
                 and forget_after.is_due(existing.metadata, parse_rfc3339(when))):
             # Forgotten once the whole batch is validated and embedded, just
             # before it is written, so a refused batch forgets nothing early.
-            overdue.append(existing.episode_id)
+            overdue.append((len(results), existing.episode_id, existing.metadata[forget_after.KEY]))
             existing = None
         if existing is not None:
             seen[digest] = len(results)
@@ -580,10 +582,17 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
 
     if fresh:
         vectors, reused = await embed_pending_counted(runtime, space, fresh)
-        for episode_id in overdue:
-            await cast(Callable[[str, int], Awaitable[object]], runtime.forget_overdue)(space, episode_id)
+        forgot: dict[int, ScheduledForget] = {}
+        for slot, episode_id, stamp in overdue:
+            receipt = await cast(Callable[[str, int], Awaitable[ForgetReceipt]], runtime.forget_overdue)(space, episode_id)
+            forgot[slot] = ScheduledForget(episode_id=episode_id, forget_after=stamp, outcome="forgotten",
+                                           reason=forget_after.reason(stamp, when), receipt=receipt)
         await write_batch(runtime, space, fresh, vectors, results, reused=reused)
         await runtime.documents.bump_revision(space)
+        for slot, taken in forgot.items():
+            # The receipt names the memory this write forgot, so the caller
+            # does not learn of it only from a 410 later.
+            results[slot] = cast(Added, results[slot]).model_copy(update={"forgot_overdue": taken})
 
     resolved: list[Added] = []
     for r in results:

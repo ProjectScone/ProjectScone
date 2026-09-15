@@ -92,3 +92,17 @@ async def test_a_read_only_key_cannot_sweep(served):
     _, client, _ = served
     response = await client.post("/v1/episodes/forget-due", json={}, headers={"authorization": "Bearer r"})
     assert response.status_code == 403
+
+
+async def test_the_source_listing_leaves_an_overdue_memory_out(served):
+    engine, client, clock = served
+    kept = await client.post("/v1/episodes", json={"content": "the router lives in the hall"}, headers=AUTH)
+    await client.post("/v1/episodes", json={"content": "the wifi password is hunter2", "forget_after": "1h"}, headers=AUTH)
+    clock.now = "2026-09-15T13:00:00.000Z"
+    listed = await client.get("/v1/sources", headers=AUTH)
+    assert listed.status_code == 200 and "hunter2" not in listed.text
+    assert [i["episode_id"] for i in listed.json()["items"]] == [kept.json()["episode_id"]]
+    assert listed.json()["past_forget_after"] == 1
+    clock.now = "2026-09-15T12:30:00.000Z"
+    early = await client.get("/v1/sources", headers=AUTH)
+    assert len(early.json()["items"]) == 2 and "past_forget_after" not in early.json()

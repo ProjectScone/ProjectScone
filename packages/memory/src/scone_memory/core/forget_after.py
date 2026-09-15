@@ -71,6 +71,11 @@ def read(value: str) -> Optional[datetime]:
         return None
 
 
+def reason(stamp: str, at: str) -> str:
+    """Why a memory was taken: the one wording the sweep and a write use."""
+    return f"forget_after {stamp} had passed at {at}"
+
+
 def is_due(metadata: Mapping[str, str], now: datetime) -> bool:
     """Whether the memory's time has come. No schedule, or one that cannot be
     read, is never due: an unreadable value is reported by the sweep, not

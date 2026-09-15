@@ -781,7 +781,9 @@ def create_app(
                               and not any(ord(c) < 32 or ord(c) == 127 for c in e.metadata['document_filename'])
                               else {}),
                            **status_of(e.episode_id)}
-                          for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
+                          for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before,
+                # Sources past their forget_after, left out; the key appears only when some were.
+                **({"past_forget_after": page.past_forget_after} if page.past_forget_after else {})}
 
     @app.get("/v1/episodes/by-key")
     async def get_episode_by_key(dedup_key: str = Query(min_length=1, max_length=256),
