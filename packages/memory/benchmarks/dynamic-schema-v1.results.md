@@ -46,9 +46,11 @@ that pairing as much as of the pass.
   `concept`, …; `used_by`, `part_of`, `has`, `is_a`, …).
 - Arms: new types allowed, and new types off, per vocabulary; the pass's
   default bounds (10 triples per chunk, 20 new predicates, 10 new kinds).
-- The runs were made at commit 7a78d924. The self-reference rule was added
-  after them; the numbers below are the saved replies replayed through the
-  pass as committed (`benchmarks/dynamic_schema.py replay`, the same
+- The runs were made at commit 7a78d924. The self-reference rule, and the
+  review's gate rules (a line break in running text does not end a
+  clause; every place in the episode holding the quote's words, in any
+  wrapping, is read), were added after them; the numbers below are the
+  saved replies replayed through the pass as committed (`benchmarks/dynamic_schema.py replay`, the same
   chunks and replies in call order, a failed call failing again). The
   replay reproduces a run exactly when the rules match: without settling,
   the first run's replay gave its report to the count.
@@ -80,7 +82,7 @@ Why whole triples were not proposed:
 | Scone | allowed | 39 | 22 | 16 | 13 | 15 | 10 | 2 | – | 0 |
 | Scone | off | 50 | 28 | 16 | 12 | 12 | 11 | 3 | 16 | – |
 | LlamaIndex | allowed | 72 | 25 | 6 | 17 | 12 | 13 | 2 | – | 2 |
-| LlamaIndex | off | 77 | 25 | 9 | 16 | 10 | 15 | 2 | 14 | – |
+| LlamaIndex | off | 77 | 25 | 8 | 16 | 11 | 15 | 2 | 14 | – |
 
 Bounds and failures: one call in each Scone arm failed with the reply
 schema's token ceiling reached (`calls_failed` 1, the chunk yielded
@@ -159,7 +161,12 @@ before settling were right and 7 of the 18 after. On the live runs the
 self-reference rule removed 2 proposals in each arm with new types
 allowed (26 to 24, 20 to 18), all wrong. The clause fix in
 `distill._clause_around` (a quote that keeps its full stop is read in its
-own sentence) changed no count on these replies.
+own sentence) changed no count on these replies. The review's gate rules,
+replayed on all three saved runs, changed no proposal and no share: one
+triple in the LlamaIndex arm with new types off moved from predicate not
+in quote to context not asserted ("replacement is a sequence of
+writes,\nnot a global transaction", whose wrapped line's `not` now reads
+in its clause; the context check comes first).
 
 ## What this does not say
 
@@ -169,4 +176,6 @@ own sentence) changed no count on these replies.
   score.
 - The correctness counts are one reader's, over 42 proposals.
 - The gate's "context not asserted" words miss `when` and `can`; those
-  proposals reach review. Nothing here changes that gate.
+  proposals reach review. A clause is found by punctuation, blank lines
+  and list, heading and table lines, not parsed: running text whose
+  clause ends without a mark reads on into the next line.

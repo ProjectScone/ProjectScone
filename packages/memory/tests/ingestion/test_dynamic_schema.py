@@ -24,6 +24,7 @@ from scone_memory.backends import SqliteDocumentStore
 from scone_memory.core.errors import InvalidInput
 from scone_memory.ingestion import distill
 from scone_memory.ingestion import dynamic_schema as module
+from scone_memory.ingestion.distill import Distiller
 from scone_memory.ingestion.dynamic_schema import extract_dynamic_schema, schema_term
 from scone_memory.providers.llm import ChatError, FakeChat
 from scone_memory.runtime.cli import build_parser, run
@@ -131,6 +132,39 @@ async def test_a_quote_that_changes_only_whitespace_is_stored_as_the_chunk_write
     assert report.record()["quotes_settled"] == 2 and "2 quote(s) settled to the chunk's whitespace" in report.text()
 
 
+async def test_a_settled_quote_is_refused_when_its_words_stand_hedged_elsewhere_in_the_chunk():
+    # Settling takes the first span of the quote's words; another span of
+    # them, wrapped at another word in a hedged clause, is read too.
+    wrapped = "The worker\nuses Ollama today. We may decide that the worker uses\nOllama later."
+    engine = await opened_with(wrapped)
+
+    report = await extract_dynamic_schema(engine, SPACE, FakeChat([reply({**GOOD_USES, "quote": "worker uses Ollama"})]))
+
+    assert (report.quotes_settled, report.rejected_reasons, report.proposed) == (1, {"context_not_asserted": 1}, ())
+
+
+async def test_a_quote_hedged_in_another_chunk_of_its_episode_is_refused_as_the_distiller_refuses_it():
+    # The proposal rests on the episode, so every place in the episode that
+    # holds the quote's words is read, not only the chunk the model saw.
+    filler = " ".join(f"Sentence number {i} talks about harbours and orchards on the ridge." for i in range(12))
+    text = (filler + " The worker uses Ollama for extraction.\n\n"
+            + filler.replace("harbours", "boats") + " We may decide that the worker uses Ollama for extraction.")
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=300,
+                                events=InMemoryEventLog()).open()
+    added = await engine.remember(SPACE, text)
+    chunks = await engine.documents.chunks_of(SPACE, added.episode_id)
+    candidate = {**GOOD_USES, "quote": "worker uses Ollama"}
+    asserted = [chunk for chunk in chunks if "The worker uses Ollama" in chunk.text]
+    assert len(chunks) > 1 and len(asserted) == 1 and "may decide" not in asserted[0].text
+
+    report = await extract_dynamic_schema(engine, SPACE, FakeChat(
+        [reply(candidate) if chunk in asserted else reply() for chunk in chunks]))
+
+    assert (report.rejected_reasons, report.proposed) == ({"context_not_asserted": 1}, ())
+    distilled = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(SPACE, added.episode_id)
+    assert [item.reason for item in distilled.rejected] == ["context_not_asserted"]
+
+
 async def test_a_quote_too_long_to_store_is_counted_as_unquoted(monkeypatch):
     engine = await opened()
     await engine.remember(SPACE, LEDGER)
@@ -231,12 +265,14 @@ async def test_a_new_predicate_and_kind_are_proposed_vocabulary_with_the_quotes_
 async def test_with_new_types_off_a_triple_outside_the_vocabulary_is_rejected_and_counted():
     engine = await opened()
     await engine.remember(SPACE, LEDGER)
-    chat = FakeChat([reply(GOOD_USES, GOOD_STORES, {**GOOD_USES, "object_kind": "service"})])
+    # The kind-only case names another object: the same triple again would be
+    # on record already, and restated whatever its kinds.
+    chat = FakeChat([reply(GOOD_USES, GOOD_STORES, {**GOOD_USES, "object": "extraction", "object_kind": "service"})])
 
     report = await extract_dynamic_schema(engine, SPACE, chat, entity_kinds=KINDS, predicates=PREDICATES,
                                           allow_new_types=False)
 
-    assert report.rejected_reasons == {"new_type_not_allowed": 2}
+    assert (report.rejected_reasons, report.restated) == ({"new_type_not_allowed": 2}, 0)
     assert (len(report.proposed), report.new_predicates, report.new_kinds) == (1, (), ())
     assert "not allowed" in chat.calls[0][1] and "uses" in chat.calls[0][1] and "project, product" in chat.calls[0][1]
     opened_chat = FakeChat([reply(GOOD_USES)])
@@ -360,6 +396,46 @@ async def test_the_same_reading_again_is_restated_and_a_declined_proposal_does_n
                                          episode_ids=[elsewhere.episode_id])
     assert (other.chunks_total, other.restated, [p.object for p in other.proposed]) == (1, 0, ["Ollama", "extraction"]), \
         "the same triple from another episode, and another object from the same one, are proposals of their own"
+
+
+async def test_the_new_type_bounds_do_not_count_a_triple_already_on_record():
+    # A triple already proposed is restated whatever the budget or switch:
+    # nothing new would be proposed, so no bound cut anything.
+    engine = await opened_with(USES)
+    first = await extract_dynamic_schema(engine, SPACE, FakeChat([reply(GOOD_USES)]))
+    assert [t.term for t in first.new_predicates] == ["uses"]
+
+    tight = await extract_dynamic_schema(engine, SPACE, FakeChat([reply(GOOD_USES)]), max_new_predicates=0,
+                                         max_new_kinds=0)
+    closed = await extract_dynamic_schema(engine, SPACE, FakeChat([reply(GOOD_USES)]), allow_new_types=False,
+                                          entity_kinds=("project",), predicates=("stores",))
+
+    for again in (tight, closed):
+        assert (again.restated, again.rejected_reasons, again.cut_by, again.proposed) == (1, {}, (), ())
+
+
+async def test_the_chunks_of_an_episode_forgotten_during_the_pass_are_not_sent():
+    filler = " ".join(f"Sentence number {i} talks about harbours and orchards on the ridge." for i in range(14))
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=300,
+                                events=InMemoryEventLog()).open()
+    added = await engine.remember(SPACE, filler)
+    await engine.remember(SPACE, HARBOUR)
+    chunks = await engine.documents.chunks_of(SPACE, added.episode_id)
+    assert len(chunks) > 2
+    calls: list[str] = []
+
+    class Forgets:
+        async def complete(self, system: str, user: str) -> str:
+            calls.append(user)
+            if len(calls) == 1:
+                await engine.forget(SPACE, added.episode_id)
+            return reply()
+
+    report = await extract_dynamic_schema(engine, SPACE, Forgets())
+
+    assert (len(calls), report.model_calls, report.chunks_gone) == (2, 2, len(chunks) - 1), \
+        "the first chunk was already sent; the rest are not, and the other episode still is"
+    assert HARBOUR in calls[1] and "forgotten before or while the model answered" in report.text()
 
 
 async def test_an_episode_forgotten_while_the_model_answers_gets_nothing_written():

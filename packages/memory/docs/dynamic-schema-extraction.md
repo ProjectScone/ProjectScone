@@ -49,27 +49,42 @@ entry becomes a proposal only when:
    - the quote's clause holds none of the negating, conditional and
      hedging words the distiller refuses (`not`, `if`, `unless`, `may`,
      `should`, `plans` and others; `when` and `can` are not among them),
-     and is not an instruction or a question (`context_not_asserted`);
+     and is not an instruction or a question (`context_not_asserted`).
+     Every place the quote's words stand is read, with any whitespace
+     between them, since a quote does not say which place it copied or
+     how the text wrapped there. A clause ends at `.`, `?`, `!` or `;`,
+     and at a line break only before a blank line, a list item (`- `,
+     `* `), a heading or a table row, or after a heading or a table row:
+     in running text a line break is where a hard-wrapped document
+     wrapped, so "refused if the" on one line reads with "worker uses
+     Ollama" on the next. The clause is found by those marks, not parsed;
    - the predicate's words, less glue words, are the quote's
      (`predicate_not_in_quote`). A suggested predicate is therefore used
      only where the quote supports its words: the pass does not map
      "requires" onto a suggested `depends_on`.
-4. **Its two ends are not one name** (`self_reference`, by the ledger's
+4. **It is not hedged anywhere in its episode.** The proposal rests on
+   the episode, not the chunk, so the clause check above is run again
+   over the whole episode: a quote asserted in one chunk and hedged in
+   another chunk of the same episode is `context_not_asserted`, as the
+   distiller, which reads the episode, refuses it.
+5. **Its two ends are not one name** (`self_reference`, by the ledger's
    name identity, `entity_key`). LlamaIndex's schema extractor drops these
    too; a small model writes them ("relation quotes participate in the
    coverage audit" as the coverage audit participating in itself).
-5. **Its types are admitted.** A predicate or kind outside the suggested
+6. **It is not already on record.** The same subject, predicate and object
+   from the same episode, in any status — proposed, held, closed or
+   declined — is counted in `restated` and not proposed again, so running
+   the pass twice does not double the review queue and a declined proposal
+   does not come back. This is checked before the types: a triple on
+   record proposes nothing new, so a tighter budget or `--no-new-types`
+   on a second pass counts it restated, not cut. The same triple from
+   another episode is its own proposal, as the distiller's would be.
+7. **Its types are admitted.** A predicate or kind outside the suggested
    vocabulary is refused as `new_type_not_allowed` when new types are off.
    When they are on, a pass admits at most `max_new_predicates` new
    predicates and `max_new_kinds` new kinds; a triple that needs one more
    is `new_type_cut`. A term already admitted in the pass costs nothing
    again.
-6. **It is not already on record.** The same subject, predicate and object
-   from the same episode, in any status — proposed, held, closed or
-   declined — is counted in `restated` and not proposed again, so running
-   the pass twice does not double the review queue and a declined proposal
-   does not come back. The same triple from another episode is its own
-   proposal, as the distiller's would be.
 
 The distiller's rule that two objects for one subject and predicate in one
 reply reject each other (`same_source_conflict`) is not applied: documents
@@ -152,8 +167,10 @@ over a space, not both on a timer.
 `triples_per_chunk`, `new_types`. A bound out of range is refused before
 any model call. A call that fails is counted in `calls_failed`, a reply
 with no list of triples in `replies_unparsed`, and the pass goes on to
-the next chunk. A chunk whose episode is forgotten while the model
-answers gets nothing written and is counted in `chunks_gone`.
+the next chunk. A chunk whose episode is forgotten during the pass is
+counted in `chunks_gone`: before its call, its text is not sent (the
+episode is looked up before each call); while the model answers, nothing
+is written.
 
 ## How this differs from the references
 

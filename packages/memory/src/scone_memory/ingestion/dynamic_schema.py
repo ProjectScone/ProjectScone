@@ -23,17 +23,21 @@ triple with a span quoted from the chunk. A triple is kept only when:
   and is short enough to store, the model called it an observation, both
   ends are named in it, its clause is not negated or hypothetical, and the
   predicate's words are the quote's;
+- no place in the whole episode holding the quote's words reads them in a
+  negated or hypothetical clause: the proposal rests on the episode, as
+  the distiller's does;
 - its two ends are not one name (``self_reference``), which LlamaIndex's
   schema extractor also drops;
+- the same triple from the same episode is not already on record, in any
+  status: that is counted as restated rather than proposed again, whatever
+  its kinds, so a declined proposal does not come back;
 - a kind or predicate outside the suggested vocabulary is allowed, and the
   pass's budget of new predicates or new kinds is not spent.
 
 Everything else is counted by reason. What is kept goes through the
 existing proposal and review path: ``assert_fact(proposed=True,
 origin="extracted")`` with its quote and source episode, so it answers
-nothing until a person approves it. The same triple from the same episode
-already on record, in any status, is counted as restated rather than
-proposed again, so a declined proposal does not come back.
+nothing until a person approves it.
 
 A kind or predicate outside the suggested vocabulary that a written
 proposal uses is proposed vocabulary. The report records each with the
@@ -62,7 +66,15 @@ from typing import TYPE_CHECKING, Optional, Sequence
 from ..core.errors import InvalidInput, NotFound
 from ..core.validation import check_space, entity_key
 from ..providers.llm import ChatError, ChatModel, StructuredChatModel
-from .distill import DEFAULT_CONFIDENCE, Extracted, _clean, _find_array, _grounding_reason, _literal
+from .distill import (
+    DEFAULT_CONFIDENCE,
+    Extracted,
+    _clean,
+    _find_array,
+    _grounding_reason,
+    _hedged_somewhere,
+    _literal,
+)
 
 if TYPE_CHECKING:
     from ..core.models import Chunk, Episode
@@ -227,7 +239,8 @@ class DynamicSchemaReport:
     proposed_outside_schema: int = 0
     new_predicates: tuple[ProposedTerm, ...] = ()
     new_kinds: tuple[ProposedTerm, ...] = ()
-    #: Chunks whose episode was forgotten before their proposals were written.
+    #: Chunks whose episode was forgotten during the pass: not sent when it
+    #: went before their call, nothing written when it went during it.
     chunks_gone: int = 0
     seconds: float = 0.0
     version: str = VERSION
@@ -284,7 +297,7 @@ class DynamicSchemaReport:
                 f"new kinds: {', '.join(t.term for t in self.new_kinds) or 'none'}; "
                 f"{self.dropped_extra} past the per-chunk limit, {self.replies_unparsed} repl(ies) unreadable, "
                 f"{self.calls_failed} call(s) failed, {self.skipped_long} chunk(s) too long to show, "
-                f"{self.chunks_gone} chunk(s) forgotten while the model answered")
+                f"{self.chunks_gone} chunk(s) forgotten before or while the model answered")
         if self.chunks_cut:
             said += f"; {self.chunks_cut} chunk(s) past max_calls, resume after chunk {self.resume_after}"
         return said
@@ -449,6 +462,9 @@ async def extract_dynamic_schema(
         if len(chunk.text.encode("utf-8")) > MAX_CHUNK_BYTES:
             counts["skipped_long"] += 1
             continue
+        if await engine.documents.get_episode(space, episode.episode_id) is None:
+            counts["gone"] += 1  # forgotten since the pass read the chunks: its text is not sent
+            continue
         counts["asked"] += 1
         user = _user(chunk.text, kinds, suggested, allow_new_types, max_triples_per_chunk)
         try:
@@ -473,10 +489,16 @@ async def extract_dynamic_schema(
             read, settled = _settled(read, chunk.text)
             counts["settled"] += settled
             reason = _grounding_reason(read.triple, chunk.text)
+            if reason is None and _hedged_somewhere(episode.content, str(read.triple.quote)):
+                # The proposal rests on the episode, as the distiller's does.
+                reason = "context_not_asserted"
             if reason is None and entity_key(read.triple.subject) == entity_key(read.triple.object):
                 reason = "self_reference"
             if reason is not None:
                 rejected[reason] = rejected.get(reason, 0) + 1
+                continue
+            if await _on_record(engine, space, read, episode.episode_id):
+                counts["restated"] += 1
                 continue
             triple = read.triple
             fresh_predicates = [] if triple.predicate in suggested else [triple.predicate]
@@ -489,9 +511,6 @@ async def extract_dynamic_schema(
                         or len(new_kinds.keys() | set(fresh_kinds)) > max_new_kinds:
                     rejected["new_type_cut"] = rejected.get("new_type_cut", 0) + 1
                     continue
-            if await _on_record(engine, space, read, episode.episode_id):
-                counts["restated"] += 1
-                continue
             try:
                 fact = await engine.assert_fact(
                     space, triple.subject, triple.predicate, triple.object, valid_from=episode.created_at,
