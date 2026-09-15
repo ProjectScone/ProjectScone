@@ -35,6 +35,7 @@ from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as 
                                   MIN_BYTES as TEMPORAL_MIN_BYTES, temporal_answer)
 from ..memory.engine import Record, MemoryEngine
 from ..memory.vector_identity import VectorWriterChanged
+from ..core.bearer_keys import Unauthorized, key_holder
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
 from ..retrieval.recall import LANES
@@ -424,17 +425,10 @@ def create_app(
     app.state.worker = worker
 
     def current_space_for(request: Request) -> str:
-        header = request.headers.get("authorization", "")
-        scheme, _, token = header.partition(" ")
-        if scheme.lower() != "bearer" or not token.strip():
-            raise Unauthorized("missing bearer key")
-        space = app.state.keys.get(token.strip())
-        if space is None:
-            raise Unauthorized("unknown key")
-        role = app.state.roles.get(token.strip(), "full")
-        if not permitted(role, request.method, request.url.path):
-            raise Forbidden(f"key role {role} cannot {_refused_verb(request.method, request.url.path)}")
-        return space
+        holder = key_holder(request.headers.get("authorization", ""), app.state.keys, app.state.roles)
+        if not permitted(holder.role, request.method, request.url.path):
+            raise Forbidden(f"key role {holder.role} cannot {_refused_verb(request.method, request.url.path)}")
+        return holder.space
 
     def assert_current_space(request: Request, space: str) -> None:
         if current_space_for(request) != space:
@@ -1714,10 +1708,6 @@ def create_app(
         }
 
     return app
-
-
-class Unauthorized(Exception):
-    pass
 
 
 #: Ids one batch episode read may ask for. A review page asks for the
