@@ -773,8 +773,18 @@ defaults to 150 and is bounded to 72–300. Unsupported settings or missing PDF
 rendering dependencies refuse startup. Installed dependencies and configuration
 do not promise that language data, a particular file or recognition will work.
 
+A host can also offer languages a request may choose for its own scan:
+`SCONE_DOCUMENT_OCR_LANGUAGES=deu,jpn+eng` (comma-separated, Tesseract names).
+Each is checked at startup the way `SCONE_DOCUMENT_OCR_LANGUAGE` is, and
+installing its language data is still the operator's job. A request then names
+one in `pdf_ocr.language` (`{"mode": "all_pages", "reading_order": "provider",
+"language": "deu"}`). A language the host did not list, including the host's own
+default named explicitly, is refused before the original is read. A request that
+names no language is read with the host's default, and its selection, its
+retained `pdf_ocr` metadata and its job identity serialize exactly as before.
+
 Authenticated `GET /v1/documents/formats` includes `pdf_ocr.available`, `modes`
-and `reading_orders`. A native host may instead supply
+and `reading_orders`, and `languages` when the host offers any. A native host may instead supply
 `document_ocr=DocumentOcr(my_recognizer, dpi=150)` to `create_app` or
 `create_conversation_app`, using `scone_memory.ingestion.document_ocr.DocumentOcr`
 and an existing `OcrEngine` implementation. The caller owns that recognizer.
