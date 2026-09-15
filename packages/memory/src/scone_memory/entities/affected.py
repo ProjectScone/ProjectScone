@@ -50,8 +50,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: declares it, and a test dependency breaking breaks the tests. An MCP
 #: server rests on its executable, the variables it needs and the origin
 #: it reaches the same way.
-DEPENDS_ON = ("calls", "imports", "inherits", "mixes_in", "depends_on", "develops_with", "references",
-              "runs_with", "requires_env", "connects_to")
+DEPENDS_ON = ("calls", "imports", "imports_when_called", "imports_for_types", "inherits", "mixes_in", "depends_on",
+              "develops_with", "references", "runs_with", "requires_env", "connects_to")
 #: Hops the walk may take. Past this it is the whole component, not a
 #: blast radius.
 MAX_HOPS = 8

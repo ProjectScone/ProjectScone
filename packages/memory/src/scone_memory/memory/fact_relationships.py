@@ -12,7 +12,8 @@ from typing import Awaitable, Callable, Optional, Protocol, Sequence
 from ..core.errors import InvalidInput, NotFound
 from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Fact, FactLink
 from ..core.ports import DocumentStore, NewFactLink
-from ..core.validation import check_space
+from ..core.validation import check_space, entity_key
+from ..entities.merges import SAME_ENTITY
 
 
 class PlaceFact(Protocol):
@@ -70,6 +71,10 @@ async def assert_fact(
     only proposed or declined refuses the whole assertion."""
     await runtime.living(space)
     check_space(space)
+    if entity_key(predicate) == SAME_ENTITY:
+        # Only a person's recorded decision merges two entities; a claim
+        # that two names are one is stated under a predicate of its own.
+        raise InvalidInput(f"{SAME_ENTITY!r} is reserved for entity merges; record one with merge_entities")
     premises = [int(f) for f in derived_from]
     if premises:
         if origin == "stated":

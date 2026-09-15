@@ -15,9 +15,10 @@ from functools import partial
 from typing import (TYPE_CHECKING, AsyncIterator, Callable, Iterable, Literal, Mapping, Optional,
                     Sequence, TypedDict, cast)
 
-from . import (archive, catalog, fact_placement, fact_relationships, fact_review, file_claims, retention,
+from . import (archive, catalog, entity_merging, fact_placement, fact_relationships, fact_review, file_claims, retention,
                source_keys, vector_identity)
 from .identity import join_match
+from ..entities.merges import is_decision
 from .catalog import (Profile as Profile, RecentActivity as RecentActivity,
                       SOURCE_WALK_PAGE as SOURCE_WALK_PAGE, SOURCE_WALK_READS as SOURCE_WALK_READS)
 from .fact_review import DECISIONS as DECISIONS, MAX_DECISIONS as MAX_DECISIONS, _reason as _reason
@@ -148,6 +149,7 @@ ATTACHMENT_TYPES = (
     "application/vnd.ms-powerpoint.slideshow.macroEnabled.12",
     "application/vnd.oasis.opendocument.text", "application/vnd.oasis.opendocument.spreadsheet",
     "application/vnd.oasis.opendocument.presentation", "application/epub+zip",
+    "application/hwp+zip",
 )
 #: Bytes one attachment may carry. Evidence, not a file share.
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
@@ -710,6 +712,7 @@ class MemoryEngine:
         return self._table_context_embeddings
 
     def _ingestion_runtime(self, embedding_checkpoint: EmbeddingCheckpoint | None = None) -> ingestion_batch.IngestionRuntime:
+        from ..ingestion.document_outline import document_outline
         context_inputs = None
         if self.table_context_embeddings:
             from ..ingestion.table_context import embedding_inputs
@@ -722,6 +725,7 @@ class MemoryEngine:
             semantic_aware=self.semantic_aware, heading_context=self.heading_context,
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
             context_lane=self.context_lane,
+            document_outline=partial(document_outline, blobs=self.blobs),
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
@@ -1403,6 +1407,19 @@ class MemoryEngine:
     async def close_fact(self, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
         return await fact_review.close_fact(self._review_runtime(), space, fact_id, reason, actor=actor)
 
+    async def merge_entities(self, space: str, alias: str, into: str, *, reason: str,
+                             actor: Optional[str] = None) -> Fact:
+        """Record that ``alias`` names the entity ``into`` names, from now.
+        Every view of the graph, and the walk retrieval takes through it,
+        then treats the two as one entity; see ``memory.entity_merging``."""
+        return await entity_merging.merge_entities(self, space, alias, into, reason=reason, actor=actor)
+
+    async def unmerge_entities(self, space: str, alias: str, *, reason: str,
+                               actor: Optional[str] = None) -> Fact:
+        """Close the merge in force for ``alias``: the names part from now,
+        and a view of an earlier moment still shows them joined."""
+        return await entity_merging.unmerge_entities(self, space, alias, reason=reason, actor=actor)
+
     async def facts(
         self,
         space: str,
@@ -1560,6 +1577,8 @@ def derivation_groups(facts: Sequence[Fact]) -> list[list[Fact]]:
     both subjects in one group, so "mark works_at acme" and "acme based_in
     lisbon" meet. Pure; order is by the smallest fact id in each group."""
     parent: dict[str, str] = {}
+    # A merge decision says two names are one; it is not a claim to reason from.
+    facts = [fact for fact in facts if not is_decision(fact)]
 
     key = entity_key
 
