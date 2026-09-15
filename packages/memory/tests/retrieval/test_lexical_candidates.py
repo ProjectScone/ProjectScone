@@ -38,7 +38,9 @@ def every_document(index: Bm25, query: str, limit: int, allowed=None, prefixes=(
     n = len(docs)
     lengths = {doc_id: sum(counts.values()) for doc_id, counts in docs.items()}
     avg_len = sum(lengths.values()) / n
-    family_df = {prefix: min(n, sum(df[member] for member in members)) for prefix, members in families}
+    # A document holding two members of a family is one document of it.
+    family_df = {prefix: sum(1 for counts in docs.values() if any(counts.get(member) for member in members))
+                 for prefix, members in families}
     candidates = docs.keys() if allowed is None else [d for d in allowed if d in docs]
     scored = []
     for doc_id in candidates:

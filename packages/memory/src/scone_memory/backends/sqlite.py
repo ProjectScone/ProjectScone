@@ -407,6 +407,7 @@ class SqliteDocumentStore:
         self._holding = False
         #: Per space, chunks the lexical index had not reached after the last text search.
         self._lexical_behind: dict[str, int] = {}
+        self._exact_forms_cut: dict[str, int] = {}
 
     async def close(self) -> None:
         self.conn.close()
@@ -539,17 +540,24 @@ class SqliteDocumentStore:
         the last text search: what the text lane could not see then."""
         return self._lexical_behind.get(space, 0)
 
+    def exact_forms_cut(self, space: str) -> int:
+        """Query words the last family search of ``space`` left at their
+        family's weight because more than ``MAX_EXACT_FORMS`` would have moved."""
+        return self._exact_forms_cut.get(space, 0)
+
     async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
                            prefixes: Sequence[str], exact_forms: bool = False) -> list[tuple[int, float]]:
         # The lane ranks our own tokens (see sqlite_lexical), so it agrees
         # with the in-memory lane on every script and every accent.
+        self._exact_forms_cut[space] = 0
         match = lexical_match(query, prefixes)
         if match is None:
             return []
         _, behind = synchronize_lexical(self.conn, space)
         self._lexical_behind[space] = behind
-        tables, rank, joins, parameters = (exact_form_rank(self.conn, query, prefixes) if exact_forms
-                                           else ("", "bm25(chunk_lexical_fts)", "", []))
+        tables, rank, joins, parameters, cut = (exact_form_rank(self.conn, query, prefixes) if exact_forms
+                                                else ("", "bm25(chunk_lexical_fts)", "", [], 0))
+        self._exact_forms_cut[space] = cut
         # CROSS JOIN keeps the space's chunks inside the index scan. Left to
         # itself, with the exact-form tables SQLite started from the chunks and
         # matched the expression again for each one, expanding every prefix

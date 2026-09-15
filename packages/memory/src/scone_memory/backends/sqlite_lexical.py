@@ -95,10 +95,19 @@ def _hits(conn: sqlite3.Connection, phrase: str) -> int:
     return int(conn.execute("SELECT count(*) FROM chunk_lexical_fts WHERE chunk_lexical_fts MATCH ?", (phrase,)).fetchone()[0])
 
 
-def exact_form_rank(conn: sqlite3.Connection, query: str, prefixes: Sequence[str]) -> tuple[str, str, str, list[object]]:
+#: Query words one family search moves to their own idf at most. Each reads
+#: two tables into the join, beside the search's four, and SQLite joins at
+#: most 64; the rarest words are moved first, and the rest keep their
+#: family's weight and are counted, so the lane can say so.
+MAX_EXACT_FORMS = 24
+
+
+def exact_form_rank(conn: sqlite3.Connection, query: str,
+                    prefixes: Sequence[str]) -> tuple[str, str, str, list[object], int]:
     """The common table expressions, the rank expression, the joins it reads
     and their parameters, in the order they appear, for a family search that
-    weighs the query's own words.
+    weighs the query's own words, and the number of words past
+    ``MAX_EXACT_FORMS`` left at their family's weight.
 
     bm25() scores a prefix phrase at the family's idf and cannot weigh one
     row's phrase differently from another's. A row holding one of the
@@ -122,19 +131,30 @@ def exact_form_rank(conn: sqlite3.Connection, query: str, prefixes: Sequence[str
     tables: list[str] = []
     rank, joins, phrases, multiples = "bm25(chunk_lexical_fts)", "", [], []
     rows = int(conn.execute("SELECT count(*) FROM chunk_lexical").fetchone()[0])
+    # Every word that would move, as (idf, family, word). A word no row holds
+    # would take the highest idf and move nothing, and a word as common as
+    # its family (no row holds a relative without it) moves nothing either;
+    # neither costs a scan. A repeated word is weighed once.
+    movable: list[tuple[float, int, str]] = []
+    family_idfs: list[float] = []
     for number, stem in enumerate(stems):
-        forms = [token for token in tokens if token.startswith(stem)]
+        family_idf = _fts5_idf(rows, _hits(conn, '"' + stem.replace('"', '""') + '"*'))
+        family_idfs.append(family_idf)
+        for form in dict.fromkeys(token for token in tokens if token.startswith(stem)):
+            hits = _hits(conn, '"' + form.replace('"', '""') + '"')
+            idf = _fts5_idf(rows, hits)
+            if hits and idf > family_idf:
+                movable.append((idf, number, form))
+    # The rarest words first, across families, up to the bound; the sort is
+    # stable, so words as rare keep the query's family order.
+    movable.sort(key=lambda move: -move[0])
+    kept, cut = movable[:MAX_EXACT_FORMS], max(0, len(movable) - MAX_EXACT_FORMS)
+    for number, stem in enumerate(stems):
         family = '"' + stem.replace('"', '""') + '"*'
-        family_idf = _fts5_idf(rows, _hits(conn, family))
-        # The rarest form first: coalesce takes the first form a row holds. A
-        # form as common as its family (no row holds a relative without it)
-        # moves nothing, and costs no scan.
-        weighed = sorted(((_fts5_idf(rows, _hits(conn, '"' + form.replace('"', '""') + '"')), form) for form in forms),
-                         reverse=True)
+        family_idf = family_idfs[number]
+        # The rarest form first: coalesce takes the first form a row holds.
         moves: list[str] = []
-        for idf, form in weighed:
-            if idf <= family_idf:
-                continue
+        for idf, _, form in (move for move in kept if move[1] == number):
             word = '"' + form.replace('"', '""') + '"'
             alias = f"family{number}_{len(moves)}"
             for name, phrase in ((alias, f"{family} AND {word}"), (f"{alias}_word", word)):
@@ -146,7 +166,7 @@ def exact_form_rank(conn: sqlite3.Connection, query: str, prefixes: Sequence[str
             multiples.append(idf / family_idf - 1)
         if moves:
             rank += " + coalesce(" + ", ".join(moves) + ", 0.0)"
-    return ("WITH " + ", ".join(tables) + " " if tables else ""), rank, joins, [*phrases, *multiples]
+    return ("WITH " + ", ".join(tables) + " " if tables else ""), rank, joins, [*phrases, *multiples], cut
 
 
 @contextmanager

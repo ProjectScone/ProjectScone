@@ -21,22 +21,37 @@ by default, and `SCONE_LEXICAL_EXACT_FORMS=0` turns it off.
 
 | engine defaults, frozen n=50 (seed 42) | R@5 | all@5 | R@15 | MRR |
 |---|---|---|---|---|
-| before: exact forms off on this branch (main's ranking) | 0.90 | 0.76 | 1.00 | 0.8379 |
-| **after: exact forms on** | **0.90** | **0.76** | **1.00** | **0.8444** |
+| main's ranking (a family's passages overcounted in memory) | 0.90 | 0.76 | 1.00 | 0.8379 |
+| before: exact forms off on this branch | 0.90 | 0.78 | 1.00 | 0.8405 |
+| **after: exact forms on** | **0.90** | **0.78** | **1.00** | **0.8444** |
 | LlamaIndex 0.14.24 BM25 + vector, reciprocal rank | 0.88 | 0.74 | 0.98 | 0.8307 |
 
 | engine defaults, 100 other items (seed 7, outside the frozen 50) | R@5 | all@5 | R@15 | MRR |
 |---|---|---|---|---|
-| before: exact forms off | 0.96 | 0.84 | 0.99 | 0.8854 |
-| **after: exact forms on** | **0.97** | **0.87** | **0.99** | **0.9042** |
+| main's ranking | 0.96 | 0.84 | 0.99 | 0.8854 |
+| before: exact forms off on this branch | 0.96 | 0.83 | 0.99 | 0.8855 |
+| **after: exact forms on** | **0.97** | **0.86** | **0.99** | **0.9042** |
 | LlamaIndex BM25 + vector | 0.91 | 0.71 | 0.99 | 0.8099 |
 
-The gains are small on the frozen sample, where MRR rises 0.0065 and R@10
+The branch's off row is not main's ranking. Review found that the
+in-memory scorer took a family's document frequency as the sum of its
+members' (a passage holding "billing" and "bills" counted twice), where
+SQLite counts rows. That lowered the family's idf below the word's even
+where every passage of the family held the word, and exact forms then
+credited the undoing of the overcount as if it were a preference for the
+word. The scorer now counts each passage once, in both settings, and the
+rows above were run after that fix. The overcount fix alone moved the
+frozen sample's MRR from 0.8379 to 0.8405: run with the old stem prefixes,
+the frozen rankings were identical, so the nested-prefix fix below moved
+none of them. What is left for exact forms
+is 0.0039 there, 0.0187 on the second sample and 0.0155 on the third.
+
+The gains are small on the frozen sample, where MRR rises 0.0039 and R@10
 goes from 0.92 to 0.94. On the second sample MRR rises 0.019, R@5 by one
 item and all-sessions@5 by three items. Not every item moved up. On the
-frozen sample 4 items rose in reciprocal rank and 1 fell (from 1/11 to
+frozen sample 3 items rose in reciprocal rank and 1 fell (from 1/11 to
 1/12). On the second sample 6 rose and 4 fell: one from rank 1 to rank 2,
-and three by one place further down.
+two by one place further down (4 to 5, 5 to 6) and one by two (8 to 10).
 
 ## The signal
 
@@ -52,9 +67,11 @@ family, and that stays. What changes is the weight of that one term.
 - With two query words in one family, a passage takes the rarest one it
   holds.
 
-The credit a passage gains is bounded by the gap between the word's idf
-and the family's. It can never exceed the saturated score of one term at
-the word's idf.
+The credit a passage gains is the gap between the word's idf and the
+family's, times BM25's count part, which reaches `k1 + 1`. It is at most
+2.2 times the gap, more than the gap for a short passage (review measured
+1.59 times on a one-word passage), and can never exceed the saturated
+score of one term at the word's idf.
 
 The in-memory scorer applies this directly. SQLite's `bm25()` cannot
 weigh one phrase differently for different rows. So for each query word,
@@ -94,7 +111,11 @@ python benchmarks/northstar_defaults.py --data ../../bench-data/longmemeval_s.js
   --check` ran again on both samples. `compare()` gave 0.90 / 0.76 / 1.00 / 0.8444
   on the frozen sample and 0.97 / 0.87 / 0.99 / 0.9042 on the second, the
   on rows exactly. LlamaIndex gave 0.8307 and 0.8099 (0.8098 in the first
-  `compare()` of the second sample, 0.8099 in its sweep row).
+  `compare()` of the second sample, 0.8099 in its sweep row). Those runs
+  predate the review fixes below and are kept as the record of main's
+  ranking. After the fixes, both commands ran again without `--check`
+  (LlamaIndex's side does not read Scone's scorer, and its rows were
+  0.8307 and 0.8098 again), and the tables above are those runs.
 - **Lanes.** At weight 0.01 the fused rows equal the text lane alone on both
   samples, with the setting off and on, as the northstar file found. The
   vector lane alone is unchanged by the setting (0.6196 and 0.6775 MRR).
@@ -104,7 +125,9 @@ python benchmarks/northstar_defaults.py --data ../../bench-data/longmemeval_s.js
 The two named samples are not blind to the design. Before any code was
 written, a scratch copy of the scorer was patched with candidate designs
 and run at engine defaults on both samples. That copy reproduced the
-engine's own numbers when set to today's behaviour.
+engine's own numbers when set to today's behaviour. It carried the
+in-memory family overcount review later found, so the table below is the
+record of how the design was chosen, not today's numbers.
 
 | design (scratch scorer) | frozen R@5 / all@5 / R@15 / MRR | second sample R@5 / all@5 / R@15 / MRR |
 |---|---|---|
@@ -138,15 +161,28 @@ sample is the blind check:
 | today | 0.95 | 0.80 | 0.99 | 0.8546 |
 | **the family at the word's idf** | **0.96** | **0.80** | **0.99** | **0.8702** |
 
+After the review fixes, the same sample ran through the engine's own sweep
+(`sweep()` from `northstar_defaults.py` over the items a
+`--holdout-of`-style draw leaves outside both named samples): off 0.95 /
+0.79 / 0.99 / 0.8547, on 0.96 / 0.80 / 0.99 / 0.8702. 7 items rose and 1
+fell (1/11 to 1/13).
+
 ## SQLite
 
-The benches above run the in-memory stores. The frozen-sample check was
-also run with `SqliteDocumentStore` (fused, engine defaults otherwise).
-Off, it gave R@5 0.90, all@5 0.78, R@15 0.98 and MRR 0.8392. On, it gave
-0.90, 0.78, 1.00 and 0.8444. SQLite's off numbers differ from the
-in-memory store's. FTS5's `bm25()` uses its own idf formula and counts over
-the whole index, which is one known difference; the cause was not
-isolated.
+The benches above run the in-memory stores. The same sweep was run with
+`SqliteDocumentStore` in place of the in-memory store, one database per
+item, after the review fixes:
+
+| SQLite, engine defaults | frozen R@5 / all@5 / R@15 / MRR | second sample R@5 / all@5 / R@15 / MRR |
+|---|---|---|
+| exact forms off | 0.90 / 0.78 / 0.98 / 0.8392 | 0.96 / 0.83 / 0.99 / 0.8875 |
+| **exact forms on** | **0.90 / 0.78 / 1.00 / 0.8444** | **0.97 / 0.86 / 0.99 / 0.9027** |
+
+The frozen rows equal the check run before review. On the second sample,
+not measured on SQLite before, 6 items rose and 4 fell, as in memory.
+SQLite's off numbers still differ from the in-memory store's. FTS5's
+`bm25()` uses its own idf formula and counts over the whole index, which
+is one known difference; the cause was not isolated.
 
 A text-lane read costs more on SQLite with the setting on. The test store
 was one space holding the frozen 50 items' sessions: 45,169 chunks, with
@@ -165,13 +201,37 @@ SQLite looked the prefix up again for every row it matched: the median
 was 2,268 ms a query for ten questions, against 21 ms off. That form was
 replaced before the default was turned on. The replacement returned the
 same 60 chunks in the same order for all 50 questions, with scores within
-2.4e-16.
+2.4e-16. The timings were not re-run after the review fixes: on SQLite
+they only take reads away (a repeated word, a word no row holds), and in
+memory a sum became a count.
+
+## Review fixes
+
+- **SQLite's join limit.** Each word moved added two tables to the join,
+  and SQLite joins at most 64: a query of 31 such words (or "billing"
+  written 31 times, or words no row holds) failed with "at most 64 tables
+  in a join" and dropped the whole text lane. A repeated word and a word no
+  row holds now read nothing, and at most `MAX_EXACT_FORMS` (24) words
+  move, the rarest first; the rest keep their family's weight and the
+  recall's `degraded` says how many. The largest count of query words in
+  a family on all 500 LongMemEval-S questions is 18, so no measured
+  question reached the bound.
+- **The credit's bound** was stated as the idf gap; it is up to 2.2 times
+  the gap (above).
+- **The in-memory family overcount** (above). Both stores now count a
+  family's passages once.
+- **Nested prefixes.** "states statement" gave `stat` and `state`, and
+  "statement" counted in both families, so exact forms credited it twice.
+  A prefix inside a broader one the query gives is now left to that one.
+  One frozen question ("stars ... Starbucks Rewards") had such a pair.
 
 ## What is still open
 
 - **The mechanism is not isolated.** The design table is consistent with
   the credit belonging to the word's own idf rather than to a heavier
-  family, but no item was examined to say why this corpus rewards it.
+  family, but no item was examined to say why this corpus rewards it. One
+  part that was not a preference, the in-memory overcount, is now gone
+  from both sides of the comparison.
 - **Only English suffix rules make families**, so this moves nothing for
   a language the stem rules do not know.
 - **Postgres, Elasticsearch and the other stores** take no prefixes, so

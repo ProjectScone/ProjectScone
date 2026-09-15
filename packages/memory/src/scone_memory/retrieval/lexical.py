@@ -200,7 +200,8 @@ class Bm25:
         what "billing" alone would, one holding "billing" and "bills" scores
         their joint count at "billing"'s idf (the family's count, not a
         second term), and one holding only relatives scores as without it.
-        The credit is bounded by the gap between the two idfs."""
+        The credit is the gap between the two idfs times BM25's count part,
+        which reaches ``k1 + 1``: at most 2.2 times the gap, not the gap."""
         terms = [fold_diacritics(token) for token in tokenize(query)]
         folded = [fold_diacritics(prefix) for prefix in prefixes]
         families = [(prefix, [term for term in self._df if term.startswith(prefix)]) for prefix in folded]
@@ -218,10 +219,13 @@ class Bm25:
             return []
         n = len(self._docs)
         avg_len = sum(self._lengths.values()) / n
-        family_df = {prefix: min(n, sum(self._df[member] for member in members)) for prefix, members in families}
         # Each family's count in every document holding a member, read from
         # the postings: whole numbers, so the same in any order of adding.
         family_tf: list[tuple[str, dict[int, int]]] = []
+        # A family's document frequency is the documents holding any member,
+        # each once: one holding "billing" and "bills" is one document, as
+        # SQLite counts its rows, not two.
+        family_df: dict[str, int] = {}
         matching: set[int] = set()
         for prefix, members in families:
             tfs: dict[int, int] = {}
@@ -229,6 +233,7 @@ class Bm25:
                 for doc_id in self._postings[member]:
                     tfs[doc_id] = tfs.get(doc_id, 0) + self._docs[doc_id][member]
             family_tf.append((prefix, tfs))
+            family_df[prefix] = len(tfs)
             matching.update(tfs)
         for term in terms:
             matching.update(self._postings.get(term, ()))

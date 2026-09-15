@@ -409,6 +409,12 @@ async def recall(
             behind = backlog(space) if callable(backlog) else 0
             if behind:
                 degraded.append(f"text: {behind} chunk(s) not yet in the lexical index; the text lane is behind")
+            # A store that moves a bounded number of the query's own words to
+            # their idf says how many it left at their family's weight.
+            forms_cut = getattr(runtime.documents, "exact_forms_cut", None)
+            cut = forms_cut(space) if callable(forms_cut) else 0
+            if cut:
+                degraded.append(f"text: {cut} query word(s) past MAX_EXACT_FORMS kept their family's weight")
         except Exception as e:  # noqa: BLE001
             degraded.append(f"text: {type(e).__name__}: {e}")
             failed.add("text")
