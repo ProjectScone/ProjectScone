@@ -276,11 +276,11 @@ def test_a_statement_s_caption_and_years_above_the_grid_are_its_header_rows():
     prose=[line('The figures below are unaudited and in millions,',.02,.7,2),*statement(top=.2,rows=3)]
     found=infer_tables(prose)
     assert found.tables[0].rows==3 and found.unassigned==(0,)
-    # Rows above the grid are read up to a bound: of four title lines in a
-    # chain, the nearest three are its rows and the fourth is not.
-    titled=[*(line(f'Title line {n}',.02,.3,n) for n in range(4)),*statement(top=.24,rows=3)]
+    # Rows above the grid are read up to a bound: of five title lines in a
+    # chain, the nearest four are its rows and the fifth is not.
+    titled=[*(line(f'Title line {n}',.02,.3,n) for n in range(MAX_HEADER_ROWS+1)),*statement(top=.08+(MAX_HEADER_ROWS+1)*.04,rows=3)]
     found=infer_tables(titled)
-    assert MAX_HEADER_ROWS==3 and found.tables[0].rows==6 and found.unassigned==(0,)
+    assert MAX_HEADER_ROWS==4 and found.tables[0].rows==3+MAX_HEADER_ROWS and found.unassigned==(0,)
 
 
 def test_a_bulleted_or_enumerated_list_is_not_a_table_but_an_enumerated_column_of_labels_is():
@@ -319,15 +319,59 @@ def test_the_layout_says_when_the_rows_above_a_grid_were_read_up_to_their_bound(
     from scone_memory.ocr.tables import MAX_HEADER_ROWS, infer_tables
     def line(text,row):
         return OcrRegion(text=text,box=(.02,.08+row*.04,.3,.105+row*.04))
-    grid=statement(top=.24,rows=3)
-    four=infer_tables([*(line(f'Title line {n}',n) for n in range(4)),*grid])
-    assert four.tables[0].rows==3+MAX_HEADER_ROWS and 'header_rows_limit' in four.notes, "a fourth title was dropped by the cap"
-    three=infer_tables([*(line(f'Title line {n}',n+1) for n in range(3)),*grid])
-    assert three.tables[0].rows==6 and 'header_rows_limit' not in three.notes
-    broken=infer_tables([line('Title line 0',0),line('Title line 1',1),line('This sentence ends the chain.',2),line('Title line 3',3),*grid])
+    grid=statement(top=.08+(MAX_HEADER_ROWS+1)*.04,rows=3)
+    over=infer_tables([*(line(f'Title line {n}',n) for n in range(MAX_HEADER_ROWS+1)),*grid])
+    assert over.tables[0].rows==3+MAX_HEADER_ROWS and 'header_rows_limit' in over.notes, "a title past the bound was dropped by the cap"
+    within=infer_tables([*(line(f'Title line {n}',n+1) for n in range(MAX_HEADER_ROWS)),*grid])
+    assert within.tables[0].rows==3+MAX_HEADER_ROWS and 'header_rows_limit' not in within.notes
+    broken=infer_tables([*(line(f'Title line {n}',n) for n in range(MAX_HEADER_ROWS-1)),line('This sentence ends the chain.',MAX_HEADER_ROWS-1),line('Title line last',MAX_HEADER_ROWS),*grid])
     assert broken.tables[0].rows==4 and 'header_rows_limit' not in broken.notes, "the chain broke before the cap mattered"
     # A row of too many cells to be a grid's clears the rows held above
     # it, and the cap that bit before it is forgotten with them.
-    scattered=[OcrRegion(text=str(n),box=(.02+n*.07,.24,.03+n*.07,.265)) for n in range(13)]
-    cleared=infer_tables([*(line(f'Title line {n}',n) for n in range(4)),*scattered,line('Title line 5',5),line('Title line 6',6),*statement(top=.36,rows=3)])
+    scattered=[OcrRegion(text=str(n),box=(.02+n*.07,.28,.03+n*.07,.305)) for n in range(13)]
+    cleared=infer_tables([*(line(f'Title line {n}',n) for n in range(MAX_HEADER_ROWS+1)),*scattered,line('Title line 6',6),line('Title line 7',7),*statement(top=.40,rows=3)])
     assert cleared.tables[0].rows==5 and 'header_rows_limit' not in cleared.notes
+
+
+def test_a_colon_closed_heading_between_the_years_and_the_grid_is_a_row_and_a_sentence_s_tail_is_not():
+    from scone_memory.ocr.tables import infer_tables
+    def line(text,left,right,row):
+        return OcrRegion(text=text,box=(left,.08+row*.04,right,.105+row*.04))
+    years=[line('2021',.62,.66,0),line('2022',.84,.88,0)]
+    # The years, a section's heading closed by a colon, then the grid:
+    # the heading is a row and the years still head the grid above it.
+    headed=[*years,line('Basic net loss per share:',.02,.2,1),*statement(top=.16,rows=3)]
+    found=infer_tables(headed)
+    rows={}
+    for cell in found.tables[0].cells:
+        rows.setdefault(cell.row,[]).append((cell.column,cell.column_span,cell.text))
+    assert found.tables[0].rows==5 and rows[0]==[(1,1,'2021'),(2,1,'2022')] and rows[1]==[(0,1,'Basic net loss per share:')]
+    # A sentence's tail on a line of its own, or a long colon-closed line,
+    # is prose: the chain ends there and the years are lost with it.
+    for tail in ('were as follows:','The components of intangible assets, net as of December 31 were:'):
+        found=infer_tables([*years,line(tail,.02,.2 if tail.startswith('were') else .7,1),*statement(top=.16,rows=3)])
+        assert found.tables[0].rows==3 and found.unassigned==(0,1,2), tail
+
+
+def test_a_header_cell_beside_a_narrow_column_claims_it_by_its_place_in_the_row():
+    from scone_memory.ocr.tables import infer_tables
+    def cell(text,left,right,row):
+        return OcrRegion(text=text,box=(left,.1+row*.04,right,.125+row*.04))
+    def grid(top_row):
+        made=[]
+        for n in range(3):
+            row=top_row+n
+            made+=[cell(f'Asset {n}',.02,.2,row),cell(f'{1000+n:,}',.4,.45,row),cell(f'({100+n})',.6,.65,row),cell(str(n),.99,1.,row)]
+        return made
+    # The last header cell sits left of the digits column, over no band:
+    # it takes the one band left between its neighbour's and the row's end.
+    header=[cell('Gross Carrying Value',.36,.47,0),cell('Accumulated Amortization',.55,.67,0),cell('Useful Life - Years',.87,.97,0)]
+    [table]=infer_tables([*header,*grid(1)]).tables
+    assert table.rows==4 and [(c.column,c.column_span,c.text) for c in table.cells if c.row==0]==[
+        (1,1,'Gross Carrying Value'),(2,1,'Accumulated Amortization'),(3,1,'Useful Life - Years')]
+    # A lone cell over no band is not placed by its place, nor a cell with
+    # two bands to choose from.
+    lone=infer_tables([cell('Useful Life - Years',.87,.97,0),*grid(1)])
+    assert lone.tables[0].rows==3 and lone.unassigned==(0,)
+    two=infer_tables([cell('Gross Carrying Value',.36,.47,0),cell('Useful Life - Years',.87,.97,0),*grid(1)])
+    assert two.tables[0].rows==3 and two.unassigned==(0,1)
