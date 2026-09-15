@@ -45,6 +45,83 @@ class ScriptedModel:
             raise RuntimeError("provider close failed")
 
 
+async def test_a_turn_records_how_long_it_took_and_only_the_moments_that_came():
+    from scone_memory import InMemoryEventLog
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), events=InMemoryEventLog()).open()
+    seen = []
+
+    async def watch(chunk):
+        seen.append(chunk)
+
+    conversation = TextConversation(memory, "alpha", "timed", lambda: ScriptedModel("Timed reply."))
+    first = await conversation.reply("first", on_text=watch)
+    second = await conversation.reply("second")
+    events = [e for e in await memory.events.query("alpha", kind="conversation_turn", limit=10)]
+    assert [e.payload["turn_id"] for e in reversed(events)] == [first["turn_id"], second["turn_id"]]
+    streamed, buffered = events[1].payload, events[0].payload
+    assert streamed["mode"] == "text" and streamed["session_id"] == "timed"
+    assert set(streamed["latency_ms"]) == {"context", "first_token", "total"}, "a text turn has no first audio"
+    assert 0 <= streamed["latency_ms"]["context"] <= streamed["latency_ms"]["first_token"] <= streamed["latency_ms"]["total"]
+    assert set(buffered["latency_ms"]) == {"context", "total"}, "a turn nobody streams has no first token"
+    assert seen == ["Timed reply."]
+    await conversation.close()
+    await memory.close()
+
+
+async def test_recording_a_turns_timing_never_undoes_the_turn(memory, monkeypatch):
+    from scone_memory.realtime import text as text_module
+
+    async def refuse(*args, **kwargs):
+        raise RuntimeError("the log is full")
+
+    monkeypatch.setattr(memory, "record_turn", refuse)
+    conversation = TextConversation(memory, "alpha", "unlogged", lambda: ScriptedModel("Still replied."))
+    result = await conversation.reply("first")
+    assert result["text"] == "Still replied." and result["assistant_episode_id"]
+    await conversation.close()
+
+    async def stall(*args, **kwargs):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(memory, "record_turn", stall)
+    monkeypatch.setattr(text_module, "NOTE_TIMEOUT", 0.05)
+    slow_log = TextConversation(memory, "alpha", "slow-log", lambda: ScriptedModel("Replied before the log."), turn_timeout=1)
+    result = await slow_log.reply("first")
+    assert result["text"] == "Replied before the log." and not slow_log.closed, \
+        "a log that takes longer than the turn's deadline neither fails nor closes a turn that stands"
+    again = await slow_log.reply("second")
+    assert again["turn_id"] != result["turn_id"]
+    await slow_log.close()
+
+
+async def test_the_first_token_is_the_first_and_a_failed_turn_records_nothing(monkeypatch):
+    from scone_memory import InMemoryEventLog
+    from scone_memory.realtime import timing as timing_module
+
+    ticks = iter(float(n) for n in range(100))
+    monkeypatch.setattr(timing_module, "_now", lambda: next(ticks))
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), events=InMemoryEventLog()).open()
+    seen = []
+
+    async def watch(chunk):
+        seen.append(chunk)
+
+    conversation = TextConversation(memory, "alpha", "ticks", lambda: ChunkedModel(("Hello ", "world")))
+    await conversation.reply("first", on_text=watch)
+    [event] = await memory.events.query("alpha", kind="conversation_turn", limit=5)
+    timing = event.payload["latency_ms"]
+    assert seen == ["Hello ", "world"] and timing["context"] < timing["first_token"] < timing["total"]
+    assert timing["first_token"] == 2000.0, "heard at tick 0, context at 1, the first chunk at 2; the second chunk marks nothing"
+    assert timing["total"] == 3000.0
+    await conversation.close()
+    failing = TextConversation(memory, "alpha", "failing", lambda: ScriptedModel("", mode="error"))
+    with pytest.raises(RuntimeError):
+        await failing.reply("first")
+    assert len(await memory.events.query("alpha", kind="conversation_turn", limit=5)) == 1, "a turn that failed records no event"
+    await memory.close()
+
+
 async def test_cancelled_turn_with_failed_processor_cleanup_closes_conversation(memory):
     class BrokenCleanup(ScriptedModel):
         async def aclose(self):

@@ -36,10 +36,36 @@ for item in recall.items:
             print(page.number, region.text, region.box, region.start, region.end)
 ```
 
+## Pages scanned the wrong way up
+
+A page scanned upside down or on its side is read as noise: measured on a
+rendered page turned 180 degrees, Tesseract returned "aun Ul 8dJJO INOqUeY".
+Page segmentation mode 1 turns a sideways page but not an upside-down one.
+`TesseractOcr(orientation=True)` (`SCONE_DOCUMENT_OCR_ORIENTATION=1` for the
+hosted document OCR) runs Tesseract's orientation detection (`--psm 0`, which
+needs the `osd` language data) before reading a page. When the detection is
+at least `min_orientation_confidence` sure (2.0 by default) that the page is
+turned a quarter, half or three quarters, the page is turned in a bounded
+child process, read, and every box is given back in the page as it was given,
+so regions still match the page's own geometry. The engine name says what
+happened: `:rotated90`, `:rotated180` or `:rotated270`; `:osd-upright`;
+`:osd-unsure` when a turn was detected below the confidence; `:osd-unknown`
+when the detection could not judge, as on a page with too few characters.
+Without the `osd` data installed the detection always fails, so a failed
+detection checks the installed languages once and, when `osd` is missing,
+refuses the page with that reason instead of reading every page as one it
+could not judge. A language list too long to fit the engine name with the
+orientation suffix (96 characters) is refused when the engine is built.
+Each checked page costs one more Tesseract run. With the setting on, the
+hosted OCR identity used by document jobs and directory sync ends
+`:orientation`, so documents extracted before are extracted again.
+
 ## Coverage and geometry
 
 The default `missing_text` mode preserves native text and only recognizes pages
-without extractable text. A page with a short text layer over a scan is therefore
+without extractable text, or whose text layer is unreadable: mostly private-use
+code points, `(cid:N)` runs, replacement characters or control bytes, the way a
+font without a usable Unicode map extracts. A page with a short text layer over a scan is therefore
 not automatically recognized. Choose `all_pages` explicitly to replace all native
 text with OCR; this mode reads page metadata without extracting discarded text.
 The default text-only `PypdfParser` still requires an existing text layer.

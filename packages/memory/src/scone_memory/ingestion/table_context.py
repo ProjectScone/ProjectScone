@@ -106,35 +106,46 @@ def context_inputs(parsed: ParsedDocument, spans: Sequence[tuple[int, int]]) -> 
     return result
 
 
-async def embedding_inputs(episode: NewEpisode, spans: Sequence[tuple[int, int]], *,
-                           blobs: BlobStore) -> list[str]:
-    """Load within the record's space, including before initial attachment linking."""
+async def retained_manifest(episode: NewEpisode, *, blobs: BlobStore, purpose: str) -> DocumentManifest | None:
+    """The manifest a file episode was stored with, checked against its retained original and
+    its text; None for an episode that is not an imported file. Loads within the record's
+    space, including before initial attachment linking. ``purpose`` names the reader in a
+    refusal."""
     original_id = episode.metadata.get('document_original')
     manifest_id = episode.metadata.get('document_manifest')
     if episode.kind != 'file' or (not original_id and not manifest_id):
-        content = episode.content.encode()
-        return [content[start:end].decode() for start, end in spans]
+        return None
     if (not original_id or not manifest_id
             or re.fullmatch(r'[a-f0-9]{64}', original_id) is None
             or re.fullmatch(r'[a-f0-9]{64}', manifest_id) is None
             or episode.source != f'attachment:{original_id}'):
-        raise InvalidInput('document table embedding context has invalid source identities')
+        raise InvalidInput(f'{purpose} has invalid source identities')
     original, raw = await blobs.get(episode.space, original_id)
     retained, encoded = await blobs.get(episode.space, manifest_id)
     if (not 0 < len(raw) <= _MAX_ATTACHMENT_BYTES or not 0 < len(encoded) <= _MAX_ATTACHMENT_BYTES
             or original.attachment_id != original_id or retained.attachment_id != manifest_id
             or hashlib.sha256(raw).hexdigest() != original_id
             or hashlib.sha256(encoded).hexdigest() != manifest_id or retained.media_type != 'application/json'):
-        raise InvalidInput('document table embedding context does not match its retained sources')
+        raise InvalidInput(f'{purpose} does not match its retained sources')
     try:
         json.loads(encoded, object_pairs_hook=_unique)
         manifest = DocumentManifest.model_validate_json(encoded)
     except (ValueError, RecursionError):
-        raise InvalidInput('document table embedding context requires a valid manifest') from None
+        raise InvalidInput(f'{purpose} requires a valid manifest') from None
     if (manifest.original_sha256 != original_id
             or manifest.parsed.format != episode.metadata.get('document_format')
             or '\n\n'.join(segment.text for segment in manifest.parsed.segments) != episode.content
             or ('document_filename' in episode.metadata
                 and episode.metadata['document_filename'] != manifest.filename)):
-        raise InvalidInput('document table embedding context does not match the episode')
+        raise InvalidInput(f'{purpose} does not match the episode')
+    return manifest
+
+
+async def embedding_inputs(episode: NewEpisode, spans: Sequence[tuple[int, int]], *,
+                           blobs: BlobStore) -> list[str]:
+    """Load within the record's space, including before initial attachment linking."""
+    manifest = await retained_manifest(episode, blobs=blobs, purpose='document table embedding context')
+    if manifest is None:
+        content = episode.content.encode()
+        return [content[start:end].decode() for start, end in spans]
     return context_inputs(manifest.parsed, spans)
