@@ -421,6 +421,8 @@ async def test_recall_expands_on_request_and_answers_as_before_without_it():
             assert "expanded" not in bare and all("via_summary" not in item for item in bare["items"])
             assert '"recall.expand_summaries": true' in json.dumps(client.get("/v1/capabilities", headers=auth).json())
             assert client.get("/v1/recall", params={"q": "x", "expand_summaries": "whole"}, headers=auth).status_code in (400, 422)
+            merged = client.get("/v1/recall", params={"q": "Zorvath", "expand_summaries": "follow", "merge": "true"}, headers=auth)
+            assert merged.status_code in (400, 422) and "merge" in merged.text
 
         out = io.StringIO()
         code = await run(build_parser().parse_args(["--space", "s", "recall", "Zorvath 1.0 recounts", "--limit", "3",
@@ -431,5 +433,9 @@ async def test_recall_expands_on_request_and_answers_as_before_without_it():
         await run(build_parser().parse_args(["--space", "s", "recall", "Zorvath 1.0 recounts", "--limit", "3", "--expand-summaries", "replace",
                                              "--expand-max-chunks", "1"]), engine, io.StringIO(""), out)
         assert "summary hit(s) to" in out.getvalue() and "via summary #" in out.getvalue()
+        for clash in ("--merge", "--parts"):
+            with pytest.raises(InvalidInput, match="--expand-summaries cannot be combined"):
+                await run(build_parser().parse_args(["--space", "s", "recall", "Zorvath", "--expand-summaries", "follow", clash]),
+                          engine, io.StringIO(""), io.StringIO())
     finally:
         await engine.close()
