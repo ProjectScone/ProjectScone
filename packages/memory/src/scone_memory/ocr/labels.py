@@ -28,12 +28,17 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import InvalidInput
+from .tables import ENUMERATOR
 from .types import REGION_LABELS, LayoutResult, OcrRegion, RegionLabel
 
 #: A page number on its own line: "12", "- 12 -", "Page 12", "12 of 40", "12/40".
 PAGE_NUMBER = re.compile(r"(?:page\s+)?[-–—]?\s*\d{1,4}(?:\s*[-–—]|\s*(?:of|/)\s*\d{1,4})?", re.IGNORECASE)
 #: A line that opens a list item: a bullet, a number or a letter with its mark, then the item.
-LIST_ITEM = re.compile(r"^(?:[•·◦▪▫‣●○■□\-–—*]|\(?\d{1,3}[.)]|\(?[a-zA-Z][.)])\s+\S")
+#: A list item's opening: a bullet, or an enumerator with its closing
+#: punctuation -- "1.", "(a)", "(ii)", "2.1." as a definition list
+#: numbers its entries -- and a word after it; the same marks the grid
+#: inference refuses as a table's first column.
+LIST_ITEM = re.compile(rf"^(?:[•·◦▪▫‣●○■□\-–—*]|{ENUMERATOR})\s+\S")
 BULLETS = "•·◦▪▫‣●○■□-–—*"
 #: A footnote's opening: its number (not the start of a longer one, so a
 #: year is not a footnote) or its mark, a space, then its text.
