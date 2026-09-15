@@ -124,6 +124,33 @@ still refused, explicitly. The tool-answer path's search still keeps
 the whole session out, and voice conversations keep the default; both
 are follow-ups, not silent gaps.
 
+`history_policy="summary"` keeps what the window would lose: the turns
+that leave the model's context are folded into a running summary by a
+model the caller gives as `summary_factory` (a `ChatModel`, one round
+per fold, asked for the new summary alone), and the summary rides in
+the system message under "Earlier in this conversation, summarised:".
+`max_summary_bytes` (2000 by default, 200 to 32000, at most half of
+`max_history_bytes`) is reserved for it: the system prompt and the
+turns are bounded by the history limit less that reserve (a system
+prompt that does not fit what is left is refused at construction), the
+summary by the reserve, and so the whole never passes the limit. The
+summary's bytes are counted as the history counts them, in the request
+the model is sent, heading included: a summary of quotation marks
+costs twice its length there. One fold may take `summary_timeout`
+seconds (20 by default, 0.1 to 600); the turn's own deadline runs on
+through it. Each turn's receipt carries `history.summary`:
+`status` (`none`, `summarised`, `too_long`, `empty`, `timed_out`, or
+`failed: <error type>`), the summary's bytes, reserve and timeout, and
+the ids of the turns it covers. A summary too long for its reserve, or
+empty, or one the model did not write in time or at all, keeps the
+summary before it and the receipt says so; the turns are gone from the
+context either way, as under the window, and were captured as episodes
+already. A fold belongs to its turn: a turn that fails after folding
+leaves the summary, and the record of what has left the window, as they
+were. The summary is context for the model, not
+a record: it is never captured as a turn, and a question about a folded
+turn is still answered from memory as under the window.
+
 ## Public-text stream (optional)
 
 `public_text_streaming=True` opts every configured runtime into

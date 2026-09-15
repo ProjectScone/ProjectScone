@@ -58,12 +58,15 @@ def test_writing_into_a_vault_keeps_their_notes_updates_ours_and_removes_what_we
     first = projection_of(fact(1, "alice chen", "works_at", "Acme"), fact(2, "acme", "based_in", "Lisbon"),
                           fact(3, "bob", "knows", "Alice Chen"))
     alice = next(name for name in obsidian_files(first, ABOUT) if name.lower() == "entities/alice chen.md")
+    # The note's name keeps the entity's own spelling ("bob"); CI's filesystem
+    # tells cases apart where a Mac's does not.
+    bob = next(name for name in obsidian_files(first, ABOUT) if name.lower() == "entities/bob.md")
     (vault / DEFAULT_FOLDER / alice).write_text("# Alice, as I know her\n\nmine\n", encoding="utf-8")
     receipt = write_vault(obsidian_files(first, ABOUT, root="scone/"), vault, projection=first.digest)
     assert receipt.kept_theirs == (alice,), "a note this did not write is never written over"
     assert (vault / DEFAULT_FOLDER / alice).read_text(encoding="utf-8") == "# Alice, as I know her\n\nmine\n"
     assert receipt.written == len(obsidian_files(first, ABOUT, root="scone/")) - 1 and receipt.updated == receipt.unchanged == receipt.removed == 0
-    assert signed(home / "Bob.md") and not signed(vault / DEFAULT_FOLDER / alice) and (vault / DEFAULT_FOLDER / MANIFEST).exists()
+    assert signed(vault / DEFAULT_FOLDER / bob) and not signed(vault / DEFAULT_FOLDER / alice) and (vault / DEFAULT_FOLDER / MANIFEST).exists()
     assert (vault / ".obsidian" / "app.json").read_text(encoding="utf-8") == '{"theme": "moonstone"}' and (vault / "Daily.md").exists()
     again = write_vault(obsidian_files(first, ABOUT, root="scone/"), vault, projection=first.digest)
     assert (again.written, again.updated, again.removed) == (0, 0, 0) and again.unchanged == receipt.written, "the same notes are left as they are"

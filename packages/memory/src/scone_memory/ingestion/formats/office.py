@@ -22,6 +22,7 @@ from ...core.errors import InvalidInput
 from .archive import SafeArchive
 from .types import DocumentLimits, DocumentSegment, ParsedDocument, validate_document
 from .table_types import DocumentTableCell
+from .word_structure import WordStructure
 from .word_tables import word_children, word_table
 from .xlsx_tables import cell_position, spreadsheet_tables, spreadsheet_text_supported
 
@@ -109,6 +110,9 @@ class _Output:
         self.counts: dict[str, int] = {}
         self.text_bytes = 0
         self.deadline = monotonic() + limits.timeout_seconds
+        #: Parts the reader could not use and read around, named once each
+        #: in the document's ``structure_notes``.
+        self.notes: set[str] = set()
 
     def check(self) -> None:
         if monotonic() > self.deadline:
@@ -390,93 +394,18 @@ def _row_text(row: Element, output: _Output) -> str:
                         for cell in row if _local(cell.tag) == 'tc'), '\t')
 
 
-#: A built-in Word heading style, by the name Word gives it in every language.
-_HEADING_STYLE = re.compile(r'^heading ([1-9])$', re.IGNORECASE)
-#: How many styles a basedOn chain is followed through. A paragraph whose style's chain
-#: runs longer, or round in a circle, says ``heading_level_unresolved``.
-_STYLE_DEPTH = 16
-#: The level a style gives when its chain was not followed to its end.
-_UNRESOLVED = -1
-
-
-def _outline_level(properties: Element | None) -> int | None:
-    """A paragraph properties' outline level as a heading level: 1 to 9, 0 for explicit body text."""
-    marker = None if properties is None else _child(properties, 'outlineLvl')
-    if marker is None:
-        return None
-    value = _word_attribute(marker, 'val')
-    return int(value) + 1 if value.isdecimal() and int(value) <= 8 else 0
-
-
-def _word_heading_styles(bundle: SafeArchive, source: str, relations: dict[str, tuple[str, str]]) -> dict[str, int]:
-    """The heading level each paragraph style gives, through the styles it is based on, or
-    ``_UNRESOLVED`` for a chain not followed to its end. A document without a readable styles
-    part gives none, and its paragraphs carry no level."""
-    identifiers = [key for key, (_, kind) in relations.items() if kind == 'styles']
-    if len(identifiers) != 1:
-        return {}
-    try:
-        root = bundle.xml(_related(source, relations, identifiers[0], 'styles'), supported_namespaces=_WORD_TEXT_NAMESPACES)
-    except InvalidInput:
-        return {}
-    own: dict[str, int] = {}
-    based: dict[str, str] = {}
-    for style in root:
-        if _local(style.tag) != 'style':
-            continue
-        identifier = _word_attribute(style, 'styleId')
-        if not identifier:
-            continue
-        level = _outline_level(_child(style, 'pPr'))
-        name = _child(style, 'name')
-        named = _HEADING_STYLE.match(_word_attribute(name, 'val')) if name is not None else None
-        if level is not None:
-            own[identifier] = level
-        elif named:
-            own[identifier] = int(named.group(1))
-        parent = _child(style, 'basedOn')
-        if parent is not None:
-            based[identifier] = _word_attribute(parent, 'val')
-    levels: dict[str, int] = {}
-    for identifier in {*own, *based}:
-        current, level = identifier, _UNRESOLVED
-        for _ in range(_STYLE_DEPTH):
-            if current in own:
-                level = own[current]
-                break
-            if current not in based:
-                level = 0
-                break
-            current = based[current]
-        if level:
-            levels[identifier] = level
-    return levels
-
-
-def _paragraph_levels(root: Element, styles: Mapping[str, int]) -> dict[int, int]:
-    """Heading levels of the paragraphs under ``root``, read before their properties are pruned."""
-    levels: dict[int, int] = {}
-    for paragraph in root.iter():
-        if _local(paragraph.tag) != 'p' or paragraph.tag.rpartition('}')[0][1:] not in _WORD_NAMESPACES:
-            continue
-        properties = _child(paragraph, 'pPr')
-        level = _outline_level(properties)
-        if level is None and properties is not None and (style := _child(properties, 'pStyle')) is not None:
-            level = styles.get(_word_attribute(style, 'val'))
-        if level:
-            levels[id(paragraph)] = level
-    return levels
-
-
 def _word_content(
     root: Element, output: _Output, prefix: str, metadata: dict[str, str],
+    structure: WordStructure, declared: dict[Element, dict[str, str]],
     targets: Mapping[str, str] | None = None,
-    styles: Mapping[str, int] | None = None, levels: dict[int, int] | None = None,
 ) -> Iterator[tuple[Element, str, list[Element]]]:
-    # Pruning the first root prunes the text boxes inside it too, before they are detached, so
-    # levels read here are kept in ``levels`` for the boxes' own turn.
-    levels = {} if levels is None else levels
-    levels.update(_paragraph_levels(root, styles or {}))
+    # Paragraph properties are run metadata to the text reader and are pruned
+    # below, so what each paragraph declares is read first. A text box is
+    # detached from a paragraph already pruned, and read again declares
+    # nothing: only a role found is kept, so the body's reading stands.
+    for element in root.iter():
+        if _local(element.tag) == 'p' and (role := structure.role(element, output.check)):
+            declared[element] = role
     _prune_run_metadata(root, output)
     paragraphs = tables = 0
     for block in _blocks(root, {'p', 'tbl'}, include_tags=frozenset(_WORD_REFERENCES)):
@@ -500,11 +429,8 @@ def _word_content(
             paragraphs += 1
             locator = f'{prefix}paragraph:{paragraphs}'
             boxes = _detach_textboxes(block, output)
-            level = levels.get(id(block))
-            details = ({**metadata, 'heading_level_unresolved': 'style_chain'} if level == _UNRESOLVED
-                       else {**metadata, 'heading_level': str(level)} if level else metadata)
             text, linked = _linked_text(block, output, targets or {})
-            output.add(text, locator, {**details, **linked} if linked else details)
+            output.add(text, locator, {**metadata, **declared.get(block, {}), **linked})
             yield block, locator, boxes
 
 
@@ -566,6 +492,20 @@ def _word_note_part(
     return path, entries
 
 
+def _word_structure_part(bundle: SafeArchive, source: str, relations: dict[str, tuple[str, str]],
+                         kind: str, output: _Output) -> Element | None:
+    """The styles or numbering part, or None. One the reader cannot open is
+    noted and read around: it names roles, and the text does not depend on it."""
+    identifier = next((key for key, (_, relationship_kind) in relations.items() if relationship_kind == kind), None)
+    if identifier is None:
+        return None
+    try:
+        return bundle.xml(_related(source, relations, identifier, kind), supported_namespaces=_WORD_TEXT_NAMESPACES)
+    except InvalidInput:
+        output.notes.add(f'{kind}_unreadable')
+        return None
+
+
 def _docx(bundle: SafeArchive, output: _Output) -> None:
     source = _main_part(bundle)
     root = bundle.xml(source, supported_namespaces=_WORD_TEXT_NAMESPACES)
@@ -573,8 +513,9 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
     if _local(root.tag) != 'document' or body is None:
         raise InvalidInput('DOCX is missing its document body')
     relations = _relationships(bundle, source)
-    styles = _word_heading_styles(bundle, source, relations)
-    levels: dict[int, int] = {}
+    structure = WordStructure(_word_structure_part(bundle, source, relations, 'styles', output),
+                              _word_structure_part(bundle, source, relations, 'numbering', output))
+    declared: dict[Element, dict[str, str]] = {}
     parts: dict[str, tuple[str, dict[str, Element]]] = {}
     emitted: set[tuple[str, str]] = set()
     # Each part names its own hyperlinks: the body's, a note part's, a comment part's.
@@ -586,7 +527,7 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
         member = metadata['member']
         if member not in links:
             links[member] = _hyperlink_targets(bundle, member)
-        for block, locator, boxes in _word_content(content, output, prefix, metadata, links[member], styles, levels):
+        for block, locator, boxes in _word_content(content, output, prefix, metadata, structure, declared, links[member]):
             for number, box in enumerate(boxes, 1):
                 details = {'member': metadata['member'], 'content_role': 'textbox', 'parent_locator': locator}
                 pending.append((box, _word_prefix(locator, f'/textbox:{number}/'), details))
@@ -621,6 +562,7 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
                             details[key] = value
                 suffix = f'/{kind}:{identifier}/'
                 pending.append((note, _word_prefix(locator, suffix), details))
+    output.notes.update(structure.notes)
 
 
 def _xlsx(bundle: SafeArchive, output: _Output) -> None:
@@ -1308,6 +1250,8 @@ def parse_office(data: bytes, filename: str, limits: DocumentLimits) -> ParsedDo
         metadata = {key: str(value) for key, value in output.counts.items() if value}
         if macros:
             metadata['macros'] = 'present, not read'
+        if output.notes:
+            metadata['structure_notes'] = ','.join(sorted(output.notes))
         parsed = ParsedDocument(format=extension, parser=parser, segments=tuple(output.segments),
                                 metadata=metadata)
         validate_document(parsed, limits)

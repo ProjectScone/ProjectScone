@@ -20,11 +20,39 @@ The result says how many passages were read, unread, or too large for a
 round, how many notes and sentences were dropped and why, and it never
 claims accuracy: the quotes are checked, the sentences are not.
 
-This is not a refine chain that threads one growing answer through every
-chunk. Rounds are independent, so an early passage cannot shape what a
-later one is allowed to say; a failed round costs only its own passages;
-and the citation check is mechanical rather than an instruction the model
-may or may not follow.
+That is the ``evidence`` mode, the default. Two more modes answer the
+same way the reference framework's Refine and Accumulate do, under the
+same check:
+
+``refine`` threads one answer through the rounds. The first round that
+leaves a note is the answer; each later round is one call that sees the
+answer so far -- every sentence with its passage id and its quote, not
+the passages again -- and the new round's passages, and returns the whole
+answer rewritten. A rewritten sentence survives only if its quote is
+found in a passage read so far, and a readable rewrite replaces the
+answer; a sentence of the answer so far whose citation the rewrite does
+not carry is counted in ``refine_dropped_carried``, with a reason. A
+rewrite that cannot be read, or whose every sentence fails the check,
+leaves the answer as it stood, and ``refine_kept_prior`` counts those
+rounds. The rounds are packed by bytes as above, except that a round
+after the first answer carries that answer inside its bound: its passages
+get ``max_round_bytes`` less the answer's bytes, and each round's record
+says both. That is the reference's CompactAndRefine (its default), which
+repacks each chunk around the existing answer. Passages are never cut, so
+when the answer leaves no room for the next passage the rounds stop, the
+rest are unread, and ``truncated`` says the bound bit. An early passage
+can shape what a later round keeps, which is the trade against
+``evidence``.
+
+``accumulate`` gives the model one passage per call and joins what each
+call left, in passage order, with no fold: a note must quote the passage
+its own call held. It spends the most calls on the passages it reads.
+
+In every mode the calls are bounded by ``max_rounds`` (``evidence`` may
+add one fold), every call is counted in ``model_calls``, and the record
+says how many passages were read and how many the shown sentences cite.
+The citation check is mechanical rather than an instruction the model may
+or may not follow.
 """
 
 from __future__ import annotations
@@ -32,6 +60,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Mapping, Optional, Sequence
 
@@ -51,6 +80,9 @@ MAX_SENTENCE_CHARS = 1_000
 MAX_QUOTE_CHARS = 2_000
 
 Status = Literal["synthesized", "partial", "unavailable", "no_evidence"]
+Mode = Literal["evidence", "refine", "accumulate"]
+#: The ways a synthesis can read its rounds; ``evidence`` is the default.
+MODES: tuple[str, ...] = ("evidence", "refine", "accumulate")
 RoundStatus = Literal["noted", "unreadable", "failed", "timeout"]
 
 _NOTES_SYSTEM = (
@@ -60,6 +92,16 @@ _NOTES_SYSTEM = (
     "not say. Reply with JSON only, of the form "
     '{"notes": [{"sentence": "...", "passage": "chunk:1", "quote": "..."}]}, '
     "and with an empty list when nothing in the passages bears on the question."
+)
+_REFINE_SYSTEM = (
+    "You refine an answer to a question with new passages, using the answer so far and the new passages and "
+    "nothing else. The answer so far is a list of sentences, each with the id of the passage it came from and "
+    "a quote from that passage. Return the whole refined answer: keep each sentence that still holds, with "
+    "its passage id and its quote exactly as given; correct or add sentences only from what the new passages "
+    "say, each with the id of the one passage it comes from and a quote copied exactly, character for "
+    "character, from that passage. When the new passages add nothing, return the answer so far unchanged. "
+    "Reply with JSON only, of the form "
+    '{"notes": [{"sentence": "...", "passage": "chunk:1", "quote": "..."}]}.'
 )
 _FOLD_SYSTEM = (
     "You merge notes into a short summary that answers a question. Each summary sentence is written from one "
@@ -73,7 +115,8 @@ class SynthesisLimits(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     #: Passages one synthesis may read; more is refused, not cut. Capped by what one recall returns.
     max_passages: int = Field(default=24, ge=1, le=MAX_LIMIT)
-    #: Bytes of passage text one round may hold; a passage over it on its own is refused.
+    #: Bytes of passage text one round may hold, a refine round's answer so far included; a passage over it
+    #: on its own is refused.
     max_round_bytes: int = Field(default=12_000, ge=64, le=64_000)
     #: Rounds one synthesis may run; passages beyond them are left unread and counted.
     max_rounds: int = Field(default=6, ge=1, le=16)
@@ -124,6 +167,8 @@ class SynthesisRound:
     notes_returned: int
     notes_kept: int
     status: RoundStatus
+    #: Bytes of the answer so far a refine round carried beside its passages; 0 in any other round.
+    answer_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -155,8 +200,18 @@ class Synthesis:
     truncated: bool
     model_calls: int
     reasons: tuple[str, ...]
+    mode: Mode = "evidence"
+    #: Refine rounds whose reply left the answer as it stood: unreadable, or no sentence kept a checked quote.
+    refine_kept_prior: int = 0
+    #: Checked sentences of the answer so far that a readable refine rewrite left out, over every round.
+    refine_dropped_carried: int = 0
     #: The quotes were checked against their passages; the sentences were not checked against anything.
     verified_accuracy: Literal[False] = False
+
+    @property
+    def passages_cited(self) -> int:
+        """Distinct passages the shown sentences cite: the passages the answer used, not the ones read."""
+        return len({citation.passage_id for sentence in self.sentences for citation in sentence.citations})
 
     def text(self) -> str:
         lines = []
@@ -167,19 +222,22 @@ class Synthesis:
 
     def record(self) -> dict[str, object]:
         return {
-            "schema_version": 1, "question": self.question, "status": self.status,
+            "schema_version": 1, "question": self.question, "status": self.status, "mode": self.mode,
             "sentences": [{"text": sentence.text,
                            "citations": [{"passage": c.passage_id, "quote": c.quote, "start": c.start, "end": c.end}
                                          for c in sentence.citations]} for sentence in self.sentences],
             "sentences_offered": self.sentences_offered, "truncated": self.truncated,
             "folded": self.folded, "fold_dropped_uncited": self.fold_dropped_uncited,
             "passages": {"given": self.passages_given, "read": self.passages_read,
-                         "unread": self.passages_unread, "oversize": self.passages_oversize},
+                         "unread": self.passages_unread, "oversize": self.passages_oversize,
+                         "cited": self.passages_cited},
             "notes": {"kept": self.notes_kept, "dropped_unquoted": self.notes_dropped_unquoted,
                       "dropped_unknown": self.notes_dropped_unknown, "dropped_malformed": self.notes_dropped_malformed},
             "rounds": [{"round": r.round_number, "passages": r.passage_count, "bytes": r.passage_bytes,
-                        "notes_returned": r.notes_returned, "notes_kept": r.notes_kept, "status": r.status}
+                        "answer_bytes": r.answer_bytes, "notes_returned": r.notes_returned,
+                        "notes_kept": r.notes_kept, "status": r.status}
                        for r in self.rounds],
+            "refine_kept_prior": self.refine_kept_prior, "refine_dropped_carried": self.refine_dropped_carried,
             "model_calls": self.model_calls, "reasons": list(self.reasons), "verified_accuracy": False,
         }
 
@@ -206,25 +264,20 @@ def _object(reply: object) -> Optional[dict[str, object]]:
     return None
 
 
-def _pack(passages: Sequence[Passage], max_round_bytes: int) -> tuple[list[list[Passage]], int]:
-    """Rounds in the order given, each under the byte bound; passages over it alone are refused."""
-    rounds: list[list[Passage]] = []
-    current: list[Passage] = []
+def _size(passage: Passage) -> int:
+    return len(passage.text.encode("utf-8"))
+
+
+def _take(passages: Sequence[Passage], start: int, room: int, *, one_each: bool) -> list[Passage]:
+    """The next round from ``start``, in the order given: passages while they fit ``room`` bytes, or one."""
+    taken: list[Passage] = []
     used = 0
-    oversize = 0
-    for passage in passages:
-        size = len(passage.text.encode("utf-8"))
-        if size > max_round_bytes:
-            oversize += 1
-            continue
-        if current and used + size > max_round_bytes:
-            rounds.append(current)
-            current, used = [], 0
-        current.append(passage)
-        used += size
-    if current:
-        rounds.append(current)
-    return rounds, oversize
+    for passage in passages[start:]:
+        if (taken and one_each) or used + _size(passage) > room:
+            break
+        taken.append(passage)
+        used += _size(passage)
+    return taken
 
 
 class _Calls:
@@ -317,21 +370,42 @@ def _notes_prompt(question: str, passages: Sequence[Passage]) -> str:
     return f"Question: {question}\n\nPassages:\n{listed}"
 
 
+def _answer_so_far(answer: Sequence[_Note]) -> str:
+    """The answer as a refine call carries it: each sentence with its passage id and quote."""
+    return "\n".join(f'[s{index}] ({note.citation.passage_id}) {note.sentence} Quote: "{note.citation.quote}"'
+                     for index, note in enumerate(answer, 1))
+
+
+def _refine_prompt(question: str, so_far: str, passages: Sequence[Passage]) -> str:
+    new_passages = "\n".join(f"[{passage.id}] {passage.text}" for passage in passages)
+    return f"Question: {question}\n\nAnswer so far:\n{so_far}\n\nNew passages:\n{new_passages}"
+
+
+def _left_out(answer: Sequence[_Note], rewrite: Sequence[_Note]) -> int:
+    """Sentences of the answer whose citation no sentence of the rewrite carries; a reworded sentence keeps its quote."""
+    carried = Counter(note.citation for note in rewrite)
+    return sum((Counter(note.citation for note in answer) - carried).values())
+
+
 def _fold_prompt(question: str, notes: Sequence[_Note]) -> str:
     listed = "\n".join(f"[n{index}] ({note.citation.passage_id}) {note.sentence}" for index, note in enumerate(notes, 1))
     return f"Question: {question}\n\nNotes:\n{listed}"
 
 
 async def synthesize_passages(model: ChatModel, question: str, passages: Sequence[Passage], *,
-                              limits: Optional[SynthesisLimits] = None) -> Synthesis:
+                              limits: Optional[SynthesisLimits] = None, mode: Mode = "evidence") -> Synthesis:
     """Sentences about ``question`` from ``passages``, each with a quote found in its passage.
 
     Passages are read in the order given, so give them ranked. Over
     ``limits.max_passages`` is refused, not cut; a passage larger than a
-    round is refused on its own and the rest are read."""
+    round is refused on its own and the rest are read. ``mode`` is how the
+    rounds are read: ``evidence``, ``refine`` or ``accumulate`` (see the
+    module's account)."""
     limits = limits or SynthesisLimits()
     if not isinstance(question, str) or not question.strip():
         raise InvalidInput("a question must have something in it")
+    if mode not in MODES:
+        raise InvalidInput(f"mode must be one of {', '.join(MODES)}, not {mode!r}")
     given = tuple(passages)
     reasons: list[str] = []
     rounds: list[SynthesisRound] = []
@@ -342,40 +416,76 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
     oversize = 0
     if len(given) > limits.max_passages:
         reasons.append(f"{len(given)} passages over the bound of {limits.max_passages}; refused rather than cut")
-        return _finish(question, given, rounds, notes, tally, calls, reasons, read, oversize,
-                       folded=False, fold_uncited=0, fold_attempted=False, limits=limits, refused=True)
-    plan, oversize = _pack(given, limits.max_round_bytes)
+        return _finish(question, given, rounds, tally, calls, reasons, read, oversize,
+                       folded=False, fold_uncited=0, fold_attempted=False, limits=limits, refused=True, mode=mode)
+    fitting = [passage for passage in given if _size(passage) <= limits.max_round_bytes]
+    oversize = len(given) - len(fitting)
+    # Passages of rounds whose reply was read: what a refined sentence may quote.
+    pool: dict[str, Passage] = {}
+    kept_prior = 0
+    dropped_carried = 0
+    capped = crowded = False
     if oversize:
         reasons.append(f"{oversize} passage(s) oversize for a round of {limits.max_round_bytes} bytes; refused rather than cut")
-    if not plan:
+    if not fitting:
         reasons.append("no passages to read")
-    for number, group in enumerate(plan[:limits.max_rounds], 1):
-        size = sum(len(passage.text.encode("utf-8")) for passage in group)
-        reply, failure, reason = await calls.ask(_NOTES_SYSTEM, _notes_prompt(question, group))
+    start = 0
+    while start < len(fitting):
+        if len(rounds) == limits.max_rounds:
+            capped = True
+            reasons.append(f"{len(fitting) - start} passage(s) unread: the bound of {limits.max_rounds} round(s) was reached")
+            break
+        number = len(rounds) + 1
+        refining = mode == "refine" and bool(notes)
+        so_far = _answer_so_far(notes) if refining else ""
+        carried = len(so_far.encode("utf-8"))
+        group = _take(fitting, start, limits.max_round_bytes - carried, one_each=mode == "accumulate")
+        if not group:
+            # Only a carried answer can leave no room: every passage here fits a round on its own.
+            crowded = True
+            reasons.append(f"{len(fitting) - start} passage(s) unread: the answer so far ({carried} bytes) left no room "
+                           f"for the next passage in a round of {limits.max_round_bytes} bytes")
+            break
+        start += len(group)
+        size = sum(_size(passage) for passage in group)
+        if refining:
+            reply, failure, reason = await calls.ask(_REFINE_SYSTEM, _refine_prompt(question, so_far, group))
+        else:
+            reply, failure, reason = await calls.ask(_NOTES_SYSTEM, _notes_prompt(question, group))
         if reply is None:
             assert failure is not None and reason is not None
-            rounds.append(SynthesisRound(number, len(group), size, 0, 0, failure))
+            rounds.append(SynthesisRound(number, len(group), size, 0, 0, failure, carried))
             reasons.append(reason)
             break
-        parsed = _read_notes(reply, {passage.id: passage for passage in group}, tally)
+        held = {passage.id: passage for passage in group}
+        parsed = _read_notes(reply, {**pool, **held} if refining else held, tally)
         if parsed is None:
-            rounds.append(SynthesisRound(number, len(group), size, 0, 0, "unreadable"))
-            reasons.append(f"round {number}: the reply could not be read as notes")
+            rounds.append(SynthesisRound(number, len(group), size, 0, 0, "unreadable", carried))
+            stands = "; the answer so far stands" if refining else ""
+            kept_prior += refining
+            reasons.append(f"round {number}: the reply could not be read as notes{stands}")
             continue
         returned, kept = parsed
-        rounds.append(SynthesisRound(number, len(group), size, returned, len(kept), "noted"))
-        notes.extend(kept)
+        rounds.append(SynthesisRound(number, len(group), size, returned, len(kept), "noted", carried))
+        pool.update(held)
         read += len(group)
-    capped = len(plan) > limits.max_rounds
-    if capped:
-        reasons.append(f"{sum(len(group) for group in plan[limits.max_rounds:])} passage(s) unread: "
-                       f"the bound of {limits.max_rounds} round(s) was reached")
+        if not refining:
+            notes.extend(kept)
+        elif kept:
+            left_out = _left_out(notes, kept)
+            if left_out:
+                dropped_carried += left_out
+                reasons.append(f"round {number}: {left_out} sentence(s) of the answer so far left out of the rewrite")
+            notes = kept
+        else:
+            kept_prior += 1
+            reasons.append(f"round {number}: no refined sentence kept a checked quote; the answer so far stands")
     folded = False
     fold_uncited = 0
     fold_attempted = False
     sentences: list[Sentence] = [Sentence(note.sentence, (note.citation,)) for note in notes]
     noted_rounds = sum(1 for r in rounds if r.status == "noted" and r.notes_kept)
-    if noted_rounds >= 2 and len(notes) >= 2:
+    if mode == "evidence" and noted_rounds >= 2 and len(notes) >= 2:
         fold_attempted = True
         reply, failure, reason = await calls.ask(_FOLD_SYSTEM, _fold_prompt(question, notes))
         merged = _read_fold(reply, notes) if reply is not None else None
@@ -389,21 +499,23 @@ async def synthesize_passages(model: ChatModel, question: str, passages: Sequenc
         else:
             sentences, fold_uncited = merged
             folded = True
-    return _finish(question, given, rounds, notes, tally, calls, reasons, read, oversize, folded=folded,
+    return _finish(question, given, rounds, tally, calls, reasons, read, oversize, folded=folded,
                    fold_uncited=fold_uncited, fold_attempted=fold_attempted, limits=limits, refused=False,
-                   sentences=sentences, capped=capped)
+                   sentences=sentences, capped=capped or crowded, mode=mode, kept_prior=kept_prior,
+                   dropped_carried=dropped_carried)
 
 
-def _finish(question: str, given: Sequence[Passage], rounds: Sequence[SynthesisRound], notes: Sequence[_Note],
+def _finish(question: str, given: Sequence[Passage], rounds: Sequence[SynthesisRound],
             tally: _Tally, calls: _Calls, reasons: list[str], read: int, oversize: int, *, folded: bool,
             fold_uncited: int, fold_attempted: bool, limits: SynthesisLimits, refused: bool,
-            sentences: Sequence[Sentence] = (), capped: bool = False) -> Synthesis:
+            sentences: Sequence[Sentence] = (), capped: bool = False, mode: Mode = "evidence",
+            kept_prior: int = 0, dropped_carried: int = 0) -> Synthesis:
     offered = len(sentences)
     cut = offered > limits.max_sentences
     shown = tuple(sentences[:limits.max_sentences])
     if cut:
         reasons.append(f"{offered} sentences offered, {limits.max_sentences} shown: the sentence bound was reached")
-    # A bound of the limits cut something: rounds or sentences. A failed
+    # A bound of the limits cut something: rounds, a round's room beside a refine answer, or sentences. A failed
     # round leaves passages unread too, but that is a failure, not a bound.
     truncated = capped or cut
     unread = len(given) - read - oversize
@@ -416,9 +528,11 @@ def _finish(question: str, given: Sequence[Passage], rounds: Sequence[SynthesisR
         status = "partial"
     else:
         status = "synthesized"
-    return Synthesis(question, status, shown, tuple(rounds), len(given), read, unread, oversize, len(notes),
+    # Notes kept over every round: a refined answer's rewrites are counted as the rounds kept them.
+    kept = sum(r.notes_kept for r in rounds)
+    return Synthesis(question, status, shown, tuple(rounds), len(given), read, unread, oversize, kept,
                      tally.unquoted, tally.unknown, tally.malformed, folded, fold_uncited, offered, truncated,
-                     calls.count, tuple(reasons))
+                     calls.count, tuple(reasons), mode, kept_prior, dropped_carried)
 
 
 def passages_from_recall(items: Sequence[RecallItem]) -> tuple[Passage, ...]:
@@ -428,12 +542,12 @@ def passages_from_recall(items: Sequence[RecallItem]) -> tuple[Passage, ...]:
 
 
 async def synthesize(engine: "MemoryEngine", model: ChatModel, space: str, question: str, *,
-                     limits: Optional[SynthesisLimits] = None, as_of: Optional[str] = None,
+                     limits: Optional[SynthesisLimits] = None, mode: Mode = "evidence", as_of: Optional[str] = None,
                      tags: Sequence[str] = (), where: Mapping[str, str] | None = None, kind: Optional[str] = None,
                      source_prefix: Optional[str] = None, since: Optional[str] = None,
                      until: Optional[str] = None) -> Synthesis:
-    """Recall up to ``limits.max_passages`` passages for ``question`` and synthesize over them."""
+    """Recall up to ``limits.max_passages`` passages for ``question`` and synthesize over them in ``mode``."""
     limits = limits or SynthesisLimits()
     found = await engine.recall(space, question, limit=limits.max_passages, as_of=as_of, tags=tags, where=where,
                                 kind=kind, source_prefix=source_prefix, since=since, until=until)
-    return await synthesize_passages(model, question, passages_from_recall(found.items), limits=limits)
+    return await synthesize_passages(model, question, passages_from_recall(found.items), limits=limits, mode=mode)

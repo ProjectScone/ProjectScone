@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 from ..core.errors import InvalidInput, SconeError
 from .code import BRACE_SUFFIXES, PYTHON_SUFFIXES
+from .code_tree import TREE_SUFFIXES
 from .manifests import is_manifest
 from .mcp_config import WALKED_DOT_NAMES, is_mcp_config
 from .code_resolution import file_resolver
@@ -60,7 +61,7 @@ MAX_BYTES = 1_000_000
 #: What a sync reads when the caller does not say. Prose and code, not
 #: archives or images: a file whose bytes are not text has nothing for a
 #: lexical lane and would only bloat the space.
-SUFFIXES: tuple[str, ...] = (*PYTHON_SUFFIXES, *BRACE_SUFFIXES, ".md", ".markdown", ".rst", ".txt")
+SUFFIXES: tuple[str, ...] = (*PYTHON_SUFFIXES, *BRACE_SUFFIXES, *TREE_SUFFIXES, ".md", ".markdown", ".rst", ".txt")
 #: Changes listed in a receipt before it stops listing them. The counts
 #: stay exact; only the per-file list is bounded.
 MAX_LISTED = 1_000

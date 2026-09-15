@@ -232,3 +232,42 @@ def test_a_voice_session_needs_a_persona_even_where_text_does_not(tmp_path):
         voice = client.post("/v1/conversations", json={"request_id": "v", "capture": True, "mode": "voice"})
         assert voice.status_code == 422 and "persona" in voice.text
         assert [s["mode"] for s in client.get("/v1/conversations").json()["items"]] == ["text"]
+
+
+class PausingRecognizer(Recognizer):
+    """Hears one utterance as two final transcripts, as an energy gate
+    does when the speaker pauses mid-clause for longer than its stop."""
+
+    async def transcribe(self, audio):
+        async for chunk in audio:
+            yield SpeechStarted()
+            yield Transcript("Tell me which star Juniper points to")
+            yield SpeechStarted()
+            yield Transcript("at night.")
+
+
+@pytest.mark.parametrize("semantic", [False, True])
+def test_semantic_turns_are_the_hosts_choice_and_hold_an_open_clause(tmp_path, semantic):
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    registry = ProviderRegistry(reply={("stub", "echo"): Model}, transcription={("stub", "ears"): PausingRecognizer},
+                                speech={("stub", "mouth", "alto"): Synthesizer})
+    app = create_conversation_app(engine, KEYS, tmp_path / "turns.db", None, public_text_streaming=True,
+                                  catalog=bind_catalog([Persona.model_validate(HELPER)], registry),
+                                  semantic_turn=semantic)
+    with TestClient(app) as client:
+        client.headers.update(AUTH)
+        assert client.get("/v1/conversations/capabilities").json()["voice_turn_end"] == ("semantic" if semantic else "silence")
+        sid = create_voice(client).json()["session_id"]
+        with client.websocket_connect(f"/v1/conversations/{sid}/audio") as socket:
+            socket.send_text(json.dumps(HELLO))
+            assert json.loads(socket.receive_text())["type"] == "ready"
+            socket.send_bytes(PCM)
+            socket.send_text(json.dumps({"type": "end"}))
+            while socket.receive()["type"] != "websocket.close":
+                pass  # spoken frames, and with silence alone a clear for the superseded reply
+        episodes = client.get(f"/v1/conversations/{sid}/transcript").json()["episodes"]
+    said = [(e["content"], e["metadata"]["turn_end"]) for e in episodes if e["metadata"]["role"] == "user"]
+    if semantic:
+        assert said == [("Tell me which star Juniper points to at night.", "semantic_complete")]
+    else:
+        assert sorted(said) == [("Tell me which star Juniper points to", "silence"), ("at night.", "silence")]
