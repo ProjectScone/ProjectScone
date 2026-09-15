@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .events import TextDelta, ReplyCompleted, TextModel
+from .keypad import Keypress
 
 # Shared response protocol for both audio and text sessions.
 VoiceModel = TextModel
@@ -75,7 +76,9 @@ class Transcript:
 
 
 class AudioTransport(Protocol):
-    def receive(self) -> AsyncIterator[AudioChunk]: ...
+    def receive(self) -> AsyncIterator[AudioChunk | Keypress]:
+        """Audio, and keys a phone or dial pad pressed (``realtime.keypad``) where the transport has them."""
+        ...
     async def send(self, audio: AudioChunk, turn_id: str) -> None: ...
     async def clear(self, turn_id: str) -> None:
         """Discard queued output for this turn; failure must raise."""
