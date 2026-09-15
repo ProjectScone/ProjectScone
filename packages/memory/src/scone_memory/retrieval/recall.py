@@ -98,9 +98,9 @@ class RecallRuntime:
     vector_weight: float = 1.0
 
 
-#: Given the items recall would return and its required and excluded phrases,
-#: the answer with each stored summary expanded (``summary_expand``).
-SummaryExpander = Callable[[Sequence[RecallItem], Sequence[str], Sequence[str]], Awaitable["Expanded"]]
+#: Given the items recall would return, its required and excluded phrases and
+#: its scope, the answer with each stored summary expanded (``summary_expand``).
+SummaryExpander = Callable[[Sequence[RecallItem], Sequence[str], Sequence[str], TextFilter], Awaitable["Expanded"]]
 
 
 def placed_in_file(episode: Episode, chunk: Chunk) -> tuple[Optional[int], Optional[int], Optional[str]]:
@@ -640,6 +640,15 @@ async def recall(
         )
     fact_scope = scope if narrowing or clean_tags or clean_where else None
     facts = await fact_recall.facts_for_query(runtime.documents, space, query, boundary or now, scope=fact_scope, degraded=degraded)
+    retrieved = len(result_items)
+    expanded: "Expanded | None" = None
+    if summaries is not None:
+        # Before the event is written, so it lists what is returned and a
+        # chunk a summary brought can be judged; held to the same scope and
+        # phrases the lanes' passages were; and before supersession, so a
+        # retired claim is marked and moved whichever way it came back.
+        expanded = await summaries(result_items, required, excluded, scope)
+        result_items = list(expanded.items)
     if runtime.demote_superseded:
         # After the facts, because this is the one thing in the recall path
         # that reads the ledger rather than the index -- what the returned
@@ -648,14 +657,6 @@ async def recall(
         # worded differently.
         result_items = await supersession.demote_superseded(
             runtime.documents, space, result_items, boundary or now, degraded=degraded)
-    retrieved = len(result_items)
-    expanded: "Expanded | None" = None
-    if summaries is not None:
-        # Before the event is written, so it lists what is returned and a
-        # chunk a summary brought can be judged; checked against the same
-        # phrases the lanes' passages were.
-        expanded = await summaries(result_items, required, excluded)
-        result_items = list(expanded.items)
     previous = await fact_recall.history_for(runtime.documents, space, facts, boundary or now, scope=fact_scope) if history else []
     counts = await runtime.documents.counts(space)
     narrowing_report: Optional[Narrowing] = None

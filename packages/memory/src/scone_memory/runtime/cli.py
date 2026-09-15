@@ -1861,13 +1861,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             # lessons would vanish, or a judged-useless neighbour would ride under a good lesson.
             raise InvalidInput("--lessons cannot be combined with --merge: a merged passage joins chunks "
                                "judged separately, and one lesson cannot stand for them; ask for one or the other")
-        if args.expand_summaries and (args.merge or args.parts):
-            # A merge reads the text between the fragments it joins and reports it under one chunk's
-            # fields, so two cited chunks would come back holding an uncited one under their
-            # via_summary; --parts answers without recall's expansion at all.
-            raise InvalidInput("--expand-summaries cannot be combined with --merge or --parts: a merged passage "
-                               "holds text a summary does not rest on, and --parts answers without expansion; "
-                               "ask for one or the other")
+        if args.expand_summaries and (args.merge or args.parts or args.window or args.window_unit == "sentences"):
+            # A merge or a window returns a cited chunk holding text it does not rest on, with the spans in
+            # via_summary indexing text not returned; --parts answers without recall's expansion at all.
+            raise InvalidInput("--expand-summaries cannot be combined with --merge, a window or --parts: a merged "
+                               "or widened passage holds text a summary does not rest on, and --parts answers "
+                               "without expansion; ask for one or the other")
         policy: tuple[str, ...] = ()
         names_read = None
         if args.merge_min_share is not None and not args.merge:

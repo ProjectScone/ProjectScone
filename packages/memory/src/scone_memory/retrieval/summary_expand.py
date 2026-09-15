@@ -27,9 +27,14 @@ The rules, each with a test:
   the quote is ``unquoted``; a node that is not stored below is
   ``unresolved``. None of them is served. A node is found by the key its
   build stored it under, one read, never a walk over the space.
-- **The phrases hold.** A cited chunk the recall's ``require`` or
-  ``exclude`` would have dropped is dropped here too and counted, and a
-  summary that lost any stands beside what was left, even in ``replace``.
+- **The scope and the phrases hold.** A cited chunk the recall's scope
+  would not retain (``reranking.candidate_is_retained``: kind, source
+  prefix, dates, tags, metadata, ``as_of``, and a span that still holds its
+  text) is dropped and counted in ``dropped_scope``; one its ``require`` or
+  ``exclude`` would have dropped is dropped and counted too. A summary
+  resting partly on citations that failed, or that lost any chunk to the
+  scope or the phrases, stands beside what was left, even in ``replace``,
+  and is named in ``partial``.
 - **A document that went, or changed, is refused with a reason.** The
   summarized episode confirmed forgotten serves nothing: forgetting a
   document leaves its summaries, and the chunks they cite are deleted
@@ -37,6 +42,14 @@ The rules, each with a test:
   summary was written from is refused too. A document that could not be
   read is refused as ``unread``, and one never stored here as
   ``source_unknown``; neither is a finding that it is gone.
+  The walk awaits reads, and a document can be forgotten during any of
+  them, so every chunk to be served is read again after the last one,
+  with nothing awaited between that read and the answer; a document
+  whose chunks moved is read again for its reason (``source_gone``, or
+  ``changed_while_read`` when it is still there; a store that cannot answer
+  that read confirms nothing, and every summary is ``unread``). Those reads
+  are not counted against ``MAX_READS``: one chunk read per pass, plus a
+  document re-read for each document found changed.
   A refused summary stands as it was.
 - **Capped, and the cap says when it cut.** ``max_chunks`` bounds the
   chunks added across the answer; a summary the cap cut is kept, followed
@@ -64,8 +77,10 @@ from typing import TYPE_CHECKING, Literal, Optional, Sequence, cast
 
 from ..core.errors import Gone, InvalidInput, NotFound, SconeError
 from ..core.models import Chunk, Episode, RecallItem
+from ..core.ports import TextFilter
 from .phrases import Phrases, checked_phrases
 from .recall import placed_in_file
+from .reranking import candidate_is_retained
 from .summary_tree import StoredSummary, _hash, stored_summary, summary_key
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -86,6 +101,7 @@ _REASONS = {
     "source_unknown": "the document they name is not stored here and never was, as in a note carried from another store",
     "unread": "their document could not be read, which is not a finding that it is gone",
     "content_changed": "their document's content hash no longer matches the one they were written from",
+    "changed_while_read": "their document's chunks changed while their citations were followed, so none of them are served",
     "detail_unreadable": "their account of citations could not be read",
     "nothing_cited": "none of their citations reached a chunk of the document holding its quote",
 }
@@ -122,11 +138,16 @@ class Expanded:
     unquoted: int = 0
     #: Citations naming a node that is not stored below, or nothing this reads.
     unresolved: int = 0
+    #: Cited chunks the recall's scope would not retain.
+    dropped_scope: int = 0
     #: Cited chunks the recall's phrases dropped: one lacking a required phrase, one holding an excluded one.
     dropped_required: int = 0
     dropped_excluded: int = 0
     #: Summaries refused, each with its episode and a reason.
     refused: tuple[dict[str, object], ...] = ()
+    #: Summaries expanded to only part of what they cite -- a citation failed, or the scope, the
+    #: phrases or the cap left a chunk out -- which therefore stand beside it, in either mode.
+    partial: tuple[int, ...] = ()
     #: Summaries left as they were because the read budget was spent.
     not_read: int = 0
     reads: int = 0
@@ -139,8 +160,9 @@ class Expanded:
                 "expanded": self.expanded, "chunks_added": self.chunks_added,
                 "already_present": self.already_present, "capped": self.capped, "cut": list(self.cut),
                 "missing": self.missing, "unquoted": self.unquoted, "unresolved": self.unresolved,
-                "dropped_required": self.dropped_required, "dropped_excluded": self.dropped_excluded,
-                "refused": [dict(one) for one in self.refused], "not_read": self.not_read, "reads": self.reads,
+                "dropped_scope": self.dropped_scope, "dropped_required": self.dropped_required,
+                "dropped_excluded": self.dropped_excluded, "refused": [dict(one) for one in self.refused],
+                "partial": list(self.partial), "not_read": self.not_read, "reads": self.reads,
                 "by_summary": {str(k): list(v) for k, v in self.by_summary.items()}, "why": self.why}
 
 
@@ -161,6 +183,19 @@ class _Source:
     content_hash: str
     #: Nodes looked up by (fan_in, level, index), None when no node is stored there.
     nodes: dict[tuple[int, int, int], Optional[StoredSummary]] = field(default_factory=dict)
+
+
+@dataclass
+class _Resolved:
+    """A summary whose citations were followed: the chunks they reached, with where each holds its quotes."""
+
+    summary_of: int
+    level: int
+    index: int
+    source: _Source
+    quotes: dict[int, list[tuple[int, int]]]
+    #: Its citations that could not be followed: missing, unquoted or unresolved.
+    failed: int
 
 
 @dataclass
@@ -196,6 +231,44 @@ class _Walk:
         found = _Source(episode, {chunk.chunk_id: chunk for chunk in chunks}, _hash(episode.content))
         self.sources[episode_id] = found
         return found
+
+    @property
+    def failed(self) -> int:
+        return self.missing + self.unquoted + self.unresolved
+
+    async def confirm(self, outcomes: dict[int, "_Resolved | _Refused | _Unbudgeted"]) -> None:
+        """Read every chunk about to be served again, after every other read: a
+        document forgotten or changed during the walk refuses each summary of it.
+        Ends on a read that found nothing moved, so nothing awaits after it."""
+        while True:
+            followed = {summary: one for summary, one in outcomes.items() if isinstance(one, _Resolved)}
+            if not followed:
+                return
+            wanted = sorted({chunk_id for one in followed.values() for chunk_id in one.quotes})
+            try:
+                fresh = {chunk.chunk_id: chunk for chunk in await self.engine.documents.get_chunks(self.space, wanted)}
+            except SconeError:
+                for summary in followed:
+                    outcomes[summary] = _Refused("unread")
+                return
+            moved = next((one.summary_of for one in followed.values()
+                          if any(fresh.get(chunk_id) != one.source.chunks[chunk_id] for chunk_id in one.quotes)), None)
+            if moved is None:
+                return
+            reason = await self.recheck(moved)
+            for summary, one in followed.items():
+                if one.summary_of == moved:
+                    outcomes[summary] = _Refused(reason)
+
+    async def recheck(self, episode_id: int) -> str:
+        """Why a document whose chunks moved is refused, read again rather than assumed."""
+        self.sources.pop(episode_id, None)
+        try:
+            await self.source(episode_id)
+            reason = "changed_while_read"
+        except _Refused as refused:
+            reason = refused.reason
+        return reason
 
     def spend(self) -> None:
         """Count one read, or stop the summary being resolved when the budget is spent."""
@@ -303,27 +376,56 @@ def _placed(meta: dict[str, str]) -> tuple[int, int, int, int, str, str]:
 
 async def expand_summaries(engine: "MemoryEngine", space: str, items: Sequence[RecallItem], *,
                            mode: ExpandMode = "follow", max_chunks: int = DEFAULT_MAX_CHUNKS,
-                           require: Sequence[str] = (), exclude: Sequence[str] = ()) -> Expanded:
+                           require: Sequence[str] = (), exclude: Sequence[str] = (),
+                           scope: Optional[TextFilter] = None) -> Expanded:
     """Each summary among ``items`` followed by (``follow``) or replaced by
     (``replace``) the chunks its citations rest on, in document order, and
-    only those holding every ``require`` phrase and no ``exclude`` one."""
+    only those ``scope`` retains (unnarrowed when None) holding every
+    ``require`` phrase and no ``exclude`` one."""
     from ..memory.engine import check_space
 
     check_space(space)
     check_expansion(mode, max_chunks)
     required, excluded = checked_phrases(require, exclude)
     phrases = Phrases(required, excluded) if required or excluded else None
-    dropped = {"required": 0, "excluded": 0}
+    retained = scope if scope is not None else TextFilter()
     walk = _Walk(engine, space)
+    # Every read first: each summary resolved once, by episode, to what it cites or why it stands.
+    outcomes: dict[int, _Resolved | _Refused | _Unbudgeted] = {}
+    for item in items:
+        if "summary_of" not in item.metadata or item.episode_id in outcomes:
+            continue
+        try:
+            summary_of, level, index, fan_in, detail, written_from = _placed(item.metadata)
+            source = await walk.source(summary_of)
+            if written_from != source.content_hash:
+                raise _Refused("content_changed")
+            sentences = await walk.account(detail)
+            if sentences is None:
+                raise _Refused("detail_unreadable")
+            failed_before = walk.failed
+            quotes: dict[int, list[tuple[int, int]]] = {}
+            await walk.cited(summary_of, source, fan_in, level, sentences, None, quotes)
+            if not quotes:
+                raise _Refused("nothing_cited")
+        except (_Refused, _Unbudgeted) as stopped:
+            outcomes[item.episode_id] = stopped
+            continue
+        outcomes[item.episode_id] = _Resolved(summary_of, level, index, source, quotes, walk.failed - failed_before)
+    await walk.confirm(outcomes)
+
+    # Nothing is awaited from here on, so what was confirmed is what is served.
+    dropped = {"required": 0, "excluded": 0}
     present = {item.chunk_id for item in items}
     # A summary's outcome, by episode, so a summary recalled as several
-    # chunks is resolved once: "replaced" drops its other chunks with it.
+    # chunks is answered once: "replaced" drops its other chunks with it.
     handled: dict[int, str] = {}
     kept: list[RecallItem] = []
     refused: list[dict[str, object]] = []
     cut: list[int] = []
+    partial: list[int] = []
     by_summary: dict[int, tuple[int, ...]] = {}
-    expanded = added = repeated = capped = unbudgeted = 0
+    expanded = added = repeated = capped = unbudgeted = out_of_scope = failing = 0
     # Summaries the cap cut after some of what they cite fit, and those it left no room for at all.
     cut_partly = cut_whole = 0
     for item in items:
@@ -335,28 +437,23 @@ async def expand_summaries(engine: "MemoryEngine", space: str, items: Sequence[R
                 kept.append(item)
             continue
         handled[item.episode_id] = "stood"
-        quotes: dict[int, list[tuple[int, int]]] = {}
-        try:
-            summary_of, level, index, fan_in, detail, written_from = _placed(item.metadata)
-            source = await walk.source(summary_of)
-            if written_from != source.content_hash:
-                raise _Refused("content_changed")
-            sentences = await walk.account(detail)
-            if sentences is None:
-                raise _Refused("detail_unreadable")
-            await walk.cited(summary_of, source, fan_in, level, sentences, None, quotes)
-            if not quotes:
-                raise _Refused("nothing_cited")
-        except (_Refused, _Unbudgeted) as stopped:
-            if isinstance(stopped, _Refused):
-                refused.append({"episode_id": item.episode_id, "reason": stopped.reason})
+        outcome = outcomes[item.episode_id]
+        if not isinstance(outcome, _Resolved):
+            if isinstance(outcome, _Refused):
+                refused.append({"episode_id": item.episode_id, "reason": outcome.reason})
             else:
                 unbudgeted += 1
             kept.append(item)  # a summary not resolved stands as it was
             continue
+        source, quotes = outcome.source, outcome.quotes
+        episode = source.episode
         fresh = [source.chunks[chunk_id] for chunk_id in quotes if chunk_id not in present]
         repeated += len(quotes) - len(fresh)
-        lost = 0
+        # Before the phrases and the cap, as the lanes' passages are held to it before either.
+        in_scope = [chunk for chunk in fresh if candidate_is_retained(chunk, episode, space, retained)]
+        lost = len(fresh) - len(in_scope)
+        out_of_scope += lost
+        fresh = in_scope
         if phrases is not None:
             # Before the cap, so a chunk that could not be served takes no place.
             passing = []
@@ -379,12 +476,11 @@ async def expand_summaries(engine: "MemoryEngine", space: str, items: Sequence[R
             else:
                 cut_whole += 1
         # Part of what a summary cites does not stand for all of it, so only a whole one is replaced.
-        whole = not left and not lost
+        whole = not left and not lost and not outcome.failed
         if mode == "follow" or not whole:
             kept.append(item)
         else:
             handled[item.episode_id] = "replaced"
-        episode = source.episode
         for chunk in taken:
             present.add(chunk.chunk_id)
             first_line, last_line, declaration = placed_in_file(episode, chunk)
@@ -393,24 +489,33 @@ async def expand_summaries(engine: "MemoryEngine", space: str, items: Sequence[R
                 created_at=chunk.created_at, source=episode.source, tags=episode.tags,
                 metadata=dict(episode.metadata), start=chunk.start, end=chunk.end,
                 first_line=first_line, last_line=last_line, declaration=declaration,
-                via_summary={"episode_id": item.episode_id, "chunk_id": item.chunk_id, "level": level, "index": index,
-                             "summary_of": summary_of, "mode": mode,
+                via_summary={"episode_id": item.episode_id, "chunk_id": item.chunk_id, "level": outcome.level,
+                             "index": outcome.index, "summary_of": outcome.summary_of, "mode": mode,
                              "cited": [list(span) for span in dict.fromkeys(quotes[chunk.chunk_id])]}))
         added += len(taken)
         if taken or whole:
-            # One that added nothing because the cap or the phrases left nothing was not expanded.
+            # One that added nothing because the cap, the scope or the phrases left nothing was not expanded.
             expanded += 1
             by_summary[item.episode_id] = tuple(chunk.chunk_id for chunk in taken)
+        if taken and not whole:
+            partial.append(item.episode_id)
+            if outcome.failed:
+                failing += 1
 
     summaries = len(handled)
     why = f"expanded {expanded} of {summaries} summary hit(s) to {added} cited chunk(s)" if summaries \
         else "no summary among the items"
     if repeated:
         why += f"; {repeated} cited chunk(s) were already in the answer and are not repeated"
+    if out_of_scope:
+        why += (f"; {out_of_scope} cited chunk(s) fell outside the recall's scope and were not served, so a summary "
+                f"that lost any stands beside what was left")
     if dropped["required"] or dropped["excluded"]:
         why += (f"; {dropped['required'] + dropped['excluded']} cited chunk(s) were dropped by the phrases "
                 f"({dropped['required']} lacking a required one, {dropped['excluded']} holding an excluded one) and "
                 f"not served, so a summary that lost any stands beside what was left")
+    if failing:
+        why += f"; {failing} summary hit(s) rest partly on citations that could not be followed, so they stand beside what could be"
     if capped:
         why += f"; the cap of {max_chunks} chunk(s) left {capped} cited chunk(s) out"
         if cut_partly:
@@ -433,5 +538,6 @@ async def expand_summaries(engine: "MemoryEngine", space: str, items: Sequence[R
     return Expanded(items=tuple(kept), mode=mode, max_chunks=max_chunks, summaries=summaries, expanded=expanded,
                     chunks_added=added, already_present=repeated, capped=capped, cut=tuple(cut),
                     missing=walk.missing, unquoted=walk.unquoted, unresolved=walk.unresolved,
-                    dropped_required=dropped["required"], dropped_excluded=dropped["excluded"],
-                    refused=tuple(refused), not_read=unbudgeted, reads=walk.reads, by_summary=by_summary, why=why)
+                    dropped_scope=out_of_scope, dropped_required=dropped["required"],
+                    dropped_excluded=dropped["excluded"], refused=tuple(refused), partial=tuple(partial),
+                    not_read=unbudgeted, reads=walk.reads, by_summary=by_summary, why=why)

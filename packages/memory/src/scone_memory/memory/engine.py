@@ -1161,8 +1161,10 @@ class MemoryEngine:
             check_expansion(expand_summaries, cap)
             mode = cast("Literal['replace', 'follow']", expand_summaries)
 
-            async def expand_found(items: Sequence[RecallItem], required: Sequence[str], excluded: Sequence[str]) -> Expanded:
-                return await expand(self, space, items, mode=mode, max_chunks=cap, require=required, exclude=excluded)
+            async def expand_found(items: Sequence[RecallItem], required: Sequence[str], excluded: Sequence[str],
+                                   scope: TextFilter) -> Expanded:
+                return await expand(self, space, items, mode=mode, max_chunks=cap, require=required, exclude=excluded,
+                                    scope=scope)
 
             # Run inside recall, before its event is written and before lessons,
             # so the event lists the chunks a summary brought and they are read for lessons too.
