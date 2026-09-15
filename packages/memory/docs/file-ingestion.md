@@ -223,6 +223,23 @@ Current-text filtering also applies inside notes. Dangling, ambiguous and invali
 part references are rejected. All extracted parts share the document's text and
 segment budgets, and nested reference locators are bounded.
 
+A link in a DOCX paragraph (body, textbox, note or comment) or in a slide or
+notes paragraph keeps its words in the text, and the segment's `links`
+metadata says where they point: a JSON list of `text`, `target` and the
+link's `start`/`end` in the segment's UTF-8 bytes, with the link's own
+surrounding spaces left out of the span. An internal bookmark is `#name`. A
+target lives in the part's relationships, which are external for a web or
+mail address; they are read only as addresses and never followed. A link
+whose relationship is missing, is not a hyperlink, is blank or is longer
+than 2,048 characters is counted in `links_unresolved` and not recorded, and
+so is every link of a part whose relationships cannot be read (the part's
+text is read as before). Links are recorded while the list fits one metadata
+value of 4,096 bytes, and at most 200 per segment; `links_cut` counts the
+rest, so two links to long presigned addresses never fail the document. Links
+in table cells and in field codes (`HYPERLINK` fields) are not read yet.
+Targets are recorded data: a page showing them must not make them live
+without the reader choosing to follow one.
+
 A chart in a Word or PowerPoint file (DOCX or PPTX, or another member of their
 families) becomes a segment of its own after the text it sits in (`paragraph:3/chart:1`, `slide:2/chart:1`; `content_role` `chart`,
 `parent_locator` its paragraph or slide). Its text is the chart's title and
