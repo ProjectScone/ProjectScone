@@ -28,8 +28,16 @@ repeat.
 - Our sides: `synthesize_passages` with `max_round_bytes=6000`,
   `max_rounds=16`, `max_sentences=12`, `timeout_s=600`. `evidence` and
   `refine` pack the 12 passages into about two rounds; `accumulate` sends
-  one passage per call. The reference: LlamaIndex 0.14.24 `TreeSummarize`
-  through the comparative runner's adapter to the same model.
+  one passage per call. These are not the synthesize route's limits:
+  `scone answer`, `GET /v1/answer` and `answer_question` read with
+  12,000-byte rounds and a bound of six rounds, and set neither. There
+  each item's 12 passages (6,604 to 7,242 bytes) fit one round, so
+  `refine` would make one call, the same as `evidence`'s, and
+  `accumulate` would read 6 of the 12 and be `partial`. The smaller
+  rounds were chosen to make `refine` refine; the results below say how
+  the modes behave at these limits, not on the route. The reference:
+  LlamaIndex 0.14.24 `TreeSummarize` through the comparative runner's
+  adapter to the same model.
 - Per item the four sides run one after another, their order rotated
   item by item. Each non-empty text is judged by
   `bench.evaluators.faithfulness` (share of the text's claims a passage
@@ -69,10 +77,14 @@ Dropped notes by reason: `evidence` 9 malformed and 3 citing a passage
 the round did not hold; `refine` 1 unknown; `accumulate` 18 malformed, 8
 unknown and 1 unquoted. `evidence` folded on 2 items.
 
-Each number in the table is the median of the three repeats, and the
-first run's number too. For `evidence`, `refine` and `accumulate` every
-text, count and score matched item for item in all four runs, so the
-minimum equals the maximum. TreeSummarize matched in the first run and
+Each number in the table is the median of the three repeats. For
+`evidence`, `refine` and `accumulate` every text, count and score matched
+item for item in all four runs, so the minimum equals the maximum, with
+one exception that is a formula, not a result: the first run computed
+the quoted share as kept over returned, before `notes.carried` existed,
+so it recorded `refine` at 0.970 (32/33), counting the 16 carried
+sentences again, and commit `ddef3d81`'s message records that 0.970.
+Over the same notes the table's formula gives 0.941 (16/17). TreeSummarize matched in the first run and
 the first two repeats. In the third repeat it wrote a different text on
 `2318644b`, the same figures set out at more length, and the judge
 scored that text 0.923 faithful and 1.0 relevant instead of 0.667 and
