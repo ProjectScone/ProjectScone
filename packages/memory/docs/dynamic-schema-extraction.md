@@ -54,13 +54,17 @@ entry becomes a proposal only when:
      (`predicate_not_in_quote`). A suggested predicate is therefore used
      only where the quote supports its words: the pass does not map
      "requires" onto a suggested `depends_on`.
-4. **Its types are admitted.** A predicate or kind outside the suggested
+4. **Its two ends are not one name** (`self_reference`, by the ledger's
+   name identity, `entity_key`). LlamaIndex's schema extractor drops these
+   too; a small model writes them ("relation quotes participate in the
+   coverage audit" as the coverage audit participating in itself).
+5. **Its types are admitted.** A predicate or kind outside the suggested
    vocabulary is refused as `new_type_not_allowed` when new types are off.
    When they are on, a pass admits at most `max_new_predicates` new
    predicates and `max_new_kinds` new kinds; a triple that needs one more
    is `new_type_cut`. A term already admitted in the pass costs nothing
    again.
-5. **It is not already on record.** The same subject, predicate and object
+6. **It is not already on record.** The same subject, predicate and object
    from the same episode, in any status — proposed, held, closed or
    declined — is counted in `restated` and not proposed again, so running
    the pass twice does not double the review queue and a declined proposal

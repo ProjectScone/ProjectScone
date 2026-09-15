@@ -23,6 +23,8 @@ triple with a span quoted from the chunk. A triple is kept only when:
   and is short enough to store, the model called it an observation, both
   ends are named in it, its clause is not negated or hypothetical, and the
   predicate's words are the quote's;
+- its two ends are not one name (``self_reference``), which LlamaIndex's
+  schema extractor also drops;
 - a kind or predicate outside the suggested vocabulary is allowed, and the
   pass's budget of new predicates or new kinds is not spent.
 
@@ -215,7 +217,7 @@ class DynamicSchemaReport:
     #: of whitespace between them: the chunk's own span replaced each.
     quotes_settled: int = 0
     #: Entries not stored, by reason: ``malformed``, the grounding gate's
-    #: reasons, ``new_type_not_allowed`` and ``new_type_cut``.
+    #: reasons, ``self_reference``, ``new_type_not_allowed`` and ``new_type_cut``.
     rejected_reasons: dict[str, int] = field(default_factory=dict)
     #: Triples already on record from the same episode, in any status.
     restated: int = 0
@@ -465,12 +467,16 @@ async def extract_dynamic_schema(
         for entry in entries[:max_triples_per_chunk]:
             counts["read"] += 1
             read = _read(entry)
-            if read is not None:
-                read, settled = _settled(read, chunk.text)
-                counts["settled"] += settled
-            reason = "malformed" if read is None else _grounding_reason(read.triple, chunk.text)
-            if read is None or reason is not None:
-                rejected[str(reason)] = rejected.get(str(reason), 0) + 1
+            if read is None:
+                rejected["malformed"] = rejected.get("malformed", 0) + 1
+                continue
+            read, settled = _settled(read, chunk.text)
+            counts["settled"] += settled
+            reason = _grounding_reason(read.triple, chunk.text)
+            if reason is None and entity_key(read.triple.subject) == entity_key(read.triple.object):
+                reason = "self_reference"
+            if reason is not None:
+                rejected[reason] = rejected.get(reason, 0) + 1
                 continue
             triple = read.triple
             fresh_predicates = [] if triple.predicate in suggested else [triple.predicate]
