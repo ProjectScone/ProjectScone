@@ -17,6 +17,7 @@ import pytest
 
 from scone_memory.audio import pcm
 from scone_memory.realtime.audio import AudioChunk
+from scone_memory.realtime.keypad import Keypress
 from scone_memory.telephony import DIALECTS, CarrierTransport, g711
 
 
@@ -47,6 +48,10 @@ class FakeSocket:
 
 def start(stream_id="MZ1"):
     return json.dumps({"event": "start", "streamSid": stream_id, "start": {"streamSid": stream_id, "callSid": "CA1"}})
+
+
+def dtmf(key):
+    return json.dumps({"event": "dtmf", "streamSid": "MZ1", "dtmf": {"track": "inbound_track", "digit": key}})
 
 
 def media(ms=20):
@@ -121,3 +126,35 @@ async def test_a_carrier_that_disappears_ends_the_call_rather_than_raising_at_th
     chunks = [chunk async for chunk in transport.receive()]
     assert chunks, "what did arrive was delivered"
     assert transport.ended, "and the call is over rather than the error being raised upward"
+
+
+async def test_off_by_default_a_call_yields_only_audio_and_still_notes_the_digits():
+    socket = FakeSocket([start(), dtmf("5"), media(), json.dumps({"event": "stop", "streamSid": "MZ1"})])
+    transport = CarrierTransport(socket, DIALECTS["twilio"], rate=8000)
+    items = [item async for item in transport.receive()]
+    assert items and all(isinstance(item, AudioChunk) for item in items)
+    assert transport.digits == ["5"]
+
+
+async def test_with_the_keypad_on_a_carrier_digit_reaches_the_session_as_a_keypress():
+    socket = FakeSocket([start(), media(), dtmf("5"), media(), dtmf("#"),
+                         json.dumps({"event": "stop", "streamSid": "MZ1"})])
+    transport = CarrierTransport(socket, DIALECTS["twilio"], rate=16000, keypad="events")
+    items = [item async for item in transport.receive()]
+    presses = [item for item in items if isinstance(item, Keypress)]
+    assert [(p.key, p.source) for p in presses] == [("5", "event"), ("#", "event")]
+    assert presses[0].offset_ms == pytest.approx(20.0), "after one 20 ms media message"
+    assert isinstance(items[0], AudioChunk) and items[1] == presses[0], "in the order the carrier sent them"
+    with pytest.raises(ValueError, match="keypad"):
+        CarrierTransport(FakeSocket(), DIALECTS["twilio"], keypad="loud")
+
+
+async def test_the_digits_kept_for_reading_say_when_the_bound_bit():
+    from scone_memory.telephony import transport as module
+
+    socket = FakeSocket([start(), *[dtmf("1")] * (module.MAX_DIGITS + 3),
+                         json.dumps({"event": "stop", "streamSid": "MZ1"})])
+    transport = CarrierTransport(socket, DIALECTS["twilio"], rate=8000)
+    [item async for item in transport.receive()]
+    assert len(transport.digits) == module.MAX_DIGITS
+    assert transport.dropped_digits == 3, "a caller leaning on a key is counted past the bound, not forgotten"
