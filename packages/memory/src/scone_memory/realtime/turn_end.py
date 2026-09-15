@@ -28,8 +28,10 @@ reason is one of ``REASONS``: ``silence`` (no evidence, or no detector),
 out), ``max_duration`` (the whole turn's bound), ``max_bytes`` (a held
 turn would outgrow the transcript limit), ``speaker_changed``,
 ``input_ended`` and ``session_ended`` (the session stopped with a turn
-held: its words are recorded and nothing is answered), and ``keypad`` (keys
-from the phone joined the turn and finished it; see ``realtime.keypad``).
+held: its words are recorded and nothing is answered), ``keypad`` (keys
+from the phone joined the turn and finished it; see ``realtime.keypad``),
+and ``strategy_timeout`` (a turn strategy held the turn and the hold ran
+out; see ``realtime.turn_strategy``).
 
 The detector is a seam (``EndOfTurnDetector``): the lexical rules here
 need no model, and ``ChatEndOfTurn`` puts any chat model behind the same
@@ -50,7 +52,7 @@ if TYPE_CHECKING:
 COMPLETE, INCOMPLETE, UNSURE = "complete", "incomplete", "unsure"
 VERDICTS = (COMPLETE, INCOMPLETE, UNSURE)
 REASONS = ("silence", "semantic_complete", "semantic_incomplete_timeout", "max_duration", "max_bytes",
-           "speaker_changed", "input_ended", "session_ended", "keypad")
+           "speaker_changed", "input_ended", "session_ended", "keypad", "strategy_timeout")
 
 #: Seconds an open clause may hold a turn past the recognizer's own pause.
 HOLD_S = 1.5
@@ -243,6 +245,8 @@ class TurnHold:
         #: When the held turn is released if nothing else happens; None when nothing is held.
         self.deadline: float | None = None
         self._capped = False
+        #: Why the held turn is released when its hold runs out.
+        self._timeout_reason = "semantic_incomplete_timeout"
 
     @property
     def pending(self) -> bool:
@@ -256,14 +260,17 @@ class TurnHold:
         """The text a detector should judge if this transcript arrives now."""
         return " ".join([*self._fragments, text]) if self._joins(text, speaker) else text
 
-    def heard(self, text: str, speaker: str, judgement: Judgement, now: float) -> list[TurnEnd]:
+    def heard(self, text: str, speaker: str, judgement: Judgement, now: float,
+              timeout_reason: str = "semantic_incomplete_timeout") -> list[TurnEnd]:
+        """``timeout_reason`` is why the turn is released if this judgement
+        holds it and the hold runs out: the detector's, or a strategy's."""
         released: list[TurnEnd] = []
         if self.pending and not self._joins(text, speaker):
             released.append(self._release("speaker_changed" if speaker != self._speaker else "max_bytes", now))
         if not self.pending:
             self._first, self._speaker = now, speaker
         self._fragments.append(text)
-        self._last, self._judgement = now, judgement
+        self._last, self._judgement, self._timeout_reason = now, judgement, timeout_reason
         if judgement.verdict == COMPLETE:
             released.append(self._release("semantic_complete", now))
         elif judgement.verdict == UNSURE:
@@ -274,11 +281,13 @@ class TurnHold:
             self._arm(now)
         return released
 
-    def keyed(self, text: str, now: float, reason: str = "keypad") -> list[TurnEnd]:
+    def keyed(self, text: str, now: float, reason: str = "keypad", hold: Judgement | None = None) -> list[TurnEnd]:
         """Keys from the phone: they join the held turn, whoever it was
         spoken by, and finish it. With nothing held they are a turn of their
         own, by ``user``. Keys that would outgrow the held turn release it
-        first, as a transcript would."""
+        first, as a transcript would. With ``hold`` (a strategy waiting for
+        a submit key) they join it and do not finish it: the turn is held
+        until its own bound."""
         released: list[TurnEnd] = []
         speaker = self._speaker if self.pending else "user"
         if self.pending and not self._joins(text, speaker):
@@ -286,6 +295,10 @@ class TurnHold:
         if not self.pending:
             self._first, self._speaker = now, "user"
         self._fragments.append(text)
+        if hold is not None:
+            self._last, self._judgement = now, hold
+            self.speech_started(now)  # held to the turn's own bound
+            return released
         self._last, self._judgement = now, Judgement(COMPLETE, "keypad")
         released.append(self._release(reason, now))
         return released
@@ -307,7 +320,7 @@ class TurnHold:
     def expire(self, now: float) -> list[TurnEnd]:
         if self.deadline is None or now < self.deadline:
             return []
-        return [self._release("max_duration" if self._capped else "semantic_incomplete_timeout", now)]
+        return [self._release("max_duration" if self._capped else self._timeout_reason, now)]
 
     def drain(self, now: float, reason: str = "input_ended") -> list[TurnEnd]:
         return [self._release(reason, now)] if self.pending else []

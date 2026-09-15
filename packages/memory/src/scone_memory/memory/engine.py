@@ -1389,6 +1389,30 @@ class MemoryEngine:
         return await self._emit(space, "conversation_turn", {"session_id": session_id, "turn_id": turn_id, "mode": mode,
                                                              "latency_ms": timings})
 
+    async def record_idle(self, space: str, *, session_id: str, count: int, action: str, silent_ms: float,
+                          turn_id: Optional[str] = None) -> Optional[Event]:
+        """Append a ``conversation_idle`` event: a voice conversation waited
+        ``silent_ms`` for a user who said nothing, the ``count``-th time in a
+        row, and then prompted them (``turn_id`` is the prompt's turn), only
+        noted it, or ended the conversation (``action``: prompt, noted or
+        end). Checked whether or not an event log is attached; None when none is."""
+        check_space(space)
+        for name, value in (("session_id", session_id), ("turn_id", turn_id)):
+            if (value is not None or name == "session_id") and (not isinstance(value, str) or not 1 <= len(value) <= 128):
+                raise InvalidInput(f"{name} must be a string of 1..=128 chars")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise InvalidInput("count must be a positive integer")
+        if action not in ("prompt", "noted", "end"):
+            raise InvalidInput("action must be 'prompt', 'noted' or 'end'")
+        if isinstance(silent_ms, bool) or not isinstance(silent_ms, (int, float)) or not math.isfinite(silent_ms) \
+                or silent_ms < 0:
+            raise InvalidInput("silent_ms must be a finite non-negative number")
+        payload: dict[str, object] = {"session_id": session_id, "count": count, "action": action,
+                                      "silent_ms": float(silent_ms)}
+        if turn_id is not None:
+            payload["turn_id"] = turn_id
+        return await self._emit(space, "conversation_idle", payload)
+
     async def record(self, space: str, kind: str, payload: Mapping[str, object]) -> Event:
         """Append an event from outside the engine: a job reporting its
         status. Validated so the evidence log cannot be polluted with

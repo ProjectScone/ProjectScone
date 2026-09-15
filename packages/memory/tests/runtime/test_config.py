@@ -393,6 +393,94 @@ def test_serve_hands_the_voice_keypad_to_the_conversation_service(tmp_path, monk
     assert captured["voice_keypad"] == expected
 
 
+def test_voice_idle_and_turn_strategy_are_off_by_default():
+    settings = Settings.from_env({})
+    assert (settings.voice_idle_timeout, settings.voice_idle_prompt, settings.voice_idle_end_after) == \
+        (0.0, "Are you still there?", 3)
+    assert (settings.voice_turn_strategy, settings.voice_min_speech) == ("end_of_turn", None)
+    from scone_memory.runtime.voice_turns import build_voice_turns
+
+    assert build_voice_turns(settings) == {}
+
+
+def test_voice_idle_and_turn_strategy_are_read_from_the_environment():
+    from scone_memory.realtime.idle import IdlePolicy
+    from scone_memory.realtime.turn_strategy import KeypadSubmit, MinSpeech
+    from scone_memory.runtime.voice_turns import build_voice_turns
+
+    settings = Settings.from_env({"SCONE_VOICE_IDLE_TIMEOUT": " 8.5 ", "SCONE_VOICE_IDLE_PROMPT": " Hello? ",
+                                  "SCONE_VOICE_IDLE_END_AFTER": "0", "SCONE_VOICE_TURN_STRATEGY": " Min_Speech ",
+                                  "SCONE_VOICE_MIN_SPEECH": "1.2"})
+    assert build_voice_turns(settings) == {"voice_idle": IdlePolicy(8.5, "Hello?", None),
+                                           "voice_turn_strategy": MinSpeech(1.2)}
+    blank = Settings.from_env({"SCONE_VOICE_IDLE_TIMEOUT": "5", "SCONE_VOICE_IDLE_PROMPT": "",
+                               "SCONE_VOICE_IDLE_END_AFTER": "", "SCONE_VOICE_TURN_STRATEGY": "",
+                               "SCONE_VOICE_MIN_SPEECH": ""})
+    assert build_voice_turns(blank) == {"voice_idle": IdlePolicy(5, "Are you still there?", 3)}
+    assert build_voice_turns(Settings.from_env({"SCONE_VOICE_TURN_STRATEGY": "min_speech"})) == \
+        {"voice_turn_strategy": MinSpeech(0.8)}
+    keyed = Settings.from_env({"SCONE_VOICE_TURN_STRATEGY": "keypad_submit", "SCONE_VOICE_KEYPAD": "collect"})
+    assert build_voice_turns(keyed) == {"voice_turn_strategy": KeypadSubmit("#")}
+
+
+@pytest.mark.parametrize("env, match", [
+    ({"SCONE_VOICE_IDLE_TIMEOUT": "soon"}, "SCONE_VOICE_IDLE_TIMEOUT"),
+    ({"SCONE_VOICE_IDLE_TIMEOUT": "-1"}, "SCONE_VOICE_IDLE_TIMEOUT"),
+    ({"SCONE_VOICE_IDLE_TIMEOUT": "inf"}, "SCONE_VOICE_IDLE_TIMEOUT"),
+    ({"SCONE_VOICE_IDLE_TIMEOUT": "nan"}, "SCONE_VOICE_IDLE_TIMEOUT"),
+    ({"SCONE_VOICE_IDLE_END_AFTER": "-1"}, "SCONE_VOICE_IDLE_END_AFTER"),
+    ({"SCONE_VOICE_IDLE_END_AFTER": "two"}, "SCONE_VOICE_IDLE_END_AFTER"),
+    ({"SCONE_VOICE_TURN_STRATEGY": "eager"}, "SCONE_VOICE_TURN_STRATEGY"),
+    ({"SCONE_VOICE_TURN_STRATEGY": "keypad_submit"}, "SCONE_VOICE_KEYPAD"),
+    ({"SCONE_VOICE_MIN_SPEECH": "1"}, "SCONE_VOICE_MIN_SPEECH needs SCONE_VOICE_TURN_STRATEGY=min_speech"),
+    ({"SCONE_VOICE_TURN_STRATEGY": "min_speech", "SCONE_VOICE_MIN_SPEECH": "0"}, "SCONE_VOICE_MIN_SPEECH"),
+    ({"SCONE_VOICE_TURN_STRATEGY": "min_speech", "SCONE_VOICE_MIN_SPEECH": "31"}, "SCONE_VOICE_MIN_SPEECH"),
+    ({"SCONE_VOICE_TURN_STRATEGY": "min_speech", "SCONE_VOICE_MIN_SPEECH": "long"}, "SCONE_VOICE_MIN_SPEECH"),
+])
+def test_voice_idle_or_turn_settings_that_cannot_work_are_refused_by_name(env, match):
+    with pytest.raises(InvalidInput, match=match):
+        Settings.from_env(env)
+
+
+def test_voice_idle_settings_made_by_hand_are_checked_too():
+    from dataclasses import replace
+
+    settings = Settings.from_env({})
+    for field, value, match in (("voice_idle_prompt", "  ", "SCONE_VOICE_IDLE_PROMPT"),
+                                ("voice_idle_prompt", None, "SCONE_VOICE_IDLE_PROMPT"),
+                                ("voice_idle_end_after", True, "SCONE_VOICE_IDLE_END_AFTER"),
+                                ("voice_idle_timeout", True, "SCONE_VOICE_IDLE_TIMEOUT"),
+                                ("voice_idle_timeout", "8", "SCONE_VOICE_IDLE_TIMEOUT")):
+        with pytest.raises(InvalidInput, match=match):
+            replace(settings, **{field: value})
+
+
+@pytest.mark.parametrize("env, expected", [
+    ({}, {}),
+    ({"SCONE_VOICE_IDLE_TIMEOUT": "10", "SCONE_VOICE_TURN_STRATEGY": "keypad_submit", "SCONE_VOICE_KEYPAD": "append"},
+     {"voice_idle": ("IdlePolicy", 10.0), "voice_turn_strategy": ("KeypadSubmit", None)}),
+])
+def test_serve_hands_voice_idle_and_turn_strategy_to_the_conversation_service(tmp_path, monkeypatch, env, expected):
+    import asyncio
+
+    from scone_memory.api import __main__ as serve
+
+    captured: dict[str, object] = {}
+
+    def create(*args, **options):
+        captured.update(options)
+        raise _Stop()
+
+    monkeypatch.setattr("scone_memory.api.conversations.create_conversation_app", create)
+    env = {"SCONE_API_KEY": "solo", "SCONE_CONVERSATIONS_JOURNAL": str(tmp_path / "sessions.db"), **env}
+    engine = asyncio.run(MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open())
+    with pytest.raises(_Stop):
+        serve.build_app(Settings.from_env(env), engine)
+    handed = {name: (type(captured[name]).__name__, getattr(captured[name], "timeout", None))
+              for name in ("voice_idle", "voice_turn_strategy") if name in captured}
+    assert handed == expected
+
+
 async def test_a_semantic_merge_threshold_is_a_similarity_that_reaches_every_engine():
     from scone_memory import HashEmbedder
     from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
