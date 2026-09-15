@@ -5,15 +5,17 @@ import asyncio
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Mapping, cast
 
 from pydantic import ValidationError
 
 from ..core import forget_after as schedule
 from ..core.errors import Gone, InvalidInput, NotFound
 from ..core.retirement import RetirementStore
+from ..core.timeutil import parse_rfc3339
 from .records import key_hash
-from ..core.models import Episode
+from ..core.models import Episode, Tombstone
+from ..memory import source_keys
 from ..memory.engine import MemoryEngine
 from .document_source import DocumentSource, source_revision_key
 from .files import (FILE_MEDIA_TYPES, DocumentManifest, digest, document_provenance,
@@ -84,10 +86,11 @@ class DirectorySync:
     missing-file deletion permits the file's later return. Missing evidence or
     ownership mismatches fail closed.
 
-    A run's ``forget_after`` is stored on every revision it writes, a pending
-    one it recovers included; an unchanged source keeps the schedule it holds.
-    A source forgotten because its schedule came is suppressed like any other
-    forget of it: a later run does not bring it back.
+    A run's ``forget_after`` is stored on every revision it prepares, and a
+    pending revision keeps it whichever run finishes it; an unchanged source
+    keeps the schedule it holds. A source whose schedule has come -- swept or
+    not -- is read afresh from the file by the next run, as ``sync`` does,
+    with that run's schedule; only a forget before its time suppresses it.
     """
 
     def __init__(self, memory: MemoryEngine, root: str | Path, *, space: str, include_sensitive: bool = False,
@@ -133,7 +136,9 @@ class DirectorySync:
                 # The catalog already accepted this deletion. Finish its exact
                 # identity before the normal Gone/ownership checks below.
                 await self.memory.forget(self.space, revision.episode_id)
-        episode = await self.memory.episode_by_key(self.space, key)
+        # Read as stored, due or not, so a revision whose time has come is
+        # still checked against the journal; callers decide what due means.
+        episode = await source_keys.episode_by_key(self.memory.documents, self.memory.blobs, self.space, key)
         expected = source.metadata() | {'document_original': revision.original_sha256,
                                        'document_manifest': revision.manifest_sha256}
         if (episode.kind != 'file' or episode.source != 'attachment:' + revision.original_sha256
@@ -141,12 +146,58 @@ class DirectorySync:
                 or any(episode.metadata.get(name) != value for name, value in expected.items())
                 or episode.metadata.get('source_generation', '0') != str(revision.generation)):
             raise InvalidInput('managed source ownership does not match its journal')
-        if provenance:
+        if provenance and not self._due(episode.metadata):
             evidence = await document_provenance(self.memory, self.space, episode.episode_id)
             if evidence.filename != path:
                 raise InvalidInput('managed source provenance path does not match its journal')
             await self._index(episode)
         return episode
+
+    def _due(self, metadata: Mapping[str, str]) -> bool:
+        """Whether an episode's schedule has come."""
+        return schedule.is_due(metadata, parse_rfc3339(self.memory.clock()))
+
+    async def _swept(self, state: SourceState, path: str, revision: SourceRevision) -> Tombstone | None:
+        """The tombstone of a revision read as Gone when it went because its
+        time came: forgotten no earlier than its schedule. None for a forget
+        before its time, a forget by hand, which suppresses the path. Read by
+        the revision's identity, so a revision stored and swept before the
+        journal recorded its episode is found too."""
+        if revision.forget_after is None:
+            return None
+        source = self._source(state, path, revision)
+        identity = key_hash(self.space, source_revision_key(source, revision.original_sha256, revision.manifest_sha256))
+        tombstone = await self.memory.documents.tombstone_by_hash(self.space, identity)
+        if tombstone is None or parse_rfc3339(tombstone.forgotten_at) < parse_rfc3339(revision.forget_after):
+            return None
+        return tombstone
+
+    async def _drop(self, state: SourceState, path: str, entry: SourceEntry, swept: Tombstone) -> SourceReceipt:
+        """Abandon a replacement whose pending revision was taken at its time
+        before the replacement finished. Neither revision stands: a previous
+        one still held goes too, by the ordinary forget, after the claims both
+        were cited for are closed, as for a deletion. The swept revision is
+        recorded as absent, so a file still there is read afresh under a new
+        generation and states its claims again."""
+        pending = cast(SourceRevision, entry.pending)
+        episodes = [*entry.claimants]
+        previous: Episode | None = None
+        if entry.current is not None:
+            try:
+                previous = await self._episode(state, path, entry.current)
+            except Gone:
+                pass
+            else:
+                episodes.append(previous.episode_id)
+        closed, claimants, untracked = await self._close_claims(
+            (*episodes, swept.episode_id), path, kept=[],
+            reason=f'{path} was taken at its forget_after before it replaced its last revision', kind='source_removed')
+        if previous is not None:
+            await self.memory.forget(self.space, previous.episode_id)
+        self._save(state, path, SourceEntry(state='absent', current=pending.model_copy(update={'episode_id': swept.episode_id}),
+                                            claimants=claimants))
+        return SourceReceipt(path, 'absent', swept.episode_id, previous.episode_id if previous else None,
+                             claims_closed=closed, claims_untracked=untracked, forget_after=pending.forget_after)
 
     async def _index(self, episode: Episode) -> None:
         if (self.space, episode.content_hash) in await self.memory.documents.inflight():
@@ -209,8 +260,7 @@ class DirectorySync:
         self._save(state, path, SourceEntry(state='suppressed', current=revision, claimants=entry.claimants))
         return SourceReceipt(path, 'suppressed', revision.episode_id)
 
-    async def _finish(self, state: SourceState, path: str, entry: SourceEntry, *,
-                      forget_after: str | None = None) -> SourceReceipt:
+    async def _finish(self, state: SourceState, path: str, entry: SourceEntry) -> SourceReceipt:
         if entry.state == 'suppress':
             return await self._suppress(state, path, entry)
         pending = entry.pending
@@ -222,10 +272,14 @@ class DirectorySync:
                 try:
                     await self._episode(state, path, current)
                 except Gone:
-                    return await self._suppress(state, path, entry)
+                    # Swept at its time, the old revision is simply gone.
+                    if not await self._swept(state, path, current):
+                        return await self._suppress(state, path, entry)
             try:
                 await self._episode(state, path, pending, provenance=False)
             except Gone:
+                if taken := await self._swept(state, path, pending):
+                    return await self._drop(state, path, entry, taken)
                 return await self._suppress(state, path, entry)
             except NotFound:
                 if pending.episode_id is not None:
@@ -238,8 +292,12 @@ class DirectorySync:
             manifest = DocumentManifest.model_validate_json(encoded)
             if manifest.filename != path or manifest.original_sha256 != pending.original_sha256:
                 raise InvalidInput('pending manifest does not match its source')
+            # The schedule it was prepared under, checked then, stored now even
+            # if it has passed since; a replay of it holds the same one.
             added = await store_document(self.memory, self.space, original, manifest,
-                                         source=self._source(state, path, pending), forget_after=forget_after)
+                                         source=self._source(state, path, pending),
+                                         forget_after=schedule.Resolved(pending.forget_after)
+                                         if pending.forget_after is not None else None)
             claims = added.claims
             pending = pending.model_copy(update={'episode_id': added.added.episode_id})
             await self._episode(state, path, pending)
@@ -252,8 +310,10 @@ class DirectorySync:
         # A recorded retire intent permits an already-forgotten old episode on
         # retry. A missing record without its tombstone remains an error.
         try:
-            stored = await self._episode(state, path, pending)
+            await self._episode(state, path, pending)
         except Gone:
+            if swept := await self._swept(state, path, pending):
+                return await self._drop(state, path, entry, swept)
             return await self._suppress(state, path, entry)
         closed: int | None = 0
         untracked = 0
@@ -262,7 +322,12 @@ class DirectorySync:
             try:
                 old = await self._episode(state, path, current)
             except Gone:
-                pass
+                if await self._swept(state, path, current):
+                    # Taken at its time, not by this replacement, so nothing
+                    # closed its claims before it went: they are closed now.
+                    closed, claimants, untracked = await self._close_claims(
+                        (*claimants, cast(int, current.episode_id)), path, kept=await self._kept(pending),
+                        reason=f'no longer stated by {path}', kind='source_changed')
             else:
                 # What the new revision still says stays; the rest is closed
                 # before the old episode goes, so a retry after a crash here
@@ -278,7 +343,7 @@ class DirectorySync:
         self._save(state, path, SourceEntry(state='active', current=pending, claimants=claimants))
         return SourceReceipt(path, 'updated' if current is not None else 'added', pending.episode_id,
                              current.episode_id if current else None, claims=claims, claims_closed=closed,
-                             claims_untracked=untracked, forget_after=stored.metadata.get(schedule.KEY))
+                             claims_untracked=untracked, forget_after=pending.forget_after)
 
     async def _kept(self, revision: SourceRevision) -> list[tuple[str, str, str]]:
         """The claims a revision makes, read from its retained manifest:
@@ -354,7 +419,8 @@ class DirectorySync:
             raise InvalidInput('directory manifest exceeds its attachment limit')
         await asyncio.to_thread(self.scanner.read, item)
         pending = SourceRevision(original_sha256=digest(data), manifest_sha256=digest(encoded),
-                                 parser_revision=self.parser_revision, generation=generation)
+                                 parser_revision=self.parser_revision,
+                                 forget_after=forget_after, generation=generation)
         entry = SourceEntry(state='replace', current=current, pending=pending,
                             claimants=state.entries[item.path].claimants if item.path in state.entries else ())
         # Validate the bounded journal entry before uploads; persist the intent
@@ -366,13 +432,13 @@ class DirectorySync:
         if original.attachment_id != pending.original_sha256 or retained.attachment_id != pending.manifest_sha256:
             raise InvalidInput('retained directory source identity does not match its bytes')
         self._save(state, item.path, checked.entries[item.path])
-        return await self._finish(state, item.path, entry, forget_after=forget_after)
+        return await self._finish(state, item.path, entry)
 
     async def _file(self, state: SourceState, item: ScannedFile, *, forget_after: str | None = None) -> SourceReceipt:
         entry = state.entries.get(item.path)
         recovered: SourceReceipt | None = None
         if entry is not None and entry.state in ('replace', 'retire', 'suppress'):
-            recovered = await self._finish(state, item.path, entry, forget_after=forget_after)
+            recovered = await self._finish(state, item.path, entry)
             entry = state.entries[item.path]
         if entry is not None and entry.state == 'suppressed':
             return SourceReceipt(item.path, 'suppressed', entry.current.episode_id if entry.current else None)
@@ -387,13 +453,19 @@ class DirectorySync:
                 if entry is not None and entry.state == 'delete':
                     self._save(state, item.path, SourceEntry(state='absent', current=current, claimants=entry.claimants))
                     current = None
-                else:
+                elif not await self._swept(state, item.path, current):
+                    # Forgotten by hand: the path is suppressed. One swept at its
+                    # time is replaced below, which closes what it said.
                     return await self._suppress(state, item.path, SourceEntry(state='active', current=current,
                                                                               claimants=entry.claimants if entry else ()))
             else:
                 if entry is not None and entry.state == 'delete':
                     self._save(state, item.path, SourceEntry(state='active', current=current, claimants=entry.claimants))
-                if current.original_sha256 == item.sha256 and current.parser_revision == self.parser_revision:
+                # One whose time has come is replaced even when the file is
+                # unchanged, as `sync` and `remember` store content again once
+                # it is overdue; the replacement forgets it as any other.
+                if (current.original_sha256 == item.sha256 and current.parser_revision == self.parser_revision
+                        and not self._due(held.metadata)):
                     return recovered or SourceReceipt(item.path, 'unchanged', current.episode_id,
                                                       forget_after=held.metadata.get(schedule.KEY))
         return await self._prepare(state, item, current, generation, forget_after=forget_after)
@@ -402,7 +474,6 @@ class DirectorySync:
         if entry.state in ('absent', 'suppressed'):
             return SourceReceipt(path, entry.state, entry.current.episode_id if entry.current else None)
         if entry.state in ('replace', 'retire', 'suppress'):
-            # A revision finished here is retired below, so it takes no schedule.
             await self._finish(state, path, entry)
             entry = state.entries[path]
             if entry.state == 'suppressed':
@@ -416,6 +487,13 @@ class DirectorySync:
         try:
             await self._episode(state, path, current)
         except Gone:
+            if entry.state != 'delete' and await self._swept(state, path, current):
+                # Taken at its time and gone from disk since: what it said is
+                # closed, as for a deletion.
+                closed, claimants, untracked = await self._close_claims(
+                    (*entry.claimants, current.episode_id), path, kept=[], reason=f'{path} was removed', kind='source_removed')
+                self._save(state, path, SourceEntry(state='absent', current=current, claimants=claimants))
+                return SourceReceipt(path, 'absent', current.episode_id, claims_closed=closed, claims_untracked=untracked)
             if entry.state != 'delete':
                 return await self._suppress(state, path, entry)
         else:
@@ -433,13 +511,14 @@ class DirectorySync:
                              claims_untracked=untracked)
 
     async def synchronize(self, *, delete_missing: bool = False,
-                          forget_after: str | None = None) -> DirectorySyncResult:
-        """``forget_after`` schedules every revision this run writes, as for
+                          forget_after: str | schedule.Resolved | None = None) -> DirectorySyncResult:
+        """``forget_after`` schedules every revision this run prepares, as for
         ``remember``: resolved once, before the journal is read, so the run
-        writes one instant and a refused schedule records nothing."""
+        writes one instant, a walk that outlasts it still writes it (those
+        revisions are due at once), and a refused schedule records nothing."""
         if type(delete_missing) is not bool:
             raise InvalidInput('delete_missing must be a boolean')
-        when = schedule.asked(forget_after, self.memory.clock())
+        when = schedule.instant(schedule.asked(forget_after, self.memory.clock()))
         with self.journal.locked():
             state = self.journal.load()
             await self._preflight(state)
@@ -450,7 +529,7 @@ class DirectorySync:
             for path, entry in sorted(state.entries.items()):
                 if path not in present and entry.state in ('replace', 'retire', 'suppress'):
                     try:
-                        receipts.append(await self._finish(state, path, entry, forget_after=when))
+                        receipts.append(await self._finish(state, path, entry))
                     except Exception:
                         receipts.append(SourceReceipt(path, 'failed', code='source_transition_failed'))
             for item in first.files:

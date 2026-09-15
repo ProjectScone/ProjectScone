@@ -669,7 +669,8 @@ type, bytes, redirects, format, segment count and `forget_after`.
 schedules the page's memory to be forgotten; a past or unreadable schedule is
 refused before anything is fetched. `POST /v1/documents`, `ingest_document` and
 `store_document` take it too, refused before the file is parsed or its manifest
-stored ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
+stored; a parse that outlasts it still stores the instant resolved then, due at
+once ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
 
 ## Durable extraction checkpoints
 

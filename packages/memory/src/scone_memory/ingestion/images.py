@@ -93,7 +93,7 @@ def _entity_tag(entity_id: str) -> str:
 
 async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_type: Literal['image/png', 'image/jpeg', 'image/webp'],
                        context: ImageContext, filename: str | None = None,
-                       forget_after: str | None = None) -> ImageIngested:
+                       forget_after: str | schedule.Resolved | None = None) -> ImageIngested:
     """Retain original + context manifest, then index attribution without inference.
 
     Writes use existing primitives, not a transaction. Exact retries repair links.
@@ -104,8 +104,9 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
 
     ``forget_after`` schedules the episode's forgetting as ``remember``'s does
     (``core.forget_after``), resolved before the image is stored: a refused
-    schedule stores nothing. The same image and context again is a duplicate
-    and keeps the schedule it holds; the receipt says which.
+    schedule stores nothing, and the instant resolved then is the one stored,
+    even when it passes while the image is read. The same image and context
+    again is a duplicate and keeps the schedule it holds; the receipt says which.
     """
     check_space(space)
     if not isinstance(data, bytes) or not 0 < len(data) <= min(10_000_000, memory.max_attachment_bytes):
@@ -141,7 +142,9 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
         forget_after=when)
     if memory.image_vectors is None:
         return ImageIngested(added, image, retained)
-    episode = await memory.episode(space, added.episode_id)
+    # Read as stored, due or not: an image whose time came while it was read
+    # gets its vector like any other, and the sweep takes it with the episode.
+    episode = await memory._episode_or_gone(space, added.episode_id)
     try:
         await index_image(memory.documents, cast(ImageEmbedder, memory.image_embedder), memory.image_vectors,
                           space, episode, data)

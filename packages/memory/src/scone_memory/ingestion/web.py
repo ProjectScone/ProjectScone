@@ -202,7 +202,7 @@ class UrlIngested:
 
 async def ingest_url(engine, space: str, url: str, *, limits: Optional[WebLimits] = None,
                      parser: DocumentParser | None = None, document_limits: DocumentLimits = DocumentLimits(),
-                     tags: Sequence[str] = (), forget_after: Optional[str] = None) -> UrlIngested:
+                     tags: Sequence[str] = (), forget_after: str | schedule.Resolved | None = None) -> UrlIngested:
     """Fetch the page and read it as the document its media type says it is.
     ``forget_after`` schedules the episode's forgetting as for ``remember``;
     a refused schedule is refused before anything is fetched."""

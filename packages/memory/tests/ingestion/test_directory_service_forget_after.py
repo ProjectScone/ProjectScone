@@ -75,7 +75,7 @@ def test_the_run_store_takes_a_retried_duration_as_the_run_it_registered(tmp_pat
         registry.close()
 
 
-@pytest.mark.parametrize("bad", ["2020-01-01", "tomorrow"])
+@pytest.mark.parametrize("bad", ["2020-01-01", "tomorrow", "x" * 65, 30])
 async def test_a_refused_schedule_admits_no_run(env, bad):
     host = service(env, sync=runner(env))
     try:
@@ -115,5 +115,44 @@ async def test_a_run_whose_instant_has_passed_is_not_resumed(env):
         assert resumed.record.status == "completed"
         [outcome] = (await host.result("alpha", "scan")).items
         assert outcome.source.forget_after == "2026-09-15T13:00:00.000Z", "the resumed attempt writes the admitted instant"
+    finally:
+        await host.aclose()
+
+
+async def test_a_retry_after_an_absolute_instant_has_passed_is_still_the_same_run(env):
+    memory, root, _ = env
+    (root / "note.txt").write_text("A source")
+    host = service(env, sync=runner(env))
+    try:
+        await host.start("alpha", "scan", collection_id="notes", forget_after="2026-09-15T13:00:00Z")
+        before = await settled(host)
+        assert before.record.status == "completed"
+        memory.test_clock.now = "2026-09-15T13:30:00.000Z"
+        again = await host.start("alpha", "scan", collection_id="notes", forget_after="2026-09-15T13:00:00Z")
+        assert again.record == before.record, "a client retrying after a lost response gets the run it started"
+        with pytest.raises(InvalidInput, match="forget_after"):
+            await host.start("alpha", "other", collection_id="notes", forget_after="2026-09-15T13:00:00Z")
+    finally:
+        await host.aclose()
+
+
+async def test_a_run_whose_walk_outlasts_its_instant_completes_writing_that_instant(env):
+    memory, root, _ = env
+    (root / "note.txt").write_text("A slow source")
+    sync = runner(env)
+    parse = sync.parser.parse
+
+    async def slow(*args):
+        memory.test_clock.now = "2026-09-15T13:30:00.000Z"
+        return await parse(*args)
+
+    sync.parser.parse = slow
+    host = service(env, sync=sync)
+    try:
+        await host.start("alpha", "scan", collection_id="notes", forget_after="1h")
+        done = await settled(host)
+        assert done.record.status == "completed", done.record
+        [outcome] = (await host.result("alpha", "scan")).items
+        assert outcome.source.status == "added" and outcome.source.forget_after == "2026-09-15T13:00:00.000Z"
     finally:
         await host.aclose()

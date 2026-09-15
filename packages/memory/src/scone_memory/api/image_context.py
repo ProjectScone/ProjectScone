@@ -10,6 +10,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from ..core import forget_after as schedule
 from ..core.errors import InvalidInput
 from ..ingestion.images import ImageContext, ingest_image, recall_images
 from ..memory.engine import MemoryEngine
@@ -19,8 +20,9 @@ class _ImageBody(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid', hide_input_in_errors=True)
     attachment_id: str = Field(pattern=r'^[a-f0-9]{64}$')
     context: ImageContext
-    #: Read by ``core.forget_after``, which refuses as ``POST /v1/episodes`` does.
-    forget_after: str | None = None
+    #: Any JSON value, so ``core.forget_after`` refuses one that is not a
+    #: schedule -- a number included -- with 422, as ``POST /v1/episodes`` does.
+    forget_after: object = None
 
 
 def mount_image_context_routes(app: FastAPI, engine: MemoryEngine,
@@ -37,13 +39,14 @@ def mount_image_context_routes(app: FastAPI, engine: MemoryEngine,
             body = _ImageBody.model_validate_json(data)
         except ValidationError:
             return JSONResponse({'error': 'invalid image context or attachment ID'}, status_code=400)
+        when = schedule.asked(body.forget_after, engine.clock())
         async with ingest_slot(1):
             attachment, raw = await engine.attachment(space, body.attachment_id)
             if attachment.media_type not in ('image/png', 'image/jpeg', 'image/webp'):
                 raise InvalidInput('image context supports still PNG, JPEG and WebP images')
             media_type = cast(Literal['image/png', 'image/jpeg', 'image/webp'], attachment.media_type)
             saved = await ingest_image(engine, space, raw, media_type=media_type,
-                context=body.context, filename=attachment.filename, forget_after=body.forget_after)
+                context=body.context, filename=attachment.filename, forget_after=when)
         return JSONResponse(jsonable_encoder(asdict(saved)))
 
     @app.get('/v1/images/search')

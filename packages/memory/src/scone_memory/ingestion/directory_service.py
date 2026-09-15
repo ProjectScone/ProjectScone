@@ -231,13 +231,15 @@ class DirectorySyncService:
         """``forget_after`` schedules every revision the run writes. It is
         resolved here, against the engine clock, and kept on the run, so a
         refused one is refused before the run exists and every attempt
-        writes the same instant."""
+        writes the same instant. A retry of a run already admitted is
+        compared as asked and never resolved again, so it names that run even
+        once its instant has passed."""
         await self._space(space)
         collection = self._collection(space, collection_id)
-        when = schedule.asked(forget_after, self._memory.clock())
+        asked = schedule.text(forget_after) if forget_after is not None else None
         spec = SyncRunSpec(collection_id=collection_id, configuration=self._configuration(collection),
             delete_missing=delete_missing, deadline_s=self._deadline, max_attempts=self._attempts,
-            forget_after=when, forget_after_asked=forget_after)
+            forget_after_asked=asked)
         if expected_configuration is not None and expected_configuration != spec.configuration:
             raise WorkflowError('sync_configuration_changed')
         if delete_missing and not collection.allow_delete_missing:
@@ -247,6 +249,7 @@ class DirectorySyncService:
             if not prior.spec.same_request(spec):
                 raise WorkflowError('sync_request_conflict')
             return self._status(prior)
+        spec = spec.model_copy(update={'forget_after': schedule.instant(schedule.asked(asked, self._memory.clock()))})
         return self._admit(space, run_id, collection, spec, None, admission_guard)
 
     def _admit(self, space: str, run_id: str, collection: DirectoryCollection, spec: SyncRunSpec,
@@ -342,6 +345,8 @@ class DirectorySyncService:
                 await self._space(record.space)
                 if self._configuration(collection) != record.spec.configuration:
                     raise WorkflowError('sync_configuration_changed')
+                # The walk writes the instant each revision was prepared under,
+                # so one that outlasts it does not fail part way.
                 result = await execution.synchronize(delete_missing=record.spec.delete_missing,
                                                      forget_after=record.spec.forget_after)
                 await self._space(record.space)

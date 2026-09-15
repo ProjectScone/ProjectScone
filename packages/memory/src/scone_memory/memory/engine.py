@@ -62,6 +62,7 @@ HASHED_VECTOR_WEIGHT = 0.01
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
 from ..core import extracted, forget_after
+from ..core.forget_after import Resolved
 from ..core.validation import (
     entity_key as entity_key,
     many_valued_predicates,
@@ -645,7 +646,7 @@ class MemoryEngine:
         chunking: Optional[str] = None,
         chunking_profile: Optional[str] = None,
         semantic_merge_threshold: Optional[float] = None,
-        forget_after: Optional[str] = None,
+        forget_after: Optional[str | Resolved] = None,
     ) -> Added:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
@@ -658,8 +659,10 @@ class MemoryEngine:
 
         ``forget_after`` schedules the memory to be forgotten: an RFC 3339
         time, a date, or a duration from this engine's clock such as ``30d``
-        (``core.forget_after``). A time already past is refused. From that
-        time recall does not return it, and ``forget_due`` forgets it."""
+        (``core.forget_after``). A time already past is refused; a
+        ``Resolved`` instant, which an ingestion path checked before its
+        work, is stored as it is. From that time recall does not return it,
+        and ``forget_due`` forgets it."""
         await self._living(space)
         if replace and embedding_checkpoint is not None:
             raise InvalidInput('embedding checkpoints apply to append ingestion, not replacement')

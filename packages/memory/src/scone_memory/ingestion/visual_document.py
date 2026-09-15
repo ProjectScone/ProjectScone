@@ -1,7 +1,7 @@
 """Retain textless video sources only against complete, hash-bound evidence."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 from pydantic import ValidationError
 
@@ -44,13 +44,20 @@ async def verify_visual_record(memory: MemoryEngine, space: str, record: Record,
         raise InvalidInput('visual-only document does not match its retained evidence')
     if episode_id is None:
         return
-    episode = await memory.episode(space, episode_id)
+    # Read as stored, due or not: recovery finishes a video past its time, and
+    # the sweep forgets it, rather than the unfinished mark stopping both.
+    episode = await memory._episode_or_gone(space, episode_id)
     expected = record.content_hash or content_hash(space, '', record.dedup_key)
-    # The schedule is not evidence: a duplicate keeps the one its episode holds,
-    # whatever this write asked for, as any other duplicate does.
-    unscheduled = {name: value for name, value in episode.metadata.items() if name != forget_after.KEY}
+    # The schedule is not evidence, on either side: a duplicate keeps the one
+    # its episode holds, whatever this write asked for, and recovery's record
+    # is rebuilt from the episode's metadata, schedule and all.
     if (episode.content != '' or episode.kind != 'file' or episode.source != record.source
-            or episode.content_hash != expected or unscheduled != dict(record.metadata)):
+            or episode.content_hash != expected
+            or _unscheduled(episode.metadata) != _unscheduled(record.metadata)):
         raise InvalidInput('visual-only document episode does not match its retained evidence')
     for attachment_id in (original_id, manifest_id):
         await memory.blobs.link(space, attachment_id, episode_id)
+
+
+def _unscheduled(metadata: Mapping[str, str]) -> dict[str, str]:
+    return {name: value for name, value in metadata.items() if name != forget_after.KEY}
