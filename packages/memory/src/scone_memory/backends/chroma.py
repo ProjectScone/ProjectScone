@@ -14,11 +14,11 @@ client is synchronous, so calls run in a worker thread.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Optional, Sequence
 
 from ..core.ports import VectorPoint
 from ..core.timeutil import epoch_seconds
+from .location import local_identity
 from .validation import validate_vector
 
 if TYPE_CHECKING:
@@ -56,7 +56,7 @@ class ChromaVectorIndex:
         #: in-process clients share one store per path, and one in memory.
         #: Chroma does not expand "~" (it makes a directory of that name), so neither does this.
         self._endpoint: object = (id(client) if client is not None else url if url
-                                  else str(Path(path).resolve()) if path else "ephemeral")
+                                  else local_identity(path) if path else "ephemeral")
         self.collection: Collection | None = None
         self.dim: Optional[int] = None
 

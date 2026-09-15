@@ -20,7 +20,7 @@ from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
 from . import fact_recall, fusion, supersession
 from .entity_lane import ENTITY_WEIGHT, entity_lane
-from .image_lane import IMAGE_WEIGHT, ImageLane, search_images
+from .image_lane import IMAGE_SEARCHES, IMAGE_WEIGHT, ImageLane, search_images
 
 #: The context lane's share of a fused rank. Rank fusion is flat, so a lane
 #: that finds what the others cannot needs weight to be heard at all: on
@@ -455,6 +455,8 @@ async def recall(
     # the image embedder's space, from an index the text embedder never
     # writes, under the vector lane's filters, as deep as its own index needs.
     image_hits: list[tuple[int, float]] = []
+    #: Rows the image index returned on the lane's last search, forgotten images' included.
+    image_returned = 0
     image_ran = False
     if image_lane:
         if runtime.image is None:
@@ -462,10 +464,16 @@ async def recall(
         else:
             try:
                 t0 = time.perf_counter()
-                image_hits = await search_images(runtime.image, space, query, image_depth, boundary, clean_tags,
-                                                 clean_where, narrow_by)
+                searched = await search_images(runtime.image, runtime.documents, space, query, image_depth,
+                                               boundary, clean_tags, clean_where, narrow_by)
+                image_hits, image_returned = searched.hits, searched.returned
                 latency["image"] = _ms(t0)
                 image_ran = True
+                if searched.removed:
+                    # Left by forgets through an engine without the lane, which cannot reach its index.
+                    degraded.append(f"image lane: removed {searched.removed} vectors of images already forgotten"
+                                    + (f"; forgotten images still filled its window after {IMAGE_SEARCHES} searches, "
+                                       "so it ranked fewer images than it looks for" if searched.short else ""))
             except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
                 degraded.append(f"image lane: {type(e).__name__}: {e}")
 
@@ -682,13 +690,13 @@ async def recall(
             vector_lane="off" if not vector_ran else ("postfiltered" if vector_postfiltered else "in_store"),
             image_lane="off" if not image_ran else ("postfiltered" if image_postfiltered else "in_store"),
             text_window=depth, vector_window=vector_depth, image_window=image_depth if image_ran else 0,
-            text_returned=len(text_lane), vector_returned=len(vector_lane), image_returned=len(image_hits),
+            text_returned=len(text_lane), vector_returned=len(vector_lane), image_returned=image_returned,
             postfiltered_out=postfiltered_out,
             # The bound bit: the filter removed candidates and a lane that
             # is post-filtered had returned its whole window.
             window_exhausted=postfiltered_out > 0 and (
                 (vector_ran and vector_postfiltered and len(vector_lane) >= vector_depth)
-                or (image_postfiltered and len(image_hits) >= image_depth)
+                or (image_postfiltered and image_returned >= image_depth)
                 or (text_ran and not in_store and len(text_lane) >= depth)),
         )
         # Beside the request's own `narrow`, never merged into it: that
@@ -706,7 +714,7 @@ async def recall(
         diversity=diversity_trace,
         phrases=_finished(phrase_trace, len(result_items), limit,
                           window_full=(len(vector_lane) >= vector_depth or len(text_lane) >= depth
-                                       or len(image_hits) >= image_depth)),
+                                       or image_returned >= image_depth)),
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,

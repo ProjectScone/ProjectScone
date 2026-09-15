@@ -47,7 +47,7 @@ from ..retrieval.abstention import AbstentionPolicy
 from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
-from ..retrieval.image_lane import ImageLane
+from ..retrieval.image_lane import ImageLane, remove_forgotten, writer_block
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
 from ..retrieval.overview import OverviewResult
 from ..retrieval.synonyms import Synonyms
@@ -253,6 +253,13 @@ class MemoryEngine:
         #: Its vectors, one per stored image, checked against its writer like the text vectors.
         self.image_vectors = (None if image_vectors is None else vector_identity.guard(
             image_vectors, lambda: cast(ImageEmbedder, image_embedder).id))
+        #: Why this engine's image embedder must not write to or compare with
+        #: the image index, as the index recorded it when the engine opened; None otherwise.
+        self.image_block: str | None = None
+        #: Image vectors of forgotten images removed when the engine opened
+        #: (left by forgets through an engine without the lane); None without
+        #: the lane or when the image index cannot list what it holds.
+        self.image_vectors_removed: int | None = None
         if vector_weight is None:
             # A hashed-token embedder ranks by word overlap, badly: a weak
             # echo of the text lane. Measured on LongMemEval-S, giving it a
@@ -449,6 +456,9 @@ class MemoryEngine:
             raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
         if report.retirements_pending:
             raise InvalidInput("source cleanup remains; call recover() again before opening the engine")
+        if self.image_vectors is not None:
+            self.image_block = await writer_block(self.image_vectors, cast(ImageEmbedder, self.image_embedder).id)
+            self.image_vectors_removed = await remove_forgotten(self.documents, self.image_vectors)
         return self
 
     @property
