@@ -44,7 +44,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..entities.vocabulary_store import VocabularyStore
     from ..retrieval.lessons import Lessons
 from ..retrieval.abstention import AbstentionPolicy
-from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
+from ..retrieval.recall import (RecallRuntime, SummaryExpander, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
@@ -97,6 +97,7 @@ from ..core.models import (
     Tombstone,
     DEPENDENCY_KINDS,
     LINK_KINDS,
+    RecallItem,
     RecallResult,
     Status,
 )
@@ -1151,11 +1152,21 @@ class MemoryEngine:
         )
         if type(lessons) is not bool:
             raise InvalidInput("lessons must be a boolean")
+        summaries: Optional[SummaryExpander] = None
         if expand_summaries is not None:
-            from ..retrieval.summary_expand import DEFAULT_MAX_CHUNKS, check_expansion
+            from ..retrieval.summary_expand import DEFAULT_MAX_CHUNKS, Expanded, check_expansion, expand_summaries as expand
 
             # Before the search, so a mistaken request spends no work and logs no recall.
-            check_expansion(expand_summaries, DEFAULT_MAX_CHUNKS if expand_max_chunks is None else expand_max_chunks)
+            cap = DEFAULT_MAX_CHUNKS if expand_max_chunks is None else expand_max_chunks
+            check_expansion(expand_summaries, cap)
+            mode = cast("Literal['replace', 'follow']", expand_summaries)
+
+            async def expand_found(items: Sequence[RecallItem], required: Sequence[str], excluded: Sequence[str]) -> Expanded:
+                return await expand(self, space, items, mode=mode, max_chunks=cap, require=required, exclude=excluded)
+
+            # Run inside recall, before its event is written and before lessons,
+            # so the event lists the chunks a summary brought and they are read for lessons too.
+            summaries = expand_found
         elif expand_max_chunks is not None:
             raise InvalidInput("expand_max_chunks is a cap on expand_summaries; ask for expand_summaries with it")
         result = await recall(runtime, space, query, limit, as_of, tags, where, history,
@@ -1163,16 +1174,7 @@ class MemoryEngine:
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
                             entity_notes=notes, lanes=lanes,
-                            require=require, exclude=exclude, diversity=diversity)
-        if expand_summaries is not None:
-            from ..retrieval.summary_expand import DEFAULT_MAX_CHUNKS, expand_summaries as expand
-
-            # Before lessons, so the chunks a summary brings are read for lessons too.
-            opened = await expand(self, space, result.items, mode=cast("Literal['replace', 'follow']", expand_summaries),
-                                  max_chunks=DEFAULT_MAX_CHUNKS if expand_max_chunks is None else expand_max_chunks)
-            result.items = list(opened.items)
-            result.expanded = opened.record()
-            result.returned_bytes = sum(len(item.text.encode()) for item in opened.items)
+                            require=require, exclude=exclude, diversity=diversity, summaries=summaries)
         if lessons:
             from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons, read_summary
 
