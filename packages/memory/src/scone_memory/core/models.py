@@ -460,16 +460,11 @@ class RerankTrace(BaseModel):
     candidates_omitted: int
     payload_bytes: int
     duration_ms: float
-    #: The listwise pass's receipt, when the reranker was a listwise model; left out otherwise.
-    listwise: Optional[ListwiseReceipt] = None
-
-    @model_serializer(mode="wrap")
-    def omit_absent_listwise(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        # A scorer's trace answers exactly as it did before listwise passes existed.
-        value: dict[str, object] = handler(self)
-        if self.listwise is None:
-            value.pop("listwise", None)
-        return value
+    #: The listwise pass's receipt, when the reranker was a listwise model. A
+    #: scorer's trace leaves the key out, so it answers exactly as it did before
+    #: listwise passes existed; the field, not a serializer, drops it, so the
+    #: published schema stays typed.
+    listwise: Optional[ListwiseReceipt] = Field(default=None, exclude_if=lambda receipt: receipt is None)
 
 
 class QueryEntity(BaseModel):
