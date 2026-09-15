@@ -112,6 +112,9 @@ class EpisodeBody(BaseModel):
     created_at: Optional[str] = None
     #: How this record is cut; unset keeps the server's rule.
     chunking: Optional[Literal["length", "code", "structure", "semantic"]] = None
+    #: The genre whose boundaries structure chunking cuts at; an unknown
+    #: name is refused by the engine, which owns the list.
+    chunking_profile: Optional[str] = Field(default=None, max_length=64)
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
@@ -629,6 +632,7 @@ def create_app(
             dedup_key=body.dedup_key,
             replace=body.replace,
             chunking=body.chunking,
+            chunking_profile=body.chunking_profile,
         )
         return added.model_dump()
 
@@ -654,7 +658,7 @@ def create_app(
                         "job": job_json(replayed), "replayed": True}
         records = [
             Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
-                   chunking=r.chunking)
+                   chunking=r.chunking, chunking_profile=r.chunking_profile)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
