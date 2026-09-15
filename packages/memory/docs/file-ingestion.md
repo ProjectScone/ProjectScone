@@ -511,9 +511,10 @@ its manifest and deduplication identity are unchanged. A document that does
 gets a new manifest digest; use a new durable run and parser revision to
 re-extract it.
 
-ODT, EPUB, PPTX, spreadsheets and PDF record no roles: their text becomes
-paragraphs (and declared tables stay tables). A PDF text layer declares no
-headings, and none are inferred from it; the record says
+EPUB, PPTX, spreadsheets and PDF record no roles: their text becomes
+paragraphs (and declared tables stay tables). An ODT heading carries
+`heading_level` alone, and a level with no role is written as a heading. A PDF
+text layer declares no headings, and none are inferred from it; the record says
 `structure_declared: false`.
 
 ### What the Markdown says and where it came from
@@ -580,8 +581,26 @@ unwritten though it comes before the row the bound cut at), and
 `bound.segments_omitted` counts segments not wholly written. The command repeats
 this on stderr.
 
-Inline formatting (bold, links, code spans) is not kept by the readers, so it
-is not in the Markdown; images and charts are not emitted.
+Inline formatting (bold, code spans) is not kept by the readers, so it is not
+in the Markdown, and images are not emitted. Some of what a segment carries is
+not written, and the record counts it among the segments written:
+
+- A Word or PowerPoint chart is quoted like other side content (`> chart:
+  Revenue (bar chart)`, then one line per series); its cached values are not
+  made a table.
+- A link's text is written as text; its target (the `links` metadata of a Word
+  or slide paragraph) is not, and `link_targets_unwritten` counts them.
+- A PDF page's bookmark `section` is not written as a heading, because the
+  titles are not in the text and a page can open mid-section;
+  `sections_unwritten` counts the pages that carried one.
+- A page whose text layer the PDF reader named `unreadable` is written as
+  extracted and counted in `unreadable_segments`.
+- A Word paragraph whose style chain ran short (`heading_level_unresolved`) is
+  written as a paragraph and counted in `headings_unresolved`.
+
+OCR paragraphs of an image (`frame:N/paragraph:M`) are paragraphs, each traced
+to its own locator. A PowerPoint deck's sections name no text; its slides are
+written in the presentation's order.
 
 Measured on this repository's `packages/memory/docs` (45 files): each file was
 rendered to HTML by an independent CommonMark renderer (markdown-it-py with

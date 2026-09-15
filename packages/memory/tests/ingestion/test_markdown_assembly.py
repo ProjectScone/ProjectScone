@@ -588,3 +588,167 @@ def test_a_table_segment_without_cells_is_written_after_its_grid_not_dropped() -
     assert assemble_markdown(text).markdown == (
         '> t was read as text, not as a grid; its lines follow as paragraphs. 1 segment the document puts between '
         'its rows is written after it.\n\na\n\nb\n\naside')
+
+
+# What readers merged from main put in a segment, and what the Markdown does with it.
+
+
+def test_an_open_document_heading_names_only_its_level_and_is_still_a_heading() -> None:
+    from .test_office_formats import O, T, archive
+
+    body = ('<office:text><text:h text:outline-level="2">Refunds</text:h><text:p>Within 30 days.</text:p>'
+            '<text:h text:outline-level="10">Deepest</text:h></office:text>')
+    data = archive({'content.xml': f'<office:document-content xmlns:office="{O}" xmlns:text="{T}"><office:body>{body}'
+                                   '</office:body></office:document-content>'})
+    parsed = parse_office(data, 'terms.odt', DocumentLimits())
+    assert 'block_role' not in parsed.segments[0].metadata, 'the reader gives a level and no role'
+    result = assemble_markdown(parsed)
+    assert result.markdown == '## Refunds\n\nWithin 30 days.\n\n###### Deepest'
+    record = result.record()
+    assert record['structure_declared'] is True and record['blocks'] == {'heading': 2, 'paragraph': 1}
+    assert record['headings_clamped'] == 1 and record['roles_unreadable'] == 0
+    assert_traced(parsed, result)
+
+
+def test_a_level_alone_that_is_not_a_level_is_a_paragraph_and_counted() -> None:
+    parsed = ParsedDocument(format='custom', parser='plugin', segments=(
+        DocumentSegment(text='Not a level', locator='a', metadata={'heading_level': 'x'}),
+        DocumentSegment(text='Zero', locator='b', metadata={'heading_level': '0'}),
+        DocumentSegment(text='Listed', locator='c', metadata={'block_role': 'list_item', 'heading_level': '2'}),
+    ))
+    result = assemble_markdown(parsed)
+    assert result.markdown == 'Not a level\n\nZero\n\n- Listed'
+    assert result.record()['roles_unreadable'] == 2
+
+
+def test_a_word_heading_whose_style_chain_ran_short_is_a_paragraph_and_counted() -> None:
+    parsed = parse_office(word(paragraph('Circular', style='Loop') + paragraph('Overview', style='Berschrift1'),
+                               styles=STYLES), 'report.docx', DocumentLimits())
+    assert parsed.segments[0].metadata['heading_level_unresolved'] == 'style_chain'
+    result = assemble_markdown(parsed)
+    assert result.markdown == 'Circular\n\n# Overview'
+    assert result.record()['headings_unresolved'] == 1
+
+
+def test_a_chart_is_quoted_after_its_slide_text_with_one_line_per_series() -> None:
+    from .test_office_charts import BAR, deck
+
+    parsed = parse_office(deck(BAR), 'results.pptx', DocumentLimits())
+    result = assemble_markdown(parsed)
+    assert result.markdown == ('Results\n\n> chart: Revenue (bar chart)\\\n> 2025: Q1 10; Q2 12.5\\\n'
+                               '> 2024: Q1 8; Q2 9')
+    assert [(span.kind, span.sources[0].locator) for span in result.spans] == [
+        ('paragraph', 'slide:1/paragraph:1'), ('quote', 'slide:1/chart:1')]
+    assert_traced(parsed, result)
+
+
+def test_a_chart_in_a_word_list_item_is_quoted_after_the_item_it_sits_in() -> None:
+    from .test_docx_parts import document
+    from .test_office_charts import BAR, C
+
+    inline = f'<w:drawing><c:chart xmlns:c="{C}" r:id="chart"/></w:drawing>'
+    item = '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr>'
+    body = (f'<w:p>{item}<w:r><w:t>Collect</w:t>{inline}</w:r></w:p>'
+            f'<w:p>{item}<w:r><w:t>Reconcile</w:t></w:r></w:p>')
+    data = document(body, relationships=f'<Relationship Id="chart" Target="charts/chart1.xml" Type="{R}/chart"/>',
+                    extra={'content/charts/chart1.xml': BAR})
+    parsed = parse_office(data, 'report.docx', DocumentLimits())
+    assert [s.locator for s in parsed.segments] == ['paragraph:1', 'paragraph:1/chart:1', 'paragraph:2']
+    result = assemble_markdown(parsed)
+    assert result.markdown.split('\n\n')[0] == '- Collect'
+    assert result.markdown.split('\n\n')[1].startswith('> chart: Revenue (bar chart)')
+    assert result.markdown.split('\n\n')[2] == '- Reconcile', 'the quote ends the list; nothing touches it'
+    assert_traced(parsed, result)
+
+
+def test_link_targets_are_counted_not_written_and_the_link_text_stays() -> None:
+    from .test_office_links import docx, external, run
+
+    body = (f'<w:p>{run("See the ")}<w:hyperlink r:id="rId7">{run("refund policy")}</w:hyperlink>'
+            f'{run(" or ")}<w:hyperlink w:anchor="returns">{run("returns")}</w:hyperlink></w:p>'
+            f'<w:p>{run("No links.")}</w:p>')
+    parsed = parse_office(docx(body, external('rId7', 'https://example.com/refunds')), 'terms.docx', DocumentLimits())
+    assert len(json.loads(parsed.segments[0].metadata['links'])) == 2
+    result = assemble_markdown(parsed)
+    assert result.markdown == 'See the refund policy or returns\n\nNo links.'
+    assert result.record()['link_targets_unwritten'] == 2
+    cut = assemble_markdown(parsed, max_bytes=1)
+    assert cut.markdown == '' and cut.record()['link_targets_unwritten'] == 0, 'only written segments count'
+
+
+def test_an_unreadable_link_list_counts_nothing_and_writes_the_text() -> None:
+    parsed = ParsedDocument(format='custom', parser='plugin', segments=(
+        DocumentSegment(text='See here', locator='a', metadata={'links': 'not json'}),
+        DocumentSegment(text='And there', locator='b', metadata={'links': '{"text": "there"}'}),
+    ))
+    result = assemble_markdown(parsed)
+    assert result.markdown == 'See here\n\nAnd there' and result.record()['link_targets_unwritten'] == 0
+
+
+async def test_pdf_bookmark_sections_are_counted_not_made_into_headings() -> None:
+    pytest.importorskip('pypdf')
+    from .test_pdf_outline import chapters, with_outline
+
+    parsed = await BuiltinDocumentParser().parse(with_outline(chapters), 'survey.pdf')
+    assert parsed.segments[2].metadata['section'] == 'Chapter 2 > Refunds'
+    result = assemble_markdown(parsed)
+    assert result.markdown == ('Introduction to the survey.\n\nScope of the crane survey.\n\nRefunds within 30 days.'
+                               '\n\nReturns by post.\n\nAppendix tables.')
+    record = result.record()
+    assert record['sections_unwritten'] == 5 and record['structure_declared'] is False
+    assert record['blocks'] == {'paragraph': 5}
+
+
+async def test_an_unreadable_pdf_page_is_written_as_extracted_and_counted() -> None:
+    pytest.importorskip('pypdf')
+    from .test_unreadable_text_layer import PAGES, READABLE, mixed_pdf
+
+    parsed = await BuiltinDocumentParser().parse(mixed_pdf(PAGES), 'survey.pdf')
+    result = assemble_markdown(parsed)
+    assert result.markdown.startswith(READABLE + '\n\n')
+    assert result.record()['unreadable_segments'] == 1
+    assert [span.sources[0].locator for span in result.spans] == ['page:1', 'page:2']
+    readable = await BuiltinDocumentParser().parse(mixed_pdf(((READABLE, False),)), 'survey.pdf')
+    assert assemble_markdown(readable).record()['unreadable_segments'] == 0
+    said_otherwise = ParsedDocument(format='pdf', parser='plugin', segments=(
+        DocumentSegment(text='Fine.', locator='page:1', metadata={'unreadable': 'false'}),))
+    assert assemble_markdown(said_otherwise).record()['unreadable_segments'] == 0
+
+
+async def test_ocr_paragraphs_of_an_image_are_paragraphs_traced_to_each() -> None:
+    pytest.importorskip('PIL')
+    from scone_memory.ingestion.formats.media import ImageDocumentParser
+
+    from .test_ocr_paragraphs import LAID_OUT, Engine, png
+
+    parsed = await ImageDocumentParser(Engine(LAID_OUT)).parse(png(), 'scan.png')
+    result = assemble_markdown(parsed)
+    assert result.markdown == 'The crane\\\nrusted.\n\nPaid in June.\n\nFooter'
+    assert [span.sources[0].locator for span in result.spans] == [
+        'frame:1/paragraph:1', 'frame:1/paragraph:2', 'frame:1/paragraph:3']
+    assert result.record()['structure_declared'] is False
+    assert_traced(parsed, result)
+
+
+def test_a_deck_with_sections_rebuilds_its_slides_in_the_presentations_order() -> None:
+    from .test_office_formats import P
+    from .test_pptx_sections import P14, slide
+
+    sections = (f'<p:extLst><p:ext uri="{{521415D9-36F7-43E2-AB2F-B90AF26B5E84}}"><p14:sectionLst xmlns:p14="{P14}">'
+                '<p14:section name="Opening" id="{A}"><p14:sldIdLst><p14:sldId id="257"/></p14:sldIdLst></p14:section>'
+                '</p14:sectionLst></p:ext></p:extLst>')
+    data = ooxml_archive({
+        'ppt/presentation.xml': (f'<p:presentation xmlns:p="{P}" xmlns:r="{R}"><p:sldIdLst>'
+                                 f'<p:sldId id="257" r:id="r2"/><p:sldId id="256" r:id="r1"/></p:sldIdLst>{sections}'
+                                 '</p:presentation>'),
+        'ppt/_rels/presentation.xml.rels': (f'<Relationships xmlns="{REL}"><Relationship Id="r1" '
+                                            f'Target="slides/slide1.xml" Type="{R}/slide"/><Relationship '
+                                            f'Id="r2" Target="slides/slide2.xml" Type="{R}/slide"/></Relationships>'),
+        'ppt/slides/slide1.xml': slide('Body slide'),
+        'ppt/slides/slide2.xml': slide('# Opening slide'),
+    }, main_part='ppt/presentation.xml')
+    parsed = parse_office(data, 'deck.pptx', DocumentLimits())
+    result = assemble_markdown(parsed)
+    assert result.markdown == '\\# Opening slide\n\nBody slide', 'a section name is not text and adds no heading'
+    assert result.record()['structure_declared'] is False
+    assert_traced(parsed, result)

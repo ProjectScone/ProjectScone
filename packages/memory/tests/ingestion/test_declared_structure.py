@@ -250,3 +250,22 @@ def test_html_list_ids_name_the_mail_part_they_come_from() -> None:
     parsed = parse_text(mail, 'm.eml', DocumentLimits())
     assert [(s.text, s.metadata['list_id'], s.metadata['list_item_id']) for s in parsed.segments if 'list_id' in s.metadata] == [
         ('first', 'mime:1.1/1', 'mime:1.1/1'), ('second', 'mime:1.2/1', 'mime:1.2/1'), ('more', 'mime:1.2/1', 'mime:1.2/1')]
+
+
+def test_a_short_style_chain_is_unresolved_only_where_nothing_in_it_said_heading_or_body() -> None:
+    styles = STYLES + ('<w:style w:type="paragraph" w:styleId="BodyLoop"><w:name w:val="BodyLoop"/>'
+                       '<w:pPr><w:outlineLvl w:val="9"/></w:pPr><w:basedOn w:val="Loop"/></w:style>'
+                       '<w:style w:type="paragraph" w:styleId="TitleLoop"><w:name w:val="Title"/>'
+                       '<w:basedOn w:val="TitleLoop"/></w:style>')
+    body = ''.join([
+        paragraph('Body by style', style='BodyLoop'),
+        paragraph('Body by paragraph', style='Loop', outline=9),
+        paragraph('Titled', style='TitleLoop'),
+        paragraph('Listed loop', style='Loop', number=2),
+    ])
+    assert roles(word(body, styles=styles, numbering=NUMBERING)) == [
+        ('Body by style', MEMBER),
+        ('Body by paragraph', MEMBER),
+        ('Titled', heading(1, 'style')),
+        ('Listed loop', {**item('2', '0', 'ordered'), 'heading_level_unresolved': 'style_chain'}),
+    ]
