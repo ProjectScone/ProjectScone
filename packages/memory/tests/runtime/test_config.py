@@ -372,3 +372,34 @@ def test_serve_hands_the_voice_keypad_to_the_conversation_service(tmp_path, monk
     with pytest.raises(_Stop):
         serve.build_app(Settings.from_env(env), engine)
     assert captured["voice_keypad"] == expected
+
+
+async def test_a_semantic_merge_threshold_is_a_similarity_that_reaches_every_engine():
+    from scone_memory import HashEmbedder
+    from scone_memory.runtime.config import ENGINE_SETTINGS, build_in_process_engine
+
+    settings = Settings.from_env({"SCONE_SEMANTIC_MERGE_THRESHOLD": " 0.6 "})
+    assert settings.semantic_merge_threshold == 0.6
+    assert Settings.from_env({}).semantic_merge_threshold is None
+    assert Settings.from_env({"SCONE_SEMANTIC_MERGE_THRESHOLD": " "}).semantic_merge_threshold is None, \
+        "an empty value is unset, as elsewhere"
+    assert "semantic_merge_threshold" in ENGINE_SETTINGS
+    engine = await build_engine(settings)
+    try:
+        assert engine.semantic_merge_threshold == 0.6
+    finally:
+        await engine.close()
+    in_process = await build_in_process_engine(settings, HashEmbedder())
+    assert in_process.semantic_merge_threshold == 0.6
+
+
+@pytest.mark.parametrize("raw, match", [
+    ("0", "SCONE_SEMANTIC_MERGE_THRESHOLD: semantic_merge_threshold must be a similarity above 0 and at most 1"),
+    ("-0.2", "SCONE_SEMANTIC_MERGE_THRESHOLD: semantic_merge_threshold must be a similarity"),
+    ("1.5", "SCONE_SEMANTIC_MERGE_THRESHOLD: semantic_merge_threshold must be a similarity"),
+    ("nan", "SCONE_SEMANTIC_MERGE_THRESHOLD: semantic_merge_threshold must be a similarity"),
+    ("often", "SCONE_SEMANTIC_MERGE_THRESHOLD must be a number, got 'often'"),
+])
+def test_a_semantic_merge_threshold_that_is_not_a_similarity_is_refused_by_name(raw, match):
+    with pytest.raises(InvalidInput, match=match):
+        Settings.from_env({"SCONE_SEMANTIC_MERGE_THRESHOLD": raw})

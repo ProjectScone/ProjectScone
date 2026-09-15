@@ -88,3 +88,13 @@ def test_explicit_loader_executes_target_without_leaking_environment(tmp_path):
         "assert os.environ['LANGSMITH_TRACING']=='false'; print('configured')"],
         text=True, capture_output=True, check=True)
     assert child.stdout == "configured\n" and child.stderr == ""
+
+
+def test_template_semantic_merge_threshold_is_off_and_its_example_parses():
+    parse = runpy.run_path(str(LOADER))["parse_environment"]
+    template = (ROOT / ".env.example").read_text()
+    assert Settings.from_env(parse(template)).semantic_merge_threshold is None, "a second pass is opt-in"
+    example = re.search(r"^# (SCONE_SEMANTIC_MERGE_THRESHOLD=\S+)$", template, re.MULTILINE)
+    assert example is not None, "the template must show the setting"
+    threshold = Settings.from_env(parse(example.group(1))).semantic_merge_threshold
+    assert threshold is not None and 0 < threshold <= 1
