@@ -238,6 +238,8 @@ class Settings:
     document_video_config: Optional[str] = None
     document_ocr_executable: Optional[str] = None
     document_ocr_language: str = 'eng'
+    #: Languages a request may choose for its scan, besides document_ocr_language.
+    document_ocr_languages: tuple[str, ...] = ()
     document_ocr_psm: int = 3
     document_ocr_dpi: int = 150
     #: Turn a page Tesseract's orientation detection is sure is turned before reading it.
@@ -476,6 +478,8 @@ class Settings:
             document_video_config=env.get("SCONE_DOCUMENT_VIDEO_CONFIG") or None,
             document_ocr_executable=env.get('SCONE_DOCUMENT_OCR_EXECUTABLE') or None,
             document_ocr_language=env.get('SCONE_DOCUMENT_OCR_LANGUAGE', 'eng'),
+            document_ocr_languages=tuple(one.strip() for one in env.get('SCONE_DOCUMENT_OCR_LANGUAGES', '').split(',')
+                                         if one.strip()),
             document_ocr_psm=int(env.get('SCONE_DOCUMENT_OCR_PSM', '3')),
             document_ocr_dpi=int(env.get('SCONE_DOCUMENT_OCR_DPI', '150')),
             document_ocr_orientation=env.get('SCONE_DOCUMENT_OCR_ORIENTATION') == '1',
