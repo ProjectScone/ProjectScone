@@ -422,3 +422,37 @@ async def test_a_semantic_merge_threshold_is_a_similarity_that_reaches_every_eng
 def test_a_semantic_merge_threshold_that_is_not_a_similarity_is_refused_by_name(raw, match):
     with pytest.raises(InvalidInput, match=match):
         Settings.from_env({"SCONE_SEMANTIC_MERGE_THRESHOLD": raw})
+
+
+async def test_profile_bucket_rules_come_from_the_environment_and_reach_every_engine(tmp_path):
+    from scone_memory.memory.catalog import BucketRules
+    from scone_memory.runtime.config import POLICY_SETTINGS, build_in_process_engine
+
+    base = {"SCONE_SQLITE_PATH": str(tmp_path / "m.db"), "SCONE_EMBEDDER": "hash"}
+    assert (await build_engine(Settings.from_env(base))).profile_bucket_rules == BucketRules()
+    settings = Settings.from_env(base | {
+        "SCONE_PROFILE_STATIC_PREDICATES": "name, role", "SCONE_PROFILE_DYNAMIC_PREDICATES": "works_on",
+        "SCONE_PROFILE_STATIC_AFTER_DAYS": "45", "SCONE_PROFILE_DYNAMIC_CHANGES": "3",
+        "SCONE_PROFILE_CHANGE_WINDOW_DAYS": "180", "SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS": "7"})
+    expected = BucketRules.of(static_predicates=["name", "role"], dynamic_predicates=["works_on"],
+                              static_after_days=45, dynamic_changes=3, change_window_days=180, half_life_days=7)
+    assert "profile_dynamic_changes" in POLICY_SETTINGS
+    for built in (await build_engine(settings), await build_in_process_engine(settings, HashEmbedder())):
+        assert built.profile_bucket_rules == expected
+    blank = Settings.from_env(base | {"SCONE_PROFILE_STATIC_AFTER_DAYS": "", "SCONE_PROFILE_DYNAMIC_CHANGES": ""})
+    assert (await build_engine(blank)).profile_bucket_rules == BucketRules()
+
+
+@pytest.mark.parametrize("env, named", [
+    ({"SCONE_PROFILE_STATIC_AFTER_DAYS": "-1"}, "SCONE_PROFILE_STATIC_AFTER_DAYS"),
+    ({"SCONE_PROFILE_STATIC_AFTER_DAYS": "soon"}, "SCONE_PROFILE_STATIC_AFTER_DAYS"),
+    ({"SCONE_PROFILE_DYNAMIC_CHANGES": "0"}, "SCONE_PROFILE_DYNAMIC_CHANGES"),
+    ({"SCONE_PROFILE_DYNAMIC_CHANGES": "1.5"}, "SCONE_PROFILE_DYNAMIC_CHANGES"),
+    ({"SCONE_PROFILE_CHANGE_WINDOW_DAYS": "0"}, "SCONE_PROFILE_CHANGE_WINDOW_DAYS"),
+    ({"SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS": "inf"}, "SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS"),
+    ({"SCONE_PROFILE_STATIC_PREDICATES": "name", "SCONE_PROFILE_DYNAMIC_PREDICATES": "Name"},
+     "SCONE_PROFILE_STATIC_PREDICATES and SCONE_PROFILE_DYNAMIC_PREDICATES"),
+])
+def test_bad_profile_bucket_rules_are_refused_naming_the_setting(env, named):
+    with pytest.raises(InvalidInput, match=named):
+        Settings.from_env(env)
