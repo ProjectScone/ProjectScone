@@ -46,6 +46,12 @@ that can set a base URL and a bearer key, is the client.
    wrapped as `<scone-memory boundary="…">` … `</scone-memory boundary="…">`,
    with a boundary drawn fresh per request so stored text cannot close it, and
    placed after the request's own system and developer messages.
+   Native text conversations insert the same block as a user message, so that
+   retrieved text never carries system authority; here it sits in the system
+   prompt instead, still labelled as background and not instructions. Stored
+   text that reaches this block is read by the model with system standing, so
+   a space whose contents are not trusted is better served by the native
+   conversation service.
 3. **Forward.** The server's model (`SCONE_CHAT_URL`, `SCONE_CHAT_MODEL`) is
    asked. It takes one system prompt and one user prompt, so the request's
    system and developer messages and the memory block are joined into the
