@@ -21,7 +21,8 @@ def build_document_ocr(settings: Settings) -> DocumentOcr | None:
         raise ValueError('SCONE_DOCUMENT_OCR_EXECUTABLE must name an installed absolute executable')
     try:
         engine = TesseractOcr(executable=str(path), language=settings.document_ocr_language,
-                              page_segmentation=settings.document_ocr_psm)
+                              page_segmentation=settings.document_ocr_psm,
+                              orientation=settings.document_ocr_orientation)
     except InvalidInput as error:
         raise ValueError(str(error)) from error
     configured = DocumentOcr(engine, dpi=settings.document_ocr_dpi)

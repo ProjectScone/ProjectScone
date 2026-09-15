@@ -109,7 +109,7 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
     try:
         for value in observations:
             payload = value.model_dump()
-            region = OcrRegion.model_validate({key: payload[key] for key in OcrRegion.model_fields})
+            region = OcrRegion.model_validate({key: payload[key] for key in OcrRegion.model_fields if key in payload})
             text_bytes += len(region.text.encode('utf-8'))
             if text_bytes > 2_000_000:
                 raise InvalidInput('OCR table analysis exceeds its text limit')
