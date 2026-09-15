@@ -172,10 +172,11 @@ class ChatEndOfTurn:
 
 @dataclass(frozen=True)
 class TurnReceipt:
-    """Why a turn ended. ``held_ms`` is the wait after its last final
-    transcript arrived; ``turn_ms`` runs from its first final transcript to
-    its release. Both start after the recognizer's pause, so neither counts
-    the speech inside a transcript or the pause that ended it."""
+    """Why a turn ended. ``held_ms`` is the wait after the last final
+    transcript with words in it arrived (a wordless one re-arms the hold
+    but is not part of the turn); ``turn_ms`` runs from its first final
+    transcript to its release. Both start after the recognizer's pause, so
+    neither counts the speech inside a transcript or the pause that ended it."""
 
     reason: str
     verdict: str

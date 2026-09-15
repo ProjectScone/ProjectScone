@@ -112,8 +112,8 @@ reply that is playing.
 
 Every user turn records why it ended, as `metadata["turn_end"]` on its stored
 episode and as `session.last_turn_receipt` (`reason`, `verdict`, `cue`,
-`fragments`, `held_ms` after its last final transcript arrived, `turn_ms` from its
-first; both start after the recognizer's pause, not at the first spoken word):
+`fragments`, `held_ms` after its last final transcript with words arrived, `turn_ms`
+from its first; both start after the recognizer's pause, not at the first spoken word):
 
 | `reason` | Meaning |
 | --- | --- |
