@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryEventLog, InMemoryVectorIndex, MemoryEngine
 from scone_memory.api.app import create_app
-from scone_memory.core.errors import InvalidInput
+from scone_memory.core.errors import InvalidInput, SconeError
+from scone_memory.core.ports import TextFilter
 from scone_memory.providers.llm import FakeChat
 from scone_memory.retrieval import summary_expand as module
 from scone_memory.retrieval.summary_expand import expand_summaries
@@ -334,8 +335,10 @@ async def test_a_node_cited_from_above_is_checked_like_a_chunk_and_never_followe
         opened = await expand_summaries(engine, "s", top, mode="replace")
         # node:1:0 was written from other content; the first node:1:1 quote is
         # not its text; node:1:2's account cannot be read; node:1:3 is not stored
-        # under a node's key; a page is not a node. Only node:1:1 is followed.
-        assert [item.chunk_id for item in opened.items] == [chunks[1].chunk_id] and opened.unresolved == 5
+        # under a node's key; a page is not a node. Only node:1:1 is followed,
+        # and a summary resting partly on citations that failed is not replaced.
+        assert [item.chunk_id for item in opened.items] == [top[0].chunk_id, chunks[1].chunk_id] and opened.unresolved == 5
+        assert opened.partial == (top[0].episode_id,) and opened.expanded == 1
         # The top account, four node lookups (node:1:1 once, though cited twice), and the two accounts of nodes that held.
         assert opened.reads == 7
     finally:
@@ -494,6 +497,7 @@ async def test_the_phrases_a_recall_was_given_hold_for_what_a_summary_brings():
             "part of what it cites does not stand for all of it, so the summary stays"
         assert (excluded.dropped_excluded, excluded.dropped_required, excluded.expanded) == (1, 0, 1)
         assert "1 cited chunk(s) were dropped by the phrases" in excluded.why
+        assert excluded.partial == (hit[0].episode_id,) and "could not be followed" not in excluded.why
         assert excluded.record()["dropped_excluded"] == 1
 
         required = await expand_summaries(engine, "s", hit, mode="replace", require=["Bramley"])
@@ -571,5 +575,196 @@ async def test_a_chunk_brought_by_a_summary_says_where_in_the_file_it_is_as_a_di
             assert direct.chunk_id == item.chunk_id and direct.declaration is not None
             assert (item.first_line, item.last_line, item.declaration) == (direct.first_line, direct.last_line, direct.declaration)
         assert opened.items[1].first_line == 6 and opened.items[1].declaration == "lighthouse_range"
+    finally:
+        await engine.close()
+
+
+async def test_a_document_forgotten_while_expansion_reads_serves_nothing_of_it():
+    engine, episode_id, chunks = await document()
+    try:
+        await build_summary_tree(engine, FakeChat(replies_for(chunks, max_levels=1)), "s", episode_id,
+                                 fan_in=3, max_levels=1, store=True)
+        first, second = await summary_items(engine, 1, 0), await summary_items(engine, 1, 1)
+        real = engine.attachment
+        read: list[str] = []
+
+        async def attachment(space, attachment_id):
+            got = await real(space, attachment_id)
+            read.append(attachment_id)
+            if len(read) == 2:
+                # Another request forgets the document while the second summary's account is read,
+                # after the first summary's citations were already followed and checked.
+                await engine.forget("s", episode_id)
+            return got
+
+        engine.attachment = attachment
+        try:
+            opened = await expand_summaries(engine, "s", [*first, *second], mode="replace")
+        finally:
+            engine.attachment = real
+        assert await engine.documents.chunks_of("s", episode_id) == []
+        assert opened.items == (*first, *second) and opened.chunks_added == 0 and opened.expanded == 0, \
+            "no chunk of a document forgotten during the call is served, whichever summary's read it happened in"
+        assert [r["reason"] for r in opened.refused] == ["source_gone", "source_gone"] and "forgotten" in opened.why
+        assert [r["episode_id"] for r in opened.refused] == [first[0].episode_id, second[0].episode_id]
+    finally:
+        await engine.close()
+
+    engine, episode_id, chunks = await document()
+    try:
+        await build_summary_tree(engine, FakeChat(replies_for(chunks, max_levels=1)), "s", episode_id,
+                                 fan_in=3, max_levels=1, store=True)
+        hit, second = await summary_items(engine, 1, 0), await summary_items(engine, 1, 1)
+        real_get = engine.documents.get_chunks
+
+        async def changed(space, ids):
+            # One chunk of the document reads differently now; the document is still there.
+            return [chunk.model_copy(update={"text": chunk.text.upper()}) if chunk.chunk_id == chunks[0].chunk_id else chunk
+                    for chunk in await real_get(space, ids)]
+
+        async def failing(space, ids):
+            raise SconeError("the store did not answer")
+
+        engine.documents.get_chunks = changed
+        try:
+            moved = await expand_summaries(engine, "s", [*hit, *second], mode="replace")
+        finally:
+            engine.documents.get_chunks = real_get
+        assert moved.items == (*hit, *second) and moved.chunks_added == 0, \
+            "a document that changed serves none of its chunks, not only the one that moved"
+        assert [r["reason"] for r in moved.refused] == ["changed_while_read", "changed_while_read"]
+        assert "changed while" in moved.why
+        engine.documents.get_chunks = failing
+        try:
+            unread = await expand_summaries(engine, "s", hit, mode="replace")
+        finally:
+            engine.documents.get_chunks = real_get
+        assert unread.items == tuple(hit) and [r["reason"] for r in unread.refused] == ["unread"]
+        assert [item.chunk_id for item in (await expand_summaries(engine, "s", hit, mode="replace")).items] == [
+            chunks[0].chunk_id, chunks[1].chunk_id]
+
+        # A second document, forgotten while the first one's reason is read again: the last read
+        # before the answer is the one that finds nothing moved.
+        mill = await engine.remember("s", "\n\n".join(reversed(PARTS)), kind="file", source="mill.md")
+        mill_chunks = await engine.documents.chunks_of("s", mill.episode_id)
+        await build_summary_tree(engine, FakeChat(replies_for(mill_chunks, max_levels=1)), "s", mill.episode_id,
+                                 fan_in=3, max_levels=1, store=True)
+        milled = await summary_items(engine, 1, 0, source="mill.md")
+        real_episode = engine.episode
+        asked: list[int] = []
+
+        async def episode(space, wanted):
+            asked.append(wanted)
+            if wanted == episode_id and asked.count(episode_id) == 2:
+                await engine.forget("s", mill.episode_id)
+            return await real_episode(space, wanted)
+
+        firsts: list[int] = []
+
+        async def changed_once(space, ids):
+            firsts.append(1)
+            return await (changed if len(firsts) == 1 else real_get)(space, ids)
+
+        engine.episode, engine.documents.get_chunks = episode, changed_once
+        try:
+            both = await expand_summaries(engine, "s", [*hit, *milled], mode="replace")
+        finally:
+            engine.episode, engine.documents.get_chunks = real_episode, real_get
+        assert both.items == (*hit, *milled) and both.chunks_added == 0
+        assert [r["reason"] for r in both.refused] == ["changed_while_read", "source_gone"]
+    finally:
+        await engine.close()
+
+
+async def test_what_a_summary_brings_holds_to_the_scope_the_recall_was_given():
+    engine, episode_id, chunks = await document()
+    try:
+        await build_summary_tree(engine, FakeChat(replies_for(chunks, max_levels=1)), "s", episode_id,
+                                 fan_in=3, max_levels=1, store=True)
+        noted = await engine.recall("s", "Zorvath 1.0 recounts", limit=3, kind="note", expand_summaries="follow")
+        assert noted.items and all("summary_of" in item.metadata and item.via_summary is None for item in noted.items), \
+            "a recall of notes does not hand back a file's chunks through a summary"
+        assert noted.expanded["dropped_scope"] >= 2 and (noted.expanded["chunks_added"], noted.expanded["expanded"]) == (0, 0)
+        assert "outside the recall's scope" in noted.expanded["why"]
+        prefixed = await engine.recall("s", "Zorvath 1.0 recounts", limit=3, source_prefix="town.md#summary",
+                                       expand_summaries="replace")
+        assert prefixed.items and all(item.source.startswith("town.md#summary") for item in prefixed.items), \
+            "a summary whose chunks are out of scope stands as it was, even under replace"
+        assert prefixed.expanded["dropped_scope"] >= 2
+        open_scope = await engine.recall("s", "Zorvath 1.0 recounts", limit=3, expand_summaries="follow")
+        assert open_scope.expanded["chunks_added"] >= 2 and open_scope.expanded["dropped_scope"] == 0
+
+        hit = await summary_items(engine, 1, 0)
+        tagged = await expand_summaries(engine, "s", hit, mode="replace", scope=TextFilter(tags=("elsewhere",)))
+        assert tagged.items == tuple(hit) and tagged.dropped_scope == 2 and tagged.record()["dropped_scope"] == 2
+        assert [item.chunk_id for item in (await expand_summaries(engine, "s", hit, mode="replace", scope=TextFilter())).items] == [
+            chunks[0].chunk_id, chunks[1].chunk_id]
+    finally:
+        await engine.close()
+
+
+async def test_a_summary_some_of_whose_citations_fail_is_not_replaced_by_the_rest():
+    engine, episode_id, chunks = await document()
+    try:
+        def cite(chunk, quote=None):
+            said = quote or opening(chunk.text)
+            return {"passage": f"chunk:{chunk.chunk_id}", "quote": said, "start": 0, "end": len(said)}
+
+        account = {"sentences": [{"text": "A.", "citations": [cite(chunks[0])]},
+                                 {"text": "B.", "citations": [cite(chunks[1], "words it never held")]},
+                                 {"text": "C.", "citations": [{"passage": "node:0:5", "quote": "x", "start": 0, "end": 1}]}]}
+        hit = await forged_summary(engine, episode_id, chunks, account=account)
+        kept = await expand_summaries(engine, "s", hit, mode="replace")
+        assert [item.chunk_id for item in kept.items] == [hit[0].chunk_id, chunks[0].chunk_id], \
+            "part of what a summary cites does not stand for all of it"
+        assert (kept.unquoted, kept.unresolved, kept.expanded) == (1, 1, 1) and kept.partial == (hit[0].episode_id,)
+        assert kept.record()["partial"] == [hit[0].episode_id]
+        assert "1 summary hit(s) rest partly on citations that could not be followed" in kept.why
+
+        honest = await forged_summary(engine, episode_id, chunks, account={"sentences": [account["sentences"][0]]})
+        whole = await expand_summaries(engine, "s", honest, mode="replace")
+        assert [item.chunk_id for item in whole.items] == [chunks[0].chunk_id] and whole.partial == ()
+        assert "could not be followed" not in whole.why
+        # In one answer, each summary is judged on its own citations, and one recalled twice is followed once.
+        mixed = await expand_summaries(engine, "s", [*hit, *hit, *honest], mode="replace")
+        assert [item.chunk_id for item in mixed.items] == [hit[0].chunk_id, chunks[0].chunk_id, hit[0].chunk_id]
+        assert (mixed.unquoted, mixed.unresolved, mixed.partial, mixed.already_present) == (1, 1, (hit[0].episode_id,), 1)
+    finally:
+        await engine.close()
+
+
+async def test_a_chunk_brought_by_a_summary_carries_the_superseded_mark_a_direct_hit_does():
+    engine, episode_id, chunks = await document()
+    try:
+        newer = await engine.remember("s", "The harbour at Vellmar now stays open all winter.", kind="note", source="newer.md")
+        await engine.assert_fact("s", "vellmar harbour", "closes_in", "November", valid_from="2024-01-01T00:00:00Z",
+                                 source_episode_id=episode_id)
+        await engine.assert_fact("s", "vellmar harbour", "closes_in", "never", valid_from="2025-01-01T00:00:00Z",
+                                 source_episode_id=newer.episode_id)
+        await build_summary_tree(engine, FakeChat(replies_for(chunks, max_levels=1)), "s", episode_id,
+                                 fan_in=3, max_levels=1, store=True)
+        direct = await engine.recall("s", PARTS[0], limit=3, kind="file")
+        assert direct.items and all(item.superseded for item in direct.items if item.episode_id == episode_id)
+        opened = await engine.recall("s", "Zorvath 1.0 recounts", limit=3, expand_summaries="follow")
+        brought = [item for item in opened.items if item.via_summary is not None]
+        assert brought and all(item.episode_id == episode_id and item.superseded for item in brought), \
+            "a retired claim is marked whether it came back directly or through a summary"
+    finally:
+        await engine.close()
+
+
+async def test_a_window_is_refused_with_expansion_since_it_would_move_what_the_cited_spans_index():
+    engine, episode_id, chunks = await document()
+    try:
+        with TestClient(create_app(engine, {"key-a": "s"})) as client:
+            auth = {"Authorization": "Bearer key-a"}
+            for widening in ({"window": 40}, {"window_unit": "sentences"}):
+                refused = client.get("/v1/recall", params={"q": "harbour", "expand_summaries": "follow", **widening}, headers=auth)
+                assert refused.status_code == 422 and "window" in refused.json()["error"], refused.text
+                assert client.get("/v1/recall", params={"q": "harbour", **widening}, headers=auth).status_code == 200
+        for widening in (["--window", "40"], ["--window-unit", "sentences"]):
+            with pytest.raises(InvalidInput, match="--expand-summaries cannot be combined"):
+                await run(build_parser().parse_args(["--space", "s", "recall", "harbour", "--expand-summaries", "follow", *widening]),
+                          engine, io.StringIO(""), io.StringIO())
     finally:
         await engine.close()

@@ -472,10 +472,12 @@ was, with no lanes of its own, and each carries `via_summary`: the summary's
 episode and chunk, its level and index, the episode it summarizes, the mode,
 and `cited`, the character spans of the chunk's stored text where the quotes
 it rests on sit. Its `first_line`, `last_line` and `declaration` are worked
-out from the document as a direct hit's are. Spans rather than the quotes themselves, so an answer holds
-no second copy of a passage's text for withholding to miss; after a window
-widens the passage they index the chunk's stored text, not the widened passage. A cited
-chunk already in the answer is not repeated.
+out from the document as a direct hit's are, and so is `superseded`: expansion
+runs before supersession, so a chunk whose claim the ledger retired is marked
+and moved below its replacement whether it came back directly or through a
+summary. Spans rather than the quotes themselves, so an answer holds no second
+copy of a passage's text for withholding to miss. A cited chunk already in the
+answer is not repeated.
 
 What it refuses, and says so in `expanded`:
 
@@ -487,10 +489,17 @@ What it refuses, and says so in `expanded`:
   A node is found by the source key its build stored it under, one read,
   not by listing the document's summaries, which walks every episode in the
   space.
-- The phrases the recall was given hold for what a summary brings: a cited
-  chunk lacking a `require` phrase or holding an `exclude` one is not served
-  and is counted in `dropped_required` or `dropped_excluded`, and a summary
-  that lost any stands beside what was left, even under `replace`.
+- The scope and the phrases the recall was given hold for what a summary
+  brings. A cited chunk the scope would not retain is not served and is
+  counted in `dropped_scope`: the same check the reranker makes before
+  exposing a passage's text (kind, source prefix, since and until, tags,
+  `where`, conditions, `as_of`, and a span that still holds its text), so a
+  recall narrowed to `kind=note` gets the summary and none of the file it
+  cites. A cited chunk lacking a `require` phrase or holding an `exclude` one
+  is counted in `dropped_required` or `dropped_excluded`.
+- Only a whole summary is replaced. One resting partly on citations that
+  failed, or that lost a chunk to the scope, the phrases or the cap, stands
+  beside what was left even under `replace`, and is named in `partial`.
 - A summary whose document is forgotten is refused as `source_gone` and
   nothing of the document is served: forgetting a document leaves its
   summaries, and what they cite is deleted text. A document whose content
@@ -499,7 +508,15 @@ What it refuses, and says so in `expanded`:
   note written by hand or carried from another store). A document that
   could not be read is `unread`, and one whose id was never stored here (a
   note carried from another store) is `source_unknown`; neither is a
-  finding that it is gone;
+  finding that it is gone. Following citations awaits reads, and a
+  document can be forgotten during any of them, so every chunk about to be
+  served is read again after the last one, with nothing awaited between that
+  read and the answer: a document whose chunks moved is read again for its
+  reason, `source_gone` when it was forgotten and `changed_while_read` when it
+  is still there, and none of its chunks is served under any summary; a
+  store that cannot answer that read confirms nothing, and every summary is
+  `unread`. Those reads (one chunk read per pass, plus a document re-read for
+  each document found changed) are not counted against `MAX_READS`;
   metadata that does not say what a note summarizes is `malformed`; an
   account that cannot be read is `detail_unreadable`; citations that reach
   no chunk are `nothing_cited`. A refused summary stands as it was.
@@ -514,16 +531,14 @@ What it refuses, and says so in `expanded`:
 
 The answer can hold more than `limit` items, and `returned_bytes` counts
 what is returned. Expansion runs inside recall before `lessons`, so the
-chunks a summary brings are read for lessons, and before the route's window
-and withholding stages, so what it adds is widened and scanned like any
-passage. It is refused with `merge` (a merged passage holds the text between
-two cited chunks, which the summary does not rest on, under one chunk's
-`via_summary`) and, on the command line, with `--parts`, which answers
-without recall's expansion. The narrowing a caller set (kind, tags, source prefix,
-dates) chose what was searched; it is not applied again to what a returned
-summary cites, since a summary is a note and what it cites is the document's
-own text. The phrases are applied, because they are a promise about the text
-returned. The recall event is written after expansion: it lists the items
+chunks a summary brings are read for lessons, and before the route's
+withholding stage, so what it adds is scanned like any passage. It is refused
+with `merge` and with a window (`window`, or `window_unit=sentences`, and so
+`compress`): a merged or widened passage holds text the summary does not rest
+on under its `via_summary`, and a widened one has a new `start` and text, so
+the spans in `cited` would no longer index the text returned. On the command
+line it is refused with `--parts` too, which answers without recall's
+expansion. The recall event is written after expansion: it lists the items
 returned, each chunk a summary brought marked with that summary's episode
 in `via_summary`, with `returned_bytes` and the `expanded` record, so
 feedback on a brought chunk is accepted and feedback on a replaced summary
