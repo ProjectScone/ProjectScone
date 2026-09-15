@@ -785,6 +785,25 @@ def create_app(
                                         store=True, model_name=getattr(model, "model", type(model).__name__))
         return JSONResponse(tree.record())
 
+    @app.post("/v1/chunk-questions")
+    async def post_chunk_questions(per_chunk: int = Query(default=3, ge=1, le=5),
+                                   max_chunks: int = Query(default=2000, ge=1, le=2000),
+                                   after_chunk: Optional[int] = Query(default=None, ge=0),
+                                   episode_id: Optional[list[int]] = Query(default=None),
+                                   space: str = Depends(space_for)) -> JSONResponse:
+        """Write the question lane with the synthesis model: questions each
+        chunk answers, kept only with a sentence quoted from the chunk, indexed
+        apart from its context. Refused while SCONE_QUESTION_LANE is off; a store
+        without the question index answers with a report that says so."""
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            return JSONResponse({"error": "no synthesis model configured to write questions with (SCONE_CHAT_URL and "
+                                          "SCONE_CHAT_MODEL)"}, status_code=501)
+        report = await engine.build_chunk_questions(space, model, per_chunk=per_chunk, max_chunks=max_chunks,
+                                                    after_chunk=after_chunk, episode_ids=episode_id,
+                                                    model_name=getattr(model, "model", type(model).__name__))
+        return JSONResponse(report.record())
+
     @app.get("/v1/episodes/{episode_id}/summaries")
     async def get_episode_summaries(episode_id: int, space: str = Depends(space_for)) -> dict:
         """The summaries stored for the episode, top level first, each saying whether the document has changed since."""
