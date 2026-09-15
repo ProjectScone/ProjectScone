@@ -1823,6 +1823,47 @@ lines that put it in force — nothing is written anywhere, and no engine
 reads a tuning file behind anyone's back. It uses its own in-process
 stores per item, so the configured store is neither read nor written.
 
+## Measuring on a BEIR dataset
+
+```bash
+scone bench-beir datasets/scifact --split test --k 1,3,10 --queries 300 --seed 1 --json
+```
+
+Every other bench here reads a dataset this project shaped. BEIR is the
+ground retrieval systems are compared on: a directory holding
+`corpus.jsonl`, `queries.jsonl` and `qrels/<split>.tsv`, relevance judged
+in grades. `bench-beir` reads those files itself, with no BEIR package:
+any split, not only `test`. A malformed judgement is refused with its
+line number, and a judgement naming a document or query the files do not
+hold is counted in the report, never dropped in silence. Queries nobody
+judged are counted and not run.
+
+The corpus goes into a fresh in-process memory, one episode per document
+under `beir:<id>`, so the configured store is neither read nor written.
+Each judged query is recalled, and the passages returned are mapped back
+to documents in rank order, a document chunked many times counted once at
+its best rank. The scores are graded nDCG, with gain equal to the grade
+as trec_eval computes it and the ideal the judged grades in their best
+order; recall and precision of documents judged relevant (grade above 0);
+and reciprocal rank at the largest k. Every per-query ranking and score is
+in the JSON.
+
+Recall takes a query of at most 1,000 characters, and argument-retrieval
+sets hold whole paragraphs as queries. A longer query is recalled cut at
+the last space within the limit, marked `"cut": true` in its per-query
+entry and counted in `queries_cut`. A query with no text retrieves
+nothing, scores zero and is counted in `queries_empty`. Neither stops the
+run after the corpus is stored, and both stay in the averages, so a run
+over such a set says how many of its queries it asked as written.
+
+`--queries` runs that many judged queries chosen by `--seed`.
+`--max-documents` stores at most that many documents, keeping every
+document judged for the queries run and filling the rest in file order.
+A cut corpus has fewer distractors and scores higher, so the report says
+it was cut and by how much. The embedder is the one the report names:
+with the default hashing embedder the numbers measure lexical overlap,
+not a semantic model.
+
 ## Trying a parked record again, on purpose
 
 A record the extractor keeps failing on is **parked** after
