@@ -637,11 +637,11 @@ def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[st
     one named by the tree when somebody knows it and by arithmetic on the
     importing file's path when nobody does."""
     if isinstance(node, ast.Import):
-        return [alias.name for alias in node.names]
+        return [_published(resolve, alias.name, "python") or alias.name for alias in node.names]
     if not isinstance(node, ast.ImportFrom):
         return []
     if not node.level:
-        return [node.module] if node.module else []
+        return [_published(resolve, node.module, "python") or node.module] if node.module else []
     # "from .code import x" names the module in module; "from . import
     # code" names it in the aliases. Either way what is imported is a
     # module.
@@ -1215,6 +1215,8 @@ def _unquoted_imports(raw: list[str], clean: list[str], path: str, family: str, 
                 where = _named(target, path, resolve)
             elif family == "rust" and target.split("::")[0] in ("crate", "self", "super"):
                 where = _module_file(target.split("::"), path, root, resolve, "::", base)
+            elif family == "rust":
+                where = _published(resolve, target, "rust") or target
             elif family == "jvm" and root is not None:
                 where = _module_file(target.split("."), path, root, resolve, ".", None)
             else:
@@ -1433,6 +1435,17 @@ def _module_file(parts: list[str], path: str, root: Optional[int], resolve: Opti
     return written
 
 
+def _published(resolve: Optional["Resolve"], module: str, language: str) -> Optional[str]:
+    """The file a module of a package another repository in the space
+    publishes is, when whoever walked the tree knows the space's manifests
+    (`file_resolver` with what the space publishes); None otherwise."""
+    package = getattr(resolve, "package", None)
+    if package is None:
+        return None
+    found = package(module, language)
+    return found if isinstance(found, str) and found else None
+
+
 def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str]:
     """An import as it can be named. Anything not written relative to this
     file is a package, and names itself.
@@ -1453,7 +1466,11 @@ def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str
     external packages and 0 files with a dependant.
     """
     if not module.startswith("."):
-        return module
+        # A package another repository in the space publishes is followed
+        # to its file; any other package names itself.
+        suffix = posixpath.splitext(path)[1].lstrip(".").lower()
+        language = "go" if suffix == "go" else "js" if suffix in FIRST else ""
+        return (_published(resolve, module, language) if language else None) or module
     if resolve is not None:
         return resolve(path, 1, module)
     # ``./store`` and ``../core/api`` are already paths; only the leading
