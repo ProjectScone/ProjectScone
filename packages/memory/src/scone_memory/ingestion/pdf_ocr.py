@@ -53,15 +53,17 @@ def _page_text(result: OcrResult, offset: int, max_bytes: int,
                order: OrderedRegions | None = None) -> tuple[str, tuple[PdfTextRegion, ...]]:
     parts: list[str] = []
     regions: list[PdfTextRegion] = []
-    previous: tuple[int, int] | None = None
+    previous: tuple[int, int, int] | None = None
     indices = range(len(result.regions)) if order is None else order.indices
     previous_column: int | None = None
     for position, index in enumerate(indices):
         region = result.regions[index]
         column = order.columns[position] if order else None
-        key = (region.block, region.line)
-        separator = '' if previous is None else (' ' if previous == key else '\n')
-        if previous is not None and column != previous_column:
+        key = (region.block, region.paragraph, region.line)
+        # A space within a line, a line break within a paragraph, a blank line between paragraphs.
+        separator = ('' if previous is None else ' ' if previous == key
+                     else '\n' if previous[:2] == key[:2] else '\n\n')
+        if previous is not None and column != previous_column and separator == ' ':
             separator = '\n'
         offset += len(separator)
         end = offset + len(region.text.encode('utf-8'))
@@ -111,7 +113,7 @@ def assemble_ocr_pdf(parsed: ParsedPdf, recognized: Mapping[int, OcrResult], lim
         texts.append(text)
         offset = end
     suffix = '' if reading_order == 'provider' else f'+{reading_order}-v1'
-    output = ParsedPdf(text='\n\n'.join(texts), parser=f'{parsed.parser}+scone-ocr-v1{suffix}', pages=tuple(pages),
+    output = ParsedPdf(text='\n\n'.join(texts), parser=f'{parsed.parser}+scone-ocr-v2{suffix}', pages=tuple(pages),
                        outline=parsed.outline)
     validate_pdf(output, limits)
     return output

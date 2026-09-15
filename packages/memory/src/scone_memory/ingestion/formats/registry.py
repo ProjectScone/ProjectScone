@@ -84,7 +84,7 @@ class BuiltinDocumentParser:
                               **({'ocr_engine': p.ocr_engine} if p.ocr_engine else {}),
                               **({'section': _section(p.section)} if p.section else {})},
                     regions=tuple(DocumentTextRegion(text=r.text, box=r.box, score=r.score,
-                        block=r.block, line=r.line, start=r.start - p.start, end=r.end - p.start,
+                        block=r.block, paragraph=r.paragraph, line=r.line, start=r.start - p.start, end=r.end - p.start,
                         provider_index=r.provider_index, reading_column=r.reading_column,
                         coordinate_space=p.region_geometry) for r in p.regions))
                 for p in pdf.pages if not p.empty),

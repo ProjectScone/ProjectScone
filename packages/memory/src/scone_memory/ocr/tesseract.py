@@ -59,7 +59,7 @@ def parse_tsv(raw: bytes, *, width: int, height: int, max_regions: int, engine: 
             line_number = lines.setdefault(line_key, len(lines))
             regions.append(OcrRegion(text=text,
                 box=(left / width, top / height, (left + box_width) / width, (top + box_height) / height),
-                score=score / 100., block=block, line=line_number))
+                score=score / 100., block=block, paragraph=paragraph, line=line_number))
             if len(regions) > max_regions:
                 raise InvalidInput('OCR exceeded its region limit')
         return OcrResult(engine=engine, width=width, height=height, regions=tuple(regions))
