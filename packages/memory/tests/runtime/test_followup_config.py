@@ -95,6 +95,57 @@ def test_a_setting_that_does_nothing_without_the_mode_names_the_mode():
         Settings.from_env({"SCONE_FOLLOWUP_MODEL": "condenser"})
 
 
+class _Stop(Exception):
+    pass
+
+
+def _serve(tmp_path, monkeypatch, env, model_factory):
+    """Run serve-conversations up to building its app; what it handed the app is returned."""
+    import scone_memory.api.conversation_server as launcher
+
+    captured: dict[str, object] = {}
+
+    def create(*args, **options):
+        captured.update(options)
+        raise _Stop()
+
+    async def build(settings):
+        return await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+
+    monkeypatch.setattr("scone_memory.api.conversations.create_conversation_app", create)
+    monkeypatch.setattr(launcher, "build_engine", build)
+    code = launcher.main(Settings.from_env(env), journal=str(tmp_path / "sessions.db"), model_factory=model_factory)
+    return code, captured
+
+
+def test_serve_conversations_hands_the_option_to_its_text_runtime(tmp_path, monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from scone_memory.retrieval.recall_scope import RecallScope
+
+    module = ModuleType("followup_serve_provider")
+    module.create = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    built: list[dict[str, object]] = []
+    monkeypatch.setattr("scone_memory.realtime.text.TextConversation",
+                        lambda engine, space, sid, factory, **options: built.append(options))
+    code, captured = _serve(tmp_path, monkeypatch, environment(tmp_path), "followup_serve_provider:create")
+    assert code == 2 and captured["followup"] == {"followup_queries": "carry"}
+    scoped = captured["scoped_runtime_factory"]
+    assert callable(scoped)
+    scoped("default", "s1", RecallScope.validated(), followup_queries="carry")
+    assert built == [{**RecallScope.validated().kwargs(), "followup_queries": "carry"}]
+
+
+def test_serve_conversations_without_a_text_runtime_refuses_the_option(tmp_path, monkeypatch, capsys):
+    code, captured = _serve(tmp_path, monkeypatch, environment(tmp_path), None)
+    assert code == 2 and captured == {}
+    assert "SCONE_FOLLOWUP_QUERIES" in capsys.readouterr().err
+    off, captured = _serve(tmp_path, monkeypatch, environment(tmp_path, SCONE_FOLLOWUP_QUERIES="off"), None)
+    assert off == 2 and captured["followup"] == {}
+
+
 async def test_the_served_conversation_path_hands_the_option_to_the_runtime(tmp_path):
     import httpx
 

@@ -76,7 +76,9 @@
 
     SCONE_FOLLOWUP_QUERIES off | carry | rewrite   served text conversations also search a follow-up turn
                                    ("since when?") with what earlier user turns named (carry), or as a
-                                   self-hosted model restates it (rewrite); off by default
+                                   self-hosted model restates it (rewrite); off by default. Text
+                                   conversations of serve and serve-conversations --model-factory only;
+                                   history-only serving refuses it, and voice sessions do not take it
     SCONE_FOLLOWUP_URL, SCONE_FOLLOWUP_MODEL, SCONE_FOLLOWUP_API_KEY, SCONE_FOLLOWUP_TIMEOUT (5)
                                    rewrite only: its own self-hosted endpoint, never another setting's key
 

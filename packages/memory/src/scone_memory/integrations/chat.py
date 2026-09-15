@@ -14,7 +14,7 @@ with what it was given is not something the caller can observe.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional, Sequence
 
 from ..core.errors import InvalidInput
@@ -121,7 +121,8 @@ async def recall_context(
     if followup != "off":
         planned = await plan_followup(messages, followup, model=followup_model, question=query, timeout_s=followup_timeout)
         if planned.query is not None:
-            found = fused(found, await engine.recall(space, planned.query, **options), limit=limit)
+            found, facts_dropped = fused(found, await engine.recall(space, planned.query, **options), limit=limit)
+            planned = replace(planned, facts_dropped=facts_dropped)
     record = planned.record() if planned is not None else None
     texts, episodes, facts = _lines(found, floor)
     # The budget is the whole injected message, header included: a caller

@@ -141,11 +141,44 @@ async def test_context_off_searches_the_question_alone_with_no_followup_block(me
     assert memory.gold_episode not in {reference["episode_id"] for reference in receipt["references"]}
 
 
-async def test_context_leaves_a_standalone_question_alone(memory, monkeypatch):
+@pytest.mark.parametrize("question", ["Which city is Globex based in?", "Is there a meeting with Bob Stone on Friday?"])
+async def test_context_leaves_a_standalone_question_alone(memory, monkeypatch, question):
     searched = spy(memory, monkeypatch)
-    _, receipt = await MemoryContext(memory, "alpha", "s1", followup_queries="carry").prepare(
-        turn("Which city is Globex based in?"))
-    assert searched == ["Which city is Globex based in?"] and receipt["followup"]["applied"] is False
+    _, receipt = await MemoryContext(memory, "alpha", "s1", followup_queries="carry").prepare(turn(question))
+    assert searched == [question] and receipt["followup"]["applied"] is False
+
+
+BOB_PASSAGE = "Bob Smith starts the Denver budget review on Friday at nine in the large meeting room on floor three."
+BOB_ALICE = [{"role": "user", "content": "Did Alice Chen join Acme Robotics?"},
+             {"role": "assistant", "content": "Here is what memory holds."},
+             {"role": "user", "content": "What about Bob?"}]
+
+
+@pytest.fixture
+async def crowded():
+    """Ten facts for each side of a follow-up, and one passage only the question finds."""
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    engine.gold_episode = (await engine.remember("alpha", BOB_PASSAGE)).episode_id  # type: ignore[attr-defined]
+    for number in range(12):
+        await engine.assert_fact("alpha", "Bob Smith", f"attended_meeting_{number}", f"planning session {number}")
+        await engine.assert_fact("alpha", "Alice Chen", f"attended_workshop_{number}",
+                                 f"Acme Robotics workshop number {number} held in the east wing training room "
+                                 "with the controls team and visitors")
+    return engine
+
+
+async def test_chat_carried_facts_do_not_push_out_the_passage_the_question_found(crowded):
+    _, off = await recall_context(crowded, "alpha", BOB_ALICE)
+    _, carried = await recall_context(crowded, "alpha", BOB_ALICE, followup="carry")
+    assert crowded.gold_episode in off.episode_ids and len(off.fact_ids) == 10
+    assert carried.followup is not None and carried.followup["applied"] is True
+    assert len(carried.fact_ids) <= len(off.fact_ids) and carried.followup["facts_dropped"] == 10
+    assert crowded.gold_episode in carried.episode_ids
+
+
+async def test_context_counts_the_facts_fusion_dropped(crowded):
+    _, receipt = await MemoryContext(crowded, "alpha", "s1", followup_queries="carry").prepare(BOB_ALICE)
+    assert receipt["followup"]["applied"] is True and receipt["followup"]["facts_dropped"] == 10
 
 
 async def test_context_falls_back_from_a_failed_model_and_still_prepares(memory):

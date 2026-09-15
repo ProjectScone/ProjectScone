@@ -26,19 +26,34 @@ receipt["followup"]              # the same block
 ```
 
 Served text conversations take it from the environment:
-`SCONE_FOLLOWUP_QUERIES=off | carry | rewrite` (default `off`).
+`SCONE_FOLLOWUP_QUERIES=off | carry | rewrite` (default `off`), on both
+`scone serve` and `scone serve-conversations --model-factory`.
+`serve-conversations` without a model factory refuses the setting at
+startup: history-only serving searches no memory, so it would do nothing.
+Voice sessions and `pipeline.memory.MemoryStage` do not take it; they
+search the latest question alone.
 
 ## carry: no model
 
 A latest user turn **leans on the conversation** when any of these holds,
 and the receipt's `cues` lists which:
 
-- it refers back: it, its, they, them, their, he, him, his, she, her,
-  that, this, those, these, there, then, or the phrases "since when",
-  "what about", "how about";
-- it is three words or fewer (`short`);
-- it names nothing and has fewer than two telling words of its own —
-  words of four letters or more that are not common words (`names nothing`).
+- it holds one of the phrases "since when", "what about", "how about",
+  or ends in "too" or "as well" ("Globex too?");
+- it names nothing (see below) and
+  - refers back: it, its, they, them, their, he, him, his, she, her,
+    that, this, those, these, there, then;
+  - or is three words or fewer (`short`);
+  - or has fewer than two telling words of its own — words of four
+    letters or more that are not common words (`names nothing`).
+
+A turn that names something is taken to be about what it names, and
+only the phrases above make it lean. "Is there a meeting with Bob Smith
+on Friday?" and "When did Kestrel Bank open its Leeds branch?" hold a
+referring word, but it points into the question, so they are searched
+as asked and the reason lists the names ("standalone: the question names
+Bob Smith, Friday; ..."). The cost: "Is it open on Sundays?" names
+"Sundays", so it is not carried either.
 
 Then the **named or rare terms** of the most recent earlier *user* turn
 that has any are carried forward verbatim — never the assistant's words,
@@ -48,11 +63,21 @@ written: a run of capitalised words that are not common words (so a
 sentence may open with a name, but not with "Where"), a quoted phrase,
 or a word shaped like an identifier (a digit, a symbol inside it as in
 `node.js`, or a capital after its first letter as in `iPhone`). "Rare"
-is a shape, not a count over the corpus; no store is read.
+is a shape, not a count over the corpus; no store is read. A listed
+word that opens a sentence capitalised is not a name and does not join
+the name after it: verbs of asking (Explain, Remind, Summarize,
+Describe, Compare, Check, Recall ...), discourse adverbs (Actually,
+Maybe ...) and Yesterday, Today, Tomorrow, Tonight. So "Actually,
+Summarize Alice Chen's role." names `Alice Chen`. Shape cannot tell
+"Globex hired Carol" from "Explain what Carol does", so an opening verb
+missing from that list is still read as a name.
 
 Nothing is carried, and the record says why, for a first turn, a
 standalone question, earlier turns that name nothing, terms the question
 already names, and a carried query over the 1,000-character query bound.
+A term counts as already named only as whole words, whatever the case
+and spacing: "Ann" is carried into "And since when has she run Annex?",
+and "Io" into "since when is the ratio tracked?".
 
 ## rewrite: a model, with a fallback
 
@@ -73,7 +98,13 @@ model.
 The question as asked is always searched. The follow-up's list is fused
 with it **by rank**: interleaved, the question's first, each passage
 once, cut at the recall limit. The question's best passage keeps the
-lead; the follow-up's best is second. Reciprocal rank fusion was tried
+lead; the follow-up's best is second. Facts are interleaved the same way
+and cut to as many as the longer of the two recalls gave, so a carried
+query never doubles the facts: `recall_context` puts facts ahead of
+passages inside its character budget, and ten more facts could push out
+the passage the question found on its own. The receipt's
+`facts_dropped` counts the facts the cut left out. The cut bounds the
+number of facts, not their length. Reciprocal rank fusion was tried
 first: because the second query contains the question's own words, the
 question's matches rank in both lists and collect credit twice, which
 buried the passage only the carried terms found. On the development
@@ -103,6 +134,7 @@ absent when the setting is off.
 | `cues` | what made the turn read as leaning on the conversation |
 | `terms_found`, `cut` | new terms that turn named; `cut` is true when `MAX_CARRIED_TERMS` (6) dropped some |
 | `turns_unread` | earlier user turns not read when `MAX_LOOKBACK_TURNS` (4) was reached without a term |
+| `facts_dropped` | facts left out when the two recalls were fused, to hold no more than the longer one gave |
 | `model_calls`, `fallback` | rewrite only: calls made, and why the model's answer was not used |
 | `history_omitted` | rewrite only: turns left out by the 6,000-byte history bound |
 
@@ -110,7 +142,7 @@ absent when the setting is off.
 
 | Variable | Meaning |
 |---|---|
-| `SCONE_FOLLOWUP_QUERIES` | off (default), carry, or rewrite; requires `SCONE_CONVERSATIONS_JOURNAL`, not with `SCONE_ADAPTIVE_RETRIEVAL` or tool mode |
+| `SCONE_FOLLOWUP_QUERIES` | off (default), carry, or rewrite; requires `SCONE_CONVERSATIONS_JOURNAL`, not with `SCONE_ADAPTIVE_RETRIEVAL` or tool mode; `serve-conversations` needs `--model-factory` for it |
 | `SCONE_FOLLOWUP_URL`, `SCONE_FOLLOWUP_MODEL` | rewrite only, required: a self-hosted OpenAI-compatible endpoint and model |
 | `SCONE_FOLLOWUP_API_KEY` | rewrite only, optional; never borrowed from another setting |
 | `SCONE_FOLLOWUP_TIMEOUT` | rewrite only: seconds for the model, default 5, at most 60 |

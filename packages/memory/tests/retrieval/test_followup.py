@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -74,6 +75,31 @@ def test_a_sentence_may_open_with_a_name_but_not_with_an_asking_word():
     assert named_terms("Globex hired Carol. Where did she go?") == ["Globex", "Carol"]
 
 
+@pytest.mark.parametrize("text, terms", [
+    ("Explain what Alice Chen does at Acme.", ["Alice Chen", "Acme"]),
+    ("Remind me where Alice Chen works.", ["Alice Chen"]),
+    ("Actually, Summarize Alice Chen's role.", ["Alice Chen"]),
+    ("Describe how Globex ships.", ["Globex"]),
+    ("Summarise what Globex ships.", ["Globex"]),
+    ("Then Yesterday Bob said Hello.", ["Bob"]),
+    ("Today Carol and Tomorrow Dan.", ["Carol", "Dan"]),
+    ("Compare Globex. Check Initech. Recall Acme.", ["Globex", "Initech", "Acme"]),
+])
+def test_a_verb_or_adverb_opening_a_sentence_is_not_a_name_and_does_not_join_one(text, terms):
+    assert named_terms(text) == terms
+
+
+@pytest.mark.parametrize("word", """Explain Remind Summarize Summarise Describe Compare Check Recall Remember Define
+    Clarify Confirm Search Look Actually Basically Honestly Anyway Maybe Perhaps Yesterday Today Tomorrow Tonight""".split())
+def test_each_listed_opening_word_is_not_read_as_a_name(word):
+    assert named_terms(f"{word} Globex Labs, please.") == ["Globex Labs"]
+
+
+def test_an_opening_verb_is_not_carried_into_a_follow_up():
+    messages = [{"role": "user", "content": "Explain what Alice Chen does at Acme."}, {"role": "user", "content": "since when?"}]
+    assert carry(messages).carried == ("Alice Chen", "Acme")
+
+
 def test_punctuation_ends_a_name_and_a_name_is_counted_once():
     assert named_terms("Alice, Bob and ACME met Acme at Bob's.") == ["Alice", "Bob", "ACME"]
 
@@ -104,16 +130,40 @@ def test_a_first_turn_is_left_unchanged_and_says_so():
     assert followup.applied is False and followup.query is None and "first turn" in followup.reason
 
 
-def test_a_referring_word_makes_a_question_that_names_things_lean_on_the_conversation():
-    followup = carry(turn("Is that office in Lisbon or Porto?"))
+def test_a_referring_word_makes_a_question_that_names_nothing_lean_on_the_conversation():
+    followup = carry(turn("Is that office still open?"))
     assert followup.applied is True and followup.carried == ("Alice Chen",) and "that" in followup.cues
 
 
-def test_a_short_turn_leans_on_the_conversation_even_when_it_names_something():
+@pytest.mark.parametrize("question", [
+    "Is that office in Lisbon or Porto?",
+    "Is there a meeting with Bob Smith on Friday?",
+    "When did Kestrel Bank open its Leeds branch?",
+    "Who is on call for Orion Deploy this week?",
+    "When did Bob Smith join Initech and where did he live then?",
+])
+def test_a_question_that_names_its_own_subject_stands_alone_whatever_referring_word_it_holds(question):
+    followup = carry(turn(question))
+    assert followup.applied is False and followup.query is None and followup.carried == ()
+    assert followup.reason.startswith("standalone: the question names") and followup.cues == ()
+
+
+def test_the_standalone_reason_names_what_the_question_named():
+    assert "Bob Smith, Friday" in carry(turn("Is there a meeting with Bob Smith on Friday?")).reason
+
+
+def test_a_short_turn_leans_on_the_conversation_only_when_it_names_nothing():
+    leaning = carry(turn("And his email?"))
+    assert leaning.applied is True and "short" in leaning.cues
+    assert carry(turn("Bob Smith's employer?")).applied is False
+    assert carry(turn("Globex hired Carol?")).applied is False
+
+
+def test_a_named_turn_ending_in_too_or_as_well_leans_on_the_conversation():
     followup = carry(turn("Globex too?"))
-    assert followup.applied is True and followup.query == "Alice Chen Globex too?" and "short" in followup.cues
-    assert carry(turn("Globex hired Carol?")).applied is True
-    assert carry(turn("Globex hired Carol Diaz?")).applied is False
+    assert followup.applied is True and followup.query == "Alice Chen Globex too?" and followup.cues == ("too",)
+    assert carry(turn("And Globex as well?")).cues == ("as well",)
+    assert carry(turn("Is Globex too big to join?")).applied is False
 
 
 def test_a_named_question_with_few_telling_words_still_stands_alone():
@@ -140,8 +190,24 @@ def test_a_turn_naming_nothing_with_one_telling_word_leans_but_two_stand_alone()
 
 
 def test_nothing_is_carried_when_the_question_already_names_it():
-    followup = carry(turn("Does Alice Chen still work there?"))
+    followup = carry(turn("What about Alice Chen's team?"))
     assert followup.applied is False and followup.query is None and "already" in followup.reason
+
+
+@pytest.mark.parametrize("first, second, carried", [
+    ("Where does Ann work?", "And since when has she run Annex?", ("Ann",)),
+    ("Tell me about project Io.", "since when is the ratio tracked?", ("Io",)),
+])
+def test_a_term_inside_a_longer_word_of_the_question_is_still_carried(first, second, carried):
+    followup = carry([{"role": "user", "content": first}, {"role": "user", "content": second}])
+    assert followup.applied is True and followup.carried == carried
+
+
+def test_a_term_the_question_names_beside_punctuation_is_not_carried_again():
+    messages = [{"role": "user", "content": "Is node.js on Alice Chen's laptop?"},
+                {"role": "user", "content": "What about (node.js) for alice  chen, since when?"}]
+    followup = carry(messages)
+    assert followup.applied is False and "already" in followup.reason
 
 
 def test_an_earlier_follow_up_is_skipped_to_reach_the_turn_that_named_something():
@@ -309,11 +375,11 @@ def test_two_recalls_are_interleaved_by_rank_the_question_first_each_passage_onc
                             degraded=["vectors: down"], top_similarity=0.2)
     second = RecallResult(event_id=8, items=[item(4), item(3), item(2), item(5)], facts=[fact(11), fact(10)],
                           low_confidence=False, degraded=["text: slow"], top_similarity=0.6)
-    both = fused(original, second, limit=4)
+    both, facts_dropped = fused(original, second, limit=4)
     # Reciprocal rank fusion would put 2 and 3 first: both lists hold them.
     assert [i.chunk_id for i in both.items] == [1, 4, 2, 3]
-    assert [i.chunk_id for i in fused(original, second, limit=5).items] == [1, 4, 2, 3, 5]
-    assert [f.fact_id for f in both.facts] == [10, 11, 12]
+    assert [i.chunk_id for i in fused(original, second, limit=5)[0].items] == [1, 4, 2, 3, 5]
+    assert [f.fact_id for f in both.facts] == [10, 11] and facts_dropped == 1
     assert both.event_id == 7 and both.low_confidence is False and both.top_similarity == 0.6
     assert both.degraded == ["text: slow", "vectors: down"]
 
@@ -321,6 +387,24 @@ def test_two_recalls_are_interleaved_by_rank_the_question_first_each_passage_onc
 def test_fused_confidence_is_low_only_when_both_are_low_and_unknown_otherwise():
     low = RecallResult(low_confidence=True)
     unknown = RecallResult(low_confidence=None)
-    assert fused(low, low, limit=5).low_confidence is True
-    assert fused(low, unknown, limit=5).low_confidence is None
-    assert fused(unknown, unknown, limit=5).top_similarity is None
+    assert fused(low, low, limit=5)[0].low_confidence is True
+    assert fused(low, unknown, limit=5)[0].low_confidence is None
+    assert fused(unknown, unknown, limit=5)[0].top_similarity is None
+
+
+def test_fused_facts_are_no_more_than_the_longer_recall_gave_and_the_cut_is_counted():
+    ten, other_ten = [fact(i) for i in range(1, 11)], [fact(i) for i in range(11, 21)]
+    both, dropped = fused(RecallResult(facts=ten), RecallResult(facts=other_ten), limit=5)
+    assert [f.fact_id for f in both.facts] == [1, 11, 2, 12, 3, 13, 4, 14, 5, 15] and dropped == 10
+    longer_question, dropped = fused(RecallResult(facts=ten[:3]), RecallResult(facts=other_ten[:1]), limit=5)
+    assert [f.fact_id for f in longer_question.facts] == [1, 11, 2] and dropped == 1
+    longer_follow_up, dropped = fused(RecallResult(facts=ten[:1]), RecallResult(facts=other_ten[:3]), limit=5)
+    assert [f.fact_id for f in longer_follow_up.facts] == [1, 11, 12] and dropped == 1
+    shared, dropped = fused(RecallResult(facts=ten[:2]), RecallResult(facts=ten[:2]), limit=5)
+    assert [f.fact_id for f in shared.facts] == [1, 2] and dropped == 0
+
+
+def test_the_facts_dropped_by_fusion_are_in_the_record():
+    followup = carry(turn("since when?"))
+    assert followup.record()["facts_dropped"] == 0
+    assert replace(followup, facts_dropped=3).record()["facts_dropped"] == 3
