@@ -2623,7 +2623,22 @@ of `bm25()` to the word's idf, computed as FTS5 computes it. That part is
 read only for rows holding the word (the `bm25()` of the family AND the
 word, less that of the word), two small index reads per query word a
 family holds. It does nothing without `SCONE_LEXICAL_STEMS`, and the
-result's `prefixes.exact_forms` says whether it ran. Off by default.
+result's `prefixes.exact_forms` says whether it ran. On by default;
+`SCONE_LEXICAL_EXACT_FORMS=0` turns it off. Measured on LongMemEval-S at
+today's defaults, against LlamaIndex's BM25 + vector retrieval
+([results](../benchmarks/exact-forms-2026-09-15.results.md)):
+
+| exact forms | frozen 50: R@5 / all@5 / R@15 / MRR | 100 other items: R@5 / all@5 / R@15 / MRR |
+|---|---|---|
+| off | 0.90 / 0.76 / 1.00 / 0.838 | 0.96 / 0.84 / 0.99 / 0.885 |
+| **on** | **0.90 / 0.76 / 1.00 / 0.844** | **0.97 / 0.87 / 0.99 / 0.904** |
+| LlamaIndex BM25 + vector | 0.88 / 0.74 / 0.98 / 0.831 | 0.91 / 0.71 / 0.99 / 0.810 |
+
+Both samples informed the design; a third, blind sample of 100 items
+moved MRR from 0.855 to 0.870. On SQLite the text lane costs more with it
+on: a median text-lane read of 27.1 ms against 22.3 ms off (means 34.8
+and 24.7 ms) on one space of 45,169 chunks. The results file
+has both.
 
 ### Synonyms the caller wrote down
 
