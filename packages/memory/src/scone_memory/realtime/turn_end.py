@@ -14,15 +14,18 @@ silence threshold and produces its final transcript. A detector then
 judges the text heard so far. Complete, or no evidence either way, and
 the turn ends there, at the threshold the recognizer already waited. An
 open clause holds the turn for up to ``hold`` seconds more; the speaker
-starting again keeps it open, and their next words join it. The hold is
-added to the recognizer's pause, never a replacement for it.
+starting again (or a noise onset the recognizer takes for speech) keeps
+it open until ``max_duration`` after its first final transcript, and
+their next words join it. The hold is added to the recognizer's pause,
+never a replacement for it.
 
 Every bound says when it bit. Each released turn carries a receipt whose
 reason is one of ``REASONS``: ``silence`` (no evidence, or no detector),
 ``semantic_complete``, ``semantic_incomplete_timeout`` (the hold ran
 out), ``max_duration`` (the whole turn's bound), ``max_bytes`` (a held
-turn would outgrow the transcript limit), ``speaker_changed`` and
-``input_ended``.
+turn would outgrow the transcript limit), ``speaker_changed``,
+``input_ended`` and ``session_ended`` (the session stopped with a turn
+held: its words are recorded and nothing is answered).
 
 The detector is a seam (``EndOfTurnDetector``): the lexical rules here
 need no model, and ``ChatEndOfTurn`` puts any chat model behind the same
@@ -43,11 +46,13 @@ if TYPE_CHECKING:
 COMPLETE, INCOMPLETE, UNSURE = "complete", "incomplete", "unsure"
 VERDICTS = (COMPLETE, INCOMPLETE, UNSURE)
 REASONS = ("silence", "semantic_complete", "semantic_incomplete_timeout", "max_duration", "max_bytes",
-           "speaker_changed", "input_ended")
+           "speaker_changed", "input_ended", "session_ended")
 
 #: Seconds an open clause may hold a turn past the recognizer's own pause.
 HOLD_S = 1.5
-#: Seconds from a turn's first words to its release, however it is held.
+#: Seconds from a turn's first final transcript to its release, however it is held.
+#: The words in that transcript were spoken before it, so the bound and
+#: ``TurnReceipt.turn_ms`` start after the recognizer's pause, not at the first word.
 MAX_DURATION_S = 10.0
 #: The transcript limit a single final transcript already keeps (audio.is_question).
 MAX_BYTES = 32000
@@ -59,16 +64,18 @@ CONJUNCTIONS = frozenset("and but or nor because if unless while although wherea
 PREPOSITIONS = frozenset("to for of at with from about into onto by as between without toward towards upon via".split())
 ARTICLES = frozenset("the a an my your our their its every".split())
 FILLERS = frozenset("um umm uh uhh uhm er erm hmm".split())
-#: Words that open a question when they come first. Only the wh-words can
-#: strand a preposition at the end ("who is it for"); "could you send it to"
-#: is still waiting for its object.
-WH_WORDS = frozenset("who whom whose what which where when why how".split())
-QUESTION_WORDS = WH_WORDS | frozenset("is are was were do does did can could would will should shall may".split())
+#: Wh-words that can be the object a trailing preposition lost ("who is it
+#: for", "where are you from", "how much is it for"). "When", "why" and a
+#: bare "how" cannot, so "how do I get from" is still waiting for its
+#: object, as "could you send it to" is. A question word first is no
+#: evidence on its own that a turn is finished: "what I really need is".
+STRANDING = frozenset(["who", "whom", "whose", "what", "which", "where", "how much", "how many"])
 #: Marks after which the speaker is plainly still going.
 OPEN_ENDINGS = ("...", "…", ",", ";", ":", "-", "–", "—")
 #: Closing marks that may follow a sentence's final punctuation.
 CLOSERS = ")]\"'”’"
-WORD = re.compile(r"[A-Za-z']+")
+#: Letters and digits in any script: "set a timer for 20" ends on "20", not "for".
+WORD = re.compile(r"[^\W_]+(?:'[^\W_]*)*")
 
 
 @dataclass(frozen=True)
@@ -96,9 +103,9 @@ def judge_text(text: str) -> Judgement:
     An open quote or bracket, a trailing filler, or a trailing mark such as
     a comma is incomplete whatever else is true. Then terminal punctuation
     is complete. A trailing conjunction or article is incomplete; so is a
-    trailing preposition, unless the text opens with a wh-word ("where did
-    you send it to"). A question word first is complete. Anything else is
-    unsure, and is left to the silence that already ended it."""
+    trailing preposition, unless the text opens with a wh-phrase that can
+    be its object ("where did you send it to"), which is unsure. Anything
+    else is unsure, and is left to the silence that already ended it."""
     stripped = text.strip()
     if stripped.count("(") > stripped.count(")"):
         return Judgement(INCOMPLETE, "open parenthesis")
@@ -118,10 +125,12 @@ def judge_text(text: str) -> Judgement:
     if not words:
         return Judgement(UNSURE, "no words")
     last, first = words[-1], words[0].split("'")[0]  # "where's" opens like "where"
-    if last in CONJUNCTIONS or last in ARTICLES or (last in PREPOSITIONS and first not in WH_WORDS):
+    if first == "how":
+        first = " ".join(words[:2])  # "how much" can be an object; "how do" cannot
+    if last in PREPOSITIONS and first in STRANDING:
+        return Judgement(UNSURE, f"'{last}' may be stranded by '{first}'")
+    if last in CONJUNCTIONS or last in ARTICLES or last in PREPOSITIONS:
         return Judgement(INCOMPLETE, f"trailing '{last}'")
-    if first in QUESTION_WORDS:
-        return Judgement(COMPLETE, "question word")
     return Judgement(UNSURE, "no cue")
 
 
@@ -162,8 +171,10 @@ class ChatEndOfTurn:
 
 @dataclass(frozen=True)
 class TurnReceipt:
-    """Why a turn ended. ``held_ms`` is the wait after its last words were
-    heard; ``turn_ms`` runs from its first words to its release."""
+    """Why a turn ended. ``held_ms`` is the wait after its last final
+    transcript arrived; ``turn_ms`` runs from its first final transcript to
+    its release. Both start after the recognizer's pause, so neither counts
+    the speech inside a transcript or the pause that ended it."""
 
     reason: str
     verdict: str
@@ -199,7 +210,8 @@ class TurnHold:
     turns it releases (none, one, or two when another speaker or the byte
     bound releases the held turn first). ``speech_started`` keeps a held
     turn open until the turn's own bound. ``expire`` releases a turn whose
-    deadline has come; ``drain`` releases whatever is held when input ends."""
+    deadline has come; ``drain`` releases whatever is held when input ends,
+    or under ``reason`` when the session stops."""
 
     def __init__(self, *, hold: float = HOLD_S, max_duration: float = MAX_DURATION_S,
                  max_bytes: int = MAX_BYTES) -> None:
@@ -259,8 +271,8 @@ class TurnHold:
             return []
         return [self._release("max_duration" if self._capped else "semantic_incomplete_timeout", now)]
 
-    def drain(self, now: float) -> list[TurnEnd]:
-        return [self._release("input_ended", now)] if self.pending else []
+    def drain(self, now: float, reason: str = "input_ended") -> list[TurnEnd]:
+        return [self._release(reason, now)] if self.pending else []
 
     def _release(self, reason: str, now: float) -> TurnEnd:
         receipt = TurnReceipt(reason, self._judgement.verdict, self._judgement.cue, len(self._fragments),

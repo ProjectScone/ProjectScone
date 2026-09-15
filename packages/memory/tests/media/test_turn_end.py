@@ -26,6 +26,9 @@ from scone_memory.realtime.turn_end import (
     ("Let me see, uh.", "filler 'uh'"),
     ("So what I mean is,", "trailing ','"),
     ("Well I was thinking...", "trailing '...'"),
+    ("When I get home remind me to", "trailing 'to'"),
+    ("How do I get from", "trailing 'from'"),
+    ("why don't you add it to", "trailing 'to'"),
 ])
 def test_a_transcript_cut_mid_clause_is_incomplete(text, cue):
     assert judge_text(text) == Judgement(INCOMPLETE, cue)
@@ -38,11 +41,6 @@ def test_a_transcript_cut_mid_clause_is_incomplete(text, cue):
     ("He said \"go home.\"", "terminal punctuation"),
     ("Can you tell me what it is for?", "question mark"),
     ("I went to the shop and.", "terminal punctuation"),
-    ("what are you waiting for", "question word"),
-    ("where did you send it to", "question word"),
-    ("how long does it take", "question word"),
-    ("can you help me", "question word"),
-    ("where's the party at", "question word"),
 ])
 def test_a_finished_sentence_or_a_question_is_complete(text, cue):
     assert judge_text(text) == Judgement(COMPLETE, cue)
@@ -55,6 +53,34 @@ def test_no_evidence_either_way_is_unsure_unless_a_clause_is_open(text):
         assert verdict == Judgement(INCOMPLETE, "trailing 'the'"), "an article never ends a question"
     else:
         assert verdict.verdict == UNSURE
+
+
+@pytest.mark.parametrize("text", [
+    "set a timer for 20", "Book a table for 2", "set the temperature to 72", "remind me at 5",
+    "send it to " + chr(0x6771) + chr(0x4EAC), "put it in the " + chr(0x0444) + chr(0x0430) + chr(0x0439) + chr(0x043B),
+])
+def test_the_last_word_may_be_a_number_or_in_any_script(text):
+    assert judge_text(text) == Judgement(UNSURE, "no cue"), "the word before it is not the last word"
+
+
+@pytest.mark.parametrize("text", [
+    "what's on my calendar today", "how long does it take", "can you help me", "what I really need is",
+    "What's the weather going to be like in",
+])
+def test_a_question_word_first_is_not_evidence_that_the_turn_is_finished(text):
+    assert judge_text(text) == Judgement(UNSURE, "no cue")
+
+
+@pytest.mark.parametrize("text, cue", [
+    ("what are you waiting for", "'for' may be stranded by 'what'"),
+    ("where did you send it to", "'to' may be stranded by 'where'"),
+    ("where's the party at", "'at' may be stranded by 'where'"),
+    ("who is this for", "'for' may be stranded by 'who'"),
+    ("how much is it for", "'for' may be stranded by 'how much'"),
+    ("How many people is the table for", "'for' may be stranded by 'how many'"),
+])
+def test_a_preposition_a_wh_phrase_can_strand_is_neither_held_nor_called_complete(text, cue):
+    assert judge_text(text) == Judgement(UNSURE, cue)
 
 
 @pytest.mark.parametrize("verdict, cue", [("maybe", "no cue"), (COMPLETE, None)])
@@ -170,6 +196,13 @@ def test_a_held_turn_that_would_outgrow_its_byte_bound_is_released_first():
     first, = turns.heard("more words to", "user", Judgement(INCOMPLETE, "trailing 'to'"), now=1.1)
     assert first.receipt.reason == "max_bytes" and first.text == "Twenty bytes of it and"
     assert turns.pending and turns.text_with("x", "user") == "more words to x"
+
+
+def test_a_stopping_session_releases_what_is_held_under_its_own_reason():
+    turns = hold()
+    turns.heard("Cancel my card and", "user", Judgement(INCOMPLETE, "trailing 'and'"), now=1.0)
+    [end] = turns.drain(now=1.5, reason="session_ended")
+    assert end.receipt.reason == "session_ended" and end.text == "Cancel my card and" and not turns.pending
 
 
 def test_input_ending_releases_what_is_held():
