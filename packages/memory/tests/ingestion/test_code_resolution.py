@@ -108,3 +108,40 @@ def test_the_walk_names_a_file_written_outright_a_rust_mod_file_and_the_newer_su
     assert walked("src/main.c", 1, "./lib/y.h") is None
     assert walked("src/main.rs", 1, "util") == "src/util/mod.rs" and walked("src/main.rs", 1, "store") == "src/store.rs"
     assert walked("web/app.js", 1, "./a") == "web/a.mjs" and walked("lib/main.dart", 1, "./b") == "lib/b.dart"
+
+
+def test_a_published_package_s_module_is_its_file_in_the_repository_that_publishes_it():
+    from scone_memory.ingestion.code_resolution import file_resolver
+    from scone_memory.ingestion.repositories import published_by
+
+    published = published_by([("lib/pyproject.toml", "defines", "libpkg"), ("ui/package.json", "defines", "@acme/ui"),
+                              ("core/Cargo.toml", "defines", "acme-core"), ("svc/go.mod", "defines", "example.com/svc"),
+                              ("lib/pyproject.toml", "depends_on", "requests"), ("lib/src/a.py", "defines", "lib/src/a.py:f")])
+    assert published == {"libpkg": "lib", "@acme/ui": "ui", "acme-core": "core", "example.com/svc": "svc"}, \
+        "only a manifest's own package, not what it depends on nor what a file defines"
+    walked = file_resolver(["app/main.py"], published,
+                           known=["lib/src/libpkg/__init__.py", "lib/src/libpkg/util.py", "ui/src/button.tsx",
+                                  "ui/src/index.ts", "core/src/lib.rs", "core/src/store/mod.rs", "svc/pkg/store/store.go"])
+    assert walked.package("libpkg.util", "python") == "lib/src/libpkg/util.py"
+    assert walked.package("libpkg", "python") == "lib/src/libpkg/__init__.py"
+    assert walked.package("libpkg.missing", "python") is None and walked.package("requests", "python") is None, \
+        "a module never mapped, or a package nobody here publishes, stays a name"
+    assert walked.package("@acme/ui/button", "js") == "ui/src/button.tsx" and walked.package("@acme/ui", "js") == "ui/src/index.ts"
+    assert walked.package("acme_core::store::Shelf", "rust") == "core/src/store/mod.rs"
+    assert walked.package("acme_core", "rust") == "core/src/lib.rs"
+    assert walked.package("example.com/svc/pkg/store", "go") == "svc/pkg/store"
+    assert walked.package("example.com/svc/pkg/none", "go") is None and walked.package("example.com/other", "go") is None
+    assert file_resolver(["app/main.py"]).package("libpkg.util", "python") is None, "nothing published, nothing followed"
+
+
+def test_a_package_published_at_the_mapped_root_has_no_directory_in_front():
+    from scone_memory.ingestion.code_resolution import file_resolver
+    from scone_memory.ingestion.repositories import published_by
+
+    published = published_by([("pyproject.toml", "defines", "mypkg"), ("package.json", "defines", "@acme/ui"),
+                              ("Cargo.toml", "defines", "acme-core"), ("go.mod", "defines", "example.com/svc")])
+    assert published == {"mypkg": "", "@acme/ui": "", "acme-core": "", "example.com/svc": ""}
+    walked = file_resolver(["mypkg/util.py", "index.ts", "src/lib.rs", "pkg/store/store.go", "main.py"], published)
+    assert walked.package("mypkg.util", "python") == "mypkg/util.py"
+    assert walked.package("@acme/ui", "js") == "index.ts" and walked.package("acme_core", "rust") == "src/lib.rs"
+    assert walked.package("example.com/svc/pkg/store", "go") == "pkg/store"
