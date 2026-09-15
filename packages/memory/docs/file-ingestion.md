@@ -187,8 +187,8 @@ Current-text filtering also applies inside notes. Dangling, ambiguous and invali
 part references are rejected. All extracted parts share the document's text and
 segment budgets, and nested reference locators are bounded.
 
-A chart in a DOCX or PPTX file becomes a segment of its own after the text it
-sits in (`paragraph:3/chart:1`, `slide:2/chart:1`; `content_role` `chart`,
+A chart in a Word or PowerPoint file (DOCX or PPTX, or another member of their
+families) becomes a segment of its own after the text it sits in (`paragraph:3/chart:1`, `slide:2/chart:1`; `content_role` `chart`,
 `parent_locator` its paragraph or slide). Its text is the chart's title and
 kind, then one line per series of category and value pairs, for example
 `Revenue (bar chart)` then `2025: Q1 10; Q2 12.5`. The chart kinds Office 2016
@@ -204,7 +204,8 @@ segment also carries `chart_type`, `chart_series` and `chart_points`. A chart
 whose relationship or part cannot be read is not a reason to refuse the file:
 it is left out and counted in the document's `charts_unreadable`. A file with a
 chart read says `charts` and its parser id ends `+charts-v1`; a file without
-charts is read exactly as before.
+charts is read exactly as before. A package that also carries macros keeps its
+`macros` note beside the chart counts.
 
 DOCX, XLSX and PPTX locate their main document through `_rels/.rels` and resolve
 child relationships relative to that selected part. Nonstandard main-part paths

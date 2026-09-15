@@ -43,7 +43,7 @@ BAR = chart("<c:barChart>" + series("2025", ["Q1", "Q2"], ["10", "12.5"]) + seri
             + "</c:barChart>")
 
 
-def deck(chart_xml: str, *, relationship: bool = True, charts: int = 1) -> bytes:
+def deck(chart_xml: str, *, relationship: bool = True, charts: int = 1, extra: dict[str, str] | None = None) -> bytes:
     frame = (f'<p:graphicFrame><a:graphic><a:graphicData uri="{C}"><c:chart xmlns:c="{C}" xmlns:r="{R}" r:id="c1"/>'
              "</a:graphicData></a:graphic></p:graphicFrame>") * charts
     slide = (f'<p:sld xmlns:p="{P}" xmlns:a="{A}"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Results</a:t></a:r>'
@@ -55,6 +55,7 @@ def deck(chart_xml: str, *, relationship: bool = True, charts: int = 1) -> bytes
         "ppt/slides/_rels/slide1.xml.rels": (f'<Relationships xmlns="{REL}"><Relationship Id="c1" Target="../charts/chart1.xml" '
                                             f'Type="{R}/chart"/></Relationships>' if relationship else f'<Relationships xmlns="{REL}"/>'),
         "ppt/charts/chart1.xml": chart_xml,
+        **(extra or {}),
     }, main_part="ppt/presentation.xml")
 
 
@@ -120,6 +121,26 @@ def test_a_file_without_charts_reads_exactly_as_before():
     parsed = parse_office(data, "report.docx", DocumentLimits())
     assert parsed.parser == "native-xml" and parsed.metadata == {}
     assert "metadata" not in parsed.model_dump(exclude_defaults=True)
+
+
+def test_a_macro_enabled_file_says_both_what_its_charts_gave_and_that_macros_were_there():
+    """A family member with macros keeps its macros note beside the chart counts, and neither replaces the other."""
+    macros = {"ppt/vbaProject.bin": 'Sub Auto_Open() MsgBox "never run" End Sub'}
+    parsed = parse_office(deck(BAR, extra=macros), "results.pptm", DocumentLimits())
+    assert [s.locator for s in parsed.segments] == ["slide:1/paragraph:1", "slide:1/chart:1"]
+    assert parsed.parser == "native-xml+charts-v1"
+    assert parsed.metadata == {"charts": "1", "macros": "present, not read"}
+    missing = parse_office(deck(BAR, relationship=False, extra=macros), "results.ppsm", DocumentLimits())
+    assert missing.parser == "native-xml"
+    assert missing.metadata == {"charts_unreadable": "1", "macros": "present, not read"}
+    inline = f'<w:drawing><c:chart xmlns:c="{C}" r:id="chart"/></w:drawing>'
+    report = document(f"<w:p><w:r><w:t>Before.</w:t>{inline}</w:r></w:p>",
+                      relationships=f'<Relationship Id="chart" Target="charts/chart1.xml" Type="{R}/chart"/>',
+                      extra={"content/charts/chart1.xml": BAR, "content/vbaProject.bin": "binary"})
+    word = parse_office(report, "report.docm", DocumentLimits())
+    assert [s.locator for s in word.segments] == ["paragraph:1", "paragraph:1/chart:1"]
+    assert word.parser == "native-xml+charts-v1"
+    assert word.metadata == {"charts": "1", "macros": "present, not read"}
 
 
 def test_a_series_named_by_a_literal_or_not_at_all_is_still_labelled():
