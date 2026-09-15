@@ -306,8 +306,12 @@ async def test_a_forgotten_document_serves_nothing_and_its_tree_is_refused_with_
         await engine.forget("s", vellmar)
         found = await traverse_summaries(engine, "s", "harbour of Vellmar", branching=1)
         assert found.items and all(item.episode_id == brannock for item in found.items)
-        assert found.refused == ({"episode_id": vellmar, "reason": "source_gone"},) and found.documents == (brannock,)
-        assert "1 document tree(s) were refused: their document is forgotten" in found.why
+        assert found.refused == () and found.documents == (brannock,) and found.unlisted_trees == 1, \
+            "a tree left behind by a forgotten document is counted on an unscoped call, not read"
+        assert "1 summary tree(s) name a document the space's listing did not return" in found.why
+        named = await traverse_summaries(engine, "s", "harbour of Vellmar", branching=1, episode_ids=[vellmar])
+        assert named.refused == ({"episode_id": vellmar, "reason": "source_gone"},) and named.unlisted_trees == 0
+        assert "1 document tree(s) were refused: their document is forgotten" in named.why
         unknown = await traverse_summaries(engine, "s", "harbour", episode_ids=[424242])
         assert unknown.items == () and unknown.refused == ({"episode_id": 424242, "reason": "source_unknown"},)
     finally:
@@ -563,7 +567,8 @@ async def test_episodes_the_listing_leaves_out_are_counted_since_a_tree_among_th
         finally:
             engine.documents.recent_episodes = real_walk
         assert short.unlisted == 2 and vellmar not in short.documents
-        assert short.refused == ({"episode_id": vellmar, "reason": "unlisted"},)
+        assert short.refused == () and short.unlisted_trees == 1, "a tree whose document the listing left out is counted"
+        assert "leaves its tree behind, and the listing left episodes out)" in short.why
         assert f"the store listed {short.walked} episode(s) and holds {short.walked + 2}" in short.why
         assert (await traverse_summaries(engine, "s", "harbour of Vellmar")).unlisted == 0
     finally:
@@ -630,5 +635,249 @@ async def test_the_engine_http_and_cli_surfaces_answer_alike():
         printed = out.getvalue()
         assert "descended 2 level(s)" in printed and f"#{vellmar}" in printed and "via level 2 #" in printed
         assert chunks[0].text[:40] in printed
+    finally:
+        await engine.close()
+
+
+async def test_trees_forgotten_documents_leave_behind_cost_no_read_and_no_refusal_on_an_unscoped_call(monkeypatch):
+    engine, documents = await library()
+    try:
+        vellmar, _ = documents["Vellmar"]
+        brannock, _ = documents["Brannock"]
+        await engine.forget("s", vellmar)
+        await engine.forget("s", brannock)
+        monkeypatch.setattr(module, "MAX_DOCUMENTS", 1)
+        reads: list[int] = []
+        real_episode = engine.episode
+
+        async def counting(space, episode_id, *args, **kwargs):
+            reads.append(episode_id)
+            return await real_episode(space, episode_id, *args, **kwargs)
+
+        engine.episode = counting
+        scoped = await traverse_summaries(engine, "s", "harbour", kind="note")
+        assert (scoped.refused, scoped.unlisted_trees, scoped.out_of_scope, reads) == ((), 2, 0, []), \
+            "two trees whose documents are gone: counted, never read, never refused, and no bound spent on them"
+        assert scoped.why.startswith("no document with a summary tree is in scope")
+        assert json.loads(json.dumps(scoped.record()))["unlisted_trees"] == 2
+        assert "2 summary tree(s) name a document the space's listing did not return" in scoped.why
+        named = await traverse_summaries(engine, "s", "harbour", episode_ids=[vellmar])
+        assert named.refused == ({"episode_id": vellmar, "reason": "source_gone"},) and reads == [vellmar], \
+            "a document named is still read and refused with its reason"
+        assert not named.why.startswith("no document with a summary tree is in scope")
+    finally:
+        await engine.close()
+
+
+async def test_a_replaced_document_leaves_a_count_not_a_growing_list_of_refusals():
+    engine, _ = await library()
+    try:
+        place, sections = LIBRARY["vellmar.md"]
+        parts = [part for _, texts in sections for part in texts]
+        for version in range(3):
+            added = await engine.remember("s", "\n\n".join(parts) + f"\n\nRevision {version} of the notes was filed by the clerk.",
+                                          kind="file", source="vellmar.md", dedup_key="vellmar.md", replace=True)
+            chunks = await engine.documents.chunks_of("s", added.episode_id)
+            await build_summary_tree(engine, FakeChat(replies_for(place, sections, chunks[:9]) + [reply()] * 4), "s",
+                                     added.episode_id, fan_in=3, store=True)
+        found = await traverse_summaries(engine, "s", "harbour of Vellmar", kind="conversation")
+        assert found.refused == () and found.unlisted_trees == 2 and found.out_of_scope == 3, \
+            "two replaced versions left trees behind; the library's two documents and the latest version are out of scope"
+    finally:
+        await engine.close()
+
+
+CARRIED = [
+    "The harbour at Vellmar closes to sailing boats every November, when the winter swell runs in across the outer bar from the west.",
+    "Its lighthouse was rebuilt in 1904 after a storm took the first tower down to its footings, and its lamp now turns on a mercury bath.",
+    "Pilots board arriving ships two miles out at the red buoy in every season, and their cutter is moored by the fish market steps.",
+    "The orchard on the ridge grows only Bramley apples, planted in rows of forty on terraces that were cut by hand a century ago.",
+    "Picking starts in the last week of September and ends before the first frost, and the school children get two days off lessons.",
+    "A cider press in the tithe barn turns out two thousand litres a season, sold at the Saturday stall beside the old church wall.",
+    "Harbour dues at Vellmar harbour are paid to the harbour master of Vellmar, who keeps the harbour ledger at Vellmar harbour office.",
+]
+
+
+async def test_a_chunk_carried_up_beside_summaries_competes_with_them_and_is_not_a_leaf_for_free():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=170).open()
+    try:
+        added = await engine.remember("s", "\n\n".join(CARRIED), kind="file", source="vellmar.md")
+        chunks = await engine.documents.chunks_of("s", added.episode_id)
+        assert [chunk.text.strip() for chunk in chunks] == CARRIED
+        harbour = [(f"The harbour of Vellmar: {opening(c.text)}.", f"chunk:{c.chunk_id}", opening(c.text)) for c in chunks[0:3]]
+        orchard = [(f"The orchard: {opening(c.text)}.", f"chunk:{c.chunk_id}", opening(c.text)) for c in chunks[3:6]]
+        root = [("Vellmar keeps a harbour.", "node:1:0", harbour[0][0]), ("Vellmar keeps an orchard.", "node:1:1", orchard[0][0]),
+                ("And harbour dues.", f"chunk:{chunks[6].chunk_id}", opening(chunks[6].text))]
+        tree = await build_summary_tree(engine, FakeChat([reply(*harbour), reply(*orchard), reply(*root)]), "s",
+                                        added.episode_id, fan_in=3, store=True)
+        assert [node.written_from for node in tree.nodes if node.level == 2] == [("node:1:0", "node:1:1", f"chunk:{chunks[6].chunk_id}")]
+
+        apples = await traverse_summaries(engine, "s", "orchard Bramley apples", branching=1)
+        assert apples.steps[1]["pool"] == 3, "the two sections and the chunk carried up beside them"
+        assert [item.chunk_id for item in apples.items] == [chunk.chunk_id for chunk in chunks[3:6]], \
+            "the chosen section's chunks, and not the carried chunk the step did not keep"
+        assert apples.steps[1]["chunks"] == [] and apples.leaves == 3
+
+        dues = await traverse_summaries(engine, "s", "harbour dues paid to the harbour master", branching=1, limit=3)
+        assert dues.steps[1]["chosen"] == [] and dues.steps[1]["chunks"] == [chunks[6].chunk_id], \
+            "the carried chunk scored best at its step and was kept in place of a section"
+        assert [item.chunk_id for item in dues.items] == [chunks[6].chunk_id] and (dues.leaves, dues.cut_by_limit) == (1, 0)
+        assert dues.items[0].via_tree["rank"] == 1 and [step["level"] for step in dues.items[0].via_tree["path"]] == [2]
+
+        shallow = await traverse_summaries(engine, "s", "orchard Bramley apples", branching=1, max_depth=1)
+        assert shallow.cut_by_depth == 3 and shallow.items == (), "the carried chunk was reached and not scored too"
+    finally:
+        await engine.close()
+
+
+SHORT = [
+    "Kelp gathering on the Orrin shore happens at the lowest spring tides of the year, by families with carts.",
+    "Orrin kelp is burned in stone pits to make soda ash that was once sold to glassworks across the water.",
+    "The Orrin kelp season ends in August, when the storms start to throw the weed high above the reach of carts.",
+]
+TALL = [
+    "Glassworks at Tamsey melted soda ash and sand in a brick cone furnace that burned coal day and night.",
+    "Tamsey glassworks blowers made green bottles for the cider trade, hundreds of them in a single shift.",
+    "The Tamsey glassworks cone was pulled down in 1931 and its bricks went into the new harbour wall.",
+    "Tamsey market is held on Thursdays in the square, with stalls of fish, bread and woollen goods.",
+    "Tamsey market tolls were paid to the lord of the manor until the town bought the rights in 1880.",
+    "The Tamsey market cross was rebuilt after a cart ran into it during the fair of 1902.",
+    "Tamsey chapel was built by the quarrymen with stone they carried down from the hill on Sundays.",
+    "The Tamsey chapel organ came second hand from a church in the city and still needs two to pump it.",
+    "Tamsey chapel choir sings at the harvest supper every October in the hall behind the chapel.",
+]
+
+
+async def test_branch_first_holds_across_trees_of_different_depths():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=90).open()
+    try:
+        short = await engine.remember("s", "\n\n".join(SHORT), kind="file", source="orrin.md")
+        short_chunks = await engine.documents.chunks_of("s", short.episode_id)
+        assert len(short_chunks) == 3
+        await build_summary_tree(engine, FakeChat([reply(*[(f"Orrin kelp: {opening(c.text)}.", f"chunk:{c.chunk_id}", opening(c.text))
+                                                          for c in short_chunks])]), "s", short.episode_id, fan_in=3, store=True)
+        tall = await engine.remember("s", "\n\n".join(TALL), kind="file", source="tamsey.md")
+        tall_chunks = await engine.documents.chunks_of("s", tall.episode_id)
+        assert len(tall_chunks) == 9
+        replies, firsts = [], []
+        themes = ["glassworks soda ash", "market", "chapel"]
+        for group, theme in enumerate(themes):
+            rows = [(f"Tamsey {theme}: {opening(c.text)}.", f"chunk:{c.chunk_id}", opening(c.text))
+                    for c in tall_chunks[group * 3:group * 3 + 3]]
+            replies.append(reply(*rows))
+            firsts.append(rows[0][0])
+        replies.append(reply(*[(f"Tamsey keeps its {theme}.", f"node:1:{group}", firsts[group]) for group, theme in enumerate(themes)]))
+        assert (await build_summary_tree(engine, FakeChat(replies), "s", tall.episode_id, fan_in=3, store=True)).levels == 2
+
+        def ranks(item):
+            return [step["rank"] for step in item.via_tree["path"]]
+
+        short_first = await traverse_summaries(engine, "s", "Orrin kelp soda ash glassworks", branching=2, limit=3)
+        assert [ranks(item) for item in short_first.items] == [[1], [1], [1]], \
+            "the one-level tree kept first serves all its chunks before a chunk under the tree kept second"
+        assert {item.episode_id for item in short_first.items} == {short.episode_id}
+
+        tall_first = await traverse_summaries(engine, "s", "Tamsey glassworks soda ash and the market", branching=2)
+        assert [ranks(item) for item in tall_first.items] == [[1, 1]] * 3 + [[1, 2]] * 3 + [[2]] * 3, \
+            "every chunk under the tree kept first, its sections in their order, before the tree kept second"
+        assert max(item.similarity for item in tall_first.items[6:]) > min(item.similarity for item in tall_first.items[3:6]), \
+            "the tree kept second holds a chunk that scores better on its own, or the order proves nothing"
+    finally:
+        await engine.close()
+
+
+async def test_a_summary_on_the_returned_path_forgotten_during_the_walk_refuses_its_document():
+    engine, documents = await library()
+    try:
+        vellmar, _ = documents["Vellmar"]
+        nodes = await nodes_of(engine, vellmar)
+        harbour = nodes[(1, 0)].episode_id
+        standing = await traverse_summaries(engine, "s", "harbour of Vellmar", branching=1)
+        assert len(standing.items) == 3 and standing.refused == (), "summaries still there confirm their paths"
+        real = engine.attachment
+
+        async def rebuilt(space, attachment_id):
+            got = await real(space, attachment_id)
+            if attachment_id == nodes[(1, 0)].detail and not done:
+                done.append(await engine.forget("s", harbour))  # a rebuild forgets the old nodes
+            return got
+
+        done: list[object] = []
+        engine.attachment = rebuilt
+        try:
+            found = await traverse_summaries(engine, "s", "harbour of Vellmar", branching=1)
+        finally:
+            engine.attachment = real
+        assert found.items == () and found.refused == ({"episode_id": vellmar, "reason": "tree_changed"},), \
+            "no item comes back through a summary that is gone"
+        assert "a summary on the path to their chunks was forgotten or changed while the tree was read" in found.why
+    finally:
+        await engine.close()
+
+    engine, documents = await library(index=NoStoredVectors())
+    try:
+        vellmar, _ = documents["Vellmar"]
+        nodes = await nodes_of(engine, vellmar)
+        real = engine.attachment
+
+        async def early(space, attachment_id):
+            got = await real(space, attachment_id)
+            if attachment_id == nodes[(1, 0)].detail and not done:
+                done.append(await engine.forget("s", nodes[(1, 0)].episode_id))  # before its chunks were ever read
+            return got
+
+        done = []
+        engine.attachment = early
+        try:
+            found = await traverse_summaries(engine, "s", "harbour of Vellmar", branching=1, episode_ids=[vellmar])
+        finally:
+            engine.attachment = real
+        assert found.steps[1]["chosen"] == [nodes[(1, 0)].episode_id], "the forgotten section is still kept by its words"
+        assert found.items == () and found.refused == ({"episode_id": vellmar, "reason": "tree_changed"},), \
+            "a summary whose chunks were gone when first read confirms nothing"
+    finally:
+        await engine.close()
+
+
+async def test_a_document_refused_at_the_last_read_leaves_the_receipt_as_well_as_the_answer():
+    engine, documents = await library()
+    try:
+        vellmar, _ = documents["Vellmar"]
+        brannock, _ = documents["Brannock"]
+        real_get = engine.documents.get_chunks
+
+        async def gone(space, ids):
+            engine.documents.get_chunks = real_get
+            await engine.forget("s", vellmar)
+            return await real_get(space, ids)
+
+        engine.documents.get_chunks = gone
+        try:
+            found = await traverse_summaries(engine, "s", "harbour of Vellmar", branching=1)
+        finally:
+            engine.documents.get_chunks = real_get
+        assert found.items == () and found.refused == ({"episode_id": vellmar, "reason": "source_gone"},)
+        assert (found.documents, found.leaves, found.cut_by_limit) == ((brannock,), 0, 0)
+        assert "of 1 document tree(s) to 0 chunk(s)" in found.why
+    finally:
+        await engine.close()
+
+    engine, documents = await library()
+    try:
+        vellmar, _ = documents["Vellmar"]
+        brannock, _ = documents["Brannock"]
+        both = await traverse_summaries(engine, "s", "Vellmar Brannock harbour river", branching=2, limit=3)
+        assert {item.episode_id for item in both.items} != {vellmar, brannock} and both.cut_by_limit == 3, \
+            "the leaves beyond the limit hold the other document"
+
+        async def failing(space, ids):
+            raise SconeError("the store did not answer")
+
+        engine.documents.get_chunks = failing
+        unread = await traverse_summaries(engine, "s", "Vellmar Brannock harbour river", branching=2, limit=3)
+        assert unread.items == () and {one["episode_id"] for one in unread.refused} == {vellmar, brannock}
+        assert all(one["reason"] == "unread" for one in unread.refused)
+        assert (unread.documents, unread.leaves, unread.cut_by_limit) == ((), 0, 0), \
+            "a confirming read that failed confirms no document's chunks, returned or cut"
     finally:
         await engine.close()

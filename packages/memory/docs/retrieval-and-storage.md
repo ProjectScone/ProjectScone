@@ -633,7 +633,11 @@ keeps the children most like the question, and descends to the leaves.
   counted again after the listing, and episodes it did not return — a store
   that caps what it lists (Elasticsearch lists at most 10,000), or episodes
   stored meanwhile — are counted in `unlisted`, since a tree among them was
-  not found. More than
+  not found. With no documents named, a tree whose document the listing did
+  not return — a document forgotten, or replaced, leaves its summaries
+  behind — cannot be fitted to the filters and is not read: it is counted in
+  `unlisted_trees`, so trees left behind by every update cost a call a count,
+  not a read and a refusal each. More than
   `MAX_DOCUMENTS` (100) documents with trees in scope is refused, not cut to
   some of them, and so is a step with more than `MAX_CANDIDATES` (1,000)
   candidates to score — a stored tree keeps a step to `branching` times its
@@ -648,19 +652,27 @@ keeps the children most like the question, and descends to the leaves.
   before choosing, not `branching` per parent. A kept summary's children are
   what its account says it was written from — the nodes of the level below
   and chunks — so a group the model left empty is not guessed at from spans.
+  The chunks a first-level summary names are leaves. A chunk a higher summary
+  names is a remainder the builder carried up beside its nodes unsummarized
+  (a level of `fan_in` × n + 1 items), so it is a candidate at the next step
+  with those nodes and a leaf only if that step keeps it; each step records
+  the summaries kept in `chosen` and the chunks kept in `chunks`.
   `max_depth` (default and most 5, a stored tree's most levels) bounds the
   steps.
-- **What comes back.** The chunks reached, branch first: the chunks of the
-  summary kept first at its step, then those of the next, and within a branch
-  in their own ranking; the first `limit` (default 10, at most 50). Branch
-  first, because a chunk's own words are the signal a broad question defeats:
-  ranked by those alone, the chunks of a lower branch displaced the section
-  the descent chose (on the fixture below, with the leaves put in their own
-  order in a scratch run, `branching` 3 fell from 0.938 to 0.838 and 4 to 0.775;
-  branch first holds 0.938 at 2, 3 and 4). Each
+- **What comes back.** The chunks reached, branch first: in the order of the
+  ranks down their paths, so every chunk under the summary kept first at a
+  step comes before any chunk under the next, whether its tree ends at that
+  step or goes further down (documents of different lengths give trees of
+  different heights), and within a branch in their own ranking; the first
+  `limit` (default 10, at most 50). Branch first, because a chunk's own words
+  are the signal a broad question defeats: ranked by those alone, the chunks
+  of a lower branch can displace the section the descent chose. The fixture
+  below has trees of one height only and does not measure that choice; the
+  tests pin the order on trees of one and two heights. Each
   item carries `via_tree`: the document, and the path of summaries kept on the
   way down, top first, each with its episode, level, index, `rank` among those
-  kept at its step and `similarity` (and `text_rank` with `text`).
+  kept at its step and `similarity` (and `text_rank` with `text`); a chunk
+  carried up and kept at a step has its own `rank` there too.
   `similarity` is the chunk's own cosine; `score` is its place in the order,
   `1 / (1 + place)`, since no one number ranks it. The route answers with the
   items and the whole record, not recall's shape: it is not a recall event,
@@ -672,18 +684,24 @@ keeps the children most like the question, and descends to the leaves.
   document's is `missing`; a node named that is not stored from this content
   and with this `fan_in`, is not below the node naming it, or is not a name
   at all, and an account that cannot be read or does not list names, are
-  `unresolved`; none is followed. A document forgotten is refused as
-  `source_gone` (its summaries outlive it), one never stored as
+  `unresolved`; none is followed. A document named and forgotten is refused
+  as `source_gone` (its summaries outlive it), one never stored as
   `source_unknown`, one unreadable as `unread`, and one the listing left out
-  as `unlisted`. The walk awaits reads and a document can be
-  forgotten during any of them, so the chunks about to be returned are read
-  again after the last one, with nothing awaited between that read and the
-  answer: a document whose chunks moved is read again for its reason and
-  serves none of its chunks, and the next chunks in order are read again in
-  its place; a store that cannot answer that read confirms nothing.
+  as `unlisted`. The walk awaits reads and a document or a summary can be
+  forgotten during any of them (building a tree again forgets the old
+  nodes), so the chunks about to be returned, and the chunks of every summary
+  on their paths, are read again in one read after the last one, with nothing
+  awaited between that read and the answer: a document whose chunks moved is
+  read again for its reason and serves none of its chunks, one with a summary
+  on a path gone or changed is refused as `tree_changed`, and the next chunks
+  in order are read again in their place; a store that cannot answer that
+  read confirms nothing, and every document with a chunk reached is refused
+  as `unread`. A document refused at that read is not in `documents`, and
+  its chunks are not in `leaves`.
 - **The bounds say when they cut.** `cut_by_limit` counts chunks reached and
-  not returned, `cut_by_depth` the summaries reached and never scored because
-  the depth ran out (their chunks were not reached), and `uncovered` the
+  not returned, `cut_by_depth` the candidates (summaries, and chunks carried
+  up beside them) reached and never scored because the depth ran out (the
+  chunks under them were not reached), and `uncovered` the
   chunks of a descended document under no summary a descent starts from — a
   group the model wrote nothing about, a remainder left beside an unjoined
   top — since no descent can reach them. `untreed` names documents asked for
