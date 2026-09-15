@@ -64,9 +64,25 @@ for item in result.items:
   recognised; neither is an index that names no location (the in-memory index,
   a custom one), except as the same object, nor a `LangChainVectorIndex` whose
   store is bound after the engine is built.
-- **The image embedder that wrote it.** The index records its writer, as the text
-  index does. An engine whose image embedder is not the recorded one (another
-  model, or the same width under another id) is told so when it opens:
+- **The image embedder that made each vector.** Every image vector carries the
+  embedder's id and width in its metadata (`image_embedder`, `image_embedder_dim`).
+  How the lane keeps another model's vectors out depends on the index, and
+  `engine.image_writer_check` says which:
+
+  - `recorded` (`InMemoryVectorIndex`, `SqliteVectorIndex`): the index records its
+    writer, as the text index does, and refuses any other image embedder (below).
+  - `tagged` (every other index: Postgres, Elasticsearch, OpenSearch, Qdrant,
+    Milvus, Chroma, LanceDB, Redis, ElastiCache, LangChain, a custom one): the index
+    cannot record a writer, so the lane searches only vectors whose
+    `image_embedder` is its own embedder's id, as a `where` condition in the index,
+    and ignores the rest. It cannot count what it ignored. Two image models can
+    therefore share such an index, each seeing only its own vectors, and a vector
+    written before vectors were tagged (by an engine older than this) is ignored
+    until its image is written again (an exact retry of `ingest_image` writes it).
+    The width is recorded, not searched on: an index holds one width.
+
+  On a `recorded` index, an engine whose image embedder is not the recorded one
+  (another model, or the same width under another id) is told so when it opens:
   `engine.image_block` names both embedders. It writes nothing there:
   `ingest_image` stores the episode and its attachments, reads the record again
   just before it would write, and returns `image_lane="blocked"` with the reason
