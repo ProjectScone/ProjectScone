@@ -131,7 +131,7 @@ def _normal(text: str) -> str:
     return " ".join(text.split())
 
 
-def _parse(reply: str) -> Optional[list[tuple[str, str]]]:
+def parse_pairs(reply: str) -> Optional[list[tuple[str, str]]]:
     """The (question, quote) pairs in a reply, or None when it is not a
     list of them. A fence or a sentence around the JSON is tolerated --
     the first bracket that opens a JSON list is the one read, so a
@@ -157,6 +157,37 @@ def _parse(reply: str) -> Optional[list[tuple[str, str]]]:
             return None
         pairs.append((question.strip(), quote.strip()))
     return pairs
+
+
+@dataclass(frozen=True)
+class Anchored:
+    """The pairs of one reply that a question can rest on, and what was dropped."""
+
+    #: (question, quote) with the quote's whitespace settled as it stands in the chunk.
+    pairs: tuple[tuple[str, str], ...]
+    #: No question, or one over MAX_QUESTION_CHARS.
+    unasked: int
+    #: A quote under MIN_QUOTE_WORDS or not in the chunk.
+    unquoted: int
+    #: Pairs past the number asked for, not looked at.
+    extra: int
+
+
+def anchored(pairs: Sequence[tuple[str, str]], text: str, per_chunk: int) -> Anchored:
+    """The first ``per_chunk`` pairs whose question was asked and whose quote
+    is in ``text`` verbatim, whitespace aside; every other pair counted."""
+    normal_text = _normal(text)
+    kept: list[tuple[str, str]] = []
+    unasked = unquoted = 0
+    for question, quote in pairs[:per_chunk]:
+        if not question or len(question) > MAX_QUESTION_CHARS:
+            unasked += 1
+            continue
+        if len(quote.split()) < MIN_QUOTE_WORDS or _normal(quote) not in normal_text:
+            unquoted += 1
+            continue
+        kept.append((question, _normal(quote)))
+    return Anchored(tuple(kept), unasked, unquoted, max(0, len(pairs) - per_chunk))
 
 
 async def chunks_in(engine: "MemoryEngine", space: str) -> list[tuple[int, Optional[str], int, str]]:
@@ -202,23 +233,19 @@ async def write_questions(engine: "MemoryEngine", space: str, model: ChatModel, 
         except ChatError:
             failed += 1
             continue
-        pairs = _parse(reply)
+        pairs = parse_pairs(reply)
         if pairs is None:
             unparsed += 1
             continue
-        normal_text = _normal(text)
-        for question, quote in pairs[:per_chunk]:
-            if not question or len(question) > MAX_QUESTION_CHARS:
-                unasked += 1
-                continue
-            if len(quote.split()) < MIN_QUOTE_WORDS or _normal(quote) not in normal_text:
-                unquoted += 1
-                continue
+        found = anchored(pairs, text, per_chunk)
+        unasked += found.unasked
+        unquoted += found.unquoted
+        for question, quote in found.pairs:
             key = _normal(question).lower()
             if key in seen:
                 continue
             seen.add(key)
-            kept.append(Question(question, _normal(quote), source, episode_id))
+            kept.append(Question(question, quote, source, episode_id))
     return QuestionSet(corpus=corpus, model=model_name or type(model).__name__, questions=tuple(kept),
                        chunks_total=len(rows), chunks_asked=len(chosen), per_chunk=per_chunk, seed=seed,
                        dropped_unparsed=unparsed, dropped_unquoted=unquoted, skipped_long=skipped_long,
