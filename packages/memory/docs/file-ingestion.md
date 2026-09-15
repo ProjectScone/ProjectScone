@@ -824,5 +824,19 @@ chunk in `declaration`. What the grammar does not name is not a
 declaration here; a language whose grammar names things another way
 (Kotlin's and Elixir's do) keeps the reader it had, and a brace-family
 file (PHP, Swift, Scala) keeps the brace reader. Without the extra
-nothing changes. The code graph's claims (imports, calls) are not read
-from these trees yet; that is the next step on this lane.
+nothing changes.
+
+The same tree speaks to the graph: every definition is a
+`defines` claim held by what encloses it (`app/cart.rb:Shop.Cart defines
+app/cart.rb:Shop.Cart.add`), what the file loads by a literal name is an
+`imports` claim (`require`/`require_relative`/`load`, Lua's `require`,
+`source` and `.` in shell and fish, Perl's `use` and `require` without the
+lowercase pragmas), and `WHY:`/`NOTE:`/`TODO:`/`ADR-12` comments become
+`notes`, `flags` and `cites` on the declaration they sit in. A load whose
+target is not a literal (`require name`, `source "$HOME/x.sh"`) is not
+claimed, and nor is one inside a function body, which runs when the
+function is called rather than when the file loads, or one nested more
+than five levels under a top-level statement; a file that shows no
+`imports` may still load something one of those ways. Calls are not
+claimed: binding one needs a receiver's type or a name resolved across
+files, which these grammars do not supply.

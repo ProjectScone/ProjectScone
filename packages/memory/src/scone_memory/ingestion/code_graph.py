@@ -390,6 +390,12 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
         decided = {claim.predicate for claim in parsed}
         kept = [claim for claim in line_read if claim.predicate not in decided]
         return (*kept, *parsed)
+    if language is not None and language.startswith("tree:"):
+        # Ruby, Lua, shell, Perl, fish: read from the grammar that already
+        # cuts them, claiming what the tree settles and nothing more.
+        from .code_tree_graph import tree_claims
+
+        return tree_claims(content, path, grammar=language[len("tree:"):])
     if language != "python":
         return ()
     try:
