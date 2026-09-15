@@ -133,6 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fuse the lanes by rank (default), by each lane's scores scaled to its own range (score), or by each lane's mean and spread (distribution)")
     p.add_argument("--lessons", action="store_true",
                    help="show beside each passage what people said about it in feedback; the order is unchanged")
+    p.add_argument("--expand-summaries", choices=("replace", "follow"),
+                   help="follow each stored summary among the passages with the chunks its citations rest on, or "
+                        "replace it with them; only those, never a forgotten document's, each saying which summary "
+                        "it came through")
+    p.add_argument("--expand-max-chunks", type=int, metavar="COUNT",
+                   help="the most chunks --expand-summaries adds (20 unless set)")
     p.add_argument("--merge", action="store_true",
                    help="join neighbouring chunks of one episode into the passage holding them, "
                         "and say which chunks went into each and what share of it they cover")
@@ -1917,6 +1923,12 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             # lessons would vanish, or a judged-useless neighbour would ride under a good lesson.
             raise InvalidInput("--lessons cannot be combined with --merge: a merged passage joins chunks "
                                "judged separately, and one lesson cannot stand for them; ask for one or the other")
+        if args.expand_summaries and (args.merge or args.parts or args.window or args.window_unit == "sentences"):
+            # A merge or a window returns a cited chunk holding text it does not rest on, with the spans in
+            # via_summary indexing text not returned; --parts answers without recall's expansion at all.
+            raise InvalidInput("--expand-summaries cannot be combined with --merge, a window or --parts: a merged "
+                               "or widened passage holds text a summary does not rest on, and --parts answers "
+                               "without expansion; ask for one or the other")
         policy: tuple[str, ...] = ()
         names_read = None
         if args.merge_min_share is not None and not args.merge:
@@ -1993,7 +2005,7 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
             history=args.history, kind=args.kind, source_prefix=args.source_prefix, since=args.since, until=args.until,
             conditions=read_conditions(args.conditions), candidate_limit=args.candidate_limit,
             rerank=not args.no_rerank, graph_boost=args.graph_boost, fusion=args.fusion,
-            lessons=args.lessons,
+            lessons=args.lessons, expand_summaries=args.expand_summaries, expand_max_chunks=args.expand_max_chunks,
             **({"lanes": [lane.strip() for lane in args.lanes.split(",") if lane.strip()]} if args.lanes else {}),
             require=args.require, exclude=args.exclude, diversity=args.diversity,
         )
@@ -2071,6 +2083,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 print(f"withheld: {row}", file=out)
         if kept is not None:
             print(kept.why, file=out)
+        if result.expanded is not None:
+            print(result.expanded["why"], file=out)
         if opened is not None:
             print(opened.why, file=out)
         if shortened is not None:
@@ -2110,6 +2124,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 words = list(dict.fromkeys(item.text[span.start:span.end] for span in marked[position].spans))
                 more = " and more" if marked[position].truncated else ""
                 print(f"      matched: {', '.join(words) or 'no word of the question'}{more}", file=out)
+            if item.via_summary is not None:
+                via = item.via_summary
+                print(f"      via summary #{via['episode_id']} (level {via['level']} of #{via['summary_of']})", file=out)
             if item.lessons is not None:
                 said = item.lessons
                 print(f"      lesson {said['state']} ({said['useful']} useful, {said['not_useful']} not; "

@@ -46,7 +46,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..ingestion.chunk_questions import QuestionLaneReport
     from ..providers.llm import ChatModel
 from ..retrieval.abstention import AbstentionPolicy
-from ..retrieval.recall import (RecallRuntime, recall, LANE_DEPTH as LANE_DEPTH,
+from ..retrieval.recall import (RecallRuntime, SummaryExpander, recall, LANE_DEPTH as LANE_DEPTH,
                                 UNFILTERED_DEPTH as UNFILTERED_DEPTH)
 from ..retrieval.episode_scope import episode_fits as _fits
 from ..retrieval.fact_recall import FACT_SCOPE_CACHE_LIMIT as FACT_SCOPE_CACHE_LIMIT
@@ -99,6 +99,7 @@ from ..core.models import (
     Tombstone,
     DEPENDENCY_KINDS,
     LINK_KINDS,
+    RecallItem,
     RecallResult,
     Status,
 )
@@ -1076,9 +1077,19 @@ class MemoryEngine:
         exclude: Sequence[str] = (),
         diversity: Optional[float] = None,
         lessons: bool = False,
+        expand_summaries: Optional[str] = None,
+        expand_max_chunks: Optional[int] = None,
     ) -> RecallResult:
         """``lessons`` puts beside each returned passage what people said about it
         (``engine.lessons``), leaving the order as it was.
+
+        ``expand_summaries`` (``follow`` or ``replace``) puts after each stored
+        summary among the returned passages, or in its place, the chunks its
+        citations rest on -- only those, never a forgotten document's -- each
+        saying in ``via_summary`` which summary it came through; at most
+        ``expand_max_chunks`` are added (``summary_expand``), so the answer can
+        hold more than ``limit``, and ``expanded`` says what was added, refused
+        and cut.
 
         ``history`` (research experiment 3) also returns, for every
         subject and predicate among the matched facts, the closed facts that
@@ -1158,12 +1169,31 @@ class MemoryEngine:
         )
         if type(lessons) is not bool:
             raise InvalidInput("lessons must be a boolean")
+        summaries: Optional[SummaryExpander] = None
+        if expand_summaries is not None:
+            from ..retrieval.summary_expand import DEFAULT_MAX_CHUNKS, Expanded, check_expansion, expand_summaries as expand
+
+            # Before the search, so a mistaken request spends no work and logs no recall.
+            cap = DEFAULT_MAX_CHUNKS if expand_max_chunks is None else expand_max_chunks
+            check_expansion(expand_summaries, cap)
+            mode = cast("Literal['replace', 'follow']", expand_summaries)
+
+            async def expand_found(items: Sequence[RecallItem], required: Sequence[str], excluded: Sequence[str],
+                                   scope: TextFilter) -> Expanded:
+                return await expand(self, space, items, mode=mode, max_chunks=cap, require=required, exclude=excluded,
+                                    scope=scope)
+
+            # Run inside recall, before its event is written and before lessons,
+            # so the event lists the chunks a summary brought and they are read for lessons too.
+            summaries = expand_found
+        elif expand_max_chunks is not None:
+            raise InvalidInput("expand_max_chunks is a cap on expand_summaries; ask for expand_summaries with it")
         result = await recall(runtime, space, query, limit, as_of, tags, where, history,
                             kind, source_prefix, since, until, conditions, candidate_limit, rerank,
                             graph_boost=graph_boost, fusion_mode=fusion, entity_projection=projection,
                             entity_unavailable=unavailable,
                             entity_notes=notes, lanes=lanes,
-                            require=require, exclude=exclude, diversity=diversity)
+                            require=require, exclude=exclude, diversity=diversity, summaries=summaries)
         if lessons:
             from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons, read_summary
 
