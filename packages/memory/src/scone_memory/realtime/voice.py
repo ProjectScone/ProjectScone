@@ -515,10 +515,10 @@ class VoiceSession:
             self._idle_ended = True
             await self._note_idle(receipt, None)
             return True
-        await self._interrupt(transport)  # audio of the turn before may still be queued
         turn_id = uuid4().hex
         prompt = watch.policy.prompt
         if prompt is not None:
+            await self._interrupt(transport)  # audio of the turn before may still be queued
             self._output_turn = turn_id
         self._reply = self._started(self._nudge(transport, tts, turn_id, self._generation, receipt, prompt))
         return False

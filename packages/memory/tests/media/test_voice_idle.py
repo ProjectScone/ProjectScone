@@ -246,6 +246,16 @@ async def test_an_idle_with_no_prompt_is_noted_and_nothing_is_said(memory):
     assert r.session.end_reason == "idle" and r.session.idles == 3
 
 
+async def test_an_idle_that_says_nothing_leaves_the_last_reply_s_audio_alone(memory):
+    async with rig(memory, idle=IdlePolicy(.1, prompt=None, end_after=10)) as r:
+        await r.say(SpeechStarted(), Transcript("Hello."))
+        await until(lambda: r.session.stored_count == 2)
+        cleared = list(r.transport.cleared)
+        await until(lambda: r.session.idles >= 2)
+        assert r.transport.cleared == cleared, "nothing was said, so nothing the listener may still hear is dropped"
+        await r.finish()
+
+
 async def test_a_prompt_the_user_talks_over_is_cleared_not_recorded_and_clears_the_count(memory):
     async with slow_rig(memory, .5, idle=IdlePolicy(.15, end_after=2)) as r:
         await asyncio.wait_for(r.tts.started.wait(), 3)
