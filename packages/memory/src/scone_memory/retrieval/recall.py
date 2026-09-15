@@ -104,6 +104,8 @@ class RecallRuntime:
     question_lane: bool = False
     #: Whether a query term's family is searched by stem prefix in the text lane.
     lexical_stems: bool = False
+    #: With stem prefixes: whether a passage holding the query's own word weighs its family at that word's idf.
+    lexical_exact_forms: bool = False
     #: The vector lane's voice in rank fusion, against the text lane's 1.0.
     vector_weight: float = 1.0
     #: Reads recorded feedback's term for each fused candidate, when the
@@ -355,7 +357,8 @@ async def recall(
                      else {"matched": len(expansion.matched), "added": len(expansion.added), "capped": expansion.capped}),
         "context_lane": runtime.context_lane,
         "question_lane": runtime.question_lane,
-        "prefixes": ({"added": len(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
+        "prefixes": ({"added": len(stem_prefixes), "applied": prefix_store is not None,
+                      "exact_forms": runtime.lexical_exact_forms} if runtime.lexical_stems else None),
         "fusion_weights": {"vector": runtime.vector_weight, "text": 1.0, **({"image": IMAGE_WEIGHT} if image_lane else {})},
         "image_lane": image_lane,
         "similarity_floor": runtime.similarity_floor,
@@ -414,7 +417,8 @@ async def recall(
             text_filter = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
                                      kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
             if prefix_store is not None and stem_prefixes:
-                text_lane = await prefix_store.search_terms(space, text_query, depth, text_filter, prefixes=stem_prefixes)
+                text_lane = await prefix_store.search_terms(space, text_query, depth, text_filter, prefixes=stem_prefixes,
+                                                            exact_forms=runtime.lexical_exact_forms)
             else:
                 text_lane = await runtime.documents.search_text(space, text_query, depth, text_filter)
             latency["text"] = _ms(t0)
@@ -425,6 +429,12 @@ async def recall(
             behind = backlog(space) if callable(backlog) else 0
             if behind:
                 degraded.append(f"text: {behind} chunk(s) not yet in the lexical index; the text lane is behind")
+            # A store that moves a bounded number of the query's own words to
+            # their idf says how many it left at their family's weight.
+            forms_cut = getattr(runtime.documents, "exact_forms_cut", None)
+            cut = forms_cut(space) if callable(forms_cut) else 0
+            if cut:
+                degraded.append(f"text: {cut} query word(s) past MAX_EXACT_FORMS kept their family's weight")
         except Exception as e:  # noqa: BLE001
             degraded.append(f"text: {type(e).__name__}: {e}")
             failed.add("text")
@@ -820,7 +830,8 @@ async def recall(
         space_bytes=counts.bytes,
         expansion=expansion.record() if expansion is not None else None,
         expanded=expanded.record() if expanded is not None else None,
-        prefixes=({"added": list(stem_prefixes), "applied": prefix_store is not None} if runtime.lexical_stems else None),
+        prefixes=({"added": list(stem_prefixes), "applied": prefix_store is not None,
+                   "exact_forms": runtime.lexical_exact_forms} if runtime.lexical_stems else None),
         past_forget_after=({"withheld": sum(withheld.values()), "episode_ids": sorted(withheld), "at": now}
                            if withheld else None),
         feedback_prior=prior.record([item.chunk_id for item in result_items]) if prior is not None else None,

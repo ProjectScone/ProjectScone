@@ -186,11 +186,22 @@ class Bm25:
                 del self._postings[term]
 
     def search(
-        self, query: str, limit: int, allowed: Iterable[int] | None = None, prefixes: Iterable[str] = ()
+        self, query: str, limit: int, allowed: Iterable[int] | None = None, prefixes: Iterable[str] = (),
+        exact_forms: bool = False,
     ) -> list[tuple[int, float]]:
         """Documents by BM25 over the query's terms; a prefix counts every
         vocabulary term that starts with it as one term, so a word's family
-        ("bill" for billing, billed, bills) is one signal, not several."""
+        ("bill" for billing, billed, bills) is one signal, not several.
+
+        With ``exact_forms``, a document holding one of the query's own
+        words in a family has that family's count weighed at the idf of the
+        rarest such word it holds instead of the family's. The family is
+        still one saturating term: a document holding only "billing" scores
+        what "billing" alone would, one holding "billing" and "bills" scores
+        their joint count at "billing"'s idf (the family's count, not a
+        second term), and one holding only relatives scores as without it.
+        The credit is the gap between the two idfs times BM25's count part,
+        which reaches ``k1 + 1``: at most 2.2 times the gap, not the gap."""
         terms = [fold_diacritics(token) for token in tokenize(query)]
         folded = [fold_diacritics(prefix) for prefix in prefixes]
         families = [(prefix, [term for term in self._df if term.startswith(prefix)]) for prefix in folded]
@@ -200,14 +211,21 @@ class Bm25:
         # the word and then the family it belongs to.
         covered = {term for term in terms if any(term.startswith(prefix) for prefix, _ in families)}
         terms = [term for term in terms if term not in covered]
+        # The query's own words in each family, rarest first: the most
+        # specific form a document holds is the first it has.
+        forms = {prefix: sorted((term for term in covered if term.startswith(prefix)), key=self._df.__getitem__)
+                 if exact_forms else [] for prefix, _ in families}
         if (not terms and not families) or not self._docs:
             return []
         n = len(self._docs)
         avg_len = sum(self._lengths.values()) / n
-        family_df = {prefix: min(n, sum(self._df[member] for member in members)) for prefix, members in families}
         # Each family's count in every document holding a member, read from
         # the postings: whole numbers, so the same in any order of adding.
         family_tf: list[tuple[str, dict[int, int]]] = []
+        # A family's document frequency is the documents holding any member,
+        # each once: one holding "billing" and "bills" is one document, as
+        # SQLite counts its rows, not two.
+        family_df: dict[str, int] = {}
         matching: set[int] = set()
         for prefix, members in families:
             tfs: dict[int, int] = {}
@@ -215,6 +233,7 @@ class Bm25:
                 for doc_id in self._postings[member]:
                     tfs[doc_id] = tfs.get(doc_id, 0) + self._docs[doc_id][member]
             family_tf.append((prefix, tfs))
+            family_df[prefix] = len(tfs)
             matching.update(tfs)
         for term in terms:
             matching.update(self._postings.get(term, ()))
@@ -230,7 +249,8 @@ class Bm25:
             for prefix, tfs in family_tf:
                 tf = tfs.get(doc_id, 0)
                 if tf:
-                    weighed.append((tf, family_df[prefix]))
+                    held = next((form for form in forms[prefix] if counts.get(form)), None)
+                    weighed.append((tf, family_df[prefix] if held is None else self._df[held]))
             for tf, df in weighed:
                 idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
                 denom = tf + self.k1 * (1 - self.b + self.b * length / avg_len)

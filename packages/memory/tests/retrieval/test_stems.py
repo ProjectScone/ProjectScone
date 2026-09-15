@@ -32,3 +32,11 @@ def test_short_odd_or_non_english_tokens_are_left_alone(token):
 def test_prefixes_are_the_distinct_stems_of_the_query_in_order_without_the_token_itself():
     assert prefixes(["bills", "billing", "lisbon", "invoices"]) == ["bill", "invoic"]
     assert prefixes(["bill"]) == [] and prefixes([]) == []
+
+
+def test_a_prefix_inside_a_broader_one_is_left_to_it():
+    """"states" gives ``stat`` and "statement" ``state``; every word ``state``
+    finds, ``stat`` finds, so "statement" would count in two families."""
+    assert prefixes(["states", "statement"]) == ["stat"]
+    assert prefixes(["statement", "states"]) == ["stat"]
+    assert prefixes(["starbucks", "stars", "rewards"]) == ["star", "reward"]
