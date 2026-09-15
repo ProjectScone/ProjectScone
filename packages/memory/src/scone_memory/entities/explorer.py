@@ -14,7 +14,12 @@ neighbourhood lit on hover, a panel that lists a chosen entity's
 relations with the facts behind each, and a filter by predicate. What
 the graph names but never reads (`typing`, a package, a cited record)
 is hidden until the legend shows it, and then drawn small and dim, so
-the picture is of the codebase and not of the standard library.
+the picture is of the codebase and not of the standard library. Beside
+the legend, a module tree lists the codebase as a person reads it:
+directories, the files in them, and what each file defines, nested as
+the code nests it; an entry chooses its entity in the drawing. The
+leading tool draws that tree on its own page with a charting library;
+here it is the page's own list, folded and unfolded by the browser.
 
 Everything the page holds comes from the projection; nothing is
 fetched. Names reach the page through one JSON block and are written
@@ -31,7 +36,9 @@ from collections import Counter
 import hashlib
 import html as markup
 import json
-from typing import Mapping
+from dataclasses import dataclass, field
+import re
+from typing import Any, Iterable, Mapping, Optional
 
 from .analysis import cached_analysis
 from .export import Export, _about_lines
@@ -43,6 +50,21 @@ MAX_NODES = 5_000
 MAX_EDGES = 20_000
 #: Characters of a label the page carries; a longer one is cut and marked.
 MAX_LABEL = 120
+#: Entries listed under one directory or file in the module tree before
+#: the rest are folded into a count; a directory of a thousand files is
+#: not read by scrolling it.
+MAX_TREE_CHILDREN = 200
+#: How deep a chain of definitions is followed below its file; a
+#: declaration held deeper than this is placed under its file, so a
+#: chain of a thousand `defines` cannot exhaust the stack.
+MAX_TREE_DEPTH = 32
+#: A file: a path with a directory, or a bare name whose suffix a reader
+#: knows (`top.py`, `README.md`); a dotted name that is not one
+#: (`asyncio.run`, `ast.Module`, a call into a library) is not a file. A
+#: declaration is a file, a colon and the name the file gives it.
+_FILE = re.compile(r"^[^:\s]+/[^/:\s]+$")
+_BARE_FILE = re.compile(r"^[^/:\s]+\.[A-Za-z0-9]{1,8}$")
+_TEXT_SUFFIXES = frozenset((".md", ".markdown", ".rst", ".txt", ".json", ".toml", ".yaml", ".yml", ".sql", ".cfg", ".ini"))
 #: Relations whose object may be something the graph only names.
 _NAMED_ONLY = frozenset(("imports", "imports_when_called", "imports_for_types", "depends_on", "develops_with", "cites",
                          "uses_type", "references"))
@@ -60,6 +82,123 @@ def _label(text: str) -> str:
     """A label as the page carries it: whitespace collapsed, cut past the bound."""
     text = " ".join(text.split())
     return text if len(text) <= MAX_LABEL else text[:MAX_LABEL - 1] + "\u2026"
+
+
+def _is_file(label: str) -> bool:
+    if ":" in label:
+        return False
+    if _FILE.match(label):
+        return True
+    if not _BARE_FILE.match(label):
+        return False
+    from ..ingestion.code import code_language
+
+    return code_language(label) is not None or label[label.rfind("."):].lower() in _TEXT_SUFFIXES
+
+
+@dataclass
+class _Directory:
+    """A directory is not an entity: it is made from the files' paths."""
+
+    name: str
+    dirs: dict[str, "_Directory"] = field(default_factory=dict)
+    files: list[str] = field(default_factory=list)
+
+
+def module_tree(entities: Iterable[tuple[str, str]], relations: Iterable[tuple[str, str, str]]) -> tuple[Optional[dict[str, Any]], int]:
+    """The codebase as a tree: directories, the files in them, and what
+    each defines, nested as the code nests it. ``entities`` are (id,
+    label) pairs of what is drawn; ``relations`` are (subject id,
+    predicate, object id) triples, of which ``defines`` places a
+    declaration under what holds it. A file is a label with a directory
+    or a suffix and no colon; a declaration is its file, a colon and a
+    name, and one a ``defines`` relation does not place is placed under
+    its file by that name. Entities that are neither (a person, a
+    package, a cited record) are not in the tree. Returns the tree and
+    how many entries were folded by the bound, or None when the drawing
+    holds no file."""
+    labels = dict(entities)
+    files = {entity_id: label for entity_id, label in labels.items() if _is_file(label)}
+    if not files:
+        return None, 0
+    by_label = {label: entity_id for entity_id, label in labels.items()}
+    file_of_label = {label: entity_id for entity_id, label in files.items()}
+    # A declaration is a drawn file, a colon and a name; what a `defines`
+    # relation places, it places, and the rest sit under their file or
+    # under the declaration their dotted name continues.
+    declared = {entity_id: label for entity_id, label in labels.items()
+                if ":" in label and entity_id not in files and label.split(":", 1)[0] in file_of_label}
+    holder: dict[str, str] = {}
+    for subject, predicate, obj in relations:
+        if (predicate == "defines" and obj in declared and obj not in holder and subject != obj
+                and (subject in files or subject in declared)):
+            holder[obj] = subject
+
+    def by_name(entity_id: str) -> str:
+        path, name = declared[entity_id].split(":", 1)
+        outer = f"{path}:{name.rpartition('.')[0]}" if "." in name else ""
+        above = by_label.get(outer)
+        return above if above is not None and above in declared and above != entity_id else file_of_label[path]
+
+    for entity_id in declared:
+        if entity_id not in holder:
+            holder[entity_id] = by_name(entity_id)
+    # Every declaration must reach a file within the depth bound: one whose
+    # chain of holders loops, or runs past the bound, sits under its file.
+    for entity_id in list(declared):
+        seen, above, depth = {entity_id}, holder[entity_id], 0
+        while above in declared and above not in seen and depth < MAX_TREE_DEPTH:
+            seen.add(above)
+            above, depth = holder[above], depth + 1
+        if above not in files:
+            holder[entity_id] = file_of_label[declared[entity_id].split(":", 1)[0]]
+    children: dict[str, list[str]] = {}
+    for entity_id in declared:
+        children.setdefault(holder[entity_id], []).append(entity_id)
+    folded = 0
+
+    def short(entity_id: str) -> str:
+        label = labels[entity_id]
+        if entity_id in declared:
+            name = label.split(":", 1)[1]
+            if holder[entity_id] in declared:
+                prefix = labels[holder[entity_id]].split(":", 1)[1] + "."
+                return (name[len(prefix):] if name.startswith(prefix) else name) or name
+            return name
+        return label.rsplit("/", 1)[-1]
+
+    def entry(entity_id: str) -> dict[str, Any]:
+        nonlocal folded
+        below = sorted(children.get(entity_id, []), key=lambda child: (short(child).casefold(), child))
+        listed = [entry(child) for child in below[:MAX_TREE_CHILDREN]]
+        if len(below) > MAX_TREE_CHILDREN:
+            folded += len(below) - MAX_TREE_CHILDREN
+            listed.append({"name": f"+{len(below) - MAX_TREE_CHILDREN} more", "more": len(below) - MAX_TREE_CHILDREN})
+        count = sum(int(item.get("count", 0)) + (1 if item.get("id") else 0) for item in listed)
+        return {"name": short(entity_id), "id": entity_id, "count": count, "children": listed}
+
+    root = _Directory("")
+    for entity_id, label in files.items():
+        node = root
+        for segment in label.split("/")[:-1]:
+            node = node.dirs.setdefault(segment, _Directory(segment))
+        node.files.append(entity_id)
+
+    def directory(node: _Directory) -> dict[str, Any]:
+        nonlocal folded
+        dirs = [directory(child) for _, child in sorted(node.dirs.items(), key=lambda item: item[0].casefold())]
+        rows = [entry(entity_id) for entity_id in sorted(node.files, key=lambda f: (labels[f].casefold(), f))]
+        listed = dirs + rows
+        if len(listed) > MAX_TREE_CHILDREN:
+            folded += len(listed) - MAX_TREE_CHILDREN
+            listed = listed[:MAX_TREE_CHILDREN] + [{"name": f"+{len(listed) - MAX_TREE_CHILDREN} more",
+                                                    "more": len(listed) - MAX_TREE_CHILDREN}]
+        count = sum(int(item.get("count", 0)) + (1 if item.get("id") else 0) for item in listed)
+        return {"name": node.name + "/", "count": count, "children": listed}
+
+    tree = directory(root)
+    tree["name"] = ""
+    return tree, folded
 
 
 def explorer_page(projection: EntityProjection, about: Mapping[str, object]) -> Export:
@@ -96,6 +235,10 @@ def explorer_page(projection: EntityProjection, about: Mapping[str, object]) -> 
     cut_labels = sum(1 for e in shown if len(e.label) > MAX_LABEL)
     if cut_labels:
         notes.append(f"{cut_labels} label(s) longer than {MAX_LABEL} characters are cut on the page")
+    tree, folded = module_tree(((e.entity_id, e.label) for e in shown if e.entity_id not in external),
+                               ((r.subject_id, r.predicate, r.object_id) for r in edges))
+    if folded:
+        notes.append(f"the module tree lists {MAX_TREE_CHILDREN} entries per directory or file and folded {folded}")
     said = "; ".join(notes)
     data = {
         "space": projection.space, "revision": projection.revision, "digest": projection.digest[:12],
@@ -107,6 +250,7 @@ def explorer_page(projection: EntityProjection, about: Mapping[str, object]) -> 
         "communities": communities,
         "predicates": sorted({r.predicate for r in edges}),
         "left_out": {"entities": left_out[0], "relations": left_out[1]},
+        "tree": tree,
     }
     block = (json.dumps(data, ensure_ascii=True, sort_keys=True)
              .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
@@ -130,7 +274,10 @@ def explorer_page(projection: EntityProjection, about: Mapping[str, object]) -> 
         '<aside><section id="legend"><h2>Communities</h2><label><input id="externals" type="checkbox"> '
         "Show what is named but never read</label><ul id=\"communities\"></ul>"
         '<h2>Relations</h2><ul id="predicates"></ul></section>'
-        '<section id="details" aria-live="polite"><p class="muted">Choose an entity to see its relations and the '
+        + ('<section id="modules"><details open><summary><h2>Modules</h2><span class="count" id="tree-count"></span>'
+           '<button id="unfold" type="button">Unfold all</button><button id="fold" type="button">Fold all</button>'
+           '</summary><div id="tree"></div></details></section>' if tree else "")
+        + '<section id="details" aria-live="polite"><p class="muted">Choose an entity to see its relations and the '
         "facts behind them. Hover to light its neighbourhood; drag to move; wheel to zoom.</p></section></aside></main>",
         f'<script id="graph-data" type="application/json">{block}</script>',
         f'<script id="graph-code">{CODE}</script>', "</body>", "</html>", ""])
@@ -154,14 +301,27 @@ main { display: grid; grid-template-columns: 1fr minmax(280px, 360px); min-heigh
 #hover { position: absolute; pointer-events: none; background: #1d1d1f; color: #fff; padding: 4px 8px;
   border-radius: 4px; font-size: 12px; max-width: 320px; overflow-wrap: anywhere; }
 aside { border-left: 1px solid #dcdcd8; overflow: auto; background: #fbfbfa; display: grid;
-  grid-template-rows: auto 1fr; min-height: 0; }
+  grid-template-rows: auto auto 1fr; min-height: 0; }
+#modules { border-bottom: 1px solid #dcdcd8; max-height: 45vh; overflow: auto; padding-top: 4px; }
+#modules > details > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+#modules > details > summary::before { content: "▸"; color: #5b5b5b; }
+#modules > details[open] > summary::before { content: "▾"; }
+#modules > details > summary h2 { margin: 0; }
+#modules > details > summary button { font-size: 11px; padding: 2px 6px; }
+#tree ul { padding-left: 14px; }
+#tree li { display: block; margin: 1px 0; }
+#tree summary { cursor: pointer; }
+#tree summary, #tree .leaf { display: flex; align-items: center; gap: 6px; }
+#tree .dir { color: #5b5b5b; }
+#tree button.go { color: #0b57d0; background: none; border: 0; padding: 0; text-align: left; overflow-wrap: anywhere; }
+#tree .more { color: #5b5b5b; font-style: italic; }
 aside section { padding: 12px 16px; }
 #legend { border-bottom: 1px solid #dcdcd8; max-height: 45vh; overflow: auto; }
 aside h2 { margin: 8px 0 4px; font-size: 13px; color: #5b5b5b; text-transform: uppercase; letter-spacing: .04em; }
 aside ul { padding-left: 0; list-style: none; margin: 0; }
 aside li { margin: 3px 0; overflow-wrap: anywhere; display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .swatch { width: 12px; height: 12px; border-radius: 50%; flex: 0 0 12px; }
-.count { color: #5b5b5b; font-size: 12px; margin-left: auto; }
+.count { color: #5b5b5b; font-size: 12px; margin-left: auto; white-space: nowrap; }
 #details h3 { margin: 0 0 4px; font-size: 16px; overflow-wrap: anywhere; }
 #details ul { padding-left: 16px; list-style: disc; }
 #details li { display: list-item; }
@@ -348,11 +508,42 @@ CODE = r"""
   function communityLabel(id) { for (var i = 0; i < data.communities.length; i++) { if (data.communities[i].id === id) { return data.communities[i].label; } } return id; }
   function centre(n) { view.x = -n.x; view.y = -n.y; wake(); }
 
+  // The module tree: directories, files and what each defines, as the
+  // page's own nested list; the browser folds and unfolds it, and an
+  // entry chooses its entity in the drawing.
+  var treeBox = document.getElementById("tree");
+  function reach(id) {
+    var n = byId[id]; if (!n) { return; }
+    if (hidden[n.community]) { hidden[n.community] = false; var boxes = communityList.querySelectorAll("input"); for (var i = 0; i < boxes.length; i++) { if (boxes[i].dataset.community === n.community) { boxes[i].checked = true; } } settle(); }
+    show(id); centre(n);
+  }
+  function branch(item, depth) {
+    var li = document.createElement("li"), name;
+    if (item.more) { li.appendChild(element("span", item.name, "more")); return li; }
+    if (item.id) { name = element("button", item.name, "go"); name.type = "button"; name.addEventListener("click", function () { reach(item.id); }); }
+    else { name = element("span", item.name, "dir"); }
+    if (item.children && item.children.length) {
+      var box = document.createElement("details"), head = document.createElement("summary"), list = document.createElement("ul");
+      box.open = depth < 1; head.appendChild(name); head.appendChild(element("span", String(item.count), "count")); box.appendChild(head);
+      item.children.forEach(function (child) { list.appendChild(branch(child, depth + 1)); });
+      box.appendChild(list); li.appendChild(box);
+    } else { var leaf = document.createElement("div"); leaf.className = "leaf"; leaf.appendChild(name); li.appendChild(leaf); }
+    return li;
+  }
+  if (treeBox && data.tree) {
+    var top = document.createElement("ul");
+    data.tree.children.forEach(function (child) { top.appendChild(branch(child, 0)); });
+    treeBox.replaceChildren(top);
+    document.getElementById("tree-count").textContent = data.tree.count + " entries";
+    document.getElementById("unfold").addEventListener("click", function (event) { event.preventDefault(); treeBox.querySelectorAll("details").forEach(function (d) { d.open = true; }); });
+    document.getElementById("fold").addEventListener("click", function (event) { event.preventDefault(); treeBox.querySelectorAll("details").forEach(function (d) { d.open = false; }); });
+  }
+
   // Legend: one row per community with a switch, and one per predicate.
   var communityList = document.getElementById("communities");
   data.communities.forEach(function (c) {
     var item = document.createElement("li"), row = document.createElement("label"), box = document.createElement("input"), swatch = element("span", "", "swatch");
-    box.type = "checkbox"; box.checked = true; swatch.style.background = colour[c.id];
+    box.type = "checkbox"; box.checked = true; box.dataset.community = c.id; swatch.style.background = colour[c.id];
     // A shown-again community is laid out again: what was hidden was not moved.
     box.addEventListener("change", function () { hidden[c.id] = !box.checked; settle(); });
     row.appendChild(box); row.appendChild(swatch); row.appendChild(element("span", c.label));
