@@ -20,6 +20,7 @@ from uuid import uuid4
 from ..memory.engine import MemoryEngine, Record, check_space
 from ..retrieval.recall_scope import RecallScope
 from .context import MemoryContext
+from .keypad import KeypadCollector, KeypadEntry, KeypadPolicy, Keypress
 from .lifecycle import cancel_once as _cancel_once, settle as _settle
 from .timing import TurnTiming
 from .turn_end import HOLD_S, MAX_DURATION_S, UNSURE, EndOfTurnDetector, Judgement, TurnEnd, TurnHold, TurnReceipt
@@ -59,6 +60,8 @@ class VoiceSession:
     hidden reasoning, tools or retrieved context is persisted as transcript.
     An optional turn detector (realtime.turn_end) holds a transcript that stops
     mid-clause for the rest of the turn; each user turn records why it ended.
+    An optional keypad policy (realtime.keypad) gives keys a transport yields
+    among its audio to the user's turn; without one they are counted and ignored.
     """
 
     def __init__(
@@ -71,6 +74,7 @@ class VoiceSession:
         turn_detector_factory: Callable[[], EndOfTurnDetector] | None = None,
         turn_hold: float = HOLD_S, turn_max_duration: float = MAX_DURATION_S,
         turn_judge_timeout: float = JUDGE_TIMEOUT,
+        keypad: KeypadPolicy | None = None,
         capture: bool, system_prompt: str = "You are a helpful voice assistant.",
         where: Mapping[str, str] | None = None, kind: str | None = None,
         source_prefix: str | None = None, since: str | None = None, until: str | None = None,
@@ -102,6 +106,8 @@ class VoiceSession:
                 raise ValueError("byte limits must be integers in 512..1000000")
         if type(audio_queue_size) is not int or not 1 <= audio_queue_size <= 256:
             raise ValueError("audio_queue_size must be in 1..256")
+        if keypad is not None and not isinstance(keypad, KeypadPolicy):
+            raise ValueError("keypad must be a realtime.keypad.KeypadPolicy or None")
         if not isinstance(system_prompt, str) or not system_prompt.strip():
             raise ValueError("system_prompt must be nonempty")
         self._history = [{"role": "system", "content": system_prompt}]
@@ -112,6 +118,9 @@ class VoiceSession:
         self._memory_context = MemoryContext(memory, space, session_id, **self._scope.kwargs())
         self._factories = factories
         self._turns = TurnHold(hold=turn_hold, max_duration=turn_max_duration)
+        self._keypad = KeypadCollector(keypad) if keypad is not None else None
+        #: When the conversation began, which keypad receipts are timed from.
+        self._origin = 0.0
         self._judge_timeout = turn_judge_timeout
         self._session_timeout, self._turn_timeout = session_timeout, turn_timeout
         self._queue_size, self._max_audio = audio_queue_size, max_audio_bytes
@@ -128,6 +137,10 @@ class VoiceSession:
         self.last_memory_receipt: dict | None = None
         #: Why the latest user turn ended (``turn_end.TurnReceipt``).
         self.last_turn_receipt: TurnReceipt | None = None
+        #: The latest keypad entry given to a turn (``keypad.KeypadEntry``).
+        self.last_keypad_receipt: KeypadEntry | None = None
+        #: Keys a transport yielded to a session without a keypad policy.
+        self.keypad_ignored = 0
 
     @property
     def state(self) -> str:
@@ -215,6 +228,7 @@ class VoiceSession:
                 _OWNER.reset(token)
 
     async def _conversation(self, transport, stt, model, tts, activity=None, detector=None):
+        self._origin = time.perf_counter()
         queue = asyncio.Queue(self._queue_size)
         control = asyncio.Lock()
         input_drained = False
@@ -223,10 +237,29 @@ class VoiceSession:
         # looks again when the earlier one comes.
         held = asyncio.Event()
 
+        async def key(press):
+            # Keys go to the turn, never to the recognizer. The first key of
+            # an entry stops a reply, as speech starting does, and a spoken
+            # clause that is held waits for the keys the caller is entering.
+            if self._keypad is None:
+                self.keypad_ignored += 1
+                return
+            async with control:
+                now = time.perf_counter()
+                if not self._keypad.pending:
+                    await self._interrupt(transport)
+                self._turns.speech_started(now)
+                for entry in self._keypad.press(press, now):
+                    await self._keyed(entry, now, transport, model, tts)
+                held.set()
+
         async def feed():
             speaking = False
             async with aclosing(transport.receive()) as incoming:
                 async for chunk in incoming:
+                    if isinstance(chunk, Keypress):
+                        await key(chunk)
+                        continue
                     check_audio(chunk, self._max_audio)
                     if activity is not None:
                         detected = await activity.detect(chunk)
@@ -262,6 +295,9 @@ class VoiceSession:
                         elif is_question(event):
                             heard = time.perf_counter()
                             await self._interrupt(transport)  # new words supersede output, even while held
+                            if self._keypad is not None:  # keys entered before these words are given first
+                                for entry in self._keypad.drain(heard, "speech"):
+                                    await self._keyed(entry, heard, transport, model, tts)
                             judgement = await self._judge(detector, self._turns.text_with(event.text, event.speaker))
                             # The hold keeps the process clock the turn's timing reads,
                             # and counts from when the transcript arrived, so a
@@ -280,6 +316,9 @@ class VoiceSession:
                             self._turns.speech_started(now=time.perf_counter())
             async with control:
                 now = time.perf_counter()
+                if self._keypad is not None:
+                    for entry in self._keypad.drain(now, "input_ended"):
+                        await self._keyed(entry, now, transport, model, tts)
                 for end in self._turns.drain(now):
                     await self._begin(end, now, transport, model, tts)
 
@@ -288,12 +327,16 @@ class VoiceSession:
             # harmless: expire releases nothing before the deadline.
             while True:
                 held.clear()
-                deadline = self._turns.deadline
+                keyed = self._keypad.deadline if self._keypad is not None else None
+                deadlines = [d for d in (self._turns.deadline, keyed) if d is not None]
                 with suppress(TimeoutError):
-                    async with asyncio.timeout(None if deadline is None else deadline - time.perf_counter()):
+                    async with asyncio.timeout(min(deadlines) - time.perf_counter() if deadlines else None):
                         await held.wait()
                 async with control:
                     now = time.perf_counter()
+                    # Keys first: an entry that times out joins the clause it was holding open.
+                    for entry in self._keypad.expire(now) if self._keypad is not None else ():
+                        await self._keyed(entry, now, transport, model, tts)
                     for end in self._turns.expire(now):
                         await self._begin(end, now, transport, model, tts)
 
@@ -329,10 +372,19 @@ class VoiceSession:
         # are recorded, not answered. When they cannot be, that is said:
         # alone as the session's error, or as a note on the error that
         # stopped it.
-        for end in self._turns.drain(time.perf_counter(), reason="session_ended"):
+        now = time.perf_counter()
+        ends: list[tuple[TurnEnd, KeypadEntry | None]] = []
+        for entry in self._keypad.drain(now, "session_ended") if self._keypad is not None else ():
+            released = self._turns.keyed(entry.text, now, reason="session_ended")
+            ends += [(end, entry if end is released[-1] else None) for end in released]
+        ends += [(end, None) for end in self._turns.drain(now, reason="session_ended")]
+        for end, entry in ends:
             self.last_turn_receipt = end.receipt  # before the record, so a failed one still says why
+            if entry is not None:
+                self.last_keypad_receipt = entry
             try:
-                await self._record(uuid4().hex, "user", end.text, speaker=end.speaker, turn_end=end.receipt.reason)
+                await self._record(uuid4().hex, "user", end.text, speaker=end.speaker, turn_end=end.receipt.reason,
+                                   keypad=entry)
             except Exception as error:
                 if failure is None:
                     raise
@@ -358,7 +410,14 @@ class VoiceSession:
             raise ValueError("end-of-turn detector must return a Judgement")
         return judgement
 
-    async def _begin(self, end: TurnEnd, now: float, transport, model, tts):
+    async def _keyed(self, entry: KeypadEntry, now: float, transport, model, tts):
+        # A keypad entry is text that finishes the user's turn; only the
+        # turn it finishes carries its receipt.
+        released = self._turns.keyed(entry.text, now)
+        for end in released:
+            await self._begin(end, now, transport, model, tts, keypad=entry if end is released[-1] else None)
+
+    async def _begin(self, end: TurnEnd, now: float, transport, model, tts, keypad: KeypadEntry | None = None):
         # Callers hold the controller, so a released turn and new speech
         # cannot interleave. The turn was heard when its last transcript
         # arrived, before any hold: a person waited from then.
@@ -369,7 +428,9 @@ class VoiceSession:
             raise RuntimeError("voice history byte limit reached")
         turn_id = uuid4().hex
         self.last_turn_receipt = end.receipt
-        await self._record(turn_id, "user", end.text, speaker=end.speaker, turn_end=end.receipt.reason)
+        if keypad is not None:
+            self.last_keypad_receipt = keypad
+        await self._record(turn_id, "user", end.text, speaker=end.speaker, turn_end=end.receipt.reason, keypad=keypad)
         self._history = messages
         self._output_turn = turn_id
         self._reply = asyncio.create_task(self._respond(transport, model, tts, turn_id, self._generation, heard))
@@ -389,7 +450,7 @@ class VoiceSession:
         if cancelled:
             raise asyncio.CancelledError()
 
-    async def _record(self, turn_id, role, text, *, speaker=None, turn_end=None):
+    async def _record(self, turn_id, role, text, *, speaker=None, turn_end=None, keypad=None):
         metadata = {"integration": "scone-voice", "session_id": self._session_id,
                     "capture_id": self._capture_id, "turn_id": turn_id, "role": role,
                     "representation": "aggregated_text",
@@ -398,6 +459,8 @@ class VoiceSession:
             metadata["speaker"] = speaker
         if turn_end is not None:
             metadata["turn_end"] = turn_end
+        if keypad is not None:
+            metadata.update(keypad.metadata(self._origin))
         if role == "assistant":
             metadata["completion_evidence"] = "adapter_end_and_output_accepted"
             metadata["playback"] = "unverified"
