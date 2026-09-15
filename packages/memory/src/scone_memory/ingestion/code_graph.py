@@ -47,7 +47,7 @@ import builtins
 import re
 from typing import TYPE_CHECKING
 
-from .code import Language, MAX_LINES, _line_starts, declarations
+from .code import BRACE_SUFFIXES, Language, MAX_LINES, PYTHON_SUFFIXES, _line_starts, declarations
 
 if TYPE_CHECKING:
     from ..core.models import Fact
@@ -144,7 +144,31 @@ _ES_TYPE_ONLY = re.compile(r"^\s*(?:import|export)\s+type\s")
 _BARE = re.compile(r"""^\s*import\s+["']([^"']+)["']""")
 _REQUIRE = re.compile(r"""\brequire\s*\(\s*["']([^"']+)["']""")
 _QUOTED = re.compile(r"""^\s*(?:_\s+|\w+\s+)?["']([^"']+)["']\s*$""")
-_USE = re.compile(r"^\s*(?:pub\s+)?use\s+([A-Za-z_][\w:]*)")
+#: The brace languages that do not quote what they import, by suffix, and
+#: how each writes it. The name is claimed as the language spells it --
+#: `com.acme.Store`, `std::fs`, `App\\Models\\User`, `stdio.h` -- and a
+#: path (a quoted `#include`, `@import("x.zig")`, a Dart file without a
+#: scheme, a PHP `require`) is a file, resolved like a relative import.
+#: A grouped import (`use a::{b, c::{d, self}}`, `import a.b.{C, D}`)
+#: names every path in the group.
+_FAMILY = {"rs": "rust", "php": "php", "java": "jvm", "kt": "jvm", "kts": "jvm", "scala": "jvm",
+           "cs": "csharp", "swift": "swift", "zig": "zig", "dart": "dart",
+           "c": "c", "h": "c", "cc": "c", "cpp": "c", "cxx": "c", "hpp": "c", "hh": "c", "m": "c", "mm": "c"}
+_RUST_USE = re.compile(r"(?:^|(?<=;))\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+?)\s*;")
+_PHP_USE = re.compile(r"(?:^|(?<=;))\s*use\s+(?:(?:function|const)\s+)?([^;]+?)\s*;")
+_PHP_REQUIRE = re.compile(r"""^\s*(?:require|include)(?:_once)?\s*\(?\s*(__DIR__\s*\.\s*)?["']([^"']+)["']""")
+_JVM_IMPORT = re.compile(r"(?:^|(?<=;))\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*(?:\.\{[^}]*\})?)(?:\.\*)?"
+                         r"(?:\s+as\s+\w+)?\s*(?:;|$)")
+_JVM_PACKAGE = re.compile(r"^\s*package\s+([A-Za-z_][\w.]*)")
+_USING = re.compile(r"^\s*(?:global\s+)?using\s+(?:static\s+)?(?:[A-Za-z_]\w*\s*=\s*)?([A-Za-z_][\w.]*)(?:\s*<[^;]*>)?\s*;")
+_SWIFT_IMPORT = re.compile(r"^\s*(?:@testable\s+)?import\s+(?:(?:class|struct|enum|protocol|typealias|func|var|let)\s+)?"
+                           r"([A-Za-z_][\w.]*)\s*$")
+_INCLUDE = re.compile(r'^\s*#\s*(?:include|import)\s*(?:"([^"]+)"|<([^>]+)>)')
+_ZIG_IMPORT = re.compile(r'@import\(\s*"([^"]+)"\s*\)')
+_DART_IMPORT = re.compile(r"""^\s*(?:import|export|part)\s+["']([^"']+)["']""")
+#: Extensions that name a source file outright: an import written with
+#: one already says which file it means.
+_SOURCE = frozenset(suffix.lstrip(".") for suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES))
 #: Where a language writes its imports in a block rather than a line.
 _OPENS = re.compile(r"^\s*import\s*\($")
 
@@ -215,10 +239,22 @@ def masked(content: str, *, prose: bool = True) -> str:
             continue
         else:
             if here in "\"'`":
-                quote = here
+                # A lone `'` with no partner on its line is a Rust lifetime
+                # (`&'static str`), not a string that runs to the next `'`.
+                line_end = content.find("\n", at + 1)
+                if here != "'" or content.find("'", at + 1, len(content) if line_end < 0 else line_end) >= 0:
+                    quote = here
             out.append(here)
         at += 1
     return "".join(out)
+
+
+def _comments_blanked(content: str, both: str) -> str:
+    """The source with its comments blanked and its strings kept: what a
+    quoted path is read from, so `/* note */ #include "x.h"` is the
+    include it is and `// was @import("old.zig")` is nothing."""
+    kept = masked(content, prose=True)
+    return "".join(" " if both[i] == " " and kept[i] == content[i] != " " else content[i] for i in range(len(content)))
 
 
 def _holder(declared: tuple, path: str, line: int) -> str:
@@ -1023,7 +1059,8 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
     # What a class is built on, read from the header line. These languages
     # write it where it can be read; what a name in the body refers to is
     # not written down, and is still not guessed at.
-    code = masked(content, prose=False).split("\n")
+    both = masked(content, prose=False)
+    code = both.split("\n")
     if path.endswith(".go"):
         # Go's types, which the brace declaration pattern cannot see.
         for number, line in enumerate(code, start=1):
@@ -1095,6 +1132,11 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
                     relation = INHERITS
                 say(subject, relation, held.get(written, written), number)
 
+    family = _FAMILY.get(posixpath.splitext(path)[1].lstrip(".").lower())
+    if family is not None:
+        _unquoted_imports(_comments_blanked(content, both).split("\n"), code, path, family, resolve, say)
+        _meaning(content, path, "braces", say)
+        return tuple(found)
     inside = False
     # Whether the statement a line continues began `import type` or
     # `export type`: a wrapped one names its module some lines later.
@@ -1121,12 +1163,271 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
                     say(path, IMPORTS_FOR_TYPES if pattern is _FROM and types_only else IMPORTS, where, number)
                 types_only = False
                 break
-        else:
-            used = _USE.match(line)
-            if used:
-                say(path, IMPORTS, used.group(1).split("::")[0], number)
     _meaning(content, path, "braces", say)
     return tuple(found)
+
+
+#: What a wrapped grouped import begins with, per family, so its lines
+#: can be joined before they are read.
+_STARTS = {"rust": re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?use\s"), "php": re.compile(r"^\s*use\s"),
+           "jvm": re.compile(r"^\s*import\s")}
+#: Lines a wrapped statement may run to before it is read as written.
+MAX_STATEMENT_LINES = 64
+#: A name an unquoted import may claim: letters, digits, dots, colons and
+#: backslashes. Anything else on the line was not an import.
+_IMPORT_NAME = re.compile(r"^[A-Za-z_#][\w.:\\#]*$")
+_PHP_OPENER = re.compile(r"^\s*namespace\b")
+
+
+def _unquoted_imports(raw: list[str], clean: list[str], path: str, family: str, resolve: Optional["Resolve"],
+                      say: Callable[[str, str, str, int], None]) -> None:
+    """The imports of a brace language that writes them without quotes,
+    one claim per name the statement means. Whether a line is an import
+    is decided on the source with its comments and strings blanked, so a
+    commented-out or quoted `use` is not one; the name is taken from the
+    blanked line too, except a quoted path, which the blanking hides and
+    ``raw`` -- the source with only its comments blanked -- still holds.
+    A package is named as the language spells
+    it; a path is resolved like a relative import, and a module path
+    inside the project (`crate::a::b`, `com.acme.Store`) is resolved to
+    its file when whoever walked the tree can confirm one, and named as
+    written otherwise. A PHP `use` inside a class is a trait, not an
+    import, and is left alone."""
+    root = _source_root(clean, path, family)
+    base = _rust_base(path) if family == "rust" else None
+    openers: list[str] = []
+    for number, shape, text in _statements(raw, clean, family):
+        inside_class = any(opener != "namespace" for opener in openers)
+        for opened in range(shape.count("{") - shape.count("}")):
+            openers.append("namespace" if _PHP_OPENER.match(shape) else "other")
+        for _ in range(shape.count("}") - shape.count("{")):
+            if openers:
+                openers.pop()
+        if not _imports_of(shape, family):
+            continue
+        if family == "php" and inside_class and _PHP_USE.search(shape):
+            continue
+        for target, is_path in _imports_of(text, family):
+            if is_path:
+                where = _named(target, path, resolve)
+            elif family == "rust" and target.split("::")[0] in ("crate", "self", "super"):
+                where = _module_file(target.split("::"), path, root, resolve, "::", base)
+            elif family == "jvm" and root is not None:
+                where = _module_file(target.split("."), path, root, resolve, ".", None)
+            else:
+                where = target
+            if where:
+                say(path, IMPORTS, where, number)
+
+
+def _statements(raw: list[str], clean: list[str], family: str):
+    """Each line as the blanked source shows it (the shape) and as it is
+    read (the text): the blanked line for a family that writes names, the
+    raw line for one that quotes paths. A grouped import that wraps lines
+    is joined until its braces close, up to a bound, and read as one."""
+    quoted = family in ("c", "zig", "dart", "php")
+    starts = _STARTS.get(family)
+    number = 0
+    while number < len(clean):
+        shape, text = clean[number], (raw[number] if quoted else clean[number])
+        first = number + 1
+        if starts is not None and starts.match(shape) and shape.count("{") > shape.count("}"):
+            last = number
+            while (shape.count("{") > shape.count("}") and last + 1 < len(clean)
+                   and last - number + 1 < MAX_STATEMENT_LINES):
+                last += 1
+                shape += " " + clean[last]
+                text += " " + (raw[last] if quoted else clean[last])
+            number = last
+        number += 1
+        yield first, shape, text
+
+
+def _imports_of(line: str, family: str) -> list[tuple[str, bool]]:
+    """What one statement imports under its family's spelling: each name
+    with whether it is a path (a file to resolve) or a name to keep."""
+    if family == "rust":
+        return [(name, False) for group in _RUST_USE.findall(line) for name in _spread(group, "::")]
+    if family == "php":
+        groups = _PHP_USE.findall(line)
+        if groups:
+            return [(name, False) for group in groups for name in _spread(group, "\\")]
+        wanted = _PHP_REQUIRE.match(line)
+        if not wanted:
+            return []
+        # `__DIR__ . '/x.php'` is beside this file, however the slash is written.
+        return _pathed("./" + wanted.group(2).lstrip("/") if wanted.group(1) else wanted.group(2))
+    if family == "jvm":
+        return [(name, False) for group in _JVM_IMPORT.findall(line) for name in _spread(group, ".")]
+    if family == "csharp":
+        used = _USING.match(line)
+        return [(used.group(1), False)] if used else []
+    if family == "swift":
+        used = _SWIFT_IMPORT.match(line)
+        return [(used.group(1), False)] if used else []
+    if family == "c":
+        used = _INCLUDE.match(line)
+        if not used:
+            return []
+        return _pathed(used.group(1)) if used.group(1) else [(used.group(2), False)]
+    if family == "zig":
+        found: list[tuple[str, bool]] = []
+        for name in _ZIG_IMPORT.findall(line):
+            found.extend(_pathed(name) if name.endswith(".zig") else [(name, False)])
+        return found
+    if family == "dart":
+        used = _DART_IMPORT.match(line)
+        if not used:
+            return []
+        name = used.group(1)
+        return [(name, False)] if ":" in name else _pathed(name)
+    return []
+
+
+def _pathed(target: str) -> list[tuple[str, bool]]:
+    where = _as_path(target)
+    return [] if where is None else [(where, True)]
+
+
+def _as_path(target: str) -> Optional[str]:
+    """A file written relative to the importing file, spelt so the resolver
+    reads it as relative: `lib/x.h` becomes `./lib/x.h`; `../x.h` already
+    is. An absolute path (`/opt/x.h`, `C:\\x.h`) is nobody's file here."""
+    target = target.replace("\\", "/")
+    if target.startswith("/") or re.match(r"^[A-Za-z]:/", target):
+        return None
+    if target.startswith("./") or target.startswith("../"):
+        return target
+    return "./" + target
+
+
+def _spread(text: str, sep: str) -> list[str]:
+    """Every path a grouped import names: `a::{b, c::{d, self}}` is
+    `a::b`, `a::c::d` and `a::c`; `a::*` is `a`; a flat list `a, b` is
+    each; an alias (`as x`, `=> x`) is not the name. A group that does
+    not close is read as written; what is not a name is dropped."""
+    text = text.strip()
+    opened = text.find("{")
+    if opened < 0:
+        return [name for name in (_plain_path(part, sep) for part in text.split(",")) if name]
+    depth, closed = 0, -1
+    for index, char in enumerate(text):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                closed = index
+                break
+    if closed < 0:
+        name = _plain_path(text, sep)
+        return [name] if name else []
+    head = text[:opened].rstrip()
+    if head.endswith(sep):
+        head = head[:-len(sep)]
+    parts, depth, start = [], 0, opened + 1
+    for index in range(opened + 1, closed):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(text[start:index])
+            start = index + 1
+    parts.append(text[start:closed])
+    names: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if part == "self":
+            if head:
+                names.append(head)
+        else:
+            names.extend(_spread(f"{head}{sep}{part}" if head else part, sep))
+    return names
+
+
+def _plain_path(text: str, sep: str) -> str:
+    """One path as written, less its alias, a trailing glob (`::*`, `.*`,
+    Scala's `._`) or `self`; empty when it is not a name."""
+    text = re.split(r"\s+as\s+|\s*=>\s*", text.strip(), maxsplit=1)[0].strip()
+    for tail in (f"{sep}*", f"{sep}_", f"{sep}self"):
+        if text.endswith(tail):
+            text = text[:-len(tail)]
+    text = text.replace(" ", "")
+    return text if _IMPORT_NAME.match(text) else ""
+
+
+def _source_root(lines: list[str], path: str, family: str) -> Optional[int]:
+    """How many directories above the importing file its module tree is
+    rooted, as the resolver counts them (1 is the file's own directory):
+    for Rust the nearest `src` directory, for a JVM language the directory
+    the file's `package` line puts it under. None when the file does not say."""
+    directory = posixpath.dirname(path)
+    if family == "rust":
+        parts = directory.split("/") if directory else []
+        for depth in range(len(parts), 0, -1):
+            if parts[depth - 1] == "src":
+                return len(parts) - depth + 1
+        return 1
+    if family == "jvm":
+        for line in lines[:64]:
+            declared = _JVM_PACKAGE.match(line)
+            if declared:
+                return len(declared.group(1).split(".")) + 1
+    return None
+
+
+class _RustBase:
+    """Where a Rust file's own modules and its siblings live: `mod.rs`,
+    `lib.rs`, `main.rs` and a crate root under `bin/`, `tests/`, `benches/`
+    or `examples/` own their directory, so `self::x` is beside them and
+    `super::x` a directory up; any other file `foo.rs` keeps its own
+    modules under `foo/` and its siblings beside itself."""
+
+    def __init__(self, path: str) -> None:
+        stem = posixpath.splitext(posixpath.basename(path))[0]
+        parent = posixpath.basename(posixpath.dirname(path))
+        # A crate root owns its directory too: `src/bin/tool.rs`, `tests/x.rs`.
+        owns = stem in ("mod", "lib", "main") or parent in ("bin", "tests", "benches", "examples")
+        self.self_level, self.self_prefix = 1, ([] if owns else [stem])
+        self.super_level = 2 if owns else 1
+
+
+def _rust_base(path: str) -> _RustBase:
+    return _RustBase(path)
+
+
+def _module_file(parts: list[str], path: str, root: Optional[int], resolve: Optional["Resolve"],
+                 sep: str, base: Optional[_RustBase]) -> str:
+    """A module path resolved to the file that holds it, the longest prefix
+    that is a file (`crate::a::b::Thing` is `src/a/b.rs`, item `Thing`),
+    or the path as written when nobody walked the tree or nothing is there."""
+    written = sep.join(parts)
+    if resolve is None or root is None:
+        return written
+    level, rest, prefix = root, parts, []
+    if base is not None:
+        head = parts[0]
+        if head == "self":
+            level, rest, prefix = base.self_level, parts[1:], list(base.self_prefix)
+        elif head == "super":
+            level, rest = base.super_level, parts[1:]
+            while rest and rest[0] == "super":
+                level, rest = level + 1, rest[1:]
+        elif head == "crate":
+            rest = parts[1:]
+    if not rest:
+        # `use super::*;` names the module itself, which may be this file's
+        # own inline `mod tests`: nothing to claim.
+        return ""
+    for length in range(len(rest), 0, -1):
+        found = resolve(path, level, ".".join([*prefix, *rest[:length]]))
+        if found:
+            return found
+    return written
 
 
 def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str]:
@@ -1164,7 +1465,7 @@ def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str
     # Appending to either produced `page.css.tsx` and `personas.ts.ts`,
     # names no file can have.
     written = posixpath.splitext(stem)[1].lstrip(".").lower()
-    if written in ASSETS or written in FIRST:
+    if written in ASSETS or written in FIRST or written in _SOURCE:
         return stem
     # Everything else takes the **family's** first spelling, not the
     # importing file's own. `tsc --traceResolution` selects `store.ts`
