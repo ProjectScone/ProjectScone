@@ -99,3 +99,59 @@ async def test_at_the_hashed_default_the_vector_lane_no_longer_overturns_the_tex
         "the fixture has the junction: at a quarter voice a short echo the vector lane ranks far above the answer "
         "takes the place the text lane gave the answer")
     assert await text_ranks() == [1, 2, 3], "unset, the text lane's order stands"
+
+
+#: The clock, and two passages: the one the query names exactly is forty
+#: minutes older than one that shares no word with it. At a hundredth
+#: voice the vector lane's rank scores are smaller than the recency term's
+#: difference over those forty minutes.
+NOW = "2026-09-15T12:00:00Z"
+EXACT = "quarterly invoice reconciliation northern warehouses"
+UNRELATED = "lunch weather notes today"
+
+
+async def _answers_nothing(*args, **kwargs):
+    return []
+
+
+async def _fails(*args, **kwargs):
+    raise RuntimeError("text index down")
+
+
+@pytest.mark.parametrize("text_lane", ["not-asked", "failed", "found-nothing"], ids=["not-asked", "failed", "found-nothing"])
+async def test_with_nothing_from_the_text_lane_the_vector_lane_speaks_at_full_voice(text_lane):
+    from scone_memory.memory.engine import Record
+
+    async def recall(**kw):
+        events = InMemoryEventLog()
+        documents = InMemoryDocumentStore()
+        engine = await MemoryEngine(documents, InMemoryVectorIndex(), HashEmbedder(), events=events,
+                                    clock=lambda: NOW, **kw).open()
+        await engine.remember_many("s", [Record(content=EXACT, created_at="2026-09-15T11:20:00Z"),
+                                         Record(content=UNRELATED, created_at="2026-09-15T12:00:00Z")])
+        lanes: tuple[str, ...] = ("vector", "text")
+        if text_lane == "not-asked":
+            lanes = ("vector",)
+        else:
+            stand_in = _fails if text_lane == "failed" else _answers_nothing
+            documents.search_text = stand_in  # type: ignore[method-assign]
+            documents.search_terms = stand_in  # type: ignore[attr-defined]
+        result = await engine.recall("s", EXACT, limit=2, lanes=lanes)
+        [event] = await events.query("s", kind="recall")
+        return [item.text for item in result.items], event.payload["fusion_weights"], result.degraded
+
+    heard, weights, degraded = await recall(vector_weight=1.0)
+    assert heard == [EXACT, UNRELATED] and weights == {"vector": 1.0, "text": 1.0}
+    assert ("text: RuntimeError: text index down" in degraded) == (text_lane == "failed"), "the fixture takes the path it names"
+    ordered, weights, _ = await recall()
+    assert ordered == [EXACT, UNRELATED], (
+        "a voice against the text lane has nothing to speak against: the vector lane's order stands, and recency "
+        "stays a tie-breaker, not the order")
+    assert weights == {"vector": 1.0, "text": 1.0}, "the event records the voice the lane had"
+
+
+async def test_a_text_lane_that_brings_passages_keeps_the_hundredth_voice_on_the_record():
+    engine = await engine_with()
+    await engine.recall("s", "billing", limit=3, lanes=("vector", "text"))
+    [event] = await engine.events.query("s", kind="recall")
+    assert event.payload["fusion_weights"] == {"vector": 0.01, "text": 1.0}

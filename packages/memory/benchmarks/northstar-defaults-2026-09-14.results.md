@@ -165,8 +165,8 @@ machine, and this change makes no claim about it.
 - **Relative-score fusion at 0.25** (0.90 / 0.74 / 0.96 / 0.834 frozen;
   0.95 / 0.82 / 0.99 / 0.868 on the second sample) also meets the rule on
   the frozen sample. It loses to rank fusion at 0.01 on both samples'
-  MRR, and it costs one item of R@15. It would also change the default
-  fusion mode for every hashed-embedder recall. The recency term
+  MRR, and it costs two items of R@15 (0.96 against 1.00 on 50). It would
+  also change the default fusion mode for every hashed-embedder recall. The recency term
   (`SCONE_RECENCY_WEIGHT`, 0.005 at age zero) is sized against rank
   fusion's scores, about 0.016 at the top, and under score fusion
   (about 1.0 at the top) it would shrink to a rounding error. These benches
@@ -189,7 +189,8 @@ machine, and this change makes no claim about it.
   samples.** The fused rows score exactly as the text lane alone on both.
   Their top five sessions match the text lane's in 149 of 150 items, and
   their top fifteen in 126 (42 of 50 and 84 of 100). The lane still runs,
-  for the confidence signal and a failed text lane. Beating the reference with a
+  for the confidence signal and a failed text lane, and when the text lane brings
+  nothing it ranks at full voice (see the docs). Beating the reference with a
   vector lane that knows something is the next row's work: a real embedder
   on both sides.
 - **Where the old measurement went.** The commit that set 0.25
