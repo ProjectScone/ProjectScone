@@ -252,6 +252,10 @@ class AnalysisCoverage(BaseModel):
     #: Entities named but never read, kept out of the partition and the
     #: central ranking and attached to the community that names each most.
     external_entities: int = 0
+    #: The degree percentile above which the graph's own entities were held
+    #: apart as hubs, and how many were; None and 0 when none was asked for.
+    exclude_hubs: Optional[float] = None
+    hubs_held_apart: int = 0
 
 
 class Groupings(BaseModel):
@@ -419,7 +423,8 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         """The space's communities, central entities, surprising connections and
         questions worth asking, computed from recorded facts and citing them.
         ``resolution`` sets how fine the communities are; ``exclude_hubs``
-        leaves entities above that degree percentile out of the central ranking."""
+        holds entities above that degree percentile out of the community
+        partition and the central ranking, and lists them apart."""
         report = await report_record(engine, space, status=status, as_of=_moment(engine, as_of), resolution=resolution,
                                      exclude_hubs=exclude_hubs, usage=usage,
                                      usage_since=None if usage_since is None else _moment(engine, usage_since))
