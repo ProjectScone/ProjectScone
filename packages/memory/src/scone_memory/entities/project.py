@@ -24,7 +24,8 @@ from typing import Iterable, Literal, Sequence, cast
 from ..core.models import Fact
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..core.validation import entity_key
-from .classify import CLASSIFIER_VERSION, ClassificationContext, ObjectClassification, classify_object, reference_flag
+from .classify import (CLASSIFIER_VERSION, ClassificationContext, ObjectClassification, classify_object, is_code_name,
+                       reference_flag)
 from .ids import attribute_id, implied_id, key_id, relation_id
 from .meanings import MAX_IMPLIED, MAX_STEPS, MAX_WALKED, RelationMeanings
 from .kinds import KIND_HINTS_VERSION, EntityKind, KindStatus, code_kind, hint, infer_kind
@@ -288,11 +289,23 @@ def quoted_form(key: str, quote: str | None) -> str | None:
 
 
 def _label(forms: Counter[str], key: str, merged: bool = False) -> str:
-    # A merged entity keeps the spelling of the name it was merged into
-    # when that name was ever written; its aliases only fill in otherwise.
+    """The spelling an entity is shown by: the most common one, casing
+    recovered where a quote kept it. A merged entity keeps the spelling of
+    the name it was merged into when that name was ever written; its
+    aliases only fill in otherwise. A code name (a path, or a path and a
+    declaration) is shown as the code declares it: the case of an
+    identifier is part of the name, and a declaration is called by its
+    lowercased key once per call it receives, so counting would rename
+    `DirectorySync._finish` to `directorysync._finish` on a busy graph."""
     own = (Counter({form: count for form, count in forms.items() if entity_key(form) == key}) if merged
            else forms) or forms
-    return min(own, key=lambda form: (-own[form], not any(c.isupper() for c in form), form)) if own else key
+    if not own:
+        return key
+    if is_code_name(key):
+        cased = [form for form in own if any(c.isupper() for c in form)]
+        if cased:
+            return min(cased, key=lambda form: (-own[form], form))
+    return min(own, key=lambda form: (-own[form], not any(c.isupper() for c in form), form))
 
 
 def _undigested_held(record: object) -> object:

@@ -741,6 +741,38 @@ in an unchanged one. This is the reference graph
 tool's watch mode without a file-system event library: polling, bounded,
 and honest about each pass.
 
+A repository has a better signal than the clock. `scone-memory hooks
+install` (from anywhere inside the repository, or `--root DIR`) writes a
+runner script into the repository's hooks directory, wherever
+`core.hooksPath` puts it, and a guarded block into `post-commit`,
+`post-checkout` and `post-merge` that calls it; each call maps the tree
+with `--graph` (`--no-graph` to store the files alone) in the background,
+so a commit is not made to wait, and appends the JSON receipt to
+`scone-map.log` in the repository's git directory (`.git/scone-map.log`;
+a linked worktree's own git directory, so two worktrees do not share a
+log). A checkout of files (the branch flag 0) maps nothing. `hooks
+status` says which hooks carry the block (`installed`, `absent`, or
+`other` for a hook of the person's own), the interpreter the runner
+names and whether it still exists, the settings it carries, and how the
+log ends: the last receipt when the last run finished, or the log's last
+line when it did not, so a failed run is never hidden behind the success
+before it. `hooks uninstall` takes the blocks out and leaves whatever
+else the hook files held, removing a file only when nothing but its
+shebang is left. A hook file that exists is appended to, never replaced;
+a second install replaces its own block where it stands, so what the
+person put after it stays after it; a block with a start and no end is
+refused rather than guessed at, and a marker is a whole line, so a
+comment that mentions one is not a block. The interpreter's path is
+written in full, so a commit from an editor with no shell environment
+still finds it, and `PYTHONPATH` goes with it when the install ran with
+one; only the settings that name a store kind or a local path
+(`SCONE_DOCUMENTS`, `SCONE_VECTORS`, `SCONE_EVENTS`, `SCONE_SQLITE_PATH`)
+are written into the runner, and a connection URL or a key never is: the
+runner reads those from the environment it runs in, or from a file the
+person names with `--env-file`, which the runner sources. `SCONE_HOOK_WAIT=1` makes the runner wait for the map. A
+file-system event watch is not built: the hooks cover the moments a
+repository's tree moves, and `--watch` covers an editor's saves.
+
 `map` walks a directory, remembers every source file under the path it
 was read from, and with `--graph` records what each says. A map is of the
 tree as it is now: a file is held under the identity `sync` uses for it,
@@ -2481,7 +2513,11 @@ order as history.
   the predicate, the instant and both claims, and points at `scone facts`.
   The ledger cannot decide which is right; a person can.
 - Saying the same thing twice at one moment is agreement, not a
-  collision, and is not counted.
+  collision, and is not counted. Nor is a many-valued predicate
+  (`calls`, `imports`, `depends_on`, or one named in `SCONE_MANY_VALUED`):
+  its values hold side by side by design, so a file that imports two
+  modules on one line is not contested. Counted, they made a code graph
+  read as thousands of collisions.
 
 ## Moving one space into another
 
@@ -2646,7 +2682,11 @@ and every item points back to the facts behind it.
   Values keep their exact text: `3 MB` and `3 mb` are two attributes.
 - **Names** are the entity's recorded spellings. The label is the most
   common one, and casing is recovered from the source quote, so `alice chen`
-  is labelled `Alice Chen`.
+  is labelled `Alice Chen`. A code name (a path, or a path and a
+  declaration) is shown as the code declares it, whatever the count: a
+  declaration is called by its lowercased key once per call it receives,
+  and a busy method would otherwise be labelled `directorysync._finish`
+  beside a quiet one labelled `DirectorySync.open`.
 - **Kinds** (person, organisation, place, project, product, event, concept;
   and for a code graph file, declaration, module)
   are inferred hints from the predicates around an entity. They carry
@@ -3715,7 +3755,7 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `cypher` | one idempotent `MERGE` per line | Neo4j, Memgraph |
 | `csv` | zip of `entities.csv`, `relations.csv`, `attributes.csv`, `about.json` | spreadsheets, bulk loaders |
 | `jsonld` | JSON-LD linked data | RDF tooling |
-| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` and `graph.canvas`, a canvas of the notes | Obsidian and other note tools |
+| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` and `graph.canvas`, a canvas of the notes; or written into a vault a person already keeps with `scone graph export --format obsidian --into VAULT` | Obsidian and other note tools |
 | `wiki` | zip of `index.md`, one article per topic and one per entity, in plain Markdown links | agents reading instead of the raw ledger |
 | `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them | GitHub, Markdown viewers, docs |
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
@@ -3758,6 +3798,21 @@ How each format places values and escapes its own syntax:
   in the tree, and a graph with no file has none. At most 200 entries
   are listed under one directory or file; the rest fold into `+N more`
   and the page's notes say how many were folded.
+- **Into a vault.** `scone graph export --format obsidian --into VAULT`
+  writes the same notes under `VAULT/scone/` instead of a zip, by three
+  rules. A file this did not write is never written over: every note it
+  writes opens with `scone_projection: <digest>` in its frontmatter and
+  a folder manifest (`scone/.scone-vault.json`) lists what the last write
+  left, so a file at a target path that is neither listed nor signed is
+  the person's, kept, and counted under `kept_theirs` (the wiki links to
+  that name reach their note, which is about the same thing). What it
+  wrote last time and does not write now is removed, so a forgotten
+  entity keeps no note; a person's file is never removed, and nothing
+  outside `scone/` is read or touched, `.obsidian/` least of all. The
+  receipt says what happened: `written`, `updated`, `unchanged`,
+  `removed`, `kept_theirs` and the projection the notes carry. Writes are
+  atomic per file. The canvas names its cards' notes by their path under
+  the vault (`scone/entities/...`), so it opens where it is written.
 - **The drawings** (`svg`, `canvas`, and the canvas in the vault) are laid
   out by construction, not simulated, so the same graph always draws
   the same way.
