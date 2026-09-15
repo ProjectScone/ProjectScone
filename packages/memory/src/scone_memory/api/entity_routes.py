@@ -31,6 +31,8 @@ from ..entities.grounding import checked_facts
 from ..entities.duplicates import (DEFAULT_MIN_SCORE, DEFAULT_PAIRS, MAX_BYTES as DUPLICATES_BYTES, MAX_PAIRS,
                                     likely_duplicates)
 from ..entities.cycles import DEFAULT_LIMIT as CYCLES_LIMIT, MAX_BYTES as CYCLES_BYTES, MAX_LIMIT as CYCLES_MAX, graph_cycles
+from ..entities.stats import (DEFAULT_HUBS, MAX_BYTES as STATS_BYTES, MAX_HUBS, MAX_PERCENTILE, MIN_PERCENTILE, graph_hubs,
+                              graph_stats)
 from ..entities.health import (DEFAULT_EXAMPLES as HEALTH_EXAMPLES, MAX_BYTES as HEALTH_BYTES, MAX_EXAMPLES,
                                graph_health)
 from ..entities.changes import DEFAULT_CHANGES, MAX_BYTES as CHANGES_BYTES, MAX_CHANGES, ChangesError, graph_changes
@@ -712,6 +714,36 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         imports that run when called or never. It reads and changes nothing."""
         when = _moment(engine, as_of)
         found = await graph_cycles(engine, space, limit=limit, status=status, as_of=when, max_bytes=max_bytes)
+        return found.record(space, status=status, as_of=when)
+
+    @app.get("/v1/graph/stats")
+    async def get_stats(
+        max_bytes: int = Query(default=STATS_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """The graph counted: entities, relations, attributes, communities and
+        modularity, isolated and external entities, kinds, predicates, and
+        the facts by origin, grounding and standing. Counts over recorded
+        data; it reads and changes nothing."""
+        when = _moment(engine, as_of)
+        found = await graph_stats(engine, space, status=status, as_of=when, max_bytes=max_bytes)
+        return found.record(space, status=status, as_of=when)
+
+    @app.get("/v1/graph/hubs")
+    async def get_hubs(
+        limit: int = Query(default=DEFAULT_HUBS, ge=1, le=MAX_HUBS, description="Hubs shown, most linked first."),
+        above: Optional[float] = Query(default=None, ge=MIN_PERCENTILE, le=MAX_PERCENTILE,
+                                       description="Only the hubs above this degree percentile, as the report "
+                                                   "holds them apart."),
+        max_bytes: int = Query(default=STATS_BYTES, ge=MIN_BYTES, le=MAX_BYTES_LIMIT),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """The graph's own entities with the most neighbours, each with its
+        degree, fact weight, PageRank and community; the graph's core
+        abstractions, or its utility hubs. It reads and changes nothing."""
+        when = _moment(engine, as_of)
+        found = await graph_hubs(engine, space, limit=limit, above=above, status=status, as_of=when,
+                                 max_bytes=max_bytes)
         return found.record(space, status=status, as_of=when)
 
     @app.get("/v1/entities/duplicates")

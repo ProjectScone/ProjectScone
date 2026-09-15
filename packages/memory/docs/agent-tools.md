@@ -47,8 +47,9 @@ not certified. Source text remains untrusted data for the receiving model.
 The graph reads are the ones the MCP server offers as `memory_graph_context`,
 `memory_entity`, `memory_connections`, `memory_graph_schema`,
 `memory_graph_match`, `memory_graph_overview`, `memory_graph_changes`,
-`memory_entity_duplicates`, `memory_graph_health`, `memory_graph_cycles` and
-`memory_graph_affected`, beside the computed `memory_temporal_answer`:
+`memory_entity_duplicates`, `memory_graph_health`, `memory_graph_cycles`,
+`memory_graph_stats`, `memory_graph_hubs` and `memory_graph_affected`, beside
+the computed `memory_temporal_answer`:
 
 - `list_path`, `read_path` and `search_paths` walk the space's tree:
   `/episodes`, `/facts`, `/entities` and `/notes`. Listing and reading
