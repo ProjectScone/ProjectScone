@@ -298,7 +298,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="counts and which stores are in use")
     sub.add_parser("tags", help="tag counts")
-    sub.add_parser("profile", help="identity facts plus recent activity")
+    p = sub.add_parser("profile", help="identity facts plus recent activity")
+    p.add_argument("--buckets", choices=("static", "dynamic", "both"),
+                   help="also place the claims in static and dynamic buckets (see SCONE_PROFILE_* rules)")
+    for bucket in ("static", "dynamic"):
+        p.add_argument(f"--{bucket}-limit", type=int, help=f"most claims the {bucket} bucket shows (default 10)")
+        p.add_argument(f"--{bucket}-max-bytes", type=int,
+                       help=f"most bytes of claims the {bucket} bucket shows (default 2000)")
     p = sub.add_parser("lessons", help="what people said about passages in feedback, weighed by age")
     p.add_argument("--window-days", type=int, default=90, help="read feedback from this many days back (default 90)")
     p.add_argument("--half-life-days", type=float, default=30, help="a judgement's weight halves every this many days")
@@ -2632,15 +2638,34 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         return 0
 
     if args.command == "profile":
-        profile = await engine.profile(space)
+        from ..memory.profile_buckets import requested
+
+        bounds = requested(args.buckets, static_limit=args.static_limit, dynamic_limit=args.dynamic_limit,
+                           static_max_bytes=args.static_max_bytes, dynamic_max_bytes=args.dynamic_max_bytes)
+        profile = await engine.profile(space, buckets=bounds)
+        placed = profile.buckets
         if args.json:
-            emit({"static_facts": [f.model_dump() for f in profile.static_facts], "dynamic": profile.dynamic,
-                  "recent": [asdict(r) for r in profile.recent]})
+            body: dict[str, object] = {"static_facts": [f.model_dump() for f in profile.static_facts],
+                                       "dynamic": profile.dynamic, "recent": [asdict(r) for r in profile.recent]}
+            if placed is not None:
+                body["buckets"] = {"static": [f.model_dump() for f in placed.static],
+                                   "dynamic": [f.model_dump() for f in placed.dynamic], "coverage": placed.coverage}
+            emit(body)
         else:
             for f in profile.static_facts:
                 print(fact_line(f), file=out)
             for line in profile.dynamic:
                 print(f"- {line}", file=out)
+            if placed is None:
+                return 0
+            for bucket in ("static", "dynamic"):
+                if bucket not in placed.coverage:
+                    continue
+                report = placed.coverage[bucket]
+                cut = f"; cut by {report['cut']}" if report["cut"] else ""
+                print(f"{bucket} ({report['shown']} shown, {report['omitted']} omitted{cut})", file=out)
+                for f in getattr(placed, bucket):
+                    print(f"  {fact_line(f)}  rule {placed.placements[f.fact_id].rule}", file=out)
         return 0
 
     if args.command == "derive":

@@ -181,3 +181,12 @@ async def test_a_ledger_that_keeps_moving_is_answered_and_said():
     profile = await memory.profile(SPACE)
     assert "ledger_moved_during_read" in profile.coverage["reasons"]
     assert [fact.object for fact in profile.static_facts] == ["vim", "dark mode"], "newest first"
+
+
+async def test_a_bucketed_profile_of_a_ledger_that_keeps_moving_keeps_its_buckets():
+    from scone_memory.memory.catalog import BucketBounds
+
+    memory = await moving_engine(times=99)
+    profile = await memory.profile(SPACE, buckets=BucketBounds())
+    assert "ledger_moved_during_read" in profile.coverage["reasons"]
+    assert profile.buckets is not None and len(profile.buckets.static) == 2

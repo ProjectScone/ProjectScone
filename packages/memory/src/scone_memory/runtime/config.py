@@ -56,6 +56,12 @@
                                    other embedder 1.0, measured (0.25 was the hashed default before)
     SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
     SCONE_PROFILE_WITHOUT          predicates a profile never shows
+    SCONE_PROFILE_STATIC_PREDICATES   predicates a bucketed profile always calls static
+    SCONE_PROFILE_DYNAMIC_PREDICATES  predicates a bucketed profile always calls dynamic
+    SCONE_PROFILE_STATIC_AFTER_DAYS   days a claim holds before it is static (default 90)
+    SCONE_PROFILE_DYNAMIC_CHANGES     value changes in the window that make a slot dynamic (default 2)
+    SCONE_PROFILE_CHANGE_WINDOW_DAYS  the days those changes are counted over (default 365)
+    SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS  days until a dynamic claim's weight halves (default 30)
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
     SCONE_RERANKER_CROSS_ENCODER_DIR, SCONE_RERANKER_CROSS_ENCODER_MODEL
                                  alternatively load preprovisioned CPU model files; both required
@@ -251,6 +257,13 @@ class Settings:
     synonyms: str | None = None
     profile_predicates: tuple[str, ...] = ()
     profile_without: tuple[str, ...] = ()
+    #: How a bucketed profile places claims (see memory/profile_buckets.py).
+    profile_static_predicates: tuple[str, ...] = ()
+    profile_dynamic_predicates: tuple[str, ...] = ()
+    profile_static_after_days: float = 90.0
+    profile_dynamic_changes: int = 2
+    profile_change_window_days: float = 365.0
+    profile_dynamic_half_life_days: float = 30.0
     similarity_floor: Optional[float] = None
     #: How much newer memory is favoured in fusion (SCONE_RECENCY_WEIGHT,
     #: SCONE_RECENCY_HALF_LIFE_DAYS): the term's size at age zero and the
@@ -397,6 +410,19 @@ class Settings:
         except InvalidInput as error:
             raise InvalidInput(str(error).replace("recency_weight", "SCONE_RECENCY_WEIGHT")
                                .replace("recency_half_life_days", "SCONE_RECENCY_HALF_LIFE_DAYS")) from None
+        try:
+            build_profile_bucket_rules(self)
+        except InvalidInput as error:
+            message = str(error)
+            for field_name, env_name in (
+                    ("static_predicates", "SCONE_PROFILE_STATIC_PREDICATES"),
+                    ("dynamic_predicates", "SCONE_PROFILE_DYNAMIC_PREDICATES"),
+                    ("static_after_days", "SCONE_PROFILE_STATIC_AFTER_DAYS"),
+                    ("dynamic_changes", "SCONE_PROFILE_DYNAMIC_CHANGES"),
+                    ("change_window_days", "SCONE_PROFILE_CHANGE_WINDOW_DAYS"),
+                    ("half_life_days", "SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS")):
+                message = message.replace(field_name, env_name)
+            raise InvalidInput(message) from None
         try:
             validate_feedback_weight(self.feedback_weight)
         except InvalidInput as error:
@@ -561,6 +587,18 @@ class Settings:
                                      if item.strip()),
             profile_without=tuple(item.strip() for item in env.get("SCONE_PROFILE_WITHOUT", "").split(",")
                                   if item.strip()),
+            profile_static_predicates=tuple(item.strip() for item in
+                                            env.get("SCONE_PROFILE_STATIC_PREDICATES", "").split(",") if item.strip()),
+            profile_dynamic_predicates=tuple(item.strip() for item in
+                                             env.get("SCONE_PROFILE_DYNAMIC_PREDICATES", "").split(",") if item.strip()),
+            profile_static_after_days=_environment_float(
+                "SCONE_PROFILE_STATIC_AFTER_DAYS", env.get("SCONE_PROFILE_STATIC_AFTER_DAYS") or "90"),
+            profile_dynamic_changes=_environment_integer(
+                "SCONE_PROFILE_DYNAMIC_CHANGES", env.get("SCONE_PROFILE_DYNAMIC_CHANGES") or "2"),
+            profile_change_window_days=_environment_float(
+                "SCONE_PROFILE_CHANGE_WINDOW_DAYS", env.get("SCONE_PROFILE_CHANGE_WINDOW_DAYS") or "365"),
+            profile_dynamic_half_life_days=_environment_float(
+                "SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS", env.get("SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS") or "30"),
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
             recency_weight=_environment_float("SCONE_RECENCY_WEIGHT", env.get("SCONE_RECENCY_WEIGHT") or str(W_RECENCY)),
             recency_half_life_days=_environment_float("SCONE_RECENCY_HALF_LIFE_DAYS",
@@ -697,6 +735,18 @@ def build_profile_policy(settings: Settings):
     from ..memory.catalog import ProfilePolicy
 
     return ProfilePolicy.of(predicates=settings.profile_predicates, without=settings.profile_without)
+
+
+def build_profile_bucket_rules(settings: Settings):
+    """How a bucketed profile places each claim, as the operator configured it."""
+    from ..memory.catalog import BucketRules
+
+    return BucketRules.of(static_predicates=settings.profile_static_predicates,
+                          dynamic_predicates=settings.profile_dynamic_predicates,
+                          static_after_days=settings.profile_static_after_days,
+                          dynamic_changes=settings.profile_dynamic_changes,
+                          change_window_days=settings.profile_change_window_days,
+                          half_life_days=settings.profile_dynamic_half_life_days)
 
 
 def build_relation_meanings(settings: Settings):
@@ -895,7 +945,9 @@ ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy", "synonyms")
 #: Settings carried into an engine through a policy they build.
-POLICY_SETTINGS = ("profile_predicates", "profile_without")
+POLICY_SETTINGS = ("profile_predicates", "profile_without", "profile_static_predicates", "profile_dynamic_predicates",
+                   "profile_static_after_days", "profile_dynamic_changes", "profile_change_window_days",
+                   "profile_dynamic_half_life_days")
 
 
 def _environment_float(name: str, value: str) -> float:
@@ -1018,6 +1070,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         lexical_stems=settings.lexical_stems, lexical_exact_forms=settings.lexical_exact_forms,
         vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
+        profile_bucket_rules=build_profile_bucket_rules(settings),
     ).open()
 
 
@@ -1274,6 +1327,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         question_lane=settings.question_lane, lexical_stems=settings.lexical_stems,
         lexical_exact_forms=settings.lexical_exact_forms, vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
+        profile_bucket_rules=build_profile_bucket_rules(settings),
         blobs=blobs,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:

@@ -161,6 +161,23 @@ evidence is discarded. This option does not expand adaptive selections or
 recent-history overviews. Tool conversations use their bounded `read_memory`
 operation instead. Added context is not proof of relevance or answer accuracy.
 
+`TextConversation(..., standing_profile=ProfilePolicy())` puts the space's
+profile claims in front of every turn, whatever recall found, bounded by
+`profile_limit` and `max_profile_bytes`; the receipt names the claim ids
+(`profile_fact_ids`), the bytes, and what the bound left out. With
+`profile_buckets=BucketBounds(include="static" | "dynamic" | "both")` the
+block instead carries the chosen buckets (`schema_version` 2, keys `static`
+and/or `dynamic`), placed by the engine's `profile_bucket_rules` and bounded
+per bucket by the `BucketBounds` counts and bytes (see
+[static and dynamic buckets](retrieval-and-storage.md#static-and-dynamic-buckets));
+each claim carries the `rule` that placed it. The receipt's
+`profile_buckets` gives, per bucket, the ids shown, each id's rule, and
+`shown`, `omitted`, `bytes` and `cut`; `profile_truncated` is true when
+either bucket was cut. `profile_buckets` needs `standing_profile` and is
+refused beside a non-default `profile_limit` or `max_profile_bytes`, which
+bound only the unbucketed block. Off by default: without `profile_buckets`
+the block is as it was.
+
 Ranked queries with recalled claims can expand bounded relationships inside the
 same scope. With `structured_paths=True` (the default), complete ordered paths
 and their quoted claims enter the same context byte budget; related conflicting
