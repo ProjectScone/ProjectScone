@@ -619,6 +619,29 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
         made = await space_report(engine, model, space, max_reports=reports, facts_each=facts, status=status, as_of=when)  # type: ignore[arg-type]
         return made.record()
 
+    @app.get("/v1/graph/communities/names")
+    async def get_community_names(
+        limit: int = Query(default=20, ge=1, le=50, description="Communities named, largest first."),
+        timeout_s: float = Query(default=120.0, ge=0.1, le=600.0,
+                                 description="One deadline over the whole pass, every model round inside it."),
+        status: StatusMode = "current", as_of: Optional[str] = None, space: str = Depends(space_for),
+    ) -> dict[str, object]:
+        """A name for each of the largest communities from the server's model,
+        beside the label the analysis computed: the model sees a community's
+        central members, kinds and predicates and answers with a name alone;
+        an answer that is not a name is recorded as none, with why, as is a
+        community the deadline or a model failure left unnamed. Refused
+        without a model."""
+        from ..entities.reports import name_communities
+
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            raise InvalidInput("community names need a model; none is configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)")
+        when = _moment(engine, as_of)
+        named = await name_communities(engine, model, space, max_names=limit, timeout_s=timeout_s,  # type: ignore[arg-type]
+                                       status=status, as_of=when)
+        return named.record()
+
     @app.get("/v1/graph/changes")
     async def get_changes(
         since: str = Query(min_length=1, max_length=64), until: Optional[str] = Query(default=None, max_length=64),
