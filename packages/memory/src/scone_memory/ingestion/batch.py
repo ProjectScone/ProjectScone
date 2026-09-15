@@ -12,8 +12,10 @@ import json
 import math
 from typing import Sequence, cast
 
+from ..core import forget_after
 from ..core.errors import InvalidInput, SconeError
-from ..core.models import Added, MAX_CONTENT_BYTES
+from ..core.timeutil import parse_rfc3339
+from ..core.models import Added, ForgetReceipt, MAX_CONTENT_BYTES, ScheduledForget
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
 from ..core.validation import KINDS, MAX_METADATA_KEYS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
@@ -174,10 +176,20 @@ class IngestionRuntime:
     #: the cut, its receipt and the embedding inputs ask for the same one,
     #: and each read fetches, hashes and validates the whole manifest.
     outlines_read: dict[tuple[str, str], DocumentOutline | None] = field(default_factory=dict)
+    #: Forget one episode through the engine's ordinary forget. A write whose
+    #: identity is held by a memory already past its ``forget_after`` forgets
+    #: that memory first and is stored afresh: the overdue one is as good as
+    #: gone, and a duplicate of it would go with it at the next sweep. None
+    #: leaves such a write a duplicate.
+    forget_overdue: Callable[[str, int], Awaitable[ForgetReceipt]] | None = None
 
 
-def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False) -> NewEpisode:
-    """Validate and snapshot caller input before any source can be removed."""
+def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False,
+                     past_schedule: bool = False) -> NewEpisode:
+    """Validate and snapshot caller input before any source can be removed.
+
+    A ``forget_after`` already past ``when`` is refused unless ``past_schedule``,
+    which only a caller re-deriving a stored record's identity passes."""
     content = record.content
     if not isinstance(content, str) or (not content.strip() and not (verified_visual and content == "")):
         raise InvalidInput("content must not be empty")
@@ -218,11 +230,20 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
         # Whether the mode exists and fits the source is `cut_for`'s to say,
         # and it says so before anything is stored.
         clean_meta["chunking"] = mode
+    scheduled, held_schedule = record.forget_after, clean_meta.get(forget_after.KEY)
+    if scheduled is not None or held_schedule is not None:
+        asked_at = forget_after.resolve(scheduled, when, allow_past=past_schedule) if scheduled is not None else None
+        held_at = (forget_after.resolve(held_schedule, when, allow_past=past_schedule)
+                   if held_schedule is not None else None)
+        if asked_at is not None and held_at is not None and asked_at != held_at:
+            raise InvalidInput(f"metadata says forget_after={held_at!r} but the record asks for {asked_at!r}")
+        clean_meta[forget_after.KEY] = cast(str, asked_at or held_at)
     if len(clean_meta) > MAX_METADATA_KEYS:
-        # Counted after both are added, or the episode is stored with more
+        # Counted after all are added, or the episode is stored with more
         # keys than its own export may carry back in.
-        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys, counting chunking, chunking_profile "
-                           f"and semantic_merge_threshold, which are stored on the episode when a record names them")
+        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys, counting chunking, chunking_profile, "
+                           f"semantic_merge_threshold and forget_after, which are stored on the episode when a "
+                           f"record names them")
     try:
         for value in (record.source or '', *clean_tags, *clean_meta.values()):
             value.encode('utf-8')
@@ -563,6 +584,9 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
     results: list[Added | _DupOf | None] = []
     fresh: list[_Pending] = []
     seen: dict[str, int] = {}  # content hash -> index into results
+    # Episodes past their forget_after that a write here replaces: the slot
+    # of the write, the episode, and when it was due.
+    overdue: list[tuple[int, int, str]] = []
     for record in records:
         new = await _validated_record(runtime, space, record, when)
         digest = new.content_hash
@@ -572,9 +596,17 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
             results[-1] = _DupOf(fresh_or_dup)  # resolved after inserts
             continue
         existing = await runtime.documents.episode_by_hash(space, digest)
+        if (existing is not None and runtime.forget_overdue is not None
+                and forget_after.is_due(existing.metadata, parse_rfc3339(when))):
+            # Forgotten once the whole batch is validated and embedded, just
+            # before it is written, so a refused batch forgets nothing early.
+            overdue.append((len(results), existing.episode_id, existing.metadata[forget_after.KEY]))
+            existing = None
         if existing is not None:
             seen[digest] = len(results)
-            results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
+            # The schedule the stored episode holds, which this write did not change.
+            results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate",
+                                 forget_after=existing.metadata.get(forget_after.KEY)))
             continue
         seen[digest] = len(results)
         results.append(None)
@@ -582,14 +614,24 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
 
     if fresh:
         vectors, reused = await embed_pending_counted(runtime, space, fresh)
+        forgot: dict[int, ScheduledForget] = {}
+        for slot, episode_id, stamp in overdue:
+            receipt = await cast(Callable[[str, int], Awaitable[ForgetReceipt]], runtime.forget_overdue)(space, episode_id)
+            forgot[slot] = ScheduledForget(episode_id=episode_id, forget_after=stamp, outcome="forgotten",
+                                           reason=forget_after.reason(stamp, when), receipt=receipt)
         await write_batch(runtime, space, fresh, vectors, results, reused=reused)
         await runtime.documents.bump_revision(space)
+        for slot, taken in forgot.items():
+            # The receipt names the memory this write forgot, so the caller
+            # does not learn of it only from a 410 later.
+            results[slot] = cast(Added, results[slot]).model_copy(update={"forgot_overdue": taken})
 
     resolved: list[Added] = []
     for r in results:
         if isinstance(r, _DupOf):
             target = cast(Added, results[r.slot])
-            resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
+            resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate",
+                                  forget_after=target.forget_after))
         else:
             resolved.append(cast(Added, r))
     return resolved
@@ -663,7 +705,8 @@ async def write_batch(
             results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks),
                                           embeddings_reused=reused[index] if reused is not None else 0,
                                           chunking=pending.chunking, structure=pending.structure,
-                                          embedding_context=pending.embedding_context)
+                                          embedding_context=pending.embedding_context,
+                                          forget_after=pending.new.metadata.get(forget_after.KEY))
     except Exception:
         # Undo the partial batch so a retry starts clean.
         for episode_id in written:

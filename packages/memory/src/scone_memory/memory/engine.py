@@ -60,7 +60,7 @@ from ..retrieval.synonyms import Synonyms
 HASHED_VECTOR_WEIGHT = 0.01
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 from ..ingestion.chunker import DEFAULT_TARGET
-from ..core import extracted
+from ..core import extracted, forget_after
 from ..core.validation import (
     entity_key as entity_key,
     many_valued_predicates,
@@ -81,7 +81,7 @@ from ..core.validation import (
     normalise_term as normalise_term,
     normalise_time as normalise_time,
 )
-from ..core.errors import Conflict, InvalidInput, NotFound
+from ..core.errors import Conflict, Gone, InvalidInput, NotFound
 from ..backends.blobs import BlobStore, InMemoryBlobStore
 from ..core.models import (
     Added,
@@ -95,6 +95,7 @@ from ..core.models import (
     FactLink,
     DoctorReport,
     ExpiryReport,
+    ForgetDueReport,
     ForgetReceipt,
     ForgetStatus,
     IngestJob,
@@ -633,6 +634,7 @@ class MemoryEngine:
         chunking: Optional[str] = None,
         chunking_profile: Optional[str] = None,
         semantic_merge_threshold: Optional[float] = None,
+        forget_after: Optional[str] = None,
     ) -> Added:
         """One record. ``dedup_key`` names it across writes; ``replace``
         makes a changed record under a known key an update (see
@@ -641,13 +643,18 @@ class MemoryEngine:
         engine's rule. ``chunking_profile`` names a genre (statute, paper,
         manual, qa, resume) whose boundaries structure chunking cuts at.
         ``semantic_merge_threshold`` joins this record's semantic chunks
-        again at that similarity, over the engine's own threshold."""
+        again at that similarity, over the engine's own threshold.
+
+        ``forget_after`` schedules the memory to be forgotten: an RFC 3339
+        time, a date, or a duration from this engine's clock such as ``30d``
+        (``core.forget_after``). A time already past is refused. From that
+        time recall does not return it, and ``forget_due`` forgets it."""
         await self._living(space)
         if replace and embedding_checkpoint is not None:
             raise InvalidInput('embedding checkpoints apply to append ingestion, not replacement')
         record = Record(content, kind, source, tuple(tags), created_at, dict(metadata or {}), dedup_key=dedup_key,
                         chunking=chunking, chunking_profile=chunking_profile,
-                        semantic_merge_threshold=semantic_merge_threshold)
+                        semantic_merge_threshold=semantic_merge_threshold, forget_after=forget_after)
         if replace:
             added = (await self.replace(space, record)).added
         else:
@@ -690,8 +697,13 @@ class MemoryEngine:
             digest = new.content_hash
             prior_tombstone = await self.documents.tombstone_by_hash(space, digest)
             existing = await self.documents.episode_by_hash(space, digest)
-            if existing is not None and existing.content == new.content:
-                added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate")
+            # An overdue memory is as good as gone: the same content again is
+            # stored afresh, the overdue one forgotten below as any replaced one.
+            if (existing is not None and existing.content == new.content
+                    and not forget_after.is_due(existing.metadata, parse_rfc3339(self.clock()))):
+                # The schedule the stored episode holds, which this write did not change.
+                added = Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate",
+                              forget_after=existing.metadata.get(forget_after.KEY))
                 return Replaced(added=added, outcome="duplicate", replaced=None)
             pending = await ingestion_batch.chunk_record(runtime, new)
             vectors, reused = await ingestion_batch.embed_pending_counted(runtime, space, [pending])
@@ -851,6 +863,7 @@ class MemoryEngine:
             context_inputs=context_inputs, verify_visual=self._verify_visual_record,
             context_lane=self.context_lane,
             document_outline=partial(document_outline, blobs=self.blobs),
+            forget_overdue=self.forget,
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
@@ -969,6 +982,20 @@ class MemoryEngine:
 
         return await forget_matching(self, space, source_prefix=source_prefix, tags=tags, conditions=conditions,
                                      kind=kind, limit=limit, apply=apply, selection=selection, with_claims=with_claims)
+
+    async def forget_due(self, space: str, now: Optional[str] = None, *, limit: int = 100, dry_run: bool = False,
+                         with_claims: Literal["keep", "exclude"] = "keep",
+                         before: Optional[int] = None) -> "ForgetDueReport":
+        """Forget the episodes whose ``forget_after`` has come, through the
+        ordinary ``forget``: most overdue first, at most ``limit`` in a pass,
+        from a walk of at most ``scheduled_forget.MAX_SCANNED`` episodes. The
+        report says what went and why, and when either bound bit. ``now``
+        may be earlier than this engine's clock, never later. See
+        ``memory.scheduled_forget``."""
+        from .scheduled_forget import forget_due
+
+        return await forget_due(self, space, now=now, limit=limit, dry_run=dry_run, with_claims=with_claims,
+                                before=before)
 
     async def forget_status(self, space: str, episode_id: int) -> ForgetStatus:
         """Observe retained, pending or completed source removal without writes."""
@@ -1125,17 +1152,27 @@ class MemoryEngine:
             self.entities.forget(space)
 
     async def episode(self, space: str, episode_id: int) -> Episode:
+        """The episode and its attachments. One past its ``forget_after``
+        reads as Gone, swept or not; ``impact`` and ``forget`` still reach it."""
         check_space(space)
-        found = await self._episode_or_gone(space, episode_id)
+        found = self._not_overdue(await self._episode_or_gone(space, episode_id))
         carried = await self.blobs.for_episode(space, episode_id)
         return found.model_copy(update={"attachments": tuple(carried)}) if carried else found
 
+    def _not_overdue(self, episode: Episode) -> Episode:
+        """The episode, or Gone when its scheduled time has come."""
+        if forget_after.is_due(episode.metadata, parse_rfc3339(self.clock())):
+            due = episode.metadata[forget_after.KEY]
+            raise Gone(f"episode {episode.episode_id} was due to be forgotten at {due}", due)
+        return episode
+
     async def episode_by_key(self, space: str, dedup_key: str) -> Episode:
         """Read a keyed source and its attachment metadata. Unknown keys raise
-        NotFound; a key with only a deletion record raises Gone. A changing
+        NotFound; a key with only a deletion record, or whose source is past
+        its ``forget_after``, raises Gone. A changing
         key is retried at most three times before Conflict. The result does
         not reserve the key for a subsequent write or include prior versions."""
-        return await source_keys.episode_by_key(self.documents, self.blobs, space, dedup_key)
+        return self._not_overdue(await source_keys.episode_by_key(self.documents, self.blobs, space, dedup_key))
 
     # -- recall -----------------------------------------------------------
 
@@ -1732,13 +1769,14 @@ class MemoryEngine:
         source_prefix: str | None = None, since: str | None = None, until: str | None = None,
         exclude_session_id: str | None = None, max_records: int = 200,
     ) -> OverviewResult:
-        """Return bounded recent source evidence; coverage and continuation are explicit."""
+        """Return bounded recent source evidence; coverage and continuation are
+        explicit. A source past its ``forget_after`` is left out and counted."""
         from ..retrieval.overview import overview
 
         return await overview(
             self.documents, space, limit=limit, before=before, where=where, kind=kind,
             source_prefix=source_prefix, since=since, until=until,
-            exclude_session_id=exclude_session_id, max_records=max_records,
+            exclude_session_id=exclude_session_id, max_records=max_records, now=self.clock(),
         )
 
     async def source_page(self, space: str, *, before: Optional[int] = None,
@@ -1756,16 +1794,27 @@ class MemoryEngine:
         matches nothing would otherwise read a whole space to prove it, and
         reaching that bound is reported as more to come rather than as the
         end.
+
+        A source past its ``forget_after`` is left out, swept or not, and
+        counted in ``past_forget_after``; the page is still filled around it.
         """
+        moment = self.clock()
+        return await self._source_page(space, before=before, limit=limit, kind=kind, conditions=conditions, now=moment)
+
+    async def _source_page(self, space: str, *, before: Optional[int], limit: int, kind: Optional[str],
+                           conditions: Mapping[str, object] | None, now: Optional[str]) -> SourcePage:
+        """``source_page``, and with ``now`` None the overdue sources too: what
+        forgetting by filter selects from, since ``forget`` still reaches them."""
         return await catalog.source_page(self.documents, space, before=before, limit=limit, kind=kind,
-            conditions=conditions, walk_page=SOURCE_WALK_PAGE, walk_reads=SOURCE_WALK_READS)
+            conditions=conditions, walk_page=SOURCE_WALK_PAGE, walk_reads=SOURCE_WALK_READS, now=now)
 
     async def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         """The episodes whose metadata matches every ``where`` pair, oldest
         first by (created_at, episode_id); with ``limit``, the newest N of
         them in that same order. This is a walk over the space's episodes,
-        fine for a session's turns, not a query language."""
-        return await catalog.episodes(self.documents, space, where, limit)
+        fine for a session's turns, not a query language. An episode past its
+        ``forget_after`` is left out, swept or not."""
+        return await catalog.episodes(self.documents, space, where, limit, now=self.clock())
 
     async def scopes(self, space: str) -> dict[str, dict[str, int]]:
         """Episode counts per metadata key and value: which users, agents

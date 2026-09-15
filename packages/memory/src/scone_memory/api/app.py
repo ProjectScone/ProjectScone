@@ -134,6 +134,9 @@ class EpisodeBody(BaseModel):
     replace: bool = False
     kind: str = "note"
     metadata: dict[str, str] = Field(default_factory=dict)
+    #: When this memory is to be forgotten: an RFC 3339 time, a date, or a
+    #: duration from the server's clock such as 30d. Refused when past.
+    forget_after: Optional[str] = Field(default=None, max_length=64)
 
 
 class SourceQuery(BaseModel):
@@ -237,6 +240,21 @@ class ForgetMatchingBody(BaseModel):
     apply: bool = False
     selection: Optional[str] = None
     with_claims: Literal["keep", "exclude"] = "keep"
+
+
+class ForgetDueBody(BaseModel):
+    """Unknown fields are refused: a sweep told something it silently
+    ignores is a sweep that did not do what was asked."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Judge what is due at this time; earlier than the server's clock, never later.
+    now: Optional[str] = Field(default=None, max_length=64)
+    limit: int = 100
+    dry_run: bool = False
+    with_claims: Literal["keep", "exclude"] = "keep"
+    #: Walk on from a previous pass's ``resume_before``.
+    before: Optional[int] = None
 
 
 class BatchBody(BaseModel):
@@ -509,6 +527,9 @@ def create_app(
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
             "episodes.forget": supports_retirement(engine.documents),
+            # A write's schedule, recall withholding what is due, and the sweep route that forgets it.
+            "episodes.forget_after": supports_retirement(engine.documents)
+                                     and callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
@@ -655,6 +676,7 @@ def create_app(
             chunking=body.chunking,
             chunking_profile=body.chunking_profile,
             semantic_merge_threshold=body.semantic_merge_threshold,
+            forget_after=body.forget_after,
         )
         return added.model_dump()
 
@@ -681,7 +703,7 @@ def create_app(
         records = [
             Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
                    chunking=r.chunking, chunking_profile=r.chunking_profile,
-                   semantic_merge_threshold=r.semantic_merge_threshold)
+                   semantic_merge_threshold=r.semantic_merge_threshold, forget_after=r.forget_after)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
@@ -766,7 +788,9 @@ def create_app(
                               and not any(ord(c) < 32 or ord(c) == 127 for c in e.metadata['document_filename'])
                               else {}),
                            **status_of(e.episode_id)}
-                          for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
+                          for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before,
+                # Sources past their forget_after, left out; the key appears only when some were.
+                **({"past_forget_after": page.past_forget_after} if page.past_forget_after else {})}
 
     @app.get("/v1/episodes/by-key")
     async def get_episode_by_key(dedup_key: str = Query(min_length=1, max_length=256),
@@ -837,6 +861,16 @@ def create_app(
         report = await engine.forget_matching(space, source_prefix=body.source_prefix, tags=body.tags,
                                               conditions=body.conditions, kind=body.kind, limit=body.limit,
                                               apply=body.apply, selection=body.selection, with_claims=body.with_claims)
+        return report.model_dump()
+
+    @app.post("/v1/episodes/forget-due")
+    async def forget_due_route(body: ForgetDueBody, space: str = Depends(space_for)) -> dict:
+        """Forget what each memory's own ``forget_after`` says is due, through
+        the ordinary forget: most overdue first, bounded per call. The report
+        names each episode, its scheduled time and its receipt, and says when
+        the limit or the walk bit (``limited``, ``scan_complete``)."""
+        report = await engine.forget_due(space, body.now, limit=body.limit, dry_run=body.dry_run,
+                                         with_claims=body.with_claims, before=body.before)
         return report.model_dump()
 
     @app.delete("/v1/episodes/{episode_id}")
@@ -1248,6 +1282,8 @@ def create_app(
             response["lessons_read"] = result.lessons_read
         if result.expanded is not None:
             response["expanded"] = result.expanded
+        if result.past_forget_after is not None:
+            response["past_forget_after"] = result.past_forget_after
         if result.feedback_prior is not None:
             # A re-ranked answer carries what moved it, and where the prior's bounds bit.
             response["feedback_prior"] = result.feedback_prior
