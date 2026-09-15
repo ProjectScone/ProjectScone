@@ -37,6 +37,33 @@ SCONE_RERANKER_LISTWISE=1
 It cannot be combined with `SCONE_RERANKER_FACTORY` or the cross encoder;
 either would set the order again.
 
+`SCONE_CHAT_URL` and `SCONE_CHAT_MODEL` are also the consolidation
+worker's model: setting them for the reranker starts the distiller as well.
+
+## Where it can run
+
+A listwise pass takes seconds per call, so it keeps its own deadline
+(`timeout`) rather than the engine's `rerank_timeout`, which caps a scorer
+at 10 s. That makes it a reranker for recall calls that can wait: the
+recall API and the benches.
+
+A conversation's `MemoryContext` prepares each turn's evidence under its own
+`recall_timeout` (2 s by default). A pass longer than that budget would have
+the whole recall cancelled, every turn, with no evidence and no fallback, so
+`MemoryContext` refuses to be built when the engine's listwise reranker has a
+`timeout` above its `recall_timeout`
+(`recall_timeout must be at least the listwise reranker's timeout`). Under a
+budget at least as long as the pass, a pass that runs out falls back to fused
+order and the turn gets its evidence.
+
+On the server this means: with `SCONE_RERANKER_LISTWISE=1`, voice sessions
+(always 2 s) do not start, and text conversations start only with
+`SCONE_ADAPTIVE_RETRIEVAL=1` and a `SCONE_ADAPTIVE_TIMEOUT` at least the
+pass's `timeout`. The start route answers 503 `conversation runtime failed to
+initialize`; it does not pass the reason on. The refusal is checked when the
+context is built, so a reranker assigned to `engine.reranker` afterwards is
+not checked.
+
 ## What it does
 
 The candidates are the ones every reranker gets: retained, in scope,

@@ -7,6 +7,8 @@ import pytest
 
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.realtime.context import MemoryContext
+from scone_memory.providers.llm import FakeChat
+from scone_memory.retrieval.listwise import ListwiseReranker
 
 
 @pytest.fixture
@@ -213,3 +215,40 @@ async def test_cancel_during_recall_never_returns_a_prepared_request(memory, mon
 def test_invalid_context_settings_rejected(memory, options):
     with pytest.raises(ValueError):
         MemoryContext(memory, "alpha", "one", **options)
+
+
+class _StalledChat(FakeChat):
+    async def complete(self, system, user):
+        await asyncio.Event().wait()
+        return ""
+
+
+def test_a_listwise_pass_longer_than_the_recall_budget_is_refused(memory):
+    # The pass keeps its own deadline, past the scorer's rerank_timeout, so a
+    # shorter recall budget would cancel every turn's recall whole.
+    memory.reranker = ListwiseReranker(FakeChat([]), timeout=60)
+    with pytest.raises(ValueError, match="listwise"):
+        MemoryContext(memory, "alpha", "one", recall_timeout=2.0)
+    memory.reranker = ListwiseReranker(FakeChat([]), timeout=5)
+    MemoryContext(memory, "alpha", "one", recall_timeout=5)
+
+
+def test_a_scorer_is_held_to_the_engine_rerank_timeout_not_its_own(memory):
+    class Scorer:
+        timeout = 60  # its own setting; recall cuts it at rerank_timeout
+
+        async def rerank(self, query, candidates):
+            return []
+
+    memory.reranker = Scorer()
+    MemoryContext(memory, "alpha", "one", recall_timeout=2.0)
+
+
+async def test_a_listwise_pass_that_times_out_leaves_the_turn_its_fused_evidence(memory):
+    await memory.remember("alpha", "Juniper uses Polaris for calibration")
+    await memory.remember("alpha", "Juniper was calibrated last Tuesday")
+    memory.reranker = ListwiseReranker(_StalledChat([]), timeout=0.05)
+    request, receipt = await MemoryContext(memory, "alpha", "one", recall_timeout=10).prepare(
+        [{"role": "user", "content": "Juniper calibration"}])
+    assert receipt["status"] == "prepared" and receipt["error_type"] is None
+    assert len(receipt["references"]) == 2 and receipt["degraded"] == ["unknown"]

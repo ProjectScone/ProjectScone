@@ -67,6 +67,7 @@
     SCONE_EVENTS_MAX     in-memory sink ring size (default 10000)
 
     SCONE_CHAT_URL, SCONE_CHAT_MODEL   OpenAI-compatible chat model for consolidation; unset = no distiller
+                                       (also the listwise reranker's model; setting it for that starts the distiller)
     SCONE_CHAT_API_KEY                 optional bearer
     SCONE_CHAT_THINK   true | false    for Ollama reasoning models; unset leaves the field out
     SCONE_CHAT_TIMEOUT                 seconds one chat call may take (default 180)
