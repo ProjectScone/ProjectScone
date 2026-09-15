@@ -164,3 +164,66 @@ async def test_the_command_line_passes_the_mode(monkeypatch):
     code = await run(args, engine, io.StringIO(""), out)
     assert code == 0 and model.calls == 2
     assert json.loads(out.getvalue())["detail"]["mode"] == "accumulate"
+
+
+# Twelve passages of about 550 bytes each, 6.6 kB in all: the size of the synthesis-modes benchmark's twelve.
+LAUNCH_NOTES = tuple(f"Launch note {i}: " + "the launch plan moved again this week. " * 14 for i in range(12))
+
+
+class RecordingChat(CitingChat):
+    def __init__(self) -> None:
+        super().__init__()
+        self.systems: list[str] = []
+
+    async def complete(self, system: str, user: str) -> str:
+        self.systems.append(system)
+        return await super().complete(system, user)
+
+
+async def launch_memory() -> MemoryEngine:
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    for text in LAUNCH_NOTES:
+        await engine.remember(SPACE, text)
+    return engine
+
+
+async def test_at_the_routes_own_limits_twelve_short_passages_are_one_round_and_accumulate_reads_six():
+    from scone_memory.retrieval import synthesis as module
+
+    engine = await launch_memory()
+    model = RecordingChat()
+    refined = await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=model, limit=12,
+                                    synthesis_mode="refine")
+    assert refined.detail["passages"]["given"] == 12 and refined.detail["passages"]["read"] == 12
+    assert len(refined.detail["rounds"]) == 1 and refined.detail["model_calls"] == 1, "all twelve fit one 12,000-byte round"
+    assert module._REFINE_SYSTEM not in model.systems, "one round leaves nothing to refine"
+    accumulated = await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=CitingChat(), limit=12,
+                                        synthesis_mode="accumulate")
+    assert accumulated.detail["model_calls"] == 6, "one call per passage, under the bound of six rounds"
+    assert accumulated.detail["passages"]["read"] == 6 and accumulated.detail["passages"]["unread"] == 6
+    assert accumulated.detail["status"] == "partial" and accumulated.detail["truncated"] is True
+
+
+async def test_a_partial_synthesis_says_so_in_its_text_and_a_whole_one_does_not(monkeypatch):
+    import io
+
+    from scone_memory.runtime import config as runtime_config
+    from scone_memory.runtime.cli import build_parser, run
+
+    engine = await launch_memory()
+    partial = await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=CitingChat(), limit=12,
+                                    synthesis_mode="accumulate")
+    *cited, last = partial.text.splitlines()
+    assert len(cited) == 6 and all(line.endswith("]") for line in cited)
+    assert last == "partial: 6 passage(s) unread: the bound of 6 round(s) was reached"
+    whole = await answer_question(engine, SPACE, QUESTION, route="synthesize", synthesis=CitingChat(), limit=6,
+                                  synthesis_mode="accumulate")
+    assert whole.detail["status"] == "synthesized"
+    assert len(whole.text.splitlines()) == 6 and all(line.endswith("]") for line in whole.text.splitlines())
+
+    monkeypatch.setattr(runtime_config, "build_chat", lambda settings: CitingChat())
+    out = io.StringIO()
+    args = build_parser().parse_args(["--space", SPACE, "answer", QUESTION, "--route", "synthesize",
+                                      "--limit", "12", "--synthesis-mode", "accumulate"])
+    assert await run(args, engine, io.StringIO(""), out) == 0
+    assert out.getvalue().rstrip("\n").endswith("partial: 6 passage(s) unread: the bound of 6 round(s) was reached")

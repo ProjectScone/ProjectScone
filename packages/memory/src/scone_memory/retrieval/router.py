@@ -203,6 +203,9 @@ async def _synthesize(engine: "MemoryEngine", space: str, question: str, model: 
         text = f"nothing to say: {made.status.replace('_', ' ')}"
         if made.reasons:
             text += f" ({'; '.join(made.reasons)})"
+    elif made.status == "partial":
+        # The text is all the command line prints: an answer that left passages unread or cut says so there.
+        text += f"\npartial: {'; '.join(made.reasons)}"
     return Answered(question, "synthesize", why, text, made.record())
 
 
