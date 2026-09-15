@@ -16,6 +16,7 @@ from typing import Literal, Mapping
 
 from ..core.validation import entity_key
 from ..memory.identity import lookup_keys
+from .merges import is_decision
 from .read import LedgerRead
 
 
@@ -46,7 +47,8 @@ def role_index(ledger: LedgerRead) -> RoleIndex:
     the join rule lets the object name an entity at all."""
     subjects: dict[str, list[int]] = defaultdict(list)
     objects: dict[str, list[int]] = defaultdict(list)
-    for fact in sorted(ledger.facts, key=lambda fact: fact.fact_id, reverse=True):
+    for fact in sorted((fact for fact in ledger.facts if not is_decision(fact)),
+                       key=lambda fact: fact.fact_id, reverse=True):
         subjects[entity_key(fact.subject)].append(fact.fact_id)
         if lookup_keys(fact.object):
             objects[entity_key(fact.object)].append(fact.fact_id)
