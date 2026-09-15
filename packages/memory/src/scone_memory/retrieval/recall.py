@@ -347,7 +347,7 @@ async def recall(
         ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
         lanes.append(context_hits)
         weights.append(CONTEXT_WEIGHT)
-    fuse = fusion.relative_scores if fusion_mode == "score" else fusion.rrf
+    fuse = {"score": fusion.relative_scores, "distribution": fusion.distribution_scores}.get(fusion_mode, fusion.rrf)
     fused = fuse(lanes, weights=weights)
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
     now = runtime.clock()
@@ -528,7 +528,7 @@ async def recall(
         history=previous,
         degraded=degraded,
         narrowing=narrowing_report,
-        fusion=cast(Literal["rank", "score"], fusion_mode),
+        fusion=cast(Literal["rank", "score", "distribution"], fusion_mode),
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,
