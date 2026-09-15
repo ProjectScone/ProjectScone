@@ -526,6 +526,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-bytes", type=int, default=1_000_000, help="bytes read from one file")
     p.add_argument("--no-ignore", action="store_true",
                    help="read the tree whole; by default what its .gitignore and .sconeignore files exclude is left unread")
+    p.add_argument("--forget-after", help="forget every file this sync writes at this time: RFC 3339, YYYY-MM-DD, "
+                                          "or a duration such as 30d, resolved once for the run; an unchanged "
+                                          "file keeps the schedule it holds")
 
     p = sub.add_parser("map", help="remember every source file under a directory as it is now -- a changed file "
                                     "updates its memory -- and optionally what each says")
@@ -893,7 +896,8 @@ async def sync_command(args: argparse.Namespace, engine: MemoryEngine, out) -> i
     chosen = {"suffixes": tuple(args.suffix)} if args.suffix else {}
     done = await sync_directory(engine, args.space, args.directory, marker=args.marker,
                                 apply=args.apply, remove=args.remove, limit=args.limit,
-                                max_bytes=args.max_bytes, ignore=not args.no_ignore, repo=args.repo, **chosen)
+                                max_bytes=args.max_bytes, ignore=not args.no_ignore, repo=args.repo,
+                                forget_after=args.forget_after, **chosen)
     if args.json:
         print(json.dumps(done.record()), file=out)
         return 0
