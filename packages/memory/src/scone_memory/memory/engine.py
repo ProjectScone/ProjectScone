@@ -405,10 +405,14 @@ class MemoryEngine:
             return None
         return await self.events.append(NewEvent(ts=self.clock(), space=space, kind=kind, payload=payload, dedup_key=dedup_key))
 
+    @staticmethod
+    def _query_hash(query: str) -> str:
+        return hashlib.sha256(query.encode()).hexdigest()[:16]
+
     def _query_for_evidence(self, query: str) -> dict:
         if self.record_queries:
             return {"query": query, "query_hashed": False}
-        return {"query": hashlib.sha256(query.encode()).hexdigest()[:16], "query_hashed": True}
+        return {"query": self._query_hash(query), "query_hashed": True}
 
     async def open(self) -> "MemoryEngine":
         from . import space_cleanup
@@ -1332,7 +1336,11 @@ class MemoryEngine:
         # What the passage said when it was judged, so a ranking prior can tell
         # when the id now names other text. A passage already gone gets none.
         # And which question it was judged for, so asking again is not corroboration.
-        marked: dict[str, object] = {"question": question(recall.payload.get("query"))}
+        # A query kept in the clear is hashed as a hashed recall's is, so the same words are one question either way.
+        asked = recall.payload.get("query")
+        if recall.payload.get("query_hashed") is False:
+            asked = self._query_hash(str(asked))
+        marked: dict[str, object] = {"question": question(asked)}
         for chunk in await self.documents.get_chunks(space, [chunk_id]):
             episode = await self.documents.get_episode(space, chunk.episode_id)
             if episode is not None:
