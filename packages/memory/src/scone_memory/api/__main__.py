@@ -24,6 +24,14 @@ from ..agents.workflow import WorkflowError
 from .app import create_app
 
 
+def document_ocr_identity(settings: Settings) -> str:
+    """What names the configured OCR for a document job or a directory sync: a change here
+    means a document already extracted must be extracted again. Orientation is named only
+    when on, so a store synced before it existed keeps its identity."""
+    identity = f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}'
+    return identity + ':orientation' if settings.document_ocr_orientation else identity
+
+
 def build_app(settings: Settings, engine, *, document_media: DocumentMedia | None = None, document_video: DocumentVideo | None = None):
     from ..runtime.agent_runtime import load_agent_runtime
     from ..runtime.document_jobs import load_document_imports
@@ -43,11 +51,11 @@ def build_app(settings: Settings, engine, *, document_media: DocumentMedia | Non
         ocr = build_document_ocr(settings)
         if settings.document_jobs_config:
             imports = load_document_imports(settings.document_jobs_config, engine, document_ocr=ocr, document_media=document_media, document_video=document_video,
-                ocr_identity=f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}')
+                ocr_identity=document_ocr_identity(settings))
         if settings.directory_sync_config:
             directory_sync = load_directory_sync(settings.directory_sync_config, engine,
                 document_ocr=ocr, document_media=document_media, document_video=document_video,
-                ocr_identity=f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}')
+                ocr_identity=document_ocr_identity(settings))
         app = _build_app(settings, engine, agents, document_ocr=ocr, document_import_service=imports,
                          document_media=document_media, document_video=document_video, directory_sync_service=directory_sync)
         return agents.own(app) if agents is not None else app
@@ -124,6 +132,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
     from .conversations import create_conversation_app
     from ..runtime.conversation_review import build_conversation_review
     from ..runtime.conversation_retrieval import build_adaptive_retrieval
+    from ..runtime.conversation_followup import build_followup
     from ..runtime.conversation_tools import build_conversation_tools
 
     journal = journal_path(settings, settings.conversations_journal)
@@ -174,7 +183,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                                    model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory,
                                    synthesis_factory=synthesis_factory, url_import=url_import,
                                    answer_review=answer_review, adaptive_retriever=adaptive_retriever,
-                                   tool_retrieval=conversation_tools))
+                                   tool_retrieval=conversation_tools, followup=build_followup(settings)))
 
 
 def build_server(settings: Settings, app):
