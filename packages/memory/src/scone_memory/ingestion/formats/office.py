@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterable, Iterator, Mapping
+import json
 from pathlib import PurePosixPath
 import posixpath
 import re
@@ -261,6 +262,124 @@ def _run_text(root: Element, output: _Output) -> str:
     )
 
 
+#: Links recorded on one segment; past it they are counted in ``links_cut``.
+MAX_LINKS = 200
+#: A target longer than this is not recorded, and is counted as unresolved.
+MAX_LINK_TARGET = 2_048
+#: The bytes one metadata value may hold, which the ``links`` list must fit.
+MAX_LINKS_BYTES = 4_096
+
+
+def _hyperlink_targets(bundle: SafeArchive, source: str) -> dict[str, str]:
+    """The hyperlink relationships of ``source`` by id. Unlike the parts a document is
+    read from, a hyperlink is external by nature, so external targets are kept here."""
+    path = PurePosixPath(source)
+    relpath = str(path.parent / '_rels' / (path.name + '.rels'))
+    if relpath not in bundle.names:
+        return {}
+    targets: dict[str, str] = {}
+    try:
+        for entry in _relationship_entries(bundle, relpath):
+            namespace, _, kind = entry.get('Type', '').rpartition('/')
+            if kind == 'hyperlink' and namespace in _OFFICE_RELATIONSHIP_NAMESPACES:
+                targets[entry.get('Id', '')] = entry.get('Target', '')
+    except InvalidInput:
+        # A part's text never depended on its relationships; broken ones lose only its links,
+        # which are then counted as unresolved.
+        return {}
+    return targets
+
+
+def _relationship_id(element: Element) -> str:
+    return next((value for key, value in element.attrib.items()
+                 if key.rpartition('}')[0][1:] in _OFFICE_RELATIONSHIP_NAMESPACES and key.endswith('}id')), '')
+
+
+def _link_target(element: Element, targets: Mapping[str, str]) -> tuple[bool, str | None]:
+    """Whether ``element`` holds a link, and where it points when that can be read: a Word
+    hyperlink by relationship or bookmark, or a drawing run whose properties carry a click."""
+    name = _local(element.tag)
+    if name == 'hyperlink' and element.tag.rpartition('}')[0][1:] in _WORD_NAMESPACES:
+        identifier = _relationship_id(element)
+        if identifier:
+            return True, targets.get(identifier)
+        anchor = _word_attribute(element, 'anchor')
+        return True, f'#{anchor}' if anchor else None
+    if name == 'r':
+        properties = _child(element, 'rPr')
+        click = None if properties is None else _child(properties, 'hlinkClick')
+        if click is not None:
+            identifier = _relationship_id(click)
+            return True, targets.get(identifier) if identifier else None
+    return False, None
+
+
+def _linked_text(root: Element, output: _Output, targets: Mapping[str, str]) -> tuple[str, dict[str, str]]:
+    """The text ``_run_text`` gives, stripped as a segment is, and metadata naming each link in it:
+    its text, target and UTF-8 span. A link whose target cannot be read is counted, not recorded."""
+    _prune_run_metadata(root, output)
+    owners: dict[int, tuple[int, str | None]] = {}
+    number = 0
+    for element in root.iter():
+        linked, target = _link_target(element, targets)
+        if linked:
+            number += 1
+            for inner in element.iter():  # links do not nest in Office text
+                owners[id(inner)] = (number, target)
+    pieces: list[str] = []
+    spans: list[tuple[int, str | None, int, int]] = []
+    size = 0
+    for element in root.iter():
+        name = _local(element.tag)
+        if name != 't' and name not in _RUN_CHARACTERS:
+            continue
+        piece = (element.text or '') if name == 't' else _RUN_CHARACTERS[name]
+        width = len(piece.encode('utf-8'))
+        owner = owners.get(id(element))
+        if owner is not None and width:
+            if spans and spans[-1][0] == owner[0]:
+                spans[-1] = (*spans[-1][:3], size + width)
+            else:
+                spans.append((owner[0], owner[1], size, size + width))
+        pieces.append(piece)
+        size += width
+    raw = output.join(pieces)
+    encoded = raw.encode('utf-8')
+    text = raw.strip()
+    lead = len(encoded) - len(raw.lstrip().encode('utf-8'))
+    kept = text.encode('utf-8')
+    found: list[dict[str, object]] = []
+    unresolved = 0
+    for _, target, start, end in spans:
+        start, end = max(0, start - lead), min(len(kept), end - lead)
+        span = kept[start:end].decode('utf-8', errors='strict') if start < end else ''
+        start += len(span.encode('utf-8')) - len(span.lstrip().encode('utf-8'))
+        end -= len(span.encode('utf-8')) - len(span.rstrip().encode('utf-8'))
+        if start >= end:
+            continue
+        if target is None or not target.strip() or len(target) > MAX_LINK_TARGET:
+            unresolved += 1
+            continue
+        found.append({'text': kept[start:end].decode('utf-8'), 'target': target, 'start': start, 'end': end})
+    metadata: dict[str, str] = {}
+    recorded: list[str] = []
+    size = 2  # the brackets
+    for link in found[:MAX_LINKS]:
+        item = json.dumps(link, ensure_ascii=False)
+        grown = size + len(item.encode('utf-8')) + (2 if recorded else 0)
+        if grown > MAX_LINKS_BYTES:
+            break
+        recorded.append(item)
+        size = grown
+    if recorded:
+        metadata['links'] = '[' + ', '.join(recorded) + ']'
+    if len(found) > len(recorded):
+        metadata['links_cut'] = str(len(found) - len(recorded))
+    if unresolved:
+        metadata['links_unresolved'] = str(unresolved)
+    return text, metadata
+
+
 def _table(root: Element, output: _Output, locator: str) -> None:
     for row_number, row in enumerate((child for child in root if _local(child.tag) == 'tr'), 1):
         output.add(_row_text(row, output), f'{locator}/row:{row_number}')
@@ -351,6 +470,7 @@ def _paragraph_levels(root: Element, styles: Mapping[str, int]) -> dict[int, int
 
 def _word_content(
     root: Element, output: _Output, prefix: str, metadata: dict[str, str],
+    targets: Mapping[str, str] | None = None,
     styles: Mapping[str, int] | None = None, levels: dict[int, int] | None = None,
 ) -> Iterator[tuple[Element, str, list[Element]]]:
     # Pruning the first root prunes the text boxes inside it too, before they are detached, so
@@ -383,7 +503,8 @@ def _word_content(
             level = levels.get(id(block))
             details = ({**metadata, 'heading_level_unresolved': 'style_chain'} if level == _UNRESOLVED
                        else {**metadata, 'heading_level': str(level)} if level else metadata)
-            output.add(_run_text(block, output), locator, details)
+            text, linked = _linked_text(block, output, targets or {})
+            output.add(text, locator, {**details, **linked} if linked else details)
             yield block, locator, boxes
 
 
@@ -456,11 +577,16 @@ def _docx(bundle: SafeArchive, output: _Output) -> None:
     levels: dict[int, int] = {}
     parts: dict[str, tuple[str, dict[str, Element]]] = {}
     emitted: set[tuple[str, str]] = set()
+    # Each part names its own hyperlinks: the body's, a note part's, a comment part's.
+    links: dict[str, dict[str, str]] = {}
     pending = deque([(body, '', {'member': source})])
     chart_relations: dict[str, dict[str, tuple[str, str]]] = {}
     while pending:
         content, prefix, metadata = pending.popleft()
-        for block, locator, boxes in _word_content(content, output, prefix, metadata, styles, levels):
+        member = metadata['member']
+        if member not in links:
+            links[member] = _hyperlink_targets(bundle, member)
+        for block, locator, boxes in _word_content(content, output, prefix, metadata, links[member], styles, levels):
             for number, box in enumerate(boxes, 1):
                 details = {'member': metadata['member'], 'content_role': 'textbox', 'parent_locator': locator}
                 pending.append((box, _word_prefix(locator, f'/textbox:{number}/'), details))
@@ -727,7 +853,7 @@ def _chart(bundle: SafeArchive, part: str, relations: dict[str, tuple[str, str]]
     output.counts['charts'] = output.counts.get('charts', 0) + 1
 
 
-def _drawing(root: Element, output: _Output, prefix: str) -> None:
+def _drawing(root: Element, output: _Output, prefix: str, targets: Mapping[str, str] | None = None) -> None:
     paragraphs = tables = 0
     for block in _blocks(root, {'p', 'tbl'}):
         if _local(block.tag) == 'tbl':
@@ -735,7 +861,8 @@ def _drawing(root: Element, output: _Output, prefix: str) -> None:
             _table(block, output, f'{prefix}/table:{tables}')
         else:
             paragraphs += 1
-            output.add(_run_text(block, output), f'{prefix}/paragraph:{paragraphs}')
+            text, linked = _linked_text(block, output, targets or {})
+            output.add(text, f'{prefix}/paragraph:{paragraphs}', linked or None)
 
 
 def _pptx(bundle: SafeArchive, output: _Output) -> None:
@@ -755,7 +882,7 @@ def _pptx(bundle: SafeArchive, output: _Output) -> None:
         slide_root = bundle.xml(path)
         if _local(slide_root.tag) != 'sld':
             raise InvalidInput('PPTX relationship is not a slide')
-        _drawing(slide_root, output, f'slide:{number}')
+        _drawing(slide_root, output, f'slide:{number}', _hyperlink_targets(bundle, path))
         slide_relations = _relationships(bundle, path)
         charts = 0
         for reference in slide_root.iter():
@@ -766,7 +893,7 @@ def _pptx(bundle: SafeArchive, output: _Output) -> None:
         for relation_id, (_, kind) in slide_relations.items():
             if kind == 'notesSlide':
                 notes_path = _related(path, slide_relations, relation_id, kind)
-                _drawing(bundle.xml(notes_path), output, f'slide:{number}/notes')
+                _drawing(bundle.xml(notes_path), output, f'slide:{number}/notes', _hyperlink_targets(bundle, notes_path))
 
 
 def _positive(value: str, maximum: int = 2_147_483_647) -> int:
