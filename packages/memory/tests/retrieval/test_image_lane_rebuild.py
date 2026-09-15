@@ -204,25 +204,34 @@ async def test_a_rebuild_counts_failures_and_forgets_and_removes_forgotten_image
         await first.close()
 
 
-async def test_another_model_writing_as_the_record_is_taken_fails_the_rebuild():
-    class Intruded(InMemoryVectorIndex):
-        armed = False
+class IntrudedAtTheRecord(InMemoryVectorIndex):
+    """Another image model writes the one vector in space ``s`` just as a rebuild records its own model."""
 
-        async def swap_writer(self, expected, record, *, require_empty=False):
-            if self.armed and record[1] == "written":
-                self.armed = False
-                [chunk_id] = await self.ids("s")
-                [point] = [p for p in self._points.values() if p.chunk_id == chunk_id]
-                await self.upsert_as([point], embedder("intruder").id)
-            return await super().swap_writer(expected, record, require_empty=require_empty)
+    armed = False
 
-    documents, vectors, images, blobs = InMemoryDocumentStore(), InMemoryVectorIndex(), Intruded(), InMemoryBlobStore()
+    async def swap_writer(self, expected, record, *, require_empty=False):
+        if self.armed and record[1] == "written":
+            self.armed = False
+            [chunk_id] = await self.ids("s")
+            [point] = [p for p in self._points.values() if p.chunk_id == chunk_id]
+            await self.upsert_as([point], embedder("intruder").id)
+        return await super().swap_writer(expected, record, require_empty=require_empty)
+
+
+async def intruded_rebuild() -> tuple[MemoryEngine, IntrudedAtTheRecord]:
+    """A second image model over one red image, its next rebuild armed to meet the intruder."""
+    documents, vectors, images, blobs = InMemoryDocumentStore(), InMemoryVectorIndex(), IntrudedAtTheRecord(), InMemoryBlobStore()
     first = await MemoryEngine(documents, vectors, HashEmbedder(), blobs=blobs, image_embedder=embedder(),
                                image_vectors=images).open()
     await ingest_image(first, "s", picture("red"), media_type="image/png", context=context(0))
     second = await MemoryEngine(documents, vectors, HashEmbedder(), blobs=blobs, image_embedder=embedder("other"),
                                 image_vectors=images).open()
     images.armed = True
+    return second, images
+
+
+async def test_another_model_writing_as_the_record_is_taken_fails_the_rebuild():
+    second, images = await intruded_rebuild()
     with pytest.raises(VectorWriterChanged, match="another image embedder wrote"):
         await second.reembed_images("s", limit=10)
     assert (await images.written_by())[1] == "invalidated"

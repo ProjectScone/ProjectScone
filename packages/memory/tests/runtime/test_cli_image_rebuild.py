@@ -13,7 +13,7 @@ from scone_memory.embedders import HashImageEmbedder
 from scone_memory.ingestion.images import ingest_image
 from scone_memory.runtime.cli import build_parser, run
 
-from ..retrieval.test_image_lane_rebuild import COLORS, PHRASES, Unrecorded, context, picture
+from ..retrieval.test_image_lane_rebuild import COLORS, PHRASES, Unrecorded, context, intruded_rebuild, picture
 
 
 async def lane(salt: str = "", stores=None) -> MemoryEngine:
@@ -160,3 +160,46 @@ async def test_the_reembed_route_waits_its_turn_behind_ingest():
             embedder.release.set()
             assert (await first).status_code == 200
             assert (await client.post("/v1/images/reembed", json={})).status_code == 200
+
+
+async def test_the_reembed_route_names_no_space_but_the_keys_own(stores):
+    """A key reaches its own space and no other: the spaces still pending
+    elsewhere in the shared image index are said to exist, never named."""
+    from scone_memory.api import create_app
+    from scone_memory.core.errors import NotFound
+
+    first = await lane("", stores)
+    for space, color in (("alpha", "red"), ("beta-secret-customer", "blue")):
+        await ingest_image(first, space, picture(color), media_type="image/png", context=context(0))
+    engine = await lane("other", stores)
+
+    async def lost(space, attachment_id):
+        raise NotFound(f"attachment {attachment_id[:8]} not found")
+
+    headers = {"authorization": "Bearer ka"}
+    with TestClient(create_app(engine, {"ka": "alpha"})) as client:
+        engine.attachment = lost  # type: ignore[method-assign]
+        failed = client.post("/v1/images/reembed", json={}, headers=headers)
+        assert failed.status_code == 200 and "beta-secret-customer" not in failed.text
+        assert (failed.json()["writer"], failed.json()["spaces_pending"], failed.json()["pending_elsewhere"]) == (
+            "rebuilding", ["alpha"], True)
+        del engine.attachment
+        done = client.post("/v1/images/reembed", json={}, headers=headers)
+        assert done.status_code == 200 and "beta-secret-customer" not in done.text
+        assert (done.json()["writer"], done.json()["spaces_pending"], done.json()["pending_elsewhere"]) == (
+            "rebuilding", [], True)
+        # Python is not keyed: the operator's own pass names the space.
+        assert (await engine.reembed_images("beta-secret-customer")).spaces_pending == []
+        last = client.post("/v1/images/reembed", json={}, headers=headers).json()
+        assert (last["writer"], last["spaces_pending"], last["pending_elsewhere"]) == ("recorded", [], False)
+
+
+async def test_the_reembed_route_answers_409_when_another_model_writes_as_the_record_is_taken():
+    from scone_memory.api import create_app
+
+    second, _ = await intruded_rebuild()
+    with TestClient(create_app(second, {"k": "s"}), raise_server_exceptions=False) as client:
+        changed = client.post("/v1/images/reembed", json={"limit": 10}, headers={"authorization": "Bearer k"})
+    assert changed.status_code == 409, changed.text
+    assert changed.json()["code"] == "writer_changed"
+    assert "another image embedder wrote image vectors during the rebuild" in changed.json()["error"]
