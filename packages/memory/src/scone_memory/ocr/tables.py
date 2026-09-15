@@ -83,6 +83,17 @@ def _box(regions: Sequence[OcrRegion], indices: Sequence[int]) -> Box:
             max(regions[i].box[2] for i in indices), max(regions[i].box[3] for i in indices))
 
 
+def _reaches(left: float, right: float, start: float, end: float) -> bool:
+    """Whether a cell over ``left``..``right`` covers the column band
+    ``start``..``end``: the band inside the cell, or the two overlapping by
+    half of the narrower and a tenth of the wider -- so a wide cell grazing
+    a narrow band does not claim it, and a narrow number inside a wide
+    band sits in it."""
+    overlap = min(right, end) - max(left, start)
+    return (left <= start and right >= end) or (
+        overlap >= 0.5 * min(right - left, end - start) and overlap >= 0.1 * max(right - left, end - start))
+
+
 def _rows(regions: Sequence[OcrRegion], gap: float) -> list[_Row]:
     bands: list[list[int]] = []
     top, bottom = 0., 0.
@@ -164,19 +175,14 @@ def infer_tables(observations: Sequence[OcrRegion]) -> TableLayout:
 
     def placed(row: _Row) -> tuple[tuple[int, int], ...] | None:
         """A row of fewer cells placed on the grid's columns, each cell over
-        the contiguous bands its width covers -- a band inside the cell, or
-        one the cell reaches over half of with a tenth of its own width,
-        so a wide cell grazing a narrow band does not claim it -- no two
-        cells sharing one and none left over; None when the row does not
-        fit."""
+        the contiguous bands its width covers (``_reaches``), no two cells
+        sharing one and none left over; None when the row does not fit."""
         columns = bands()
         taken: list[tuple[int, int]] = []
         used = 0
         for indices in row.cells:
             left, _, right, _ = _box(regions, indices)
-            covered = [j for j, (start, end) in enumerate(columns)
-                       if (left <= start and right >= end)
-                       or min(right, end) - max(left, start) >= max(0.5 * (end - start), 0.1 * (right - left))]
+            covered = [j for j, (start, end) in enumerate(columns) if _reaches(left, right, start, end)]
             if not covered or covered != list(range(covered[0], covered[-1] + 1)) or covered[0] < used:
                 return None
             taken.append((covered[0], len(covered)))
