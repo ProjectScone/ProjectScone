@@ -18,7 +18,8 @@ reply, and the sampled chunks.
 ``replay`` (no model): runs the pass again over the saved chunks with the
 saved replies in call order (a call that failed fails again), as the pass
 is now and with a rule turned back: ``no-settle`` does not settle a quote's whitespace, ``old-clause``
-also reads a quote's clause as it was before the full-stop fix. The same
+also reads a quote's clause as it was before the full-stop and line-break
+fixes (every line break ending a clause). The same
 replies, so a difference is the rule's.
 """
 from __future__ import annotations
@@ -133,7 +134,7 @@ async def run(args: argparse.Namespace) -> None:
 
 
 def _old_clause(source: str, start: int, end: int) -> str:
-    """``distill._clause_around`` as it was before the full-stop fix."""
+    """``distill._clause_around`` as it was before the full-stop and line-break fixes."""
     left = max(source.rfind(mark, 0, start) for mark in ".?!;\n") + 1
     boundaries = [position for mark in ".?!;\n" if (position := source.find(mark, end)) >= 0]
     right = min(boundaries) + 1 if boundaries else len(source)

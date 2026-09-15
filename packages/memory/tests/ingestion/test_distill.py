@@ -752,6 +752,70 @@ async def test_a_quote_that_copies_its_full_stop_is_read_in_its_own_sentence_not
     assert outcome.rejected == []
 
 
+async def test_a_quote_is_refused_when_its_words_stand_hedged_elsewhere_wrapped_another_way(engine):
+    # The model's quote does not say which place it read, or how the text
+    # wrapped there: a copy of its words across a line break is a copy too.
+    source = "The worker uses Ollama today. We may decide that the worker uses\nOllama later."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    candidate = grounded("worker", "uses", "Ollama", "worker uses Ollama")
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert outcome.added == []
+    assert [item.reason for item in outcome.rejected] == ["context_not_asserted"]
+
+
+async def test_an_overlapping_occurrence_of_the_quote_is_read_in_its_own_clause(engine):
+    # "Ana moved. Ana" stands at the start and again from the second "Ana";
+    # only the second reaches the hedged sentence.
+    source = "Ana moved. Ana moved. Ana may not have."
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    candidate = grounded("Ana", "moved", "Ana", "Ana moved. Ana")
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert [item.reason for item in outcome.rejected] == ["context_not_asserted"]
+
+
+# A line break inside running text is where a hard-wrapped document wrapped,
+# not where a clause ends. A blank line, a list item, a heading and a table
+# row do end one.
+WRAPPED_CLAUSES = {
+    "wrapped-condition": ("Retirement is refused if the\nworker uses Ollama for extraction.", False),
+    "wrapped-condition-after": ("The worker uses Ollama for extraction\nunless the queue is full.", False),
+    "wrapped-twice-condition-before": ("Retirement is refused if\nthe\nworker uses Ollama for extraction.", False),
+    "wrapped-twice-condition-after": ("The worker uses Ollama for\nextraction\nunless the queue is full.", False),
+    "wrapped-line-starting-with-an-instruction-word": ("The nightly\ntest suite uses Postgres.", True),
+    "blank-line": ("We may move the worker off it\n\nThe worker uses Ollama for extraction.", True),
+    "list-item": ("What we might change:\n- The worker uses Ollama for extraction.", True),
+    "heading-after": ("The worker uses Ollama for extraction\n## What may change", True),
+    "table-row-after": ("The worker uses Ollama for extraction\n| may | never |", True),
+    "heading-before": ("## What may change\nThe worker uses Ollama for extraction.", True),
+    "table-row-before": ("| may | never |\nThe worker uses Ollama for extraction.", True),
+}
+
+
+@pytest.mark.parametrize("source, asserted", WRAPPED_CLAUSES.values(), ids=WRAPPED_CLAUSES.keys())
+async def test_a_line_break_ends_a_clause_only_at_a_blank_line_list_item_heading_or_table_row(
+    engine, source, asserted
+):
+    added = await engine.remember(SPACE, source, created_at="2024-03-02")
+    subject = "test suite" if "suite" in source else "worker"
+    object = "Postgres" if "suite" in source else "Ollama"
+    candidate = grounded(subject, "uses", object, f"{subject} uses {object}")
+
+    outcome = await Distiller(engine, FakeChat([json.dumps([candidate])])).distill_episode(
+        SPACE, added.episode_id
+    )
+
+    assert [proposal.object for proposal in outcome.added] == ([object] if asserted else [])
+    assert [item.reason for item in outcome.rejected] == ([] if asserted else ["context_not_asserted"])
+
+
 async def test_known_capture_verification_text_produces_no_facts_from_literal_but_non_entailed_quotes(engine):
     fixture = json.loads((TESTS_ROOT / "fixtures" / "grounding_failure.json").read_text())
     added = await engine.remember(SPACE, fixture["source"], created_at="2026-09-05")
