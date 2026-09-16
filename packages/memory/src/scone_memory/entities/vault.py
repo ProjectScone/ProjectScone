@@ -46,7 +46,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Mapping
+from typing import Iterable, Mapping
 import unicodedata
 
 from ..core.errors import InvalidInput
@@ -121,6 +121,36 @@ def _atomic_write(target: Path, content: str) -> None:
         raise
 
 
+def _same_note(listing: Iterable[str], name: str) -> str | None:
+    """The name already in a directory that means this note: the same
+    name, or one a disk that ignores case and Unicode normalisation
+    would call the same. None when the directory holds no such note.
+
+    The manifest has always matched notes this way; a disk that tells
+    cases apart must be read the same way, or a note respelled becomes a
+    second note beside the first -- and the person's own note, respelled
+    by a later projection, stops being recognised as theirs.
+
+    Where a case-sensitive disk holds more than one, the first by name
+    is the note, so two runs over one directory agree.
+    """
+    folded = _folded(name)
+    return next((there for there in sorted(listing) if _folded(there) == folded), None)
+
+
+def _on_disk(target: Path) -> Path | None:
+    """The file that holds this note now, under whatever spelling, or
+    None when there is none."""
+    if target.exists():  # a stat, rather than listing a folder of notes
+        return target
+    try:
+        listing = [entry.name for entry in target.parent.iterdir()]
+    except OSError:  # no such directory yet: nothing is there to find
+        return None
+    found = _same_note(listing, target.name)
+    return target.parent / found if found is not None else None
+
+
 def _inside(home: Path, name: str) -> Path | None:
     """The path a folder-relative name means, or None when it escapes."""
     target = home / name
@@ -153,27 +183,30 @@ def write_vault(files: Mapping[str, str], into: str | Path, *, projection: str, 
     # Decide first, write after: what is the person's, what is this
     # writer's to update, what is new.
     kept: list[str] = []
-    to_write: list[tuple[str, bool]] = []
+    to_write: list[tuple[str, Path | None]] = []
     for name in sorted(files):
         target = _inside(home, name)
         if target is None:
             raise InvalidInput("a note's path must be relative and inside the folder")
-        if target.exists():
+        holding = _on_disk(target)
+        if holding is not None:
             listed_here = _folded(name) in owned
-            ours = signed(target) if target.suffix == ".md" else listed_here
+            ours = signed(holding) if holding.suffix == ".md" else listed_here
             if not ours:
                 kept.append(name)
                 continue
-            to_write.append((name, True))
+            # Written back into the note that is already there, keeping
+            # its spelling: a rename would break the links into it.
+            to_write.append((name, holding))
         else:
-            to_write.append((name, False))
+            to_write.append((name, None))
     # The manifest names what is about to be written, before it is, so a
     # crash between the two orphans nothing.
     _atomic_write(manifest_path, json.dumps({"projection": projection, "files": [name for name, _ in to_write]}, indent=1) + "\n")
     written = updated = unchanged = 0
-    for name, existed in to_write:
-        target = home / name
-        if existed:
+    for name, holding in to_write:
+        target = holding if holding is not None else home / name
+        if holding is not None:
             try:
                 current = target.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
@@ -193,7 +226,8 @@ def write_vault(files: Mapping[str, str], into: str | Path, *, projection: str, 
     for folded, name in sorted(owned.items()):
         if folded in keeping:
             continue
-        stale = _inside(home, name)
+        inside = _inside(home, name)
+        stale = _on_disk(inside) if inside is not None else None
         if stale is not None and stale.is_file() and not stale.is_symlink() and (stale.suffix != ".md" or signed(stale)):
             stale.unlink()
             removed += 1
