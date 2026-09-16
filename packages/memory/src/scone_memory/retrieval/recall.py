@@ -22,6 +22,7 @@ from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
 from . import fact_recall, fusion, supersession
 from .entity_lane import ENTITY_WEIGHT, entity_lane
+from .lane_trust import lane_voice
 from .image_lane import IMAGE_SEARCHES, IMAGE_WEIGHT, ImageLane, search_images
 from ..core.vector_writers import VectorsNotComparable
 
@@ -109,6 +110,9 @@ class RecallRuntime:
     lexical_exact_forms: bool = False
     #: The vector lane's voice in rank fusion, against the text lane's 1.0.
     vector_weight: float = 1.0
+    #: Whether that voice is decided per query from the lane's own scores,
+    #: between the configured weight and the text lane's; see lane_trust.
+    lane_trust: bool = False
     #: Reads recorded feedback's term for each fused candidate, when the
     #: engine's feedback weight is set; None leaves fusion as it was.
     feedback_prior: "Callable[[str, Mapping[int, Chunk], str], Awaitable[PriorTerms]] | None" = None
@@ -572,6 +576,11 @@ async def recall(
     # voice: at a hundredth, half an hour of age outranks an exact match.
     # So it speaks at full voice, and the event records the voice it had.
     vector_voice = runtime.vector_weight if text_lane else 1.0
+    if runtime.lane_trust and text_lane:
+        # Per query, inside the band the operator already accepted: what
+        # the lane's own scores say it has earned against the text lane.
+        vector_voice, trusted = lane_voice(vector_lane, floor=runtime.vector_weight)
+        evidence["lane_trust"] = {"vector": trusted}
     evidence["fusion_weights"] = {"vector": vector_voice, "text": 1.0, **({"image": IMAGE_WEIGHT} if image_lane else {})}
     weights = [vector_voice, 1.0]
     if graph_boost:

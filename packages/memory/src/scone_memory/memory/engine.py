@@ -246,6 +246,7 @@ class MemoryEngine:
         synonyms: "Synonyms | None" = None,
         context_lane: bool = False,
         lexical_stems: bool = True,
+        lane_trust: bool = False,
         lexical_exact_forms: bool = True,
         vector_weight: Optional[float] = None,
         chunk_tokens: int | None = None,
@@ -304,6 +305,13 @@ class MemoryEngine:
         #: resolved from the embedder when the caller did not say; on every
         #: recall event as fusion_weights.
         self.vector_weight = float(vector_weight)
+        if type(lane_trust) is not bool:
+            raise InvalidInput("lane_trust must be a boolean")
+        #: Whether the vector lane's voice is decided per query from the
+        #: shape of its own scores, between ``vector_weight`` and the text
+        #: lane's 1.0. Off by default: it moves the ranking, so it changes
+        #: nothing until a measurement says it should.
+        self.lane_trust = lane_trust
         if type(lexical_stems) is not bool:
             raise InvalidInput("lexical_stems must be a boolean")
         #: Whether a query term's family (bills, billing, billed) is searched
@@ -1353,6 +1361,7 @@ class MemoryEngine:
             lexical_stems=self.lexical_stems,
             lexical_exact_forms=self.lexical_exact_forms,
             vector_weight=self.vector_weight,
+            lane_trust=self.lane_trust,
             feedback_prior=self._feedback_prior if self.feedback_weight > 0 else None,
             image=None if self.image_vectors is None else ImageLane(cast(ImageEmbedder, self.image_embedder),
                                                                    self.image_vectors),

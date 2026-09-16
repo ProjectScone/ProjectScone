@@ -145,9 +145,10 @@ def _records(item: BenchItem) -> list[Record]:
 
 
 def _name(chunk: str, fusion: str, weight: Optional[float], diversity: Optional[float], lanes: Sequence[str],
-          exact_forms: Optional[bool] = None) -> str:
+          exact_forms: Optional[bool] = None, trust: Optional[bool] = None) -> str:
     # Rows name exact forms only when the sweep sets them, so older result files keep their names.
     suffix = "" if exact_forms is None else f" exact_forms={'on' if exact_forms else 'off'}"
+    suffix += "" if trust is None else f" lane_trust={'on' if trust else 'off'}"
     if tuple(lanes) != ("vector", "text"):
         return f"{chunk} lanes={'+'.join(lanes)}{suffix}"
     return f"{chunk} fusion={fusion} vector_weight={weight} diversity={diversity}{suffix}"
@@ -162,6 +163,7 @@ def _row(rankings: list[tuple[Sequence[str], set[str]]]) -> dict[str, Any]:
 async def sweep(items: list[BenchItem], *, chunkings: Sequence[Chunking], fusions: Sequence[str],
                 weights: Sequence[float], diversities: Sequence[Optional[float]], log: Any,
                 exact_forms: Sequence[Optional[bool]] = (None,),
+                trusts: Sequence[Optional[bool]] = (None,),
                 embedders: Optional[tuple[Embedder, Embedder]] = None,
                 cache: Optional[VectorCache] = None) -> dict[str, Any]:
     """Every row over ``items``. ``embedders`` is ours and the reference's
@@ -183,22 +185,28 @@ async def sweep(items: list[BenchItem], *, chunkings: Sequence[Chunking], fusion
             engine = await open_engine(chunking, ours)
             default_weight = engine.vector_weight
             default_exact = engine.lexical_exact_forms
+            default_trust = engine.lane_trust
             await engine.remember_many("item", records)
-            asks: list[tuple[str, float, Optional[float], tuple[str, ...], Optional[bool]]] = [
-                (fusion, weight, diversity, ("vector", "text"), exact)
-                for exact in exact_forms for fusion in fusions for weight in weights for diversity in diversities]
-            asks += [("rank", default_weight, None, lanes, exact) for exact in exact_forms
+            asks: list[tuple[str, float, Optional[float], tuple[str, ...], Optional[bool], Optional[bool]]] = [
+                (fusion, weight, diversity, ("vector", "text"), exact, trust)
+                for exact in exact_forms for trust in trusts
+                for fusion in fusions for weight in weights for diversity in diversities]
+            # A lane on its own has nothing to be trusted against, so the
+            # single-lane rows are run once, at the engine's own setting.
+            asks += [("rank", default_weight, None, lanes, exact, None) for exact in exact_forms
                      for lanes in (("text",), ("vector",))]
-            for fusion, weight, diversity, lanes, exact in asks:
+            for fusion, weight, diversity, lanes, exact, trust in asks:
                 engine.vector_weight = weight
                 engine.lexical_exact_forms = default_exact if exact is None else exact
+                engine.lane_trust = default_trust if trust is None else trust
                 pack = await engine.recall("item", item.question, limit=RECALL_LIMIT, fusion=fusion,
                                            diversity=diversity, lanes=lanes)
                 folded = distinct_sessions([hit.source or "" for hit in pack.items], max(KS))
-                rankings.setdefault(_name(chunking.label, fusion, weight, diversity, lanes, exact),
+                rankings.setdefault(_name(chunking.label, fusion, weight, diversity, lanes, exact, trust),
                                     []).append(list(folded))
             engine.vector_weight = default_weight
             engine.lexical_exact_forms = default_exact
+            engine.lane_trust = default_trust
         print(f"{position}/{len(items)} {time.perf_counter() - started:.0f}s", file=log, flush=True)
     rows = {name: _row([(ranked, answers) for ranked, answers in zip(per_item, relevant)])
             for name, per_item in rankings.items()}
@@ -249,6 +257,8 @@ def main() -> None:
     parser.add_argument("--fusions", default="rank,score,distribution")
     parser.add_argument("--weights", default="0.05,0.1,0.25,0.5,1.0")
     parser.add_argument("--diversities", default="none,0.3")
+    parser.add_argument("--lane-trust", default="default",
+                        help="off,on -- sweep MemoryEngine.lane_trust; 'default' leaves the engine's own")
     parser.add_argument("--exact-forms", default="default",
                         help="off,on -- sweep MemoryEngine.lexical_exact_forms; 'default' leaves the engine's own")
     parser.add_argument("--check", action="store_true", help="also run compare() at engine defaults")
@@ -271,7 +281,8 @@ def main() -> None:
     started = time.perf_counter()
     result = asyncio.run(sweep(items, chunkings=axis, fusions=args.fusions.split(","),
                                weights=weights, diversities=_floats(args.diversities), log=sys.stderr,
-                               exact_forms=_switches(args.exact_forms), embedders=(ours, theirs), cache=cache))
+                               exact_forms=_switches(args.exact_forms), trusts=_switches(args.lane_trust),
+                               embedders=(ours, theirs), cache=cache))
     if args.check:
         result["compare_at_defaults"] = asyncio.run(check(items, sys.stderr, (recount(ours), recount(theirs)), cache))
     result["sample"] = {"dataset": Path(args.data).name, "n": args.n, "seed": args.seed, "holdout_of": args.holdout_of,
