@@ -65,7 +65,7 @@ def _is_number(text: str) -> bool:
 
 def header_row(table: TableCandidate) -> int | None:
     """The row of ``table`` that is its header, by its shape, or None."""
-    rows: dict[int, list] = {}
+    rows: dict[int, list[TableCell]] = {}
     for cell in table.cells:
         rows.setdefault(cell.row, []).append(cell)
     # Only rows filling every column count as data, and only such a row or
