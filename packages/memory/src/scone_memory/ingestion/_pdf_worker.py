@@ -5,7 +5,7 @@ from io import BytesIO
 import json
 import logging
 import sys
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..core.errors import InvalidInput
 from .pdf import ParsedPdf, PdfEncryption, PdfLimits, PdfPage, Restriction
@@ -32,7 +32,7 @@ def _outline(reader: object) -> tuple[list[tuple[int, str, int]], Literal['none'
     found: list[tuple[int, str, int]] = []
     capped = False
 
-    def walk(level_items: list, level: int) -> None:
+    def walk(level_items: list[Any], level: int) -> None:
         nonlocal capped
         for item in level_items:
             if capped:
