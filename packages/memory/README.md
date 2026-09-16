@@ -110,6 +110,7 @@ storage ports, source validation and resource ownership.
 | Review duplicate documents without discarding originals | [Document duplicate review](docs/document-deduplication.md) |
 | Compose LlamaIndex, LangChain and reranking | [Framework integrations](docs/integrations.md) |
 | Give agents scoped search, trace and read tools | [Agent tools](docs/agent-tools.md), [tool-based conversations](docs/conversation-tools.md) |
+| Serve the engine to an MCP client, over stdio or HTTP | [MCP server](docs/mcp-server.md) |
 | Build text sessions and gather missing evidence | [Text conversations](docs/text-conversations.md), [adaptive retrieval](docs/adaptive-retrieval.md), [follow-up queries](docs/followup-queries.md) |
 | Constrain, review or quote an answer | [Answer review and output contracts](docs/answer-review.md) |
 | Add voice, personas and provider adapters | [Voice conversations](docs/voice-conversations.md) |
