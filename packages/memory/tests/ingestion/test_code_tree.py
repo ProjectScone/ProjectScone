@@ -48,7 +48,9 @@ def test_a_chunk_inside_a_definition_carries_its_name():
 def test_the_brace_family_keeps_its_reader_and_unknown_languages_stay_prose():
     for source in ("Main.kt", "cart.php", "Cart.swift", "Cart.scala"):
         assert code_language(source) == "braces", source
-    assert code_language("notes.ex") is None and code_language("Makefile") is None
+    # .ex is Elixir now (test_code_tree_more_languages); .jl is not read,
+    # because the generic rule loses every Julia function it has.
+    assert code_language("Billing.jl") is None and code_language("Makefile") is None
 
 
 def test_a_file_too_long_or_a_missing_grammar_reads_as_nothing(monkeypatch):
