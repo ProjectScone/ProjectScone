@@ -1,6 +1,7 @@
 """The Obsidian notes written into a vault a person already keeps: theirs untouched, ours kept current."""
 import io
 import json
+import unicodedata
 import zipfile
 
 import pytest
@@ -9,7 +10,8 @@ from scone_memory.core.errors import InvalidInput
 from scone_memory.core.models import Fact
 from scone_memory.entities.export import export_graph, obsidian_files
 from scone_memory.entities.project import project_entities
-from scone_memory.entities.vault import DEFAULT_FOLDER, MANIFEST, SIGNATURE, signed, write_vault
+from scone_memory.entities.vault import (DEFAULT_FOLDER, MANIFEST, SIGNATURE, _same_note, signed,
+                                          write_vault)
 
 
 def fact(number: int, subject: str, predicate: str, object_: str) -> Fact:
@@ -174,3 +176,65 @@ def test_a_target_that_is_not_a_directory_or_a_folder_that_escapes_is_refused(tm
         write_vault({"../escape.md": "x"}, tmp_path, projection=projection.digest)
     with pytest.raises(InvalidInput, match="inside the folder"):
         write_vault({"/tmp/escape.md": "x"}, tmp_path, projection=projection.digest)
+
+
+# -- one note, on a disk that tells spellings apart --------------------------------
+
+# Built with unicodedata so the two spellings of the same word are the
+# real ones and not whatever an editor saved this file as.
+CAFE_NFC = unicodedata.normalize("NFC", "caf\u00e9.md")
+CAFE_NFD = unicodedata.normalize("NFD", "caf\u00e9.md")
+
+
+@pytest.mark.parametrize("listing, name, found", [
+    (["Alice Chen.md"], "alice chen.md", "Alice Chen.md"),
+    (["alice chen.md"], "Alice Chen.md", "alice chen.md"),
+    (["alice chen.md"], "alice chen.md", "alice chen.md"),
+    ([CAFE_NFD], CAFE_NFC, CAFE_NFD),
+    (["Alice Chen.md"], "alice chen.markdown", None),
+    ([], "alice chen.md", None),
+    (["Bob.md", "bob.md", "BOB.md"], "bOb.md", "BOB.md"),
+], ids=["cased-up", "cased-down", "exact", "normalised", "different-note", "empty", "two-of-them"])
+def test_a_note_respelled_is_the_note_that_is_already_there(listing, name, found):
+    """What the manifest has always done for names, done for the disk:
+    a disk that ignores case finds these itself, and one that does not
+    would otherwise write a second note beside the first. Where a
+    case-sensitive disk holds several, the first by name is the note,
+    so two runs over one directory agree."""
+    assert _same_note(listing, name) == found
+
+
+def test_a_projection_that_respells_their_note_keeps_it_and_writes_no_second_one(tmp_path):
+    """Their note, written under one spelling and edited by hand, is
+    still theirs when a later projection spells the name differently.
+    On a disk that tells cases apart this is the whole of the bug: the
+    respelled note was written as a new file, and the person's edit sat
+    beside it, unread."""
+    vault = tmp_path / "vault"
+    home = vault / DEFAULT_FOLDER / "entities"
+    home.mkdir(parents=True)
+    (home / "Alice Chen.md").write_text("# Alice, as I know her\n\nmine\n", encoding="utf-8")
+
+    receipt = write_vault({"entities/alice chen.md": "# alice chen\n"}, vault, projection="p1")
+
+    assert receipt.kept_theirs == ("entities/alice chen.md",) and receipt.written == 0
+    notes = sorted(note.name for note in home.iterdir())
+    assert notes == ["Alice Chen.md"], "no second note was written beside theirs"
+    assert (home / "Alice Chen.md").read_text(encoding="utf-8") == "# Alice, as I know her\n\nmine\n"
+
+
+def test_our_own_note_respelled_is_updated_in_place_and_removed_when_it_goes(tmp_path):
+    vault = tmp_path / "vault"
+    ours = f"---\n{SIGNATURE}: true\n---\n\n# Bob\n"
+    first = write_vault({"entities/Bob.md": ours}, vault, projection="p1")
+    assert first.written == 1
+    home = vault / DEFAULT_FOLDER / "entities"
+
+    second = write_vault({"entities/bob.md": ours.replace("# Bob", "# bob")}, vault, projection="p2")
+    assert (second.written, second.updated) == (0, 1), "the same note, respelled, is updated where it lies"
+    assert sorted(note.name for note in home.iterdir()) == ["Bob.md"]
+    assert (home / "Bob.md").read_text(encoding="utf-8") == ours.replace("# Bob", "# bob")
+
+    third = write_vault({}, vault, projection="p3")
+    assert third.removed == 1, "and it is still ours to remove when the projection drops it"
+    assert list(home.iterdir()) == []
