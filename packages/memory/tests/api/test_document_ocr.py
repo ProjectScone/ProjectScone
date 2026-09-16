@@ -118,7 +118,8 @@ async def test_discovery_and_unconfigured_refusal(host, monkeypatch):
     client, memory, _ = host
     catalog = (await client.get('/v1/documents/formats')).json()
     assert catalog['pdf_ocr'] == {'available': True, 'modes': ['missing_text', 'all_pages'],
-        'reading_orders': ['provider', 'columns_ltr', 'columns_rtl']}
+        'reading_orders': ['provider', 'columns_ltr', 'columns_rtl'],
+        'layout': 'inferred'}
     app = create_app(memory, {'write': 'alpha'})
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://scone.test',
                                 headers={'authorization': 'Bearer write'}) as plain:
