@@ -21,19 +21,28 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
+import json
+import secrets
 import functools
 import inspect
 import os
 import sys
 from typing import Annotated, Awaitable, Callable, Mapping, Optional, Sequence
 
+from contextlib import AsyncExitStack
+from dataclasses import replace
+from pathlib import Path
+
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.server.mcpserver.exceptions import ResourceError
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from .. import __version__
-from ..core.errors import InvalidInput
+from ..core.bearer_keys import KEY_STATE, BearerKeys, KeyHolder
+from ..core.errors import InvalidInput, NotFound
 from .cli import settings_for_cli
 from .config import Settings, build_engine
 from ..memory.engine import MemoryEngine, Profile, check_space, normalise_term
@@ -121,6 +130,35 @@ def ok_text(message: str) -> CallToolResult:
 
 ToolFn = Callable[..., Awaitable[CallToolResult]]
 
+#: Tools that only read. Everything else is taken to write, so a tool
+#: added without a thought about roles is refused to a read-only key
+#: rather than quietly allowed; ``test_every_tool_is_classified`` fails
+#: until a new name is put in one set or the other.
+READING_TOOLS = frozenset({
+    "memory_recall", "memory_facts_about", "memory_pending",
+    "memory_graph_context", "memory_entity", "memory_connections", "memory_graph_schema",
+    "memory_graph_match", "memory_graph_overview", "memory_graph_changes", "memory_entity_duplicates",
+    "memory_temporal_answer", "memory_graph_cycles", "memory_graph_stats", "memory_graph_hubs",
+    "memory_graph_health", "memory_graph_affected",
+})
+
+#: Tools that change what the space holds.
+WRITING_TOOLS = frozenset({"memory_store", "memory_store_facts", "memory_forget"})
+
+
+def refuses_to_write(fn: ToolFn, role: str) -> ToolFn:
+    """A key whose role does not write is told so by the tool itself,
+    in the words the REST API uses for the same refusal. The tool stays
+    in the catalogue: a model that can read the reason corrects itself,
+    where a tool that had silently vanished would be guessed at."""
+
+    @functools.wraps(fn)
+    async def refused(**arguments: object) -> CallToolResult:
+        return tool_error(f"key role {role} cannot write")
+
+    return refused
+
+
 
 def refusals_as_tool_errors(fn: ToolFn) -> ToolFn:
     """An engine refusal (bad space name, unparsable date, unknown id)
@@ -137,12 +175,18 @@ def refusals_as_tool_errors(fn: ToolFn) -> ToolFn:
     return guarded
 
 
-def tool(server: MCPServer, name: str) -> Callable[[ToolFn], ToolFn]:
+def tool(server: MCPServer, name: str, holder: Optional[KeyHolder] = None) -> Callable[[ToolFn], ToolFn]:
     """Register ``fn`` under its mcp.rs name, its docstring (dedented) as
-    the description, with engine refusals turned into tool errors."""
+    the description, with engine refusals turned into tool errors.
+
+    ``holder`` is the key this server was built for, when it was built
+    for one: a role that does not write reaches no writing tool."""
 
     def register(fn: ToolFn) -> ToolFn:
-        server.add_tool(refusals_as_tool_errors(fn), name=name, description=inspect.cleandoc(fn.__doc__ or ""))
+        guarded = refusals_as_tool_errors(fn)
+        if holder is not None and not holder.may_write and name not in READING_TOOLS:
+            guarded = refuses_to_write(guarded, holder.role)
+        server.add_tool(guarded, name=name, description=inspect.cleandoc(fn.__doc__ or ""))
         return fn
 
     return register
@@ -257,7 +301,8 @@ async def fact_ids_by_status(engine: MemoryEngine, space: str) -> dict[int, str]
 
 
 def create_server(engine: MemoryEngine, space: str = "default",
-                  propose_below: Optional[float] = None) -> MCPServer:
+                  propose_below: Optional[float] = None,
+                  holder: Optional[KeyHolder] = None) -> MCPServer:
     """The six tools of mcp.rs and three read-only graph tools, closing over
     one engine and a default space that any call may override with its
     ``space`` argument.
@@ -266,6 +311,13 @@ def create_server(engine: MemoryEngine, space: str = "default",
     agent submits under that confidence is parked as a proposal for a
     person instead of entering the ledger. Unset, as there, means every
     submitted fact is a ledger claim.
+
+    ``holder`` is the bearer key this server answers to, when it answers
+    to one: over stdio nobody presents a key and the space argument goes
+    anywhere, exactly as before; over HTTP the key names the space and
+    the role, and both bound what these tools can reach. A server is
+    built per key rather than per request, so the bound is fixed at the
+    tool, not re-decided on each call.
     """
     if propose_below is not None and not 0.0 <= propose_below <= 1.0:
         raise InvalidInput(f"propose_below must be a confidence in 0..=1, got {propose_below}")
@@ -277,7 +329,18 @@ def create_server(engine: MemoryEngine, space: str = "default",
     )
     default_space = space
 
-    @tool(server, "memory_store")
+    def chosen(named: Optional[str]) -> str:
+        """The space a call names, or this server's own when it names
+        none. A server built for a key reaches that key's space only:
+        another name is as unknown as a space that never existed, which
+        is what the REST API tells the same key."""
+        if named is None or named == default_space:
+            return default_space
+        if holder is not None:
+            raise NotFound(f"space {named!r} is not this key's")
+        return named
+
+    @tool(server, "memory_store", holder)
     async def memory_store(
         content: Annotated[str, Field(description="The content to remember (1..=100000 bytes)")],
         space: Annotated[Optional[str], Field(description="Space to store into; defaults to the server's space")] = None,
@@ -297,10 +360,10 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error(f"content must be 1..={MAX_CONTENT} bytes, got {size}")
         if len(tags or ()) > MAX_TAGS:
             return tool_error(f"at most {MAX_TAGS} tags per store")
-        added = await engine.remember(space or default_space, content, tags=tags or (), metadata=metadata)
+        added = await engine.remember(chosen(space), content, tags=tags or (), metadata=metadata)
         return ok_text(describe_added(added))
 
-    @tool(server, "memory_recall")
+    @tool(server, "memory_recall", holder)
     async def memory_recall(
         query: Annotated[str, Field(description="Natural-language query (1..=1000 chars)")],
         space: Annotated[Optional[str], Field(description="Space to search; defaults to the server's space")] = None,
@@ -331,7 +394,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
         each with provenance. `as_of` answers what was true at a past time."""
         if not query or len(query) > MAX_QUERY:
             return tool_error(f"query must be 1..={MAX_QUERY} chars, got {len(query)}")
-        target = space or default_space
+        target = chosen(space)
         lines: list[str] = []
         if include_profile is None or include_profile:
             lines.extend(profile_lines(await engine.profile(target, 5)))
@@ -352,7 +415,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
         lines.extend(recall_lines(result))
         return ok_text("\n".join(lines) if lines else "no matching memory")
 
-    @tool(server, "memory_facts_about")
+    @tool(server, "memory_facts_about", holder)
     async def memory_facts_about(
         entity: Annotated[str, Field(description="Entity to look up (person, project, tool ...)")],
         space: Annotated[Optional[str], Field(description="Space to search; defaults to the server's space")] = None,
@@ -360,12 +423,12 @@ def create_server(engine: MemoryEngine, space: str = "default",
         """List what is currently known about one entity (active facts only)."""
         if not entity or len(entity) > MAX_ENTITY:
             return tool_error(f"entity must be 1..={MAX_ENTITY} chars, got {len(entity)}")
-        found = await facts_about(engine, space or default_space, entity)
+        found = await facts_about(engine, chosen(space), entity)
         if not found:
             return ok_text(f"no facts about {entity}")
         return ok_text("\n".join(fact_about_line(f) for f in found))
 
-    @tool(server, "memory_graph_context")
+    @tool(server, "memory_graph_context", holder)
     async def memory_graph_context(
         names: Annotated[
             Optional[list[str]], Field(description="Entities to centre on, by name or id (at most 24)")
@@ -400,12 +463,12 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error("max_bytes must be 512..=64000")
         if min_similarity is not None and not -1.0 <= min_similarity <= 1.0:
             return tool_error("min_similarity must be -1..=1")
-        packet = await graph_context(engine, space or default_space, names=names or (), question=question,
+        packet = await graph_context(engine, chosen(space), names=names or (), question=question,
                                      limits=ContextLimits(max_bytes=budget), similar=bool(similar),
                                      min_similarity=min_similarity)
         return ok_text(packet.text)
 
-    @tool(server, "memory_entity")
+    @tool(server, "memory_entity", holder)
     async def memory_entity(
         name: Annotated[str, Field(description="The entity, by name or id")],
         space: Annotated[Optional[str], Field(description="Space to read; defaults to the server's space")] = None,
@@ -414,10 +477,10 @@ def create_server(engine: MemoryEngine, space: str = "default",
         citing facts re-read now. An ambiguous name lists its candidates."""
         if not name or len(name) > MAX_ENTITY:
             return tool_error(f"name must be 1..={MAX_ENTITY} chars, got {len(name)}")
-        packet = await graph_context(engine, space or default_space, names=[name], limits=ContextLimits(max_hops=1))
+        packet = await graph_context(engine, chosen(space), names=[name], limits=ContextLimits(max_hops=1))
         return ok_text(packet.text)
 
-    @tool(server, "memory_connections")
+    @tool(server, "memory_connections", holder)
     async def memory_connections(
         source: Annotated[str, Field(description="One entity, by name or id")],
         target: Annotated[str, Field(description="The other entity, by name or id")],
@@ -431,10 +494,10 @@ def create_server(engine: MemoryEngine, space: str = "default",
         hops = max_hops if max_hops is not None else 3
         if not 1 <= hops <= 4:
             return tool_error("max_hops must be 1..=4")
-        found = await graph_connections(engine, space or default_space, source, target, max_hops=hops)
+        found = await graph_connections(engine, chosen(space), source, target, max_hops=hops)
         return ok_text(found.text)
 
-    @tool(server, "memory_graph_schema")
+    @tool(server, "memory_graph_schema", holder)
     async def memory_graph_schema(
         limit: Annotated[
             Optional[StrictInt], Field(description=f"Predicates to list, most used first (1..={MAX_PREDICATES}); defaults to 200")
@@ -453,10 +516,10 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error(f"limit must be 1..={MAX_PREDICATES}")
         if not 1_024 <= budget <= 64_000:
             return tool_error("max_bytes must be 1024..=64000")
-        return ok_text(schema_text(await schema_record(engine, space or default_space, limit=listed,
+        return ok_text(schema_text(await schema_record(engine, chosen(space), limit=listed,
                                                        max_bytes=budget)))
 
-    @tool(server, "memory_graph_match")
+    @tool(server, "memory_graph_match", holder)
     async def memory_graph_match(
         where: Annotated[
             list[TriplePattern],
@@ -490,7 +553,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
         memory_graph_schema first to know the predicates."""
         try:
             found = await graph_match(
-                engine, space or default_space, [pattern.model_dump() for pattern in where], returns=returns,
+                engine, chosen(space), [pattern.model_dump() for pattern in where], returns=returns,
                 limit=limit if limit is not None else DEFAULT_ROWS, status=status or "current",
                 as_of=normalise_time(as_of) if as_of is not None else None,
                 together=True if together is None else together,
@@ -499,7 +562,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error(str(refused))
         return ok_text(found.text)
 
-    @tool(server, "memory_graph_overview")
+    @tool(server, "memory_graph_overview", holder)
     async def memory_graph_overview(
         question: Annotated[
             Optional[str], Field(description=f"A question about the whole graph (1..={MAX_QUESTION} chars); "
@@ -524,7 +587,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
         now. A question puts the communities it concerns first."""
         try:
             found = await graph_overview(
-                engine, space or default_space, question=question,
+                engine, chosen(space), question=question,
                 limit=limit if limit is not None else DEFAULT_COMMUNITIES,
                 facts_each=facts if facts is not None else DEFAULT_FACTS_EACH,
                 max_bytes=max_bytes if max_bytes is not None else OVERVIEW_BYTES)
@@ -532,7 +595,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error(str(refused))
         return ok_text(found.text)
 
-    @tool(server, "memory_graph_changes")
+    @tool(server, "memory_graph_changes", holder)
     async def memory_graph_changes(
         since: Annotated[str, Field(description="RFC 3339 moment to compare from, as in '2025-01-01T00:00:00Z'")],
         until: Annotated[Optional[str], Field(description="RFC 3339 moment to compare to; defaults to now")] = None,
@@ -549,14 +612,14 @@ def create_server(engine: MemoryEngine, space: str = "default",
         another, relations that began and ended, values that changed and
         entities that came and went, each citing its facts re-read now."""
         try:
-            found = await graph_changes(engine, space or default_space, since=since, until=until,
+            found = await graph_changes(engine, chosen(space), since=since, until=until,
                                         limit=limit if limit is not None else DEFAULT_CHANGES,
                                         max_bytes=max_bytes if max_bytes is not None else CHANGES_BYTES)
         except ChangesError as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
 
-    @tool(server, "memory_entity_duplicates")
+    @tool(server, "memory_entity_duplicates", holder)
     async def memory_entity_duplicates(
         limit: Annotated[
             Optional[StrictInt], Field(description=f"Pairs to suggest (1..={MAX_PAIRS}); defaults to {DEFAULT_PAIRS}")
@@ -573,7 +636,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
         ("Dr. Alice Chen" and "alice chen"), each saying why and citing the
         neighbours they share. Suggestions only: nothing is merged."""
         try:
-            found = await likely_duplicates(engine, space or default_space,
+            found = await likely_duplicates(engine, chosen(space),
                                             limit=limit if limit is not None else DEFAULT_PAIRS,
                                             min_score=min_score if min_score is not None else DEFAULT_MIN_SCORE,
                                             max_bytes=max_bytes if max_bytes is not None else DUPLICATES_BYTES)
@@ -581,7 +644,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
             return tool_error(str(refused))
         return ok_text(found.text)
 
-    @tool(server, "memory_graph_affected")
+    @tool(server, "memory_graph_affected", holder)
     async def memory_graph_affected(
         name: Annotated[str, Field(description="The symbol (`pkg/mod.py:Class.method`), module, file or package",
                                    min_length=1, max_length=200)],
@@ -603,7 +666,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
         deep it walked, what it could not list, and when nothing here rests
         on the name; an ambiguous name is refused with its candidates, an
         unknown one plainly."""
-        blast = await affected(engine, space or default_space, name,
+        blast = await affected(engine, chosen(space), name,
                                max_hops=max_hops if max_hops is not None else 4,
                                limit=limit if limit is not None else 200,
                                max_bytes=max_bytes if max_bytes is not None else 16_000)
@@ -621,7 +684,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
                          + ("; raise max_hops to go further" if blast.deepest < AFFECTED_HOPS else ""))
         return ok_text("\n".join(lines))
 
-    @tool(server, "memory_graph_cycles")
+    @tool(server, "memory_graph_cycles", holder)
     async def memory_graph_cycles(
         limit: Annotated[
             Optional[StrictInt], Field(description="Groups shown of each kind (1..=100); defaults to 20")
@@ -638,14 +701,14 @@ def create_server(engine: MemoryEngine, space: str = "default",
         from ..entities.cycles import DEFAULT_LIMIT as CYCLES_LIMIT, MAX_BYTES as CYCLES_BYTES, CyclesError, graph_cycles
 
         try:
-            found = await graph_cycles(engine, space or default_space,
+            found = await graph_cycles(engine, chosen(space),
                                        limit=limit if limit is not None else CYCLES_LIMIT,
                                        max_bytes=max_bytes if max_bytes is not None else CYCLES_BYTES)
         except (CyclesError, InvalidInput) as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
 
-    @tool(server, "memory_graph_stats")
+    @tool(server, "memory_graph_stats", holder)
     async def memory_graph_stats(
         max_bytes: Annotated[
             Optional[StrictInt], Field(description="Byte budget for the answer (512..=64000); defaults to 8000")
@@ -659,13 +722,13 @@ def create_server(engine: MemoryEngine, space: str = "default",
         from ..entities.stats import MAX_BYTES as STATS_BYTES, StatsError, graph_stats
 
         try:
-            found = await graph_stats(engine, space or default_space,
+            found = await graph_stats(engine, chosen(space),
                                       max_bytes=max_bytes if max_bytes is not None else STATS_BYTES)
         except (StatsError, InvalidInput) as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
 
-    @tool(server, "memory_graph_hubs")
+    @tool(server, "memory_graph_hubs", holder)
     async def memory_graph_hubs(
         limit: Annotated[
             Optional[StrictInt], Field(description="Hubs shown, most linked first (1..=100); defaults to 10")
@@ -685,14 +748,14 @@ def create_server(engine: MemoryEngine, space: str = "default",
         from ..entities.stats import DEFAULT_HUBS, MAX_BYTES as STATS_BYTES, StatsError, graph_hubs
 
         try:
-            found = await graph_hubs(engine, space or default_space, above=above,
+            found = await graph_hubs(engine, chosen(space), above=above,
                                      limit=limit if limit is not None else DEFAULT_HUBS,
                                      max_bytes=max_bytes if max_bytes is not None else STATS_BYTES)
         except (StatsError, InvalidInput) as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
 
-    @tool(server, "memory_graph_health")
+    @tool(server, "memory_graph_health", holder)
     async def memory_graph_health(
         limit: Annotated[
             Optional[StrictInt], Field(description=f"Examples per concern (1..={HEALTH_MAX_EXAMPLES}); "
@@ -708,14 +771,14 @@ def create_server(engine: MemoryEngine, space: str = "default",
         to, predicates used once, and names that may be one thing. Counts
         with examples; it changes nothing."""
         try:
-            found = await graph_health(engine, space or default_space,
+            found = await graph_health(engine, chosen(space),
                                        limit=limit if limit is not None else HEALTH_EXAMPLES,
                                        max_bytes=max_bytes if max_bytes is not None else HEALTH_BYTES)
         except (HealthError, InvalidInput) as refused:
             return tool_error(str(refused))
         return ok_text(found.text)
 
-    @tool(server, "memory_temporal_answer")
+    @tool(server, "memory_temporal_answer", holder)
     async def memory_temporal_answer(
         question: Annotated[str, Field(description="A question about dates: how long between two events, how long "
                                                    "ago one was, which came first, what order they were in")],
@@ -738,7 +801,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
         when the question is not one it reads, when an event is not in
         memory, or when an event's day is not decided."""
         try:
-            answer = await temporal_answer(engine, space or default_space, question, now=now,
+            answer = await temporal_answer(engine, chosen(space), question, now=now,
                                            limit=limit if limit is not None else TEMPORAL_LIMIT,
                                            max_bytes=max_bytes if max_bytes is not None else TEMPORAL_BYTES)
         except (TemporalError, InvalidInput) as refused:
@@ -751,7 +814,13 @@ def create_server(engine: MemoryEngine, space: str = "default",
             check_space(space)
         except InvalidInput as refused:
             raise ResourceError(f"space: {refused}") from None
-        return space
+        try:
+            return chosen(space)
+        except NotFound as refused:
+            # A resource error travels with its reason; anything else the
+            # SDK reports as "error creating resource", which tells the
+            # caller nothing about why this address was refused.
+            raise ResourceError(str(refused)) from None
 
     async def report_markdown(space: str) -> str:
         return render_markdown(await report_record(engine, readable(space)))
@@ -817,7 +886,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
     server.resource("scone://{space}/graph/schema", name="space-graph-schema", mime_type="text/plain",
                     description="What one space's graph is made of.")(schema_lines_of)
 
-    @tool(server, "memory_pending")
+    @tool(server, "memory_pending", holder)
     async def memory_pending(
         limit: Annotated[Optional[int], Field(description="Max episodes to return (1..=20); defaults to 5")] = None,
         space: Annotated[Optional[str], Field(description="Space to inspect; defaults to the server's space")] = None,
@@ -825,10 +894,10 @@ def create_server(engine: MemoryEngine, space: str = "default",
         """List episodes awaiting fact extraction. YOU are the extractor:
         read each episode, distill durable subject/predicate/object facts
         with your own reasoning, then submit them via memory_store_facts."""
-        episodes = await pending_episodes(engine, space or default_space, max(1, min(limit or 5, MAX_PENDING)))
+        episodes = await pending_episodes(engine, chosen(space), max(1, min(limit or 5, MAX_PENDING)))
         return ok_text(pending_text(episodes))
 
-    @tool(server, "memory_store_facts")
+    @tool(server, "memory_store_facts", holder)
     async def memory_store_facts(
         episode_id: Annotated[int, Field(description="Episode id from memory_pending")],
         facts: Annotated[list[SubmittedFact], Field(description="Extracted facts (max 50)")],
@@ -846,7 +915,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
         """
         if len(facts) > MAX_FACTS:
             return tool_error(f"at most {MAX_FACTS} facts per submission")
-        target = space or default_space
+        target = chosen(space)
         episode = await engine.episode(target, episode_id)
         before = await fact_ids_by_status(engine, target)
         for fact in facts:
@@ -875,7 +944,7 @@ def create_server(engine: MemoryEngine, space: str = "default",
         counted += [f"{closed} closed", f"{len(facts) - len(fresh)} deduplicated"]
         return ok_text(f"episode {episode_id} distilled: " + ", ".join(counted))
 
-    @tool(server, "memory_forget")
+    @tool(server, "memory_forget", holder)
     async def memory_forget(
         fact_id: Annotated[int, Field(description="Fact id to close (from memory_recall / memory_facts_about output)")],
         reason: Annotated[str, Field(description="Why this fact should be forgotten (recorded, never deleted)")],
@@ -885,10 +954,155 @@ def create_server(engine: MemoryEngine, space: str = "default",
         History is preserved; nothing is deleted."""
         if not reason or len(reason) > MAX_REASON:
             return tool_error(f"reason must be 1..={MAX_REASON} chars, got {len(reason)}")
-        await engine.close_fact(space or default_space, fact_id, reason)
+        await engine.close_fact(chosen(space), fact_id, reason)
         return ok_text(f"closed fact {fact_id}: {reason}")
 
     return server
+
+
+# -- over HTTP ----------------------------------------------------------------
+
+
+#: Where an HTTP server listens when the caller names no port. Not the
+#: REST API's, so a host can run both.
+DEFAULT_HTTP_PORT = 8765
+
+#: The loopback names the SDK's own DNS-rebinding guard knows. A server
+#: on any loopback address is reachable under all of them from the same
+#: machine, so all three are allowed as Host.
+LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
+
+
+def is_loopback(host: str) -> bool:
+    """Whether a bind address is reachable only from this machine.
+    ``0.0.0.0`` and ``::`` are not: they are every address there is."""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() == "localhost"
+
+
+def _host_names(host: str) -> list[str]:
+    bracketed = f"[{host}]" if ":" in host else host
+    names = list(LOOPBACK_NAMES) if is_loopback(host) else []
+    return names + ([bracketed] if bracketed not in names else [])
+
+
+def check_bind(keys: Mapping[str, str], host: str) -> None:
+    """A server with no key answers whoever reaches it, so it may reach
+    no further than this machine."""
+    if not keys and not is_loopback(host):
+        raise InvalidInput(
+            f"serving MCP on {host} reaches beyond this machine and would answer anyone: "
+            "set SCONE_API_KEYS (or SCONE_API_KEY), or bind a loopback address")
+
+
+class HttpTransport:
+    """The MCP server over Streamable HTTP, one server per key holder.
+
+    A key names a space and a role, and that pair is fixed for the life
+    of a session: so rather than re-deciding it inside every tool call,
+    each holder gets its own MCP server, built with that space and that
+    role, and its own session table. A session id from one holder's
+    table means nothing in another's, which is what makes a stolen
+    session id useless to a key that did not open it.
+
+    Two keys that name the same space with the same role share a server:
+    they are the same authority, and nothing one may do is closed to the
+    other. Holders are taken from the key table as it stands when the
+    transport is built; a key added later with a space and role no
+    existing server covers is told to restart the server, rather than
+    served by a server built for somebody else.
+
+    The sessions themselves are opened when the host starts the app and
+    closed when it stops it, in the task that runs the lifespan -- a
+    session manager's task group must be left by the task that entered
+    it, so they cannot be opened lazily inside a request.
+    """
+
+    def __init__(self, engine: MemoryEngine, space: str, keys: Mapping[str, str], roles: Mapping[str, str],
+                 propose_below: Optional[float] = None, host: str = "127.0.0.1") -> None:
+        self.anonymous = not keys
+        check_bind(keys, host)
+        holders = [None] if self.anonymous else sorted(
+            {KeyHolder(where, roles.get(key, "full")) for key, where in keys.items()})
+        security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[f"{name}:*" for name in _host_names(host)] + _host_names(host),
+            allowed_origins=[f"http://{name}:*" for name in _host_names(host)],
+        ) if self.anonymous else None
+        self.servers = {
+            holder: create_server(engine, space if holder is None else holder.space, propose_below, holder)
+            for holder in holders
+        }
+        self.apps = {
+            holder: server.streamable_http_app(streamable_http_path="/mcp", host=host, transport_security=security)
+            for holder, server in self.servers.items()
+        }
+        self.sessions: Optional[AsyncExitStack] = None
+
+    async def __call__(self, scope: dict, receive, send) -> None:
+        if scope["type"] == "lifespan":
+            await self._lifespan(receive, send)
+            return
+        holder = None if self.anonymous else scope.get("state", {}).get(KEY_STATE)
+        app = self.apps.get(holder)
+        if self.sessions is None:
+            await _unavailable(scope, send, "the server is still starting")
+        elif app is None:
+            # A key the host added after this server was built, naming a
+            # space or role no server here covers.
+            await _unavailable(scope, send, "this key's space is not served yet; restart the server to pick it up")
+        else:
+            await app(scope, receive, send)
+
+    async def _lifespan(self, receive, send) -> None:
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                try:
+                    sessions = AsyncExitStack()
+                    for server in self.servers.values():
+                        await sessions.enter_async_context(server.session_manager.run())
+                except BaseException as e:  # the host reports it and stops; nothing is half-open
+                    await sessions.aclose()
+                    await send({"type": "lifespan.startup.failed", "message": str(e)})
+                    return
+                self.sessions = sessions
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                if self.sessions is not None:
+                    await self.sessions.aclose()
+                    self.sessions = None
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+
+
+async def _unavailable(scope: dict, send, reason: str) -> None:
+    if scope["type"] != "http":
+        await send({"type": "websocket.close", "code": 1013, "reason": reason})
+        return
+    body = json.dumps({"error": reason}).encode()
+    await send({"type": "http.response.start", "status": 503, "headers": [
+        (b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+    await send({"type": "http.response.body", "body": body})
+
+
+def http_app(engine: MemoryEngine, space: str = "default", keys: Optional[Mapping[str, str]] = None,
+             roles: Optional[Mapping[str, str]] = None, propose_below: Optional[float] = None,
+             host: str = "127.0.0.1"):
+    """The ASGI app that serves MCP over Streamable HTTP.
+
+    With keys, every request carries one and is refused before it
+    reaches a session without it. With none, the app serves as stdio
+    does -- no key, no narrowing of the space -- and may bind nothing
+    but a loopback address, since on a loopback address the caller is
+    someone already on this machine.
+    """
+    transport = HttpTransport(engine, space, keys or {}, roles or {}, propose_below, host)
+    if transport.anonymous:
+        return transport
+    return BearerKeys(transport, keys or {}, roles or {})
 
 
 # -- entry point --------------------------------------------------------------
@@ -897,10 +1111,65 @@ def create_server(engine: MemoryEngine, space: str = "default",
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m scone_memory.runtime.mcp",
-        description="Serve the memory engine over MCP stdio. Stores come from SCONE_* variables, as for the CLI.",
+        description="Serve the memory engine over MCP, on stdio or over HTTP. Stores come from SCONE_* "
+                    "variables, as for the CLI.",
     )
     parser.add_argument("--space", default="default", help="space used when a call names none (default: default)")
+    parser.add_argument("--transport", choices=("stdio", "http"), default="stdio",
+                        help="stdio for a client that starts this process (default), http for one that connects")
+    parser.add_argument("--host", default=None,
+                        help=f"address to listen on with --transport http (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=None,
+                        help=f"port to listen on with --transport http (default: {DEFAULT_HTTP_PORT})")
+    parser.add_argument("--allow-anonymous", action="store_true",
+                        help="serve HTTP with no key at all, as stdio does. Loopback only, and no key is issued")
     return parser
+
+
+#: The key a self-hosted server issues itself, kept beside the memory it
+#: opens so that moving the store moves the key with it.
+KEY_FILE = "mcp-key"
+
+
+def key_file(settings: Settings) -> Path:
+    return Path(settings.sqlite_path).expanduser().parent / KEY_FILE
+
+
+def self_hosted_key(settings: Settings, space: str, url: str, out) -> Settings:
+    """The key a host serving HTTP with none configured is given.
+
+    Self-hosting should not begin with inventing a secret and an
+    environment variable to put it in. The first start issues one, saves
+    it where only this user can read it, and prints it with the address
+    to paste it into; later starts read it back, so a client configured
+    once keeps working. A host that sets SCONE_API_KEYS never reaches
+    here, and neither does stdio, where the client is the process that
+    started this one and has nothing to prove.
+    """
+    path = key_file(settings)
+    saved = path.read_text().strip() if path.exists() else ""
+    if saved:
+        print(f"scone: serving with the key saved at {path} (delete it to issue a new one)", file=out)
+        if path.stat().st_mode & 0o077:
+            print(f"scone: warning: {path} is readable by others; other users of this machine can read this "
+                  f"key. chmod 600 it, or delete it for a new one.", file=out)
+        key = saved
+    else:
+        key = "sk-scone-" + secrets.token_urlsafe(32)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:  # an empty file, or another start won the race
+            os.chmod(path, 0o600)
+            handle = os.open(path, os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w") as writing:
+            writing.write(key + "\n")
+        print(f"scone: no SCONE_API_KEYS set, so this server issued a key for space {space!r}:\n"
+              f"  key:  {key}\n"
+              f"  file: {path} (yours alone; delete it to issue a new one)\n"
+              f"  url:  {url}\n"
+              f'  in an MCP client: "headers": {{"Authorization": "Bearer {key}"}}', file=out)
+    return replace(settings, keys={key: space}, roles={key: "full"})
 
 
 async def close_stores(engine: MemoryEngine) -> None:
@@ -917,11 +1186,36 @@ async def serve(settings: Settings, space: str) -> None:
         await close_stores(engine)
 
 
+async def serve_http(settings: Settings, space: str, host: str, port: int) -> None:
+    import uvicorn
+
+    engine = await build_engine(settings)
+    try:
+        app = http_app(engine, space, settings.keys, settings.roles, settings.mcp_propose_below, host)
+        await uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info")).serve()
+    finally:
+        await close_stores(engine)
+
+
 def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.transport == "stdio" and (args.host is not None or args.port is not None):
+        parser.error("--host and --port apply to --transport http")
     settings = settings_for_cli(os.environ if env is None else env)
     try:
-        asyncio.run(serve(settings, args.space))
+        if args.transport == "stdio":
+            asyncio.run(serve(settings, args.space))
+        else:
+            host, port = args.host or "127.0.0.1", args.port or DEFAULT_HTTP_PORT
+            if args.allow_anonymous:
+                settings = replace(settings, keys={}, roles={})
+            elif not settings.keys:
+                settings = self_hosted_key(settings, args.space, f"http://{host}:{port}/mcp", sys.stderr)
+            # Before the stores are opened: a server that must not listen
+            # should not have touched anything first.
+            check_bind(settings.keys, host)
+            asyncio.run(serve_http(settings, args.space, host, port))
     except SconeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
