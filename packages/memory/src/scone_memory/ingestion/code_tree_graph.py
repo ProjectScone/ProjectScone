@@ -45,7 +45,7 @@ from .code_tree import available, tree_declarations
 #: first. A note needs its colon and a flag needs a word boundary, as the
 #: line readers have them, so `Notes live here` is prose and not a note.
 _TAGGED = re.compile(r"^(?:(WHY|NOTE|RATIONALE)\s*:|(TODO|FIXME|HACK|XXX)\b\s*:?)\s*(.+?)\s*$", re.IGNORECASE)
-_MARKERS = re.compile(r"^[\s#/\-*\[=]+|[\s*/\-\]]+$")
+_MARKERS = re.compile(r"^[\s#/\-*\[=%]+|[\s*/\-\]]+$")  # %: Erlang comments its lines that way
 #: Ruby methods that load a file by a literal name.
 _RUBY_LOADS = frozenset({"require", "require_relative", "load"})
 #: Elixir: four words, each naming a module this file depends on.
@@ -69,6 +69,49 @@ def _literal(node: Any, raw: bytes) -> Optional[str]:
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         inner = text[1:-1]
         return None if ("#{" in inner or not inner) else inner
+    return None
+
+
+def _hcl_string(expression: Any, raw: bytes) -> Optional[str]:
+    """The literal a Terraform expression holds, or None when it is built
+    rather than written.
+
+    A written path is a ``literal_value`` holding a ``string_lit``. A
+    path with anything computed in it -- ``"./modules/${var.env}"``, a
+    function call, a variable -- is a ``template_expr`` or an
+    expression of another shape, and the walk below ends somewhere that
+    is not a string: those are refused by arriving as something else,
+    not by inspecting the text.
+    """
+    node = expression
+    while node is not None and node.type in {"expression", "literal_value"}:
+        node = next(iter(node.named_children), None)
+    if node is None or node.type != "string_lit":
+        return None
+    text = _text(node, raw).strip()
+    inner = text[1:-1] if len(text) >= 2 and text[0] == text[-1] == '"' else ""
+    return inner or None
+
+
+def _powershell_load(node: Any, raw: bytes) -> Optional[str]:
+    """What a PowerShell command loads: the module ``Import-Module``
+    names, or the script a dot-source runs. A path holding a variable is
+    not a name the tree can read, and a switch is not a module."""
+    invoked = _first_named(node, "command_invokation_operator")
+    if invoked is not None and _text(invoked, raw).strip() == ".":
+        expression = _first_named(node, "command_name_expr")
+        path = _text(expression, raw).strip().strip('"\'') if expression is not None else ""
+        return path if path and "$" not in path else None
+    name = _first_named(node, "command_name")
+    if name is None or _text(name, raw).strip().lower() != "import-module":
+        return None
+    elements = _first_named(node, "command_elements")
+    for element in (_named_children(elements) if elements is not None else []):
+        word = _text(element, raw).strip().strip('"\'')
+        if not word or element.type == "command_argument_sep":
+            continue
+        # `-Name Billing` names the same module twice; the switch is not it.
+        return None if word.startswith("-") else word
     return None
 
 
@@ -144,6 +187,34 @@ def _loads(grammar: str, root: Any, raw: bytes) -> Iterator[tuple[str, int]]:
                 yield target, node.start_point[0] + 1
         elif grammar == "solidity" and node.type == "import_directive":
             target = _literal(_first_named(node, "string"), raw)
+            if target:
+                yield target, node.start_point[0] + 1
+        elif grammar == "hcl" and node.type == "block":
+            # A module block's `source` is what this root depends on. Its
+            # version is not a module, and neither is a source built from
+            # a variable, which the tree holds as a template, not a name.
+            word = node.named_children[0] if node.named_children else None
+            if word is not None and word.type == "identifier" and _text(word, raw).strip() == "module":
+                body = _first_named(node, "body")
+                for attribute in (_named_children(body) if body is not None else []):
+                    if attribute.type != "attribute":
+                        continue
+                    name = _first_named(attribute, "identifier")
+                    if name is None or _text(name, raw).strip() != "source":
+                        continue
+                    target = _hcl_string(_first_named(attribute, "expression"), raw)
+                    if target:
+                        yield target, attribute.start_point[0] + 1
+        elif grammar == "erlang" and node.type in {"pp_include", "pp_include_lib"}:
+            target = _literal(_first_named(node, "string"), raw)
+            if target:
+                yield target, node.start_point[0] + 1
+        elif grammar == "erlang" and node.type == "import_attribute":
+            module = _first_named(node, "atom")
+            if module is not None:  # `-import(lists, [sum/1])`: the module, not the functions
+                yield _text(module, raw).strip(), node.start_point[0] + 1
+        elif grammar == "powershell" and node.type == "command":
+            target = _powershell_load(node, raw)
             if target:
                 yield target, node.start_point[0] + 1
 
