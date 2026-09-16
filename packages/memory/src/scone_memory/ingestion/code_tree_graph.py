@@ -48,6 +48,8 @@ _TAGGED = re.compile(r"^(?:(WHY|NOTE|RATIONALE)\s*:|(TODO|FIXME|HACK|XXX)\b\s*:?
 _MARKERS = re.compile(r"^[\s#/\-*\[=]+|[\s*/\-\]]+$")
 #: Ruby methods that load a file by a literal name.
 _RUBY_LOADS = frozenset({"require", "require_relative", "load"})
+#: Elixir: four words, each naming a module this file depends on.
+_ELIXIR_LOADS = frozenset({"alias", "import", "require", "use"})
 #: Shell words that read another file into the current one.
 _SHELL_SOURCES = frozenset({"source", "."})
 #: How far under a top-level statement a load is looked for.
@@ -126,6 +128,24 @@ def _loads(grammar: str, root: Any, raw: bytes) -> Iterator[tuple[str, int]]:
             word = _first_named(node, "bareword")
             if word is not None:
                 yield _text(word, raw), node.start_point[0] + 1
+        elif grammar == "elixir" and node.type == "call":
+            # alias, import, require and use each name a module this file
+            # depends on. Only an alias node is a name the tree can read:
+            # `alias unquote(mod)` names something only the compiler knows.
+            word = node.named_children[0] if node.named_children else None
+            if word is not None and word.type == "identifier" and _text(word, raw) in _ELIXIR_LOADS:
+                arguments = _first_named(node, "arguments")
+                named = next(iter(arguments.named_children), None) if arguments is not None else None
+                if named is not None and named.type == "alias":
+                    yield _text(named, raw), node.start_point[0] + 1
+        elif grammar == "proto" and node.type == "import":
+            target = _literal(_first_named(node, "string"), raw)
+            if target:  # `import public "x"` is an import like any other
+                yield target, node.start_point[0] + 1
+        elif grammar == "solidity" and node.type == "import_directive":
+            target = _literal(_first_named(node, "string"), raw)
+            if target:
+                yield target, node.start_point[0] + 1
 
 
 def _comments(root: Any, raw: bytes) -> Iterator[tuple[str, int]]:

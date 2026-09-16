@@ -33,7 +33,21 @@ TREE_SUFFIXES: dict[str, str] = {
     ".sh": "bash", ".bash": "bash", ".zsh": "bash",
     ".pl": "perl", ".pm": "perl",
     ".fish": "fish",
+    ".ex": "elixir", ".exs": "elixir",
+    ".proto": "proto",
+    ".sol": "solidity",
 }
+#: The words that open a definition in Elixir, and what each defines.
+#: Elixir has no definition node: ``defmodule`` and ``def`` are calls
+#: like ``IO.puts``, and only the word tells them apart.
+_ELIXIR_DEFINES: dict[str, str] = {"defmodule": "module", "def": "function", "defp": "function",
+                                   "defmacro": "macro", "defmacrop": "macro"}
+#: Where Protobuf keeps a definition's name: in a child node named for
+#: the kind, not in a ``name`` field.
+_PROTO_NAMES: dict[str, str] = {"message": "message_name", "enum": "enum_name",
+                                "service": "service_name", "rpc": "rpc_name"}
+#: A name Elixir builds at compile time is no name this reader can read.
+_UNREADABLE = frozenset({"unquote", "unquote_splicing"})
 #: Node types that hold a definition of what they name; a grammar's
 #: ``_definition``, ``_declaration`` and ``_item`` nodes, and the few
 #: bare words some grammars use (Ruby's ``class``, ``module``, ``method``).
@@ -72,6 +86,65 @@ def _is_definition(node_type: str) -> bool:
     return node_type in _DEFINITION_TYPES or node_type.endswith(_DEFINITION_ENDINGS)
 
 
+def _text_of(node: Any, raw: bytes) -> str:
+    return raw[node.start_byte:node.end_byte].decode("utf-8", errors="replace").strip()
+
+
+def _elixir_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
+    """What an Elixir call defines, if it defines anything.
+
+    ``defmodule Billing.Invoice do`` and ``def total(items) do`` are both
+    ``call`` nodes: the word is the call's own identifier, and the name
+    is the first argument -- an alias for a module, and for a function
+    either a call (``total(items)``) or a bare identifier (``rate``).
+    """
+    if node.type != "call" or not node.named_children:
+        return None
+    word = node.named_children[0]
+    kind = _ELIXIR_DEFINES.get(_text_of(word, raw)) if word.type == "identifier" else None
+    if kind is None:
+        return None
+    arguments = next((child for child in node.named_children if child.type == "arguments"), None)
+    first = next(iter(arguments.named_children), None) if arguments is not None else None
+    if first is None:
+        return None
+    if kind == "module":
+        return (_text_of(first, raw), kind) if first.type == "alias" else None
+    if first.type == "identifier":
+        return _text_of(first, raw), kind
+    if first.type == "call" and first.named_children:
+        named = first.named_children[0]
+        name = _text_of(named, raw)
+        # `def unquote(name)(args)` names something only the compiler knows.
+        return (name, kind) if named.type == "identifier" and name not in _UNREADABLE else None
+    return None
+
+
+def _declared(node: Any, raw: bytes, grammar: str) -> Optional[tuple[str, str]]:
+    """The name and kind this node declares in this grammar, or None.
+
+    Each grammar is read by a rule taken from its own tree. The generic
+    rule -- a definition-shaped node type with a ``name`` field -- reads
+    Ruby, Lua, Perl, shell, fish and Solidity. It does not read Elixir
+    (no definition node) or Protobuf (the name is a child, not a field),
+    and it misreads others badly enough that they are left out: R's
+    ``function_definition`` has the keyword ``function`` in its name
+    field, and Julia's functions have no name field at all.
+    """
+    if grammar == "elixir":
+        return _elixir_declared(node, raw)
+    if grammar == "proto":
+        child = _PROTO_NAMES.get(node.type)
+        if child is None:
+            return None
+        named = next((c for c in node.named_children if c.type == child), None)
+        return (_text_of(named, raw), node.type) if named is not None else None
+    if not _is_definition(node.type):
+        return None
+    named = node.child_by_field_name("name")
+    return (_text_of(named, raw), _kind(node.type)) if named is not None else None
+
+
 @lru_cache(maxsize=MAX_PARSED)
 def tree_declarations(content: str, grammar: str) -> tuple[Any, ...]:
     """Every named definition in source order, qualified by what holds it.
@@ -98,14 +171,12 @@ def tree_declarations(content: str, grammar: str) -> tuple[Any, ...]:
         if depth > MAX_DEPTH:
             return
         named = holders
-        if _is_definition(node.type):
-            name_node = node.child_by_field_name("name")
-            if name_node is not None:
-                name = raw[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace").strip()
-                if name:
-                    named = (*holders, name)
-                    found.append(Declaration(".".join(named), _kind(node.type), node.start_byte, node.end_byte,
-                                             node.start_point[0] + 1, node.end_point[0] + 1))
+        declared = _declared(node, raw, grammar)
+        if declared is not None and declared[0]:
+            name, kind = declared
+            named = (*holders, name)
+            found.append(Declaration(".".join(named), kind, node.start_byte, node.end_byte,
+                                     node.start_point[0] + 1, node.end_point[0] + 1))
         for child in node.named_children:
             walk(child, named, depth + 1)
 
