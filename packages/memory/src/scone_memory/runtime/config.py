@@ -51,6 +51,9 @@
                                    default, measured; the index is untouched either way
     SCONE_LEXICAL_EXACT_FORMS=0    turn off weighing a stem family at the query word's own idf in a passage that
                                    holds that word (still one term); on by default, measured
+    SCONE_LANE_TRUST=on            decide that voice per query from the shape of the vector lane's own
+                                   scores, between SCONE_VECTOR_WEIGHT and the text lane's 1.0 (off by
+                                   default; every recall event records the voice and what was read)
     SCONE_VECTOR_WEIGHT=0.5        the vector lane's voice in rank fusion against the text lane's 1.0 (a number
                                    above 0 and at most 4); unset, a hashed-token embedder gets 0.01 and any
                                    other embedder 1.0, measured (0.25 was the hashed default before)
@@ -258,6 +261,8 @@ class Settings:
     #: query's own word weighs its family at that word's idf.
     lexical_exact_forms: bool = True
     vector_weight: Optional[float] = None
+    #: Whether the vector lane's voice is decided per query from its own scores.
+    lane_trust: bool = False
     many_valued: tuple[str, ...] = ()
     relation_inverse: tuple[str, ...] = ()
     relation_symmetric: tuple[str, ...] = ()
@@ -595,6 +600,8 @@ class Settings:
             lexical_exact_forms=(parse_flag("SCONE_LEXICAL_EXACT_FORMS", env["SCONE_LEXICAL_EXACT_FORMS"])
                                  if env.get("SCONE_LEXICAL_EXACT_FORMS") else True),
             vector_weight=_vector_weight(env.get("SCONE_VECTOR_WEIGHT")),
+            lane_trust=(parse_flag("SCONE_LANE_TRUST", env["SCONE_LANE_TRUST"])
+                        if "SCONE_LANE_TRUST" in env else False),
             relation_inverse=tuple(item.strip() for item in env.get("SCONE_RELATION_INVERSE", "").split(",")
                                    if item.strip()),
             relation_symmetric=tuple(item.strip() for item in env.get("SCONE_RELATION_SYMMETRIC", "").split(",")
@@ -967,7 +974,7 @@ ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget
                    "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
                    "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "question_lane",
                    "lexical_stems", "lexical_exact_forms",
-                   "vector_weight", "recency_weight", "recency_half_life_days", "feedback_weight")
+                   "vector_weight", "lane_trust", "recency_weight", "recency_half_life_days", "feedback_weight")
 #: Settings carried into an engine that are read from a file, not a value.
 FILE_SETTINGS = ("abstention_policy", "synonyms")
 #: Settings carried into an engine through a policy they build.
@@ -1094,6 +1101,7 @@ async def build_in_process_engine(settings: Settings, embedder):
         synonyms=build_synonyms(settings),
         context_lane=settings.context_lane, question_lane=settings.question_lane,
         lexical_stems=settings.lexical_stems, lexical_exact_forms=settings.lexical_exact_forms,
+        lane_trust=settings.lane_trust,
         vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
         profile_bucket_rules=build_profile_bucket_rules(settings),
@@ -1357,6 +1365,7 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         synonyms=build_synonyms(settings),
         context_lane=settings.context_lane,
         question_lane=settings.question_lane, lexical_stems=settings.lexical_stems,
+        lane_trust=settings.lane_trust,
         lexical_exact_forms=settings.lexical_exact_forms, vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
         profile_bucket_rules=build_profile_bucket_rules(settings),
