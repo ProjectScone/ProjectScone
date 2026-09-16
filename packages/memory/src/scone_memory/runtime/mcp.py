@@ -8,10 +8,17 @@ one unchanged. Invalid input comes back as a tool result with
 reason and correct the call.
 
     python -m scone_memory.runtime.mcp --space default
+    python -m scone_memory.runtime.mcp --transport http --space default
 
 Stores come from the environment exactly as for the CLI (see
 ``scone_memory.runtime.config``); with nothing set, memory persists to SQLite at
 ~/.scone-memory/memory.db.
+
+Over stdio the client is the process that started this one, so there is
+no key and a call may name any space. Over HTTP every request carries a
+bearer key from the table the REST API reads, and that key fixes both
+the space the tools reach and whether they may write; a host with no key
+configured is issued one on the first start. See docs/mcp-server.md.
 
 Built on mcp 2.x, where the class the 1.x SDK called ``FastMCP`` is
 ``mcp.server.mcpserver.MCPServer``.
