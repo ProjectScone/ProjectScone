@@ -36,6 +36,9 @@ TREE_SUFFIXES: dict[str, str] = {
     ".ex": "elixir", ".exs": "elixir",
     ".proto": "proto",
     ".sol": "solidity",
+    ".tf": "hcl", ".tfvars": "hcl", ".hcl": "hcl",
+    ".erl": "erlang", ".hrl": "erlang",
+    ".ps1": "powershell", ".psm1": "powershell",
 }
 #: The words that open a definition in Elixir, and what each defines.
 #: Elixir has no definition node: ``defmodule`` and ``def`` are calls
@@ -120,6 +123,43 @@ def _elixir_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
     return None
 
 
+def _hcl_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
+    """What a Terraform block declares: its labels, under its type.
+
+    ``resource "aws_s3_bucket" "logs"`` is the bucket everything else
+    writes ``aws_s3_bucket.logs`` to reach, so the labels joined by a dot
+    are the name and the block's own word is the kind. A block with no
+    labels -- ``terraform``, ``locals``, a nested ``lifecycle`` -- names
+    nothing and declares nothing.
+    """
+    if node.type != "block" or not node.named_children:
+        return None
+    word = node.named_children[0]
+    if word.type != "identifier":
+        return None
+    labels = [_quoted(child, raw) for child in node.named_children if child.type == "string_lit"]
+    named = [label for label in labels if label]
+    return (".".join(named), _text_of(word, raw)) if named else None
+
+
+def _erlang_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
+    """Erlang's module attribute names the module; a function declaration
+    is named by the atom its first clause opens with."""
+    if node.type == "module_attribute":
+        atom = next((c for c in node.named_children if c.type == "atom"), None)
+        return (_text_of(atom, raw), "module") if atom is not None else None
+    if node.type == "fun_decl":
+        clause = next((c for c in node.named_children if c.type == "function_clause"), None)
+        atom = next((c for c in clause.named_children if c.type == "atom"), None) if clause is not None else None
+        return (_text_of(atom, raw), "function") if atom is not None else None
+    return None
+
+
+def _quoted(node: Any, raw: bytes) -> str:
+    """The text inside a quoted literal, without its quotes."""
+    return _text_of(node, raw).strip().strip('"\'')
+
+
 def _declared(node: Any, raw: bytes, grammar: str) -> Optional[tuple[str, str]]:
     """The name and kind this node declares in this grammar, or None.
 
@@ -133,6 +173,15 @@ def _declared(node: Any, raw: bytes, grammar: str) -> Optional[tuple[str, str]]:
     """
     if grammar == "elixir":
         return _elixir_declared(node, raw)
+    if grammar == "hcl":
+        return _hcl_declared(node, raw)
+    if grammar == "erlang":
+        return _erlang_declared(node, raw)
+    if grammar == "powershell":
+        if node.type != "function_statement":
+            return None
+        named = next((c for c in node.named_children if c.type == "function_name"), None)
+        return (_text_of(named, raw), "function") if named is not None else None
     if grammar == "proto":
         child = _PROTO_NAMES.get(node.type)
         if child is None:

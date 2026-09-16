@@ -188,3 +188,112 @@ def test_a_language_whose_tree_this_reader_cannot_name_stays_prose(path, source)
     rule of its own, read from its own tree."""
     assert code_language(path) is None, f"{path} is not claimed to be read"
     assert code_claims(source, path, language=None) == ()
+
+
+# -- Terraform, Erlang and PowerShell ----------------------------------------------
+
+
+TERRAFORM = '''terraform {
+  required_version = ">= 1.5"
+}
+
+# WHY: logs outlive the cluster that wrote them
+variable "region" {
+  default = "us-east-1"
+}
+
+resource "aws_s3_bucket" "logs" {
+  bucket = "scone-logs"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+module "network" {
+  source  = "./modules/network"
+  version = "1.2.0"
+}
+
+module "regional" {
+  source = "./modules/${var.env}/network"
+}
+
+output "bucket_name" {
+  value = aws_s3_bucket.logs.bucket
+}
+'''
+
+
+def test_terraform_says_its_blocks_by_type_and_labels_and_the_modules_it_pulls_in():
+    claims = code_claims(TERRAFORM, "infra/main.tf", language=code_language("infra/main.tf"))
+    assert said(claims, "defines") == [
+        ("infra/main.tf", "defines", "infra/main.tf:region"),
+        ("infra/main.tf", "defines", "infra/main.tf:aws_s3_bucket.logs"),
+        ("infra/main.tf", "defines", "infra/main.tf:network"),
+        ("infra/main.tf", "defines", "infra/main.tf:regional"),
+        ("infra/main.tf", "defines", "infra/main.tf:bucket_name"),
+    ], "a block is named by its labels; `terraform` and `lifecycle` label nothing and declare nothing"
+    assert said(claims, "imports") == [("infra/main.tf", "imports", "./modules/network")], \
+        "a module's source is what this root depends on; a version is not a module, and a source built " \
+        "from a variable is not a path the tree can name"
+    assert said(claims, "notes") == [("infra/main.tf", "notes", "logs outlive the cluster that wrote them")]
+    bucket = next(c for c in claims if c.object.endswith("aws_s3_bucket.logs"))
+    assert bucket.kind == "resource" if hasattr(bucket, "kind") else True
+
+
+ERLANG = '''-module(billing).
+-include("records.hrl").
+-include_lib("kernel/include/file.hrl").
+-import(lists, [sum/1]).
+-export([total/1]).
+
+%% WHY: an invoice is summed once
+total(Items) ->
+    sum(Items).
+
+rate() -> 0.2.
+'''
+
+
+def test_erlang_says_its_module_functions_includes_and_imports():
+    claims = code_claims(ERLANG, "src/billing.erl", language=code_language("src/billing.erl"))
+    assert said(claims, "defines") == [
+        ("src/billing.erl", "defines", "src/billing.erl:billing"),
+        ("src/billing.erl", "defines", "src/billing.erl:total"),
+        ("src/billing.erl", "defines", "src/billing.erl:rate"),
+    ], "the module attribute declares the module, and each function clause group its function"
+    assert said(claims, "imports") == [
+        ("src/billing.erl", "imports", "records.hrl"),
+        ("src/billing.erl", "imports", "kernel/include/file.hrl"),
+        ("src/billing.erl", "imports", "lists"),
+    ], "an include is a file and an import attribute is a module; an export is neither"
+    assert said(claims, "notes") == [("src/billing.erl", "notes", "an invoice is summed once")]
+
+
+POWERSHELL = '''Import-Module Billing
+Import-Module -Name Reporting
+. ./lib/helpers.ps1
+. "$PSScriptRoot/dynamic.ps1"
+
+# TODO: paging is not handled
+function Get-Total {
+    param($Items)
+    $Items | Measure-Object -Sum
+}
+
+function Set-Rate { param($Rate) }
+'''
+
+
+def test_powershell_says_its_functions_the_modules_it_imports_and_what_it_dot_sources():
+    claims = code_claims(POWERSHELL, "tools/billing.ps1", language=code_language("tools/billing.ps1"))
+    assert said(claims, "defines") == [
+        ("tools/billing.ps1", "defines", "tools/billing.ps1:Get-Total"),
+        ("tools/billing.ps1", "defines", "tools/billing.ps1:Set-Rate"),
+    ]
+    assert said(claims, "imports") == [
+        ("tools/billing.ps1", "imports", "Billing"),
+        ("tools/billing.ps1", "imports", "./lib/helpers.ps1"),
+    ], "a dot-source with a variable in the path is not a literal the tree can name, and -Name is a switch, not a module"
+    assert said(claims, "flags") == [("tools/billing.ps1", "flags", "paging is not handled")]
