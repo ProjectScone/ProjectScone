@@ -510,7 +510,7 @@ class EvidenceToolLoop:
             transcript.append({'role': 'tool', 'tool_call_id': call.id, 'content': payload})
             packet = json.loads(payload)
             if trajectory is not None and origin == 'model':
-                if call.name not in {'search_memory', 'trace_memory', 'read_memory', 'compute_memory'} or skipped:
+                if call.name in self._custom_tools or skipped:
                     round_comparable = False
                 else:
                     actual = observed_payload if packet['status'] == 'prepared' and observed_payload is not None else payload

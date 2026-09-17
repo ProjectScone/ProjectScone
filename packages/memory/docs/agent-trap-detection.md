@@ -37,12 +37,14 @@ except AgentTrapDetected as intervention:
 ```
 
 Each completed model tool round is one graph observation. Comparison includes the
-read-only memory tools, their JSON arguments and returned observations. Object key
+read-only memory tools or rejected unknown tools, their JSON arguments and returned observations. Object key
 order and provider call IDs do not create new observations. Changed arguments or
 results do. Search compaction and cached read presentation compare against their
 underlying evidence, so formatting a previous result as a reference cannot hide
 repetition. A round containing an application tool breaks the comparable sequence:
 identical application output does not prove that the application made no progress.
+Repeated unknown-tool rejections can form a trap because no application handler
+was invoked; inventing a new call ID does not make the rejected operation new.
 
 The detector checks exact repeated suffixes, including multi-node cycles. Three
 visits to the same node at unrelated points are not automatically a trap. It does

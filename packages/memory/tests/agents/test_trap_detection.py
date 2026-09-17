@@ -215,3 +215,16 @@ def test_graph_memory_is_bounded_to_the_native_round_limit():
     with pytest.raises(ValueError, match='round limit'):
         graph.observe(b'seventeenth')
     assert len(graph.snapshot().nodes) == 16
+
+
+async def test_repeated_unknown_tool_failures_stop_without_executing_a_tool(memory):
+    from scone_memory.agents.evidence_loop import ToolCall
+
+    model = Script(*(ToolStep(calls=(ToolCall(id='missing-' + str(i), name='imaginary_tool',
+                                              arguments={'query': 'private request'}),))
+                     for i in range(2)), ToolStep(content='Invented success.'))
+    with pytest.raises(RuntimeError, match='agent_no_progress') as caught:
+        await EvidenceToolLoop(model, binding(memory), limits=ToolLoopLimits(max_repeated_rounds=2)).run(
+            [{'role': 'user', 'content': 'Find the answer.'}])
+    assert len(model.requests) == 2 and caught.value.graph.path == (1, 1)
+    assert 'imaginary_tool' not in repr(caught.value.graph)
