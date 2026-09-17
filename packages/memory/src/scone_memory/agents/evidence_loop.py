@@ -606,6 +606,7 @@ class EvidenceToolLoop:
                                             allow_nan=False, separators=(',', ':')).encode('utf-8')
                                  if round_comparable else None)
                     trap = trajectory.observe(signature)
+                    check_deadline()
                     if trap is not None:
                         raise AgentTrapDetected(trap)
                 if direct_result is not None:

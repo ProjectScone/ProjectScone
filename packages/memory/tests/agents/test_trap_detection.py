@@ -228,3 +228,33 @@ async def test_repeated_unknown_tool_failures_stop_without_executing_a_tool(memo
             [{'role': 'user', 'content': 'Find the answer.'}])
     assert len(model.requests) == 2 and caught.value.graph.path == (1, 1)
     assert 'imaginary_tool' not in repr(caught.value.graph)
+
+
+@pytest.mark.parametrize('interruption', ['deadline', 'cancel'])
+async def test_intervention_respects_deadline_and_cancellation_after_analysis(memory, monkeypatch, interruption):
+    import asyncio
+    import time
+    from types import SimpleNamespace
+    from scone_memory.agents import evidence_loop
+    from scone_memory.agents.traps import ObservationGraph
+
+    now = [time.monotonic()]
+    monkeypatch.setattr(evidence_loop, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    original = ObservationGraph.observe
+
+    def interrupted(graph, observation):
+        result = original(graph, observation)
+        if result is not None:
+            if interruption == 'deadline':
+                now[0] += 121
+            else:
+                asyncio.current_task().cancel()
+        return result
+
+    monkeypatch.setattr(ObservationGraph, 'observe', interrupted)
+    model = Script(search('first'), search('second'))
+    task = asyncio.create_task(EvidenceToolLoop(model, binding(memory),
+        limits=ToolLoopLimits(max_repeated_rounds=2)).run([{'role': 'user', 'content': 'Find evidence.'}]))
+    with pytest.raises(TimeoutError if interruption == 'deadline' else asyncio.CancelledError):
+        await task
+    assert len(model.requests) == 2
