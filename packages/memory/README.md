@@ -19,6 +19,8 @@ came from; they do not establish that a generated answer is correct.
 
 See [named agents and model selection](docs/agent-models.md) for explicit per-agent
 LLM choices, scoped tool execution and workflow checkpoint identity.
+[Agent trap detection](docs/agent-trap-detection.md) can stop repeated read-only
+observations and expose the repetition graph for host-directed intervention.
 
 ## Install
 
