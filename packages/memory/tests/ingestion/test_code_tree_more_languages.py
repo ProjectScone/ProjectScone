@@ -176,16 +176,17 @@ def test_solidity_says_its_contracts_functions_and_imports():
 
 
 @pytest.mark.parametrize("path, source", [
-    ("stats.R", "total <- function(items) { sum(items) }\n"),
-    ("Billing.jl", "module Billing\nfunction total(items)\n  sum(items)\nend\nend\n"),
     ("billing.hs", "module Billing where\ntotal :: [Int] -> Int\ntotal = sum\n"),
     ("core.clj", "(defn total [items] (reduce + items))\n"),
-], ids=["r", "julia", "haskell", "clojure"])
+    ("billing.ml", "module Billing = struct\n  let total items = 0\nend\n"),
+    ("Invoice.groovy", "class Invoice { int total(List items) { 0 } }\n"),
+], ids=["haskell", "clojure", "ocaml", "groovy"])
 def test_a_language_whose_tree_this_reader_cannot_name_stays_prose(path, source):
-    """Read by the rule that reads Ruby, R yields a declaration called
-    `function` and Julia loses every function it has. A wrong name in the
-    graph is worse than no name, so these say nothing until each has a
-    rule of its own, read from its own tree."""
+    """The generic rule finds nothing in these four, and a rule of their
+    own has not been written and checked against their trees. A wrong
+    name in the graph is worse than no name, so they say nothing: this
+    is what stops a later `just add the suffix`. R and Julia were here
+    until each got the rule its own tree asks for."""
     assert code_language(path) is None, f"{path} is not claimed to be read"
     assert code_claims(source, path, language=None) == ()
 
@@ -297,3 +298,88 @@ def test_powershell_says_its_functions_the_modules_it_imports_and_what_it_dot_so
         ("tools/billing.ps1", "imports", "./lib/helpers.ps1"),
     ], "a dot-source with a variable in the path is not a literal the tree can name, and -Name is a switch, not a module"
     assert said(claims, "flags") == [("tools/billing.ps1", "flags", "paging is not handled")]
+
+
+# -- Julia and R, the two the generic rule misreads ---------------------------------
+
+
+JULIA = '''module Billing
+
+using Statistics
+import Dates: now
+include("rates.jl")
+
+# WHY: an invoice is summed once
+function total(items)
+    sum(items)
+end
+
+struct Invoice
+    id::Int
+end
+
+rate(x) = x * 0.2
+
+const CEILING = 10_000
+
+function apply!(invoice)
+    invoice.id = 7
+end
+
+end
+'''
+
+
+def test_julia_says_its_module_functions_structs_and_what_it_pulls_in():
+    claims = code_claims(JULIA, "src/Billing.jl", language=code_language("src/Billing.jl"))
+    assert said(claims, "defines") == [
+        ("src/Billing.jl", "defines", "src/Billing.jl:Billing"),
+        ("src/Billing.jl:Billing", "defines", "src/Billing.jl:Billing.total"),
+        ("src/Billing.jl:Billing", "defines", "src/Billing.jl:Billing.Invoice"),
+        ("src/Billing.jl:Billing", "defines", "src/Billing.jl:Billing.rate"),
+        ("src/Billing.jl:Billing", "defines", "src/Billing.jl:Billing.apply!"),
+    ], ("a function's name is in its signature, a struct's in its type head, and `rate(x) = ...` is a function "
+        "too -- while `const CEILING = 10_000` assigns a value and `invoice.id = 7` assigns a field, and "
+        "neither declares anything")
+    assert said(claims, "imports") == [
+        ("src/Billing.jl", "imports", "Statistics"),
+        ("src/Billing.jl", "imports", "Dates"),
+        ("src/Billing.jl", "imports", "rates.jl"),
+    ], "using and import name modules, include names a file"
+    assert said(claims, "notes") == [("src/Billing.jl:Billing", "notes", "an invoice is summed once")]
+
+
+R = '''library(stats)
+require(utils)
+source("helpers.R")
+source(file.path(root, "dynamic.R"))
+
+# TODO: weights are not applied
+total <- function(items) {
+  sum(items)
+}
+
+rate = function() 0.2
+
+threshold <- 10
+'''
+
+
+def test_r_names_a_function_after_what_it_is_assigned_to_never_after_the_keyword():
+    """R's own `function_definition` node carries the keyword `function`
+    in its name field, so the rule that reads Ruby would declare every
+    function in the file as `function`. The name is the thing it is
+    assigned to."""
+    claims = code_claims(R, "R/total.R", language=code_language("R/total.R"))
+    assert said(claims, "defines") == [
+        ("R/total.R", "defines", "R/total.R:total"),
+        ("R/total.R", "defines", "R/total.R:rate"),
+    ], "both assignment arrows define; a value that is not a function does not"
+    assert not any("function" == object_.rsplit(":", 1)[-1] for _, _, object_ in said(claims, "defines")), \
+        "the keyword is never the name"
+    assert said(claims, "imports") == [
+        ("R/total.R", "imports", "stats"),
+        ("R/total.R", "imports", "utils"),
+        ("R/total.R", "imports", "helpers.R"),
+    ], "library and require name packages, source names a file, and a path built by a call is not a name"
+    assert said(claims, "flags") == [("R/total.R", "flags", "weights are not applied")]

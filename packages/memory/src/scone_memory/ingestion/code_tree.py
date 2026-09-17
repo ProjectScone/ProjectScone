@@ -39,6 +39,8 @@ TREE_SUFFIXES: dict[str, str] = {
     ".tf": "hcl", ".tfvars": "hcl", ".hcl": "hcl",
     ".erl": "erlang", ".hrl": "erlang",
     ".ps1": "powershell", ".psm1": "powershell",
+    ".jl": "julia",
+    ".r": "r", ".R": "r",
 }
 #: The words that open a definition in Elixir, and what each defines.
 #: Elixir has no definition node: ``defmodule`` and ``def`` are calls
@@ -155,6 +157,51 @@ def _erlang_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
     return None
 
 
+def _first(node: Any, kind: str) -> Optional[Any]:
+    return next((child for child in node.named_children if child.type == kind), None)
+
+
+def _julia_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
+    """Julia keeps a function's name inside its signature and a struct's
+    inside its type head, and neither node has a name field. A short
+    definition (``rate(x) = x * 0.2``) is an assignment whose left side
+    is the call being defined."""
+    if node.type == "module_definition":
+        name = _first(node, "identifier")
+        return (_text_of(name, raw), "module") if name is not None else None
+    if node.type in {"function_definition", "macro_definition"}:
+        signature = _first(node, "signature")
+        called = _first(signature, "call_expression") if signature is not None else None
+        name = _first(called, "identifier") if called is not None else None
+        return (_text_of(name, raw), node.type[:-len("_definition")]) if name is not None else None
+    if node.type == "struct_definition":
+        head = _first(node, "type_head")
+        name = _first(head, "identifier") if head is not None else None
+        return (_text_of(name, raw), "struct") if name is not None else None
+    if node.type == "assignment":
+        called = next(iter(node.named_children), None)
+        name = _first(called, "identifier") if called is not None and called.type == "call_expression" else None
+        return (_text_of(name, raw), "function") if name is not None else None
+    return None
+
+
+def _r_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
+    """R names a function by what it is assigned to.
+
+    Its own ``function_definition`` node carries the keyword ``function``
+    in the name field, so the generic rule would declare every function
+    in a file as ``function``. The name is the identifier on the other
+    side of the arrow, and a binding whose right side is not a function
+    is a value, not a declaration.
+    """
+    if node.type != "binary_operator" or len(node.named_children) < 2:
+        return None
+    left, right = node.named_children[0], node.named_children[1]
+    if left.type != "identifier" or right.type != "function_definition":
+        return None
+    return _text_of(left, raw), "function"
+
+
 def _quoted(node: Any, raw: bytes) -> str:
     """The text inside a quoted literal, without its quotes."""
     return _text_of(node, raw).strip().strip('"\'')
@@ -177,6 +224,10 @@ def _declared(node: Any, raw: bytes, grammar: str) -> Optional[tuple[str, str]]:
         return _hcl_declared(node, raw)
     if grammar == "erlang":
         return _erlang_declared(node, raw)
+    if grammar == "julia":
+        return _julia_declared(node, raw)
+    if grammar == "r":
+        return _r_declared(node, raw)
     if grammar == "powershell":
         if node.type != "function_statement":
             return None
