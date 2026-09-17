@@ -196,6 +196,9 @@ def _r_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
     """
     if node.type != "binary_operator" or len(node.named_children) < 2:
         return None
+    operator = node.child_by_field_name("operator")
+    if operator is None or _text_of(operator, raw) not in {"<-", "<<-", "="}:
+        return None
     left, right = node.named_children[0], node.named_children[1]
     if left.type != "identifier" or right.type != "function_definition":
         return None
