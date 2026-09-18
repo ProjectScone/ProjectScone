@@ -54,6 +54,10 @@ _ELIXIR_LOADS = frozenset({"alias", "import", "require", "use"})
 _SHELL_SOURCES = frozenset({"source", "."})
 #: How far under a top-level statement a load is looked for.
 _LOAD_DEPTH = 5
+#: What a grammar calls a comment. Most say ``comment``; Julia says
+#: ``line_comment``, and a reader that knew only the first read no note
+#: in a Julia file at all.
+_COMMENT_NODES = frozenset({"comment", "line_comment", "block_comment"})
 
 
 def _text(node: Any, raw: bytes) -> str:
@@ -90,6 +94,37 @@ def _hcl_string(expression: Any, raw: bytes) -> Optional[str]:
         return None
     text = _text(node, raw).strip()
     inner = text[1:-1] if len(text) >= 2 and text[0] == text[-1] == '"' else ""
+    return inner or None
+
+
+#: R: two words naming a package, and one naming a file.
+_R_PACKAGES = frozenset({"library", "require"})
+
+
+def _r_load(node: Any, raw: bytes) -> Optional[str]:
+    """What an R call loads: the package ``library``/``require`` names,
+    or the file ``source`` reads. A path a call builds is not a name."""
+    callee = next(iter(node.named_children), None)
+    if callee is None or callee.type != "identifier":
+        return None
+    word = _text(callee, raw).strip()
+    if word not in _R_PACKAGES and word != "source":
+        return None
+    arguments = _first_named(node, "arguments")
+    argument = _first_named(arguments, "argument") if arguments is not None else None
+    inner = next(iter(argument.named_children), None) if argument is not None else None
+    if inner is None:
+        return None
+    if word == "source":
+        # `source("helpers.R")` reads a file; `source(file.path(...))`
+        # builds its path, and the tree holds the call, not the path.
+        return _quoted_text(inner, raw) if inner.type == "string" else None
+    return _text(inner, raw).strip() if inner.type in {"identifier", "string"} else None
+
+
+def _quoted_text(node: Any, raw: bytes) -> Optional[str]:
+    text = _text(node, raw).strip()
+    inner = text[1:-1] if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'" else ""
     return inner or None
 
 
@@ -213,6 +248,25 @@ def _loads(grammar: str, root: Any, raw: bytes) -> Iterator[tuple[str, int]]:
             module = _first_named(node, "atom")
             if module is not None:  # `-import(lists, [sum/1])`: the module, not the functions
                 yield _text(module, raw).strip(), node.start_point[0] + 1
+        elif grammar == "julia" and node.type in {"using_statement", "import_statement"}:
+            # `using Statistics`, `import Dates: now` -- the module, not
+            # the names taken out of it.
+            named = next(iter(node.named_children), None)
+            if named is not None and named.type == "selected_import":
+                named = next(iter(named.named_children), None)
+            if named is not None and named.type == "identifier":
+                yield _text(named, raw).strip(), node.start_point[0] + 1
+        elif grammar == "julia" and node.type == "call_expression":
+            callee = next(iter(node.named_children), None)
+            if callee is not None and callee.type == "identifier" and _text(callee, raw).strip() == "include":
+                target = _literal(_first_named(_first_named(node, "argument_list"), "string_literal")
+                                  if _first_named(node, "argument_list") is not None else None, raw)
+                if target:
+                    yield target, node.start_point[0] + 1
+        elif grammar == "r" and node.type == "call":
+            target = _r_load(node, raw)
+            if target:
+                yield target, node.start_point[0] + 1
         elif grammar == "powershell" and node.type == "command":
             target = _powershell_load(node, raw)
             if target:
@@ -226,7 +280,7 @@ def _comments(root: Any, raw: bytes) -> Iterator[tuple[str, int]]:
     stack = [root]
     while stack:
         node = stack.pop()
-        if node.type == "comment":
+        if node.type in _COMMENT_NODES:
             for offset, text in enumerate(_text(node, raw).splitlines()):
                 yield text, node.start_point[0] + 1 + offset
             continue
