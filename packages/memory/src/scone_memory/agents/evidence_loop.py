@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from ..integrations.scoped_tools import ScopedMemoryTools
 from ..integrations.read_memory import ReadMemoryArgs
@@ -26,6 +26,7 @@ from .turn_journal import ToolTurnJournal, TurnJournalError, TurnJournalPaused
 from .workflow import JSONValue
 from .public_text import PublicText
 from .usage import ModelTokenUsage, ToolTokenUsage
+from .traps import AgentTrapDetected, ObservationGraph
 
 
 if TYPE_CHECKING:
@@ -54,6 +55,14 @@ class ToolLoopLimits(BaseModel):
     max_transcript_bytes: int = Field(default=256000, ge=1024, le=1000000)
     max_tool_bytes: int = Field(default=128000, ge=512, le=512000)
     max_reply_bytes: int = Field(default=16000, ge=1, le=64000)
+    max_repeated_rounds: int | None = Field(default=None, ge=2, le=16)
+
+    @model_serializer(mode='wrap')
+    def serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        result = cast(dict[str, object], handler(self))
+        if self.max_repeated_rounds is None:
+            result.pop('max_repeated_rounds', None)
+        return result
 
 
 class ToolModel(Protocol):
@@ -288,6 +297,9 @@ class EvidenceToolLoop:
         searches: dict[str, tuple[PreparedToolEvidence, int]] = {}
         outcomes: list[ToolOutcome] = []
         calls = rounds = model_calls = tool_bytes = 0
+        trajectory = ObservationGraph(limits.max_repeated_rounds) if limits.max_repeated_rounds else None
+        round_observations: list[object] = []
+        round_comparable = True
         if journal is not None:
             journal.bind_configuration(cast(JSONValue, {'messages': messages,
                 'memory': json.loads(memory_binding) if memory_binding is not None else None, 'tools': [tool.info() for tool in self._custom_tools.values()],
@@ -341,7 +353,8 @@ class EvidenceToolLoop:
                                   usage=ToolTokenUsage(calls=tuple(usage)))
 
         async def record_call(call: ToolCall, origin: Literal['host', 'model'], *, skipped: bool = False) -> str | None:
-            nonlocal calls, tool_bytes
+            nonlocal calls, tool_bytes, round_comparable
+            observed_payload: str | None = None
             name = (call.name if call.name in ('search_memory', 'trace_memory', 'read_memory', 'compute_memory')
                     or call.name in self._custom_tools else 'unknown_tool')
             if self._progress is not None:
@@ -428,6 +441,7 @@ class EvidenceToolLoop:
                         if not valid:
                             raise RuntimeError('tool evidence changed before reuse')
                         reused = True
+                        observed_payload = cached[0].payload
                         payload = _json({'ok':True, 'status':'prepared', 'verified_accuracy':False,
                             'reuse':{'tool_result_number':cached[1], 'new_evidence_count':0},
                             'message':'These passages are already in an earlier tool result above. '
@@ -459,6 +473,7 @@ class EvidenceToolLoop:
                             check_deadline()
                         journal_reused = journal is not None and not observation.dispatched
                         payload = evidence.payload
+                        observed_payload = payload
                         repeated = (searches.get(payload) if self._compact_search_results
                                     and call.name == 'search_memory' and evidence.evidence_ids else None)
                         if repeated is not None:
@@ -494,6 +509,13 @@ class EvidenceToolLoop:
                 raise RuntimeError('tool output byte limit')
             transcript.append({'role': 'tool', 'tool_call_id': call.id, 'content': payload})
             packet = json.loads(payload)
+            if trajectory is not None and origin == 'model':
+                if call.name in self._custom_tools or skipped:
+                    round_comparable = False
+                else:
+                    actual = observed_payload if packet['status'] == 'prepared' and observed_payload is not None else payload
+                    round_observations.append({'tool': call.name, 'arguments': call.arguments,
+                                               'observation': json.loads(actual)})
             error = packet.get('error')
             codes = {'unknown_tool', 'invalid_arguments', 'timeout', 'store_error', 'retrieval_failed',
                      'output_bytes', 'evidence_unavailable', 'tool_budget', 'tool_output_budget',
@@ -572,10 +594,21 @@ class EvidenceToolLoop:
                     {'id': call.id, 'type': 'function', 'function': {'name': call.name, 'arguments': _json(call.arguments)}}
                     for call in step.calls]})
                 direct_result: str | None = None
+                round_observations = []
+                round_comparable = True
                 for call in step.calls:
                     result = await record_call(call, 'model', skipped=direct_result is not None)
                     if result is not None:
                         direct_result = result
+                check_deadline()
+                if trajectory is not None:
+                    signature = (json.dumps(round_observations, sort_keys=True, ensure_ascii=False,
+                                            allow_nan=False, separators=(',', ':')).encode('utf-8')
+                                 if round_comparable else None)
+                    trap = trajectory.observe(signature)
+                    check_deadline()
+                    if trap is not None:
+                        raise AgentTrapDetected(trap)
                 if direct_result is not None:
                     if len(_json(transcript).encode()) > limits.max_transcript_bytes:
                         raise RuntimeError('tool transcript byte limit')
