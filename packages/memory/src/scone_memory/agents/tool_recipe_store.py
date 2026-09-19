@@ -249,6 +249,15 @@ class ToolRecipeStore:
                 'proposal_id': {'type': 'string', 'maxLength': 128}, 'recipe_json': {'type': 'string', 'maxLength': 16000}},
                 'required': ['proposal_id', 'recipe_json'], 'additionalProperties': False}, propose)
 
+    def execution_tools(self, *, space: str, tools: Sequence[AgentTool]) -> tuple[AgentTool, AgentTool]:
+        from .recipe_execution import recipe_execution_tools
+        check_space(space)
+        capabilities = snapshot_tools(tools)
+        digest = hmac.new(self._key, json.dumps(['recipe-execution-v1', str(self._path), space,
+            [tool.info() for tool in capabilities]], sort_keys=True).encode(), hashlib.sha256).hexdigest()
+        return recipe_execution_tools(space=space, revision=digest,
+            bind=lambda proposal_id: self.bind(space, proposal_id, tools=capabilities))
+
     def capabilities_tool(self, *, space: str, tools: Sequence[AgentTool]) -> AgentTool:
         check_space(space)
         capabilities = snapshot_tools(tools)
