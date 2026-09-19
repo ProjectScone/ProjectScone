@@ -5,7 +5,7 @@ Models receive only a proposal adapter. Review never executes or grants a call.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +25,16 @@ from .recipe_models import RecipeModel, ToolRecipe
 from .tool_recipes import capability_digest, recipe_dependencies, reviewed_recipe_tool
 from .workflow import _integer, _name
 from ..core.validation import check_space
+
+
+class ToolRecipeConflict(ValueError):
+    pass
+
+
+def validate_proposal_id(value: str) -> None:
+    _name(value)
+    if value in ('.', '..'):
+        raise ValueError('invalid recipe proposal identifier')
 
 
 class RecipeReview(RecipeModel):
@@ -71,8 +81,8 @@ class ToolRecipeProposal(RecipeModel):
     @model_validator(mode='after')
     def valid(self) -> Self:
         check_space(self.space)
-        for name in (self.proposal_id, self.proposed_by):
-            _name(name)
+        validate_proposal_id(self.proposal_id)
+        _name(self.proposed_by)
         self.dependencies()
         if self.created_at.tzinfo is None:
             raise ValueError('invalid proposal timestamp')
@@ -104,7 +114,7 @@ class ToolRecipeStore:
         return hmac.new(self._key, ('recipe-space:' + space).encode(), hashlib.sha256).hexdigest() + ':'
 
     def _token(self, space: str, proposal_id: str) -> str:
-        _name(proposal_id)
+        validate_proposal_id(proposal_id)
         return self._prefix(space) + hmac.new(self._key, ('recipe-id:' + proposal_id).encode(), hashlib.sha256).hexdigest()
 
     def _decode(self, token: str, payload: object, space: str) -> ToolRecipeProposal:
@@ -125,6 +135,11 @@ class ToolRecipeStore:
         payload = self._storage._seal(token, record.model_dump_json().encode())
         db.execute('INSERT INTO tool_recipes VALUES (?,?) ON CONFLICT(token) DO UPDATE SET payload=excluded.payload',
                    (token, payload))
+
+    def review_actor(self, authenticated_key: str) -> str:
+        if not isinstance(authenticated_key, str) or not authenticated_key or len(authenticated_key) > 8192:
+            raise ValueError('authenticated review key required')
+        return 'key:' + hmac.new(self._key, ('recipe-reviewer:' + authenticated_key).encode(), hashlib.sha256).hexdigest()
 
     def get(self, space: str, proposal_id: str) -> ToolRecipeProposal | None:
         with self._storage._access() as db:
@@ -162,27 +177,34 @@ class ToolRecipeStore:
         return record
 
     def _review(self, space: str, proposal_id: str, *, decision: Literal['approve', 'deny', 'revoke'],
-                actor: str, reason: str, expected_revision: int) -> ToolRecipeProposal:
+                actor: str, reason: str, expected_revision: int,
+                admission_guard: Callable[[], None] | None = None) -> ToolRecipeProposal:
         _integer(expected_revision, 1, 2)
         review = RecipeReview(decision=decision, actor=actor, reason=reason, occurred_at=datetime.now(timezone.utc))
         with self._storage._access(write=True) as db:
+            if admission_guard is not None:
+                admission_guard()
             prior = self._get(db, space, proposal_id)
             if prior is None or prior.revision != expected_revision:
-                raise ValueError('recipe review revision conflict')
+                raise ToolRecipeConflict('recipe review revision conflict')
             if (decision == 'revoke' and prior.status != 'approved') or (decision != 'revoke' and prior.status != 'pending'):
-                raise ValueError('recipe review transition refused')
+                raise ToolRecipeConflict('recipe review transition refused')
             record = ToolRecipeProposal.model_validate({**prior.model_dump(), 'reviews': (*prior.reviews, review)})
             self._put(db, record)
         return record
 
     def decide(self, space: str, proposal_id: str, *, decision: Literal['approve', 'deny'], actor: str,
-               reason: str, expected_revision: int) -> ToolRecipeProposal:
+               reason: str, expected_revision: int,
+               admission_guard: Callable[[], None] | None = None) -> ToolRecipeProposal:
         if decision not in ('approve', 'deny'):
             raise ValueError('invalid recipe decision')
-        return self._review(space, proposal_id, decision=decision, actor=actor, reason=reason, expected_revision=expected_revision)
+        return self._review(space, proposal_id, decision=decision, actor=actor, reason=reason,
+                            expected_revision=expected_revision, admission_guard=admission_guard)
 
-    def revoke(self, space: str, proposal_id: str, *, actor: str, reason: str, expected_revision: int) -> ToolRecipeProposal:
-        return self._review(space, proposal_id, decision='revoke', actor=actor, reason=reason, expected_revision=expected_revision)
+    def revoke(self, space: str, proposal_id: str, *, actor: str, reason: str, expected_revision: int,
+               admission_guard: Callable[[], None] | None = None) -> ToolRecipeProposal:
+        return self._review(space, proposal_id, decision='revoke', actor=actor, reason=reason,
+                            expected_revision=expected_revision, admission_guard=admission_guard)
 
     def bind(self, space: str, proposal_id: str, *, tools: Sequence[AgentTool]) -> AgentTool:
         prior = self.get(space, proposal_id)
