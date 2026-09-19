@@ -51,6 +51,29 @@ new_tool = recipes.bind("alpha", proposal_id, tools=allowed_tools)
 # AgentRunService exact-call approval, decision, and explicit activation flow.
 ```
 
+For agents that must use new proposals without a host restart, register the
+static adapters before authoring starts:
+
+```python
+inspect_recipe, invoke_recipe = recipes.execution_tools(
+    space="alpha", tools=allowed_tools,
+)
+# Register both with the execution agent's catalog and allowed tool names.
+```
+
+`inspect_tool_recipe` accepts a proposal ID and returns the currently approved
+tool's input schema and exact revision. `invoke_tool_recipe` accepts that ID,
+`tool_revision` and an `arguments_json` string. The workflow pauses for human
+approval of this complete call. Activation rebinds the recipe and refuses changed
+authority, dependencies, revocation or mismatched inputs before dispatch. The
+adapters preserve their identity across a restart at the same store path.
+
+HTTP workflow tests cover proposal creation, version review, exact-call review,
+restart and explicit activation using separately selected scripted author and
+executor models. Denial and revocation produce no dependency effects; repeated
+activation does not replay a completed call. These are backend integration tests,
+not real-model or browser acceptance.
+
 The host must authenticate the human and supply their identity; a native Python
 method cannot establish that a string belongs to a human. Self-review under the
 proposal author's identity is refused. The bound tool's fingerprint includes the

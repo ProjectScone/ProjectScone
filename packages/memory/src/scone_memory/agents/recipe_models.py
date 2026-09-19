@@ -63,7 +63,8 @@ class ToolRecipe(RecipeModel):
 
     @model_validator(mode='after')
     def valid(self) -> Self:
-        if self.name in _RESERVED | {'recipe_capabilities', 'propose_tool_recipe'}:
+        if self.name in _RESERVED | {'recipe_capabilities', 'propose_tool_recipe',
+                                    'inspect_tool_recipe', 'invoke_tool_recipe'}:
             raise ValueError('reserved recipe name')
         if not self.description.strip() or not self.requirements.strip():
             raise ValueError('recipe purpose required')
