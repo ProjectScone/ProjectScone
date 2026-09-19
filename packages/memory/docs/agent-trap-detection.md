@@ -66,9 +66,15 @@ preserving existing configuration identities. An enabled threshold participates
 in agent and turn-journal bindings. Journal replay reconstructs observations from
 restored receipts instead of issuing already-completed searches again.
 
-This release exposes the graph on the native exception. Generic run history still
-reports the existing failure state; it does not yet transport the trap graph or a
-trap-specific reason through HTTP or the standalone SDK. Durable trajectory
-history, configurable recovery, cross-run matching and a Console graph view
-remain separate required work. Defensive attack/decoy graphs are a different
+The native exception and `trap_detected` progress event carry the graph. When run
+history collection is enabled, this event is persisted in encrypted history before
+`turn_failed`. The existing authorized history HTTP and event-stream routes expose
+its `trap_graph` field after restart, without rerunning the model or tools. Ordinary
+events omit that field. History retention and explicit event-loss gaps still apply;
+a slow observer is not guaranteed to retain every diagnostic. Validation checks
+node visits, directed transition counts and the repeating suffix against the
+bounded path. Raw tool observations are never part of this report.
+
+Configurable recovery, cross-run matching and a Console graph view remain separate
+required work. Defensive attack/decoy graphs are a different
 application and are not implemented by this detector.

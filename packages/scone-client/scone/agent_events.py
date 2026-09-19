@@ -7,11 +7,13 @@ import math
 import re
 from typing import Optional, Union
 
+from .agent_traps import TrapGraph
 from ._wire import boolean, digest, identifier, integer, invalid, record, text, timestamp
 
 MAX_POSITION = 2**53 - 1
 TERMINALS = ('turn_completed', 'turn_paused', 'turn_failed', 'turn_cancelled')
 KINDS = (
+    'trap_detected',
     'turn_started',
     *TERMINALS,
     'operation_started',
@@ -96,11 +98,13 @@ class ProgressEvent:
     reused: Optional[bool]
     journal_reused: Optional[bool]
     presentation_reused: Optional[bool]
+    trap_graph: Optional[TrapGraph] = None
 
     @classmethod
     def from_json(cls, value: object) -> ProgressEvent:
         row = record(value)
-        if set(row) != {field.name for field in fields(cls)}:
+        allowed = {field.name for field in fields(cls)}
+        if not allowed - {'trap_graph'} <= set(row) <= allowed:
             raise invalid('progress fields')
         result = cls(
             integer(row['sequence'], 1, MAX_POSITION),
@@ -131,6 +135,7 @@ class ProgressEvent:
             boolean(row['reused']) if row['reused'] is not None else None,
             boolean(row['journal_reused']) if row['journal_reused'] is not None else None,
             boolean(row['presentation_reused']) if row['presentation_reused'] is not None else None,
+            TrapGraph.from_json(row['trap_graph']) if row.get('trap_graph') is not None else None,
         )
         operations = (result.operation_id, result.operation_kind, result.duration_s)
         tool = (result.tool_index, result.tool_name, result.origin)
@@ -142,6 +147,14 @@ class ProgressEvent:
             result.journal_reused,
             result.presentation_reused,
         )
+        if result.kind == 'trap_detected':
+            if result.trap_graph is None or any(
+                item is not None for item in (*operations, *tool, *outcome)
+            ):
+                raise invalid('trap event metadata')
+            return result
+        if result.trap_graph is not None:
+            raise invalid('unexpected trap graph')
         if result.kind.startswith('turn_'):
             if any(item is not None for item in (*operations, *tool, *outcome)):
                 raise invalid('turn metadata')

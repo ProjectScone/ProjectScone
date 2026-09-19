@@ -34,6 +34,7 @@ from .video_models import VideoCatalogue, VideoFrame, VideoRegion, VideoInterpre
 from .errors import SconeError
 from .models import Added, Fact, Memory, Profile, Recall, Status, Tag
 
+from .agent_traps import TrapGraph, TrapNode, TrapEdge
 from .agent_events import ProgressEvent, ProgressGap, CollectionEvent
 from .agent_answer import AnswerStream, Ended, Gap, Terminal, TextDelta, Withdrawn
 from .agent_history import HistoryEntry, HistoryPage, HistoryStream
@@ -48,6 +49,7 @@ __all__ = [
     "ConversationClient", "ConversationCapabilities", "ConversationConflict", "Session", "SessionPage", "SessionEvent",
     "EventPage", "TurnReceipt", "TurnPage", "TranscriptPage", "TranscriptEpisode", "Persona", "PersonaRef",
     "ReplyStream", "ReplyDelta", "ReplyGap", "ReplyTerminal", "ReplyEnded",
+    "TrapGraph", "TrapNode", "TrapEdge",
     "ProgressEvent", "ProgressGap", "CollectionEvent", "HistoryEntry", "HistoryPage", "HistoryStream",
     "AnswerStream", "TextDelta", "Withdrawn", "Gap", "Terminal", "Ended",
     "InputRecord", "ApprovalCall", "ToolApprovalRecord", "ToolApprovalActivation", "AgentToolContinuation",

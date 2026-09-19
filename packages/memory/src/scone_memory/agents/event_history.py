@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import fields
+from dataclasses import asdict, fields
 import hashlib
 import json
 import hmac
@@ -20,6 +20,7 @@ from ._encrypted_store import EncryptedRecordStore
 from .approval_store import invocation_digest
 from .handoff_workflow import AgentHandoffPlan
 from .plan_store import _selections
+from .traps import validate_trap_graph
 from .history_models import (
     AgentCollectionEvent,
     AgentHistoryEntry,
@@ -193,6 +194,11 @@ class AgentEventHistoryStore:
             if type(event) not in (AgentProgressEvent, AgentProgressGap, AgentCollectionEvent):
                 raise ValueError('invalid native event')
             values: dict[str, object] = {field.name: getattr(event, field.name) for field in fields(event)}
+            graph = values.pop('trap_graph', None)
+            if graph is not None:
+                if not isinstance(event, AgentProgressEvent) or event.trap_graph is None:
+                    raise ValueError('invalid trap event')
+                validate_trap_graph(event.trap_graph)
             for value in values.values():
                 if type(value) not in (str, int, float, bool, type(None)):
                     raise ValueError('event fields must be primitive')
@@ -200,6 +206,8 @@ class AgentEventHistoryStore:
                     raise ValueError('event field too large')
                 if type(value) is int and not 0 <= value <= MAX_POSITION:
                     raise ValueError('event integer out of bounds')
+            if isinstance(event, AgentProgressEvent) and event.trap_graph is not None:
+                values['trap_graph'] = asdict(event.trap_graph)
             encoded = json.dumps(
                 {
                     'position': 1,

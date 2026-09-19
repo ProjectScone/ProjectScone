@@ -6,12 +6,13 @@ from dataclasses import dataclass
 from datetime import datetime
 import math
 import re
-from typing import Literal, Self
+from typing import Literal, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from .approval_models import Digest, Name
 from .progress import AgentProgressEvent, AgentProgressGap, TerminalKind
+from .traps import validate_trap_graph
 
 MAX_POSITION = 2**53 - 1
 _ERRORS = frozenset(
@@ -63,6 +64,14 @@ class AgentHistoryEntry(BaseModel):
     event: AgentProgressEvent | AgentProgressGap | AgentCollectionEvent
     collection_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
     activation_id: Name | None = None
+
+    @model_serializer(mode='wrap')
+    def serialize_entry(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        result = cast(dict[str, object], handler(self))
+        event = result.get('event')
+        if isinstance(event, dict) and event.get('trap_graph') is None:
+            event.pop('trap_graph', None)
+        return result
 
     @model_validator(mode='after')
     def bounded_event(self) -> Self:
@@ -142,6 +151,15 @@ class AgentHistoryEntry(BaseModel):
             event.journal_reused,
             event.presentation_reused,
         )
+        if event.kind == 'trap_detected':
+            if event.trap_graph is None or any(
+                value is not None for value in (*operations, *tool, *result)
+            ):
+                raise ValueError('invalid trap event metadata')
+            validate_trap_graph(event.trap_graph)
+            return self
+        if event.trap_graph is not None:
+            raise ValueError('unexpected trap graph')
         if event.kind.startswith('turn_'):
             if any(value is not None for value in (*operations, *tool, *result)):
                 raise ValueError('turn event has operation metadata')
