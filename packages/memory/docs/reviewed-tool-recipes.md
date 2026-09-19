@@ -7,10 +7,10 @@ When offered through an agent workflow, the approved tool also requires the
 existing exact-call approval, including the user's arguments and tool revision.
 Version approval alone never activates a call.
 
-This is a native Python capability. The reviewer UI, HTTP/SDK management routes,
-isolated test-report workflow and sandboxed Python authoring are not implemented
-by this milestone. Its scripted-model tests are not a real-model or UI acceptance
-claim.
+Native Python and authenticated HTTP version review are available. The reviewer
+UI, SDK management methods, isolated test-report workflow and sandboxed Python
+authoring are not implemented by this milestone. Its scripted-model tests are not
+a real-model or UI acceptance claim.
 
 ## Author, review, execute
 
@@ -61,6 +61,34 @@ a store or changing dependency metadata requires a new agent/plan binding.
 retires an approved version while preserving the approval and revocation records.
 Review decisions use compare-and-swap revisions. A copied database is a different
 review authority and cannot silently inherit an existing call/plan fingerprint.
+
+## Authenticated HTTP review
+
+Pass `tool_recipe_store=recipes` to `create_app`. The caller owns the store's
+lifetime. Hosts without that store expose neither the routes nor the
+`agents.tool_recipes.review` capability. This does not automatically register an
+approved tool in an agent catalog.
+
+- `GET /v1/tool-recipes?limit=50&after=...` lists proposals in the current space.
+- `GET /v1/tool-recipes/{proposal_id}` returns recipe, dependency metadata and reviews.
+- `POST /v1/tool-recipes/{proposal_id}/decision` accepts `decision` (`approve` or
+  `deny`), a nonblank `reason`, and `expected_revision: 1`.
+- `POST /v1/tool-recipes/{proposal_id}/revoke` accepts `reason` and
+  `expected_revision: 2`.
+
+Review and full-access keys can decide or revoke; read and write keys cannot.
+Reviewer identity is a keyed fingerprint of the authenticated credential, never
+a client-supplied label. The API rechecks key, role and scope after acquiring the
+write lock. It checks deleted-space state after receiving the request body and
+before returning success; this separate memory-store check is not an atomic
+transaction with recipe storage. Concurrent external space deletion requires host
+coordination. Reviews never execute handlers or activate pending calls.
+
+Malformed input returns `422`, oversized review bodies `413`, missing proposals
+`404`, revision/transition conflicts `409`, and unavailable storage `503`. After
+an ambiguous response or revision conflict, read the current record before deciding
+again. The API does not retry review mutations. Successful responses prohibit
+caching. Proposal identifiers cannot be URL navigation segments (`.` or `..`).
 
 ## Execution contract
 
