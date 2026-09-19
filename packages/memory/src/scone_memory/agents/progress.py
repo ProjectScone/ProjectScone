@@ -12,8 +12,11 @@ import time
 from typing import Literal
 from uuid import uuid4
 
+from .traps import TrapGraph
+
 OperationKind = Literal['model', 'memory', 'custom']
 EventKind = Literal[
+    'trap_detected',
     'turn_started',
     'turn_completed',
     'turn_paused',
@@ -51,6 +54,7 @@ class AgentProgressEvent:
     reused: bool | None = None
     journal_reused: bool | None = None
     presentation_reused: bool | None = None
+    trap_graph: TrapGraph | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +164,7 @@ class ProgressEmitter:
         reused: bool | None = None,
         journal_reused: bool | None = None,
         presentation_reused: bool | None = None,
+        trap_graph: TrapGraph | None = None,
     ) -> None:
         self._sequence += 1
         self._stream._append(
@@ -184,6 +189,7 @@ class ProgressEmitter:
                 reused,
                 journal_reused,
                 presentation_reused,
+                trap_graph,
             )
         )
 

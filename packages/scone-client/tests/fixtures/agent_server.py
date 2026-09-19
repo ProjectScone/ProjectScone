@@ -7,7 +7,7 @@ import sys
 import uvicorn
 from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
 from scone_memory.agents.catalog import AgentCatalog, AgentDefinition, AgentModel
-from scone_memory.agents.evidence_loop import ToolStep
+from scone_memory.agents.evidence_loop import ToolCall, ToolLoopLimits, ToolStep
 from scone_memory.agents.usage import ModelTokenUsage
 from scone_memory.agents.plan_store import AgentPlanStore
 from scone_memory.agents.run_service import AgentRunService
@@ -21,9 +21,14 @@ async def run():
     class Model:
         def __init__(self, name):
             self.name = name
+            self.calls = 0
         async def complete(self, messages, tools, *, on_public_text=None):
             with (state / 'calls.jsonl').open('a') as output:
                 output.write(json.dumps({'model': self.name, 'messages': messages}) + '\n')
+            if (state / 'trap').exists():
+                self.calls += 1
+                return ToolStep(calls=(ToolCall(id='search-' + str(self.calls), name='search_memory',
+                    arguments={'query': 'PRIVATE repeated search'}),))
             reply = self.name + ' completed the task.'
             if on_public_text is not None:
                 # Written in two pieces with a pause between, so a reader on
@@ -36,7 +41,8 @@ async def run():
     catalog = AgentCatalog(models=[AgentModel(name, name.title() + ' local', '1', lambda name=name: Model(name))
                                    for name in ('fast', 'careful')], agents=[AgentDefinition(
         agent_id='worker', instructions='Use the provided direction.', models=('fast', 'careful'),
-        default_model='fast', initial_search=(state / 'initial-search').exists())])
+        default_model='fast', initial_search=(state / 'initial-search').exists(),
+        limits=ToolLoopLimits(max_repeated_rounds=2 if (state / 'trap').exists() else None))])
     plans = AgentPlanStore(state / 'plans.sqlite', key=b'k' * 32)
     service = AgentRunService(state / 'runs', key=b'k' * 32, catalog=catalog, plans=plans, memory=memory,
                               scope_for=lambda space: RecallScope.validated(), public_text=True)

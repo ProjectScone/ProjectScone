@@ -627,3 +627,27 @@ its own; `stream_reply(..., after=stream.cursor)` resumes, sending the
 cursor as both `after=` and `Last-Event-ID`. `cancel()` returns the
 receipt only when it says `cancelled`; `delete()` and `cancel()` check
 the service's capabilities first and refuse plainly when it lacks them.
+
+
+### Agent repetition reports
+
+When a host enables `ToolLoopLimits(max_repeated_rounds=...)`, a stopped repetition
+loop appears in history as a `ProgressEvent` with `kind == "trap_detected"` and a
+`trap_graph`. The typed `TrapGraph`, `TrapNode`, and `TrapEdge` expose the bounded
+path, repeating suffix, visits, and directed transition counts. The client checks
+those counts against the path before returning a report. Queries, arguments, and
+tool output text are absent; this is an intervention signal, not a hallucination
+verdict or a factual knowledge graph.
+
+```python
+from scone import ProgressEvent
+
+for entry in agents.history("run-1").items:
+    event = entry.event
+    if isinstance(event, ProgressEvent) and event.trap_graph is not None:
+        print(event.model_id, event.trap_graph.pattern, event.trap_graph.repetitions)
+```
+
+The same typed events arrive through `stream_history`. Reading or reconnecting
+after a server restart does not rerun the agent. Existing event payloads remain
+supported. Recovery policies and graph visualization are not implemented here.
