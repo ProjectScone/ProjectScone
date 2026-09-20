@@ -18,7 +18,9 @@ from scone_memory.testing.public_qa_run import request_digest
 PROTOCOL = Path(__file__).with_name('jev-reasoning-answers-v1.protocol.md')
 
 
-def selected_requests(source: Path) -> list[PreparedAnswer]:
+def selected_requests(source: Path, per_dataset: int = 20) -> list[PreparedAnswer]:
+    if type(per_dataset) is not int or per_dataset not in (20, 100):
+        raise ValueError('choose the frozen 20-question pilot or full 100 per dataset')
     completion = json.loads((source/'completion.json').read_text())
     if not completion['terminal'] or not completion['code_and_inputs_unchanged']:
         raise ValueError('baseline incomplete')
@@ -36,21 +38,23 @@ def selected_requests(source: Path) -> list[PreparedAnswer]:
         eligible = sorted([p for p in requests if p.question.dataset == dataset], key=order)
         if len(eligible) != 100:
             raise ValueError('baseline dataset count differs')
-        chosen.extend(eligible[:20])
+        chosen.extend(eligible[:per_dataset])
     return sorted(chosen, key=order)
 
 
-async def run(source: Path, output: Path) -> None:
-    requests = selected_requests(source)
+async def run(source: Path, output: Path, per_dataset: int = 20) -> None:
+    requests = selected_requests(source, per_dataset)
     key = os.environ.get(os.environ.get('SCONE_JEV_API_KEY_ENV', 'OPENROUTER_API_KEY'))
     if not key:
         raise ValueError('configured token missing')
     output.mkdir(parents=True, exist_ok=False)
-    code, script, protocol = code_digest(), digest(Path(__file__)), digest(PROTOCOL)
+    protocol_path = PROTOCOL if per_dataset == 20 else PROTOCOL.with_name('jev-reasoning-answers-full-v1.protocol.md')
+    code, script, protocol = code_digest(), digest(Path(__file__)), digest(protocol_path)
     source_hash = digest(source/'prepared.jsonl')
     save(output/'manifest.json', {'baseline': str(source), 'prepared_sha256': source_hash,
         'code_sha256': code, 'script_sha256': script, 'protocol_sha256': protocol,
-        'model': MODEL, 'max_output_tokens': 2048, 'temperature': 0,
+        'model': MODEL, 'max_output_tokens': 2048, 'temperature': 0, 'per_dataset': per_dataset,
+        'protocol': protocol_path.name,
         'ids': [p.question.id for p in requests], 'arms': ['direct', 'reasoning']})
     with (output/'answers.jsonl').open('x') as stream:
         for index, prepared in enumerate(requests):
@@ -64,7 +68,7 @@ async def run(source: Path, output: Path) -> None:
                 stream.write(json.dumps(row, ensure_ascii=False)+'\n')
                 stream.flush()
                 print(f'{index+1}/{len(requests)} {arm}: {answer["status"]}', flush=True)
-    unchanged = (code_digest() == code and digest(Path(__file__)) == script and digest(PROTOCOL) == protocol
+    unchanged = (code_digest() == code and digest(Path(__file__)) == script and digest(protocol_path) == protocol
                  and digest(source/'prepared.jsonl') == source_hash)
     save(output/'completion.json', {'terminal': True, 'code_and_inputs_unchanged': unchanged,
         'manifest_sha256': digest(output/'manifest.json'), 'answers_sha256': digest(output/'answers.jsonl')})
@@ -89,7 +93,7 @@ def score(dataset: Path, output: Path) -> None:
     if (digest(source/'prepared.jsonl') != manifest['prepared_sha256']
             or digest(dataset/'gold.jsonl') != source_manifest['gold_sha256']):
         raise ValueError('source or gold changed')
-    requests = {p.question.id: p for p in selected_requests(source)}
+    requests = {p.question.id: p for p in selected_requests(source, manifest.get('per_dataset', 20))}
     rows = [json.loads(line) for line in (output/'answers.jsonl').read_text().splitlines()]
     expected = {(identifier, arm) for identifier in requests for arm in ('direct', 'reasoning')}
     if len(rows) != len(expected) or {(r['id'], r['arm']) for r in rows} != expected:
@@ -119,11 +123,12 @@ if __name__ == '__main__':
     parser.add_argument('--baseline', type=Path)
     parser.add_argument('--dataset', type=Path)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--per-dataset', type=int, choices=(20, 100), default=20)
     args = parser.parse_args()
     if args.command == 'run':
         if args.baseline is None:
             parser.error('--baseline required')
-        asyncio.run(run(args.baseline, args.output))
+        asyncio.run(run(args.baseline, args.output, args.per_dataset))
     else:
         if args.dataset is None:
             parser.error('--dataset required')
