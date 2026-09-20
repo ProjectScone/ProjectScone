@@ -39,13 +39,13 @@ from typing import Any, Iterator, Optional
 
 from .code import MAX_LINES, _line_starts
 from .code_graph import CITES, DEFINES, FLAGS, IMPORTS, MAX_CLAIMS, NOTES, CodeClaim, _cited, _holder
-from .code_tree import available, tree_declarations
+from .code_tree import available, dotted_module, tree_declarations
 
 #: A tagged comment: the tag, then what it says; comment markers stripped
 #: first. A note needs its colon and a flag needs a word boundary, as the
 #: line readers have them, so `Notes live here` is prose and not a note.
 _TAGGED = re.compile(r"^(?:(WHY|NOTE|RATIONALE)\s*:|(TODO|FIXME|HACK|XXX)\b\s*:?)\s*(.+?)\s*$", re.IGNORECASE)
-_MARKERS = re.compile(r"^[\s#/\-*\[=%]+|[\s*/\-\]]+$")  # %: Erlang comments its lines that way
+_MARKERS = re.compile(r"^[\s#/\-*\[=%;]+|[\s*/\-\]]+$")  # %: Erlang opens a comment that way, ;: Clojure
 #: Ruby methods that load a file by a literal name.
 _RUBY_LOADS = frozenset({"require", "require_relative", "load"})
 #: Elixir: four words, each naming a module this file depends on.
@@ -263,6 +263,22 @@ def _loads(grammar: str, root: Any, raw: bytes) -> Iterator[tuple[str, int]]:
                                   if _first_named(node, "argument_list") is not None else None, raw)
                 if target:
                     yield target, node.start_point[0] + 1
+        elif grammar == "haskell" and node.type == "import":
+            # `import qualified Data.Map as M` holds two module nodes:
+            # the one imported, and the name it is given here.
+            module = _first_named(node, "module")
+            if module is not None:
+                yield dotted_module(module, raw), node.start_point[0] + 1
+        elif grammar == "clojure" and node.type == "list_lit":
+            keyword = next(iter(node.named_children), None)
+            word = _text(keyword, raw).strip() if keyword is not None and keyword.type == "kwd_lit" else ""
+            if word in {":require", ":import", ":use"}:
+                for element in node.named_children[1:]:
+                    # `[clojure.string :as s]` names the library first;
+                    # `java.util.Date` stands alone.
+                    named = (next(iter(element.named_children), None) if element.type == "vec_lit" else element)
+                    if named is not None and named.type == "sym_lit":
+                        yield _text(named, raw).strip(), element.start_point[0] + 1
         elif grammar == "r" and node.type == "call":
             target = _r_load(node, raw)
             if target:
