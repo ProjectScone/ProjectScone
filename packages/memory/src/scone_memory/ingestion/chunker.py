@@ -107,6 +107,8 @@ def _best_cut(text: str, start: int, limit: int) -> int:
     for marker in (". ", "! ", "? ", ".\t", ".\n", "!\n", "?\n",
                    ".\r\n", "!\r\n", "?\r\n"):
         idx = window.rfind(marker)
+        while idx >= 0 and marker.startswith('.') and _name_initial(text, floor + idx):
+            idx = window.rfind(marker, 0, idx)
         if idx > best:
             best = idx + len(marker)
     # A full-width stop needs nothing after it; a closing quote or bracket
@@ -132,6 +134,17 @@ def _best_cut(text: str, start: int, limit: int) -> int:
     if idx != -1:
         return floor + idx + 1
     return limit
+
+
+def _name_initial(text: str, period: int) -> bool:
+    """Do not prefer a capital initial before another capitalized name as a cut."""
+    if (period < 1 or not text[period - 1].isalpha() or not text[period - 1].isupper()
+            or (period > 1 and text[period - 2].isalpha())):
+        return False
+    after = period + 1
+    while after < len(text) and text[after].isspace():
+        after += 1
+    return after < len(text) and text[after].isalpha() and text[after].isupper()
 
 
 #: Sentence ends in scripts written without spaces.
