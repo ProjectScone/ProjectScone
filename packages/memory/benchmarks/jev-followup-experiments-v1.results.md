@@ -81,6 +81,8 @@ preserved. No gold labels, answer aliases or output strings were changed.
 | `jev-agent-answers-20260920/run-1` | `13fd3bf83a2c9f56304f5bc66852eb5cd4b4c8a38ab3a0c9b2ccda0b09087dc0` | `ce267ae34aaa92e55c21f13e475625205ec014551d11b7578aa68aceb6c972e9` |
 | `jev-reasoning-answers-20260920/run-1` | `7b9380adcb762f218abb4c88ded21846228c87cc6dba8a3d2d302500869294f0` | `9aea38244a970ab54ea206edf6c87f5f8f9b66f0c7c18a798daece057b2e9649` |
 
-Remaining work: full-set reasoning confirmation, ingestion-boundary reevaluation,
-agent evidence-use improvements, new held-out questions and UI acceptance. These
-experiments do not close the framework's capability goal.
+The [full-set reasoning confirmation](jev-reasoning-answers-full-v1.results.md)
+is now complete: EM 69.5% -> 73.5%, F1 80.37% -> 83.72%, with one timeout
+retained. Remaining work: ingestion-boundary reevaluation, agent evidence-use
+improvements, new held-out questions and UI acceptance. These experiments do
+not close the framework's capability goal.
