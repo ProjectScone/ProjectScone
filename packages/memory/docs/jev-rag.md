@@ -62,6 +62,13 @@ whether ranking actually applied; individual items carry `rerank_score`.
 
 ## Live integration evidence — 2026-09-19
 
+The [downloaded public QA evaluation](../benchmarks/jev-public-qa-v1.results.md)
+now provides the larger comparison: all 200 reserved questions across four
+Scone retrieval arms, with 800 completed observations. Hybrid support recall@5
+rose from 85.75% to 97.00%, with median latency increasing from 47 ms to 543 ms.
+The report includes regressions, per-dataset results, the HashEmbedder baseline
+limitation and a live Jev-to-Gemma conversation/restart check.
+
 `benchmarks/jev_retrieval.py` ran four synthetic questions through authenticated
 `GET /v1/recall`, using local SQLite, HashEmbedder and lexical retrieval.
 The same candidates and return limit were used for baseline and Jev.
