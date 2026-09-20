@@ -9,6 +9,8 @@ import asyncio
 from collections import Counter
 import json
 import os
+import re
+import sqlite3
 from pathlib import Path
 import statistics
 import time
@@ -34,13 +36,14 @@ QWEN_MODEL = 'qwen/qwen3-embedding-8b'
 QUERY_PREFIX = 'Instruct: Find passages that provide evidence to answer the question.\nQuery:'
 
 
-def build_engine(output: Path, key: str, qdrant_url: str | None = None) -> MemoryEngine:
+def build_engine(output: Path, key: str, qdrant_url: str | None = None,
+                 collection: str | None = None) -> MemoryEngine:
     from .. import HashEmbedder, MemoryEngine
     from ..backends import SqliteDocumentStore, SqliteVectorIndex
     from ..core.ports import Embedder, VectorIndex
 
-    embedder: Embedder = HashEmbedder()
-    vectors: VectorIndex = SqliteVectorIndex(output/'memory.db')
+    embedder: Embedder
+    vectors: VectorIndex
     if qdrant_url is not None:
         parsed = urlsplit(qdrant_url)
         if (parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1')
@@ -52,10 +55,80 @@ def build_engine(output: Path, key: str, qdrant_url: str | None = None) -> Memor
 
         embedder = RemoteEmbedder('https://openrouter.ai/api/v1', QWEN_MODEL, api_key=key,
             dim=4096, query_prefix=QUERY_PREFIX, trust_env=False)
-        vectors = QdrantVectorIndex(qdrant_url, 'scone_qwen_answers_' + uuid.uuid4().hex)
+        vectors = QdrantVectorIndex(qdrant_url, collection or 'scone_qwen_answers_' + uuid.uuid4().hex)
+    else:
+        embedder = HashEmbedder()
+        vectors = SqliteVectorIndex(output/'memory.db')
     return MemoryEngine(SqliteDocumentStore(output/'memory.db'), vectors, embedder,
         chunk_target=700, candidate_limit=64, rerank_limit=32, rerank_max_bytes=64000,
         rerank_timeout=10)
+
+
+async def prepare_text_index(engine: MemoryEngine) -> dict[str, int]:
+    from ..backends import SqliteDocumentStore
+    store = cast(SqliteDocumentStore, engine.documents)
+    indexed = 0
+    while True:
+        done, remaining = await store.sync_text_index(SPACE)
+        indexed += done
+        if remaining == 0:
+            return {'indexed': indexed, 'remaining': 0}
+        if done <= 0:
+            raise ValueError('text index preparation made no progress')
+        await asyncio.sleep(0)
+
+
+async def prepare_query_vectors(engine: MemoryEngine, questions: list[Question]) -> dict[str, object]:
+    from ..bench.comparative import CachedEmbedder
+    from ..ingestion.embedding_cache import InMemoryEmbeddingCache
+    cached = CachedEmbedder(engine.embedder, InMemoryEmbeddingCache(1000))
+    engine.embedder = cached
+    for offset in range(0, len(questions), 32):
+        await cached.embed_queries([q.question for q in questions[offset:offset+32]])
+    return cached.record()
+
+
+async def indexed_documents(engine: MemoryEngine, corpus: list[Document]) -> dict[int, Document]:
+    from ..backends import SqliteDocumentStore
+    store = cast(SqliteDocumentStore, engine.documents)
+    expected = {doc.id: doc for doc in corpus}
+    documents: dict[int, Document] = {}
+    seen: set[str] = set()
+    before = None
+    while True:
+        episodes = await store.page_episodes(SPACE, before=before, limit=100, kind='file')
+        if not episodes:
+            break
+        for episode in episodes:
+            document_id = episode.metadata.get('document_id', '')
+            doc = expected.get(document_id)
+            if (doc is None or document_id in seen or episode.content != doc.content
+                    or episode.source != doc.source_url):
+                raise ValueError('reused index differs from the corpus')
+            seen.add(document_id)
+            documents[episode.episode_id] = doc
+        before = episodes[-1].episode_id
+    if seen != set(expected):
+        raise ValueError('reused index does not contain the complete corpus')
+    return documents
+
+
+def reuse_collection(source: Path, output: Path, inputs: dict[str, str], qdrant_url: str | None) -> str:
+    manifest = json.loads((source/'manifest.json').read_text())
+    collection = manifest.get('qdrant_collection')
+    if (not qdrant_url or manifest.get('qdrant_url') != qdrant_url or manifest.get('inputs') != inputs
+            or manifest.get('embedding_model') != QWEN_MODEL or manifest.get('dimensions') != 4096
+            or manifest.get('query_prefix') != QUERY_PREFIX or manifest.get('vector_backend') != 'qdrant'
+            or not isinstance(collection, str) or not re.fullmatch(r'scone_qwen_answers_[0-9a-f]{32}', collection)):
+        raise ValueError('reused index configuration or inputs differ')
+    old = sqlite3.connect((source/'memory.db').resolve().as_uri() + '?mode=ro', uri=True)
+    new = sqlite3.connect(output/'memory.db')
+    try:
+        old.backup(new)
+    finally:
+        old.close()
+        new.close()
+    return collection
 
 
 class PreparedAnswer(FrozenRecord):
@@ -115,7 +188,9 @@ def load_questions(dataset: Path) -> list[Question]:
     return questions
 
 
-async def run(dataset: Path, output: Path, qdrant_url: str | None = None) -> None:
+async def run(dataset: Path, output: Path, qdrant_url: str | None = None,
+              reuse_index: Path | None = None) -> None:
+    from ..bench.comparative import CachedEmbedder
     from ..memory.engine import Record
     from ..providers.jev import JevReranker
     from ..providers.llm import OpenAICompatibleTextModel
@@ -134,7 +209,8 @@ async def run(dataset: Path, output: Path, qdrant_url: str | None = None) -> Non
     inputs = {name: digest(dataset/name) for name in ('dataset.json', 'corpus.jsonl', 'reserved-queries.jsonl')}
     protocol_path = QWEN_PROTOCOL if qdrant_url else PROTOCOL
     code, protocol = code_digest(), digest(protocol_path)
-    engine = build_engine(output, key, qdrant_url)
+    collection = reuse_collection(reuse_index, output, inputs, qdrant_url) if reuse_index else None
+    engine = build_engine(output, key, qdrant_url, collection)
     save(output/'manifest.json', {'protocol': protocol_path.name.removesuffix('.protocol.md'), 'protocol_sha256': protocol,
         'code_sha256': code, 'inputs': inputs, 'questions': [q.model_dump() for q in questions],
         'gold_sha256': json.loads((dataset/'dataset.json').read_text())['files_sha256']['gold.jsonl'],
@@ -143,20 +219,46 @@ async def run(dataset: Path, output: Path, qdrant_url: str | None = None) -> Non
         'query_prefix': QUERY_PREFIX if qdrant_url else '', 'vector_weight': engine.vector_weight,
         'vector_backend': engine.vectors.name, 'qdrant_url': qdrant_url,
         'qdrant_collection': getattr(engine.vectors, 'collection', None),
+        'shared_query_vector_cache': bool(qdrant_url),
+        'index_source': str(reuse_index) if reuse_index else None,
+        'index_source_manifest_sha256': digest(reuse_index/'manifest.json') if reuse_index else None,
         'candidate_limit': 64, 'rerank_limit': 32, 'context_limit': 5, 'max_context_bytes': 8000,
         'temperature': 0, 'think': False, 'max_output_tokens': 256})
     await engine.open()
     documents: dict[int, Document] = {}
     try:
-        for offset in range(0, len(corpus), 100):
-            batch = corpus[offset:offset+100]
-            episodes = await engine.remember_many(SPACE, [Record(doc.content, kind='file', source=doc.source_url,
-                metadata={'document_id': doc.id}, created_at='2026-09-08') for doc in batch])
-            for episode, doc in zip(episodes, batch, strict=True):
-                if episode.episode_id in documents:
-                    raise ValueError('unexpected corpus deduplication')
-                documents[episode.episode_id] = doc
-            print(f'Indexed {len(documents)}/{len(corpus)}', flush=True)
+        if reuse_index:
+            documents = await indexed_documents(engine, corpus)
+            print(f'Validated {len(documents)} existing corpus documents', flush=True)
+        else:
+            for offset in range(0, len(corpus), 100):
+                batch = corpus[offset:offset+100]
+                episodes = await engine.remember_many(SPACE, [Record(doc.content, kind='file', source=doc.source_url,
+                    metadata={'document_id': doc.id}, created_at='2026-09-08') for doc in batch])
+                for episode, doc in zip(episodes, batch, strict=True):
+                    if episode.episode_id in documents:
+                        raise ValueError('unexpected corpus deduplication')
+                    documents[episode.episode_id] = doc
+                print(f'Indexed {len(documents)}/{len(corpus)}', flush=True)
+        ready = await prepare_text_index(engine)
+        if engine.vector_block is not None:
+            raise ValueError('vector index is not ready')
+        if qdrant_url:
+            from ..backends import SqliteDocumentStore
+            from ..backends.qdrant import QdrantVectorIndex
+            store = cast(SqliteDocumentStore, engine.documents)
+            chunks = store.conn.execute('SELECT count(*) FROM chunks WHERE space = ?', (SPACE,)).fetchone()[0]
+            vector_index = cast(QdrantVectorIndex, engine.vectors)
+            points = (await vector_index.client.count(vector_index.collection, exact=True)).count
+            if points != chunks:
+                raise ValueError('vector count differs from corpus chunks')
+            ready.update(chunks=chunks, vector_points=points)
+        save(output/'index-ready.json', ready)
+        print('Text and vector indexes ready before generation', flush=True)
+        if qdrant_url:
+            query_vectors = await prepare_query_vectors(engine, questions)
+            save(output/'query-vectors.json', query_vectors)
+            print('Shared query vectors ready for both arms', flush=True)
         with (output/'prepared.jsonl').open('x') as prepared_stream, (output/'answers.jsonl').open('x') as answers_stream:
             for index, question in enumerate(questions):
                 for arm in ARMS if index % 2 == 0 else tuple(reversed(ARMS)):
@@ -184,7 +286,9 @@ async def run(dataset: Path, output: Path, qdrant_url: str | None = None) -> Non
                  and all(digest(dataset/name) == sha for name, sha in inputs.items()))
     save(output/'completion.json', {'terminal': True, 'code_and_inputs_unchanged': unchanged,
         'manifest_sha256': digest(output/'manifest.json'), 'prepared_sha256': digest(output/'prepared.jsonl'),
-        'answers_sha256': digest(output/'answers.jsonl')})
+        'answers_sha256': digest(output/'answers.jsonl'), 'index_ready_sha256': digest(output/'index-ready.json'),
+        'query_vectors_sha256': digest(output/'query-vectors.json') if qdrant_url else None,
+        'embedding_cache': cast(CachedEmbedder, engine.embedder).record() if qdrant_url else None})
     if not unchanged:
         raise ValueError('code or inputs changed during generation')
 
@@ -236,6 +340,12 @@ def score(dataset: Path, output: Path) -> None:
         suffix = '.json' if name == 'manifest' else '.jsonl'
         if digest(output/(name+suffix)) != completion[name+'_sha256']:
             raise ValueError('experiment artifacts changed')
+    if ('index_ready_sha256' in completion
+            and digest(output/'index-ready.json') != completion['index_ready_sha256']):
+        raise ValueError('index readiness artifact changed')
+    if (completion.get('query_vectors_sha256') is not None
+            and digest(output/'query-vectors.json') != completion['query_vectors_sha256']):
+        raise ValueError('query vector artifact changed')
     if (any(digest(dataset/name) != sha for name, sha in manifest['inputs'].items())
             or digest(dataset/'gold.jsonl') != manifest['gold_sha256']):
         raise ValueError('dataset integrity failure')
@@ -284,9 +394,10 @@ def main() -> None:
     parser.add_argument('--dataset', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--qdrant-url', help='Use Qwen 8B embeddings with this local Qdrant server')
+    parser.add_argument('--reuse-index', type=Path, help='Validate and reuse the corpus index from a prior Qwen run')
     args = parser.parse_args()
     if args.command == 'run':
-        asyncio.run(run(args.dataset, args.output, args.qdrant_url))
+        asyncio.run(run(args.dataset, args.output, args.qdrant_url, args.reuse_index))
     else:
         score(args.dataset, args.output)
 
