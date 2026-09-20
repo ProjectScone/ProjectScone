@@ -42,6 +42,7 @@ TREE_SUFFIXES: dict[str, str] = {
     ".jl": "julia",
     ".r": "r", ".R": "r",
     ".hs": "haskell",
+    ".ml": "ocaml", ".mli": "ocaml",
     ".clj": "clojure", ".cljs": "clojure", ".cljc": "clojure", ".edn": "clojure",
 }
 #: The words that open a definition in Clojure, where a definition is a
@@ -51,6 +52,19 @@ _CLOJURE_DEFINES: dict[str, str] = {
     "defmulti": "function", "defmethod": "function", "defprotocol": "protocol", "defrecord": "record",
     "deftype": "type", "definterface": "interface", "defonce": "value",
 }
+#: OCaml declaration nodes, and where each keeps its name. Every one is
+#: a child node rather than a ``name`` field, which is why the generic
+#: rule finds nothing in an OCaml file.
+_OCAML_DEFINES: dict[str, tuple[str, str, str]] = {
+    # node type: (kind, the child holding the binding, the child holding the name)
+    "module_definition": ("module", "module_binding", "module_name"),
+    "module_type_definition": ("module type", "", "module_type_name"),
+    "value_definition": ("value", "let_binding", "value_name"),
+    "value_specification": ("value", "", "value_name"),
+    "type_definition": ("type", "type_binding", "type_constructor"),
+    "exception_definition": ("exception", "constructor_declaration", "constructor_name"),
+}
+
 #: Haskell declaration nodes, and what each declares. A `signature` is
 #: left out: it says what a function's type is, not that it exists, and
 #: the function's own equation declares it.
@@ -240,6 +254,20 @@ def _haskell_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
     return (_text_of(named, raw), kind) if named is not None else None
 
 
+def _ocaml_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
+    """What an OCaml definition declares. The name sits one or two nodes
+    in -- a module's inside its binding, a value's inside its let -- and
+    a signature file (.mli) states the same names without their bodies,
+    which is the surface another file can reach."""
+    rule = _OCAML_DEFINES.get(node.type)
+    if rule is None:
+        return None
+    kind, binding, holds = rule
+    inner = _first(node, binding) if binding else node
+    named = _first(inner, holds) if inner is not None else None
+    return (_text_of(named, raw), kind) if named is not None else None
+
+
 def _clojure_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
     """Clojure writes every definition as a list whose first symbol is
     the word that defines: ``(defn total [items] ...)``. The name is the
@@ -283,6 +311,8 @@ def _declared(node: Any, raw: bytes, grammar: str) -> Optional[tuple[str, str]]:
         return _haskell_declared(node, raw)
     if grammar == "clojure":
         return _clojure_declared(node, raw)
+    if grammar == "ocaml":
+        return _ocaml_declared(node, raw)
     if grammar == "powershell":
         if node.type != "function_statement":
             return None
