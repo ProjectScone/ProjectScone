@@ -27,18 +27,20 @@ class _Probe(BaseModel):
 
 async def probe_model_connection(connection: ModelConnection, *,
                                  transport: httpx.AsyncBaseTransport | None = None) -> dict[str, object]:
-    """Read GET /models only; this does not test inference or download a model."""
+    """Read bounded model metadata only; never run inference or download a model."""
     connection = ModelConnection.model_validate(connection)
     token = api_key(connection)
     headers = {'Accept': 'application/json', 'Accept-Encoding': 'identity'}
     if token is not None:
         headers['Authorization'] = 'Bearer ' + token
     timeout = min(connection.timeout_s, 10)
+    path = ('models/' + connection.model + '/endpoints'
+            if connection.provider == 'openrouter' else 'models')
     try:
         async with asyncio.timeout(timeout):
             async with httpx.AsyncClient(timeout=timeout, transport=transport,
                                          trust_env=False, follow_redirects=False) as client:
-                async with client.stream('GET', connection.base_url + 'models', headers=headers) as response:
+                async with client.stream('GET', connection.base_url + path, headers=headers) as response:
                     if response.status_code != 200:
                         raise ModelConnectionError('Self-hosted model discovery request failed')
                     if response.headers.get('content-encoding', 'identity').lower() != 'identity':
@@ -52,6 +54,13 @@ async def probe_model_connection(connection: ModelConnection, *,
     except (httpx.HTTPError, TimeoutError, ValueError):
         raise ModelConnectionError('Self-hosted model discovery is unavailable or returned an invalid response') from None
     data = payload.get('data') if isinstance(payload, dict) else None
+    if connection.provider == 'openrouter':
+        if (not isinstance(data, dict) or data.get('id') != connection.model
+                or not isinstance(data.get('endpoints'), list) or len(data['endpoints']) > 128
+                or any(not isinstance(item, dict) for item in data['endpoints'])):
+            raise ModelConnectionError('OpenRouter returned invalid model endpoint metadata')
+        available = bool(data['endpoints'])
+        return {'models': [connection.model] if available else [], 'model_available': available}
     if not isinstance(data, list) or len(data) > 2048:
         raise ModelConnectionError('Self-hosted model discovery returned an invalid model list')
     models: list[str] = []
@@ -101,7 +110,7 @@ def mount_model_connection_routes(app: FastAPI, store: ModelConnectionStore,
         except ModelConnectionConflict:
             return JSONResponse({'error': 'Model settings changed; reload the saved revision before saving'}, status_code=409)
         except ValueError:
-            return JSONResponse({'error': 'Invalid model connection; use a self-hosted endpoint and valid model settings (speech requires voice)'}, status_code=400)
+            return JSONResponse({'error': 'Invalid model connection; check provider, endpoint, model and token variable (speech requires voice)'}, status_code=400)
         except ModelConnectionError:
             return JSONResponse({'error': 'Self-hosted model settings could not be saved'}, status_code=503)
         except HTTPException as error:
@@ -120,7 +129,7 @@ def mount_model_connection_routes(app: FastAPI, store: ModelConnectionStore,
             body = _Probe.model_validate(await _body(request))
             return await probe_model_connection(body.connection)
         except ValueError:
-            return JSONResponse({'error': 'Invalid model connection; use a self-hosted endpoint and valid model settings'}, status_code=400)
+            return JSONResponse({'error': 'Invalid model connection; check provider, endpoint, model and token variable'}, status_code=400)
         except ModelConnectionError:
             return JSONResponse({'error': 'Self-hosted model discovery is unavailable; check the endpoint and server token configuration'}, status_code=502)
         except HTTPException as error:
