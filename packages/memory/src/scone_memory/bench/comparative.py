@@ -29,6 +29,7 @@ import time
 from typing import Any, Callable, Coroutine, Iterable, Mapping, Optional, Protocol, Sequence, TypeVar
 
 from ..core.ports import Embedder
+from ..core.embedding import embed_queries
 from ..ingestion.embedding_cache import cache_key
 from ..ingestion.vectors import validated_vectors
 from ..providers.llm import ChatModel
@@ -69,7 +70,7 @@ def _adapter_class() -> Any:
             return "SconeEmbeddingAdapter"
 
         def _get_query_embedding(self, query: str) -> list[float]:
-            return _blocking(self._scone.embed([query]))[0]
+            return _blocking(embed_queries(self._scone, [query]))[0]
 
         def _get_text_embedding(self, text: str) -> list[float]:
             return _blocking(self._scone.embed([text]))[0]
@@ -78,7 +79,7 @@ def _adapter_class() -> Any:
             return _blocking(self._scone.embed(list(texts)))
 
         async def _aget_query_embedding(self, query: str) -> list[float]:
-            return (await self._scone.embed([query]))[0]
+            return (await embed_queries(self._scone, [query]))[0]
 
         async def _aget_text_embedding(self, text: str) -> list[float]:
             return (await self._scone.embed([text]))[0]
@@ -142,7 +143,14 @@ class CachedEmbedder:
         self.tokens_past_window: Optional[int] = 0 if counts_window else None
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        keys = [cache_key(self.id, self.dim, text) for text in texts]
+        return await self._embed(texts, query=False)
+
+    async def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+        return await self._embed(texts, query=True)
+
+    async def _embed(self, texts: Sequence[str], *, query: bool) -> list[list[float]]:
+        identity = self.id + ":query-cache" if query else self.id
+        keys = [cache_key(identity, self.dim, text) for text in texts]
         found = self.cache.take(keys, self.dim)
         first_text: dict[str, str] = {}
         for key, text in zip(keys, texts):
@@ -151,7 +159,8 @@ class CachedEmbedder:
         fresh: dict[str, list[float]] = {}
         if wanted:
             started = time.perf_counter()
-            answered = await self.inner.embed([first_text[key] for key in wanted])
+            pending = [first_text[key] for key in wanted]
+            answered = await embed_queries(self.inner, pending) if query else await self.inner.embed(pending)
             self.seconds += time.perf_counter() - started
             fresh = dict(zip(wanted, validated_vectors(answered, len(wanted), self.dim)))
             self.cache.keep(fresh, self.dim)
