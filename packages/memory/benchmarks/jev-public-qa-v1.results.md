@@ -4,6 +4,15 @@ Jev improved retrieval on this frozen Scone evaluation. It did not improve every
 metric on every question, and this run does not establish answer quality or
 performance against a strong neural embedding model.
 
+**Later readiness audit (2026-09-20):** the first hybrid query reported 782
+chunks still absent from the SQLite lexical index. The subsequent queries ran
+after bounded backfill; 799/800 receipts had no degradation. That first question
+(`squad:57096f37200fba1400367fe5`) scored 1.0 on every reported retrieval metric
+in all four arms, contributing zero to the measured differences. The recorded
+scores remain unchanged, but the run has a first-query readiness confound and
+is a qualified historical comparison. New ingestion now indexes lexical rows
+atomically; subsequent Qwen experiments explicitly validate index readiness.
+
 ## Method and provenance
 
 Executed the [pre-run protocol](jev-public-qa-v1.protocol.md) using Scone's
