@@ -6,6 +6,16 @@ RAG path. Exact match rose from 62.5% to 68.5%, and token F1 from 70.78% to
 paraphrases can fail it. These results are neither a quality ceiling nor proof
 that every answer failing exact match is wrong.
 
+**Later readiness audit:** the first baseline preparation reported a partial
+SQLite text index; the paired Jev preparation followed the next backfill pass.
+The remaining 399 preparations reported no degraded lane. Both first-question
+answers were `Ofcom` and scored EM/F1 1.0, so that pair contributes zero to the
+reported answer-score gain. Nevertheless, index readiness was not held equal
+on that pair: treat this as a qualified historical result, not a fully controlled
+comparison. The Qwen run exposed the same setup flaw and was stopped unscored.
+New ingestion and explicit pre-run readiness checks correct it for subsequent
+experiments; recorded observations and headline metrics here are unchanged.
+
 ## Fixed comparison
 
 The [protocol](jev-answers-v1.protocol.md) and harness were committed/pushed as

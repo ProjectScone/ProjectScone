@@ -12,8 +12,9 @@ lane then ranks the same tokens in both stores.
 
 Like the fact-search postings, it is versioned by the tokenizer and the
 Unicode data it ran under, rebuilt whole when either changes, and kept
-current by triggers that mark a chunk dirty on write and by a
-synchronisation pass at query time, bounded per call. The original
+current atomically with new chunk writes. Triggers mark external writes
+dirty, and a bounded query-time pass backfills old or externally written
+rows. The original
 ``chunks_fts`` table stays in the schema untouched.
 """
 
@@ -230,6 +231,13 @@ def initialize_lexical(conn: sqlite3.Connection) -> None:
 MAX_SYNC_ROWS = 2_048
 
 
+def index_lexical_chunk(conn: sqlite3.Connection, chunk_id: int, space: str, text: str) -> None:
+    """Index one chunk inside the caller's transaction before publishing it."""
+    conn.execute("INSERT OR REPLACE INTO chunk_lexical(chunk_id, space, terms) VALUES (?, ?, ?)",
+                 (chunk_id, space, terms_of(text)))
+    conn.execute("DELETE FROM chunk_lexical_dirty WHERE chunk_id = ?", (chunk_id,))
+
+
 def synchronize_lexical(conn: sqlite3.Connection, space: str) -> tuple[int, int]:
     """Bring ``space``'s lexical rows up to date, up to ``MAX_SYNC_ROWS`` of
     them; the number of chunks re-read and the number still behind."""
@@ -242,9 +250,7 @@ def synchronize_lexical(conn: sqlite3.Connection, space: str) -> tuple[int, int]
             if not rows:
                 break
             for row in rows:
-                conn.execute("INSERT OR REPLACE INTO chunk_lexical(chunk_id, space, terms) VALUES (?, ?, ?)",
-                             (row["id"], space, terms_of(row["text"])))
-                conn.execute("DELETE FROM chunk_lexical_dirty WHERE chunk_id = ?", (row["id"],))
+                index_lexical_chunk(conn, row['id'], space, row['text'])
                 done += 1
         behind = conn.execute("SELECT count(*) FROM chunk_lexical_dirty WHERE space = ?", (space,)).fetchone()[0]
     return done, int(behind)

@@ -1,6 +1,97 @@
 import pytest
+import json
+import sqlite3
 
 from scone_memory.testing.public_qa import Gold, Question
+
+
+async def test_paired_query_vectors_are_computed_once_and_reused(tmp_path):
+    from scone_memory import InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.core.embedding import embed_queries
+    from scone_memory.testing.jev_answers import prepare_query_vectors
+    calls = []
+    class Embedder:
+        id = 'test-query-space'
+        dim = 2
+        async def embed(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+        async def embed_queries(self, texts):
+            calls.append(list(texts))
+            return [[0.0, 1.0] for _ in texts]
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), Embedder()).open()
+    try:
+        questions = [Question(id='q', dataset='squad', question='Who maintains Cedar?')]
+        summary = await prepare_query_vectors(engine, questions)
+        assert summary['embedded'] == 1
+        assert await embed_queries(engine.embedder, [questions[0].question]) == [[0.0, 1.0]]
+        assert await embed_queries(engine.embedder, [questions[0].question]) == [[0.0, 1.0]]
+        assert calls == [['Who maintains Cedar?']]
+        assert engine.embedder.id == 'test-query-space'
+    finally:
+        await engine.close()
+
+
+def test_index_reuse_requires_matching_embedding_space_and_input_hashes(tmp_path):
+    from scone_memory.testing.jev_answers import reuse_collection, QUERY_PREFIX, QWEN_MODEL
+    source, output = tmp_path/'source', tmp_path/'output'
+    source.mkdir()
+    output.mkdir()
+    with sqlite3.connect(source/'memory.db') as conn:
+        conn.execute('CREATE TABLE marker(value TEXT)')
+        conn.execute("INSERT INTO marker VALUES ('preserved')")
+    manifest = {'qdrant_collection': 'scone_qwen_answers_' + 'a'*32,
+                'qdrant_url': 'http://127.0.0.1:64076', 'inputs': {'corpus': 'hash'},
+                'embedding_model': QWEN_MODEL, 'dimensions': 4096,
+                'query_prefix': QUERY_PREFIX, 'vector_backend': 'qdrant'}
+    (source/'manifest.json').write_text(json.dumps(manifest))
+    assert reuse_collection(source, output, manifest['inputs'], manifest['qdrant_url']) == manifest['qdrant_collection']
+    with sqlite3.connect(output/'memory.db') as conn:
+        assert conn.execute('SELECT value FROM marker').fetchone()[0] == 'preserved'
+    for change in [{'dimensions': 768}, {'query_prefix': ''}, {'embedding_model': 'another'},
+                   {'inputs': {'corpus': 'different'}}, {'qdrant_collection': 'production'}]:
+        (source/'manifest.json').write_text(json.dumps({**manifest, **change}))
+        with pytest.raises(ValueError, match='configuration or inputs'):
+            reuse_collection(source, output, manifest['inputs'], manifest['qdrant_url'])
+
+
+async def test_index_readiness_finishes_all_migration_batches(tmp_path, monkeypatch):
+    from scone_memory import HashEmbedder, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.backends import SqliteDocumentStore, sqlite_lexical
+    from scone_memory.testing.jev_answers import prepare_text_index
+    from scone_memory.testing.jev_public_qa import SPACE
+    store = SqliteDocumentStore(tmp_path/'index.db')
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        for i in range(7):
+            await engine.remember(SPACE, f'Corpus passage {i}.')
+        monkeypatch.setattr(sqlite_lexical, 'MAX_SYNC_ROWS', 2)
+        monkeypatch.setattr(sqlite_lexical, '_VERSION', sqlite_lexical._VERSION + ';test-readiness')
+        sqlite_lexical.initialize_lexical(store.conn)
+        assert await prepare_text_index(engine) == {'indexed': 7, 'remaining': 0}
+        assert store.conn.execute('SELECT count(*) FROM chunk_lexical_dirty').fetchone()[0] == 0
+        assert await prepare_text_index(engine) == {'indexed': 0, 'remaining': 0}
+    finally:
+        await engine.close()
+
+
+async def test_reused_index_must_match_every_corpus_document(tmp_path):
+    from scone_memory import HashEmbedder, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.backends import SqliteDocumentStore
+    from scone_memory.testing.jev_answers import indexed_documents
+    from scone_memory.testing.jev_public_qa import SPACE
+    from scone_memory.testing.public_qa import Document
+    doc = Document(id='one', title='Cedar', text='Morgan maintains Cedar.', source_url='local:one')
+    engine = await MemoryEngine(SqliteDocumentStore(tmp_path/'reuse.db'), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        saved = await engine.remember(SPACE, doc.content, kind='file', source=doc.source_url,
+                                      metadata={'document_id': doc.id})
+        assert await indexed_documents(engine, [doc]) == {saved.episode_id: doc}
+        with pytest.raises(ValueError, match='corpus'):
+            await indexed_documents(engine, [doc.model_copy(update={'text': 'Changed content'})])
+        with pytest.raises(ValueError, match='corpus'):
+            await indexed_documents(engine, [])
+    finally:
+        await engine.close()
 
 
 async def test_neural_evaluation_uses_qwen_and_fresh_local_qdrant(tmp_path, monkeypatch):
