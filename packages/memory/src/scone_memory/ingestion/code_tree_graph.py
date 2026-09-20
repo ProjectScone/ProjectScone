@@ -45,7 +45,7 @@ from .code_tree import available, dotted_module, tree_declarations
 #: first. A note needs its colon and a flag needs a word boundary, as the
 #: line readers have them, so `Notes live here` is prose and not a note.
 _TAGGED = re.compile(r"^(?:(WHY|NOTE|RATIONALE)\s*:|(TODO|FIXME|HACK|XXX)\b\s*:?)\s*(.+?)\s*$", re.IGNORECASE)
-_MARKERS = re.compile(r"^[\s#/\-*\[=%;]+|[\s*/\-\]]+$")  # %: Erlang opens a comment that way, ;: Clojure
+_MARKERS = re.compile(r"^[\s#/\-*\[=%;(]+|[\s*/\-\])]+$")  # %: Erlang opens a comment that way, ;: Clojure, (* *): OCaml
 #: Ruby methods that load a file by a literal name.
 _RUBY_LOADS = frozenset({"require", "require_relative", "load"})
 #: Elixir: four words, each naming a module this file depends on.
@@ -269,6 +269,12 @@ def _loads(grammar: str, root: Any, raw: bytes) -> Iterator[tuple[str, int]]:
             module = _first_named(node, "module")
             if module is not None:
                 yield dotted_module(module, raw), node.start_point[0] + 1
+        elif grammar == "ocaml" and node.type == "open_module":
+            # `open Core.List` names the whole path, which the tree keeps
+            # as one node however many parts it has.
+            path = _first_named(node, "module_path")
+            if path is not None:
+                yield _text(path, raw).strip(), node.start_point[0] + 1
         elif grammar == "clojure" and node.type == "list_lit":
             keyword = next(iter(node.named_children), None)
             word = _text(keyword, raw).strip() if keyword is not None and keyword.type == "kwd_lit" else ""
