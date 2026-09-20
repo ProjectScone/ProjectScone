@@ -48,9 +48,13 @@ def test_a_chunk_inside_a_definition_carries_its_name():
 def test_the_brace_family_keeps_its_reader_and_unknown_languages_stay_prose():
     for source in ("Main.kt", "cart.php", "Cart.swift", "Cart.scala"):
         assert code_language(source) == "braces", source
-    # Which suffixes are read is test_code_tree_more_languages's subject,
-    # and it moves; Haskell is one this reader has no rule for.
-    assert code_language("billing.hs") is None and code_language("Makefile") is None
+    # Named languages move as rules are written for them, so this asks
+    # the property instead: a suffix no table claims is prose, and a file
+    # with no suffix at all is prose.
+    from scone_memory.ingestion.code_tree import TREE_SUFFIXES
+
+    assert ".notalanguage" not in TREE_SUFFIXES
+    assert code_language("notes.notalanguage") is None and code_language("Makefile") is None
 
 
 def test_a_file_too_long_or_a_missing_grammar_reads_as_nothing(monkeypatch):
