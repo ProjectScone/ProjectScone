@@ -385,7 +385,8 @@ async def recall(
     else:
         try:
             t0 = time.perf_counter()
-            [qvec] = await runtime.embedder.embed([query])
+            from ..core.embedding import embed_queries
+            [qvec] = await embed_queries(runtime.embedder, [query])
             width = len(qvec)
             latency["embed"] = _ms(t0)
             t0 = time.perf_counter()
