@@ -28,6 +28,18 @@ def test_short_text_is_one_chunk_and_empty_is_none():
     assert (only.start, only.end) == (0, len("just a line"))
 
 
+def test_a_persons_initial_is_not_preferred_as_a_sentence_boundary():
+    first = 'The team completed its inspection of the laboratory and documented every instrument before the scheduled opening of the new research facility. '
+    second = 'The director Morgan P. Redwood approved the completed inspection and prepared the laboratory for visitors. '
+    text = first + second * 5
+    target = text.index('P. Redwood') + 5
+    spans = chunk_spans(text, target=target)
+    chunks = [text[s.start:s.end] for s in spans]
+    assert chunks[0] == first
+    assert any('Morgan P. Redwood' in chunk for chunk in chunks)
+    assert not any(chunk.rstrip().endswith('Morgan P.') for chunk in chunks)
+
+
 def test_tiny_tail_joins_its_predecessor():
     # 300 chars, break, 400 chars of unbroken words, break, a 5-char tail.
     # With target 320 the second paragraph is cut at a space near 620,

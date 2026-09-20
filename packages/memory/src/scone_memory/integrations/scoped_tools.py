@@ -25,6 +25,8 @@ from ..agents.tool_evidence import PreparedToolEvidence, prepare_tool_evidence
 from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, EvidenceCandidate, EvidenceDecision
 from ..retrieval.recall_scope import RecallScope
+from ..retrieval.listwise import ListwiseReranker
+from ..retrieval.reranking import RerankCandidate, rerank_candidates
 from ..retrieval.computation import ComputeMemoryArgs, ComputationError
 from ..retrieval.table_query import TableQueryError
 from .compute_memory import compute_memory
@@ -66,7 +68,7 @@ def _unavailable(reason: str) -> dict[str, object]:
 class ScopedMemoryTools:
     """Per-host read-only search/trace/read binding, compatible with tool renderers.
 
-    Search offers at most 20 total candidates from one query, with 32000 evidence
+    Search uses the engine's candidate depth capped at 100, with 32000 evidence
     bytes and a caller-selected return count up to 20. Trace retains its native
     16-fact/32-edge and two-second limits. Read returns up to nine nearby chunks
     from a bounded ten-row window. The whole invocation is additionally
@@ -99,6 +101,7 @@ class ScopedMemoryTools:
             raise ValueError("max_result_bytes must be in 512..64000")
         self._memory, self._space, self._excluded = memory, space, exclude_session_id
         self._timeout, self._max_bytes = float(timeout_s), max_result_bytes
+        self._candidate_limit = min(100, getattr(memory, 'candidate_limit', None) or 20)
 
     def invocation_context(self, deadline: float) -> ToolContext:
         """A detached host scope for explicitly registered application tools."""
@@ -107,8 +110,11 @@ class ScopedMemoryTools:
 
     def journal_binding(self) -> dict[str, object]:
         """Host-owned recall policy and bounds, detached from mutable callers."""
-        return {'space': self._space, 'scope': self._scope.kwargs(), 'excluded_session': self._excluded,
-                'timeout_s': self._timeout, 'max_result_bytes': self._max_bytes, 'computation': self._compute}
+        binding: dict[str, object] = {'space': self._space, 'scope': self._scope.kwargs(), 'excluded_session': self._excluded,
+                   'timeout_s': self._timeout, 'max_result_bytes': self._max_bytes, 'computation': self._compute}
+        if self._candidate_limit != 20:
+            binding['search_candidate_limit'] = self._candidate_limit
+        return binding
 
     async def restore(self, payload: str, source_digest: str) -> PreparedToolEvidence:
         """Recheck a saved packet through current point reads, never a new search.
@@ -194,21 +200,46 @@ class ScopedMemoryTools:
 
     async def _search(self, args: _Search) -> dict[str, object]:
         result = await AdaptiveRetriever(self._memory, _RetainCandidates(),
-            limits=AdaptiveLimits(max_rounds=1, max_queries=1, candidate_limit=20,
+            limits=AdaptiveLimits(max_rounds=1, max_queries=1, candidate_limit=self._candidate_limit,
                                   max_evidence_bytes=32000, timeout_s=self._timeout)).retrieve(
                 self._space, args.query, scope=self._scope, exclude_session_id=self._excluded)
         if result.errors:
             return _unavailable("timeout" if "timeout" in result.errors else "retrieval_failed")
+        ranked_items = result.recall.items
+        ranking = None
+        if (self._memory.reranker is not None
+                and not isinstance(self._memory.reranker, ListwiseReranker) and ranked_items):
+            # Preserve the conversation policy: listwise chat uses a separate,
+            # longer deadline and cannot run within a bounded tool search.
+            # Adaptive retrieval has already removed excluded-session and
+            # out-of-scope passages; no such text reaches the model scorer.
+            candidates = [RerankCandidate(item.chunk_id, item.episode_id, item.text,
+                item.source, item.created_at, item.score, item.similarity, tuple(item.lanes.items()))
+                for item in ranked_items]
+            ranking = await rerank_candidates(self._memory.reranker, args.query, candidates,
+                limit=self._memory.rerank_limit, max_bytes=self._memory.rerank_max_bytes,
+                timeout=min(self._memory.rerank_timeout, self._timeout / 2))
+            by_id = {item.chunk_id: item for item in ranked_items}
+            ordered = set(ranking.ordered_ids)
+            ranked_items = ([by_id[key] for key in ranking.ordered_ids]
+                            + [item for item in ranked_items if item.chunk_id not in ordered])
         # Limit the combined output, not each kind separately.
         facts = result.recall.facts[:args.limit]
-        items = result.recall.items[:max(0, args.limit - len(facts))]
+        items = ranked_items[:max(0, args.limit - len(facts))]
         omitted = len(result.recall.facts) + len(result.recall.items) - len(facts) - len(items)
-        return {"ok": True, "status": "prepared" if facts or items else "empty",
+        packet: dict[str, object] = {"ok": True, "status": "prepared" if facts or items else "empty",
                 "items": [{"episode_id": row.episode_id, "chunk_id": row.chunk_id, "text": row.text,
                            "source": row.source, "created_at": row.created_at, "score": row.score} for row in items],
                 "facts": [_claim(row) for row in facts], "verified_accuracy": False,
                 "coverage": {"bounded": True, "complete": False, "truncated": result.truncated or omitted > 0,
                              "output_omitted_count": omitted, "reasons": list(result.reasons)}}
+        if ranking is not None:
+            packet['rerank'] = ranking.trace.model_dump()
+            # A source may change while an async scorer runs. Revalidate even
+            # callers of run(), which do not ask for a prepared evidence lease.
+            await prepare_tool_evidence(self._memory, self._space, self._scope,
+                self._excluded, packet, self._timeout)
+        return packet
 
     async def run(self, name: str, arguments: Mapping[str, object]) -> dict[str, object]:
         offered = {"search_memory", "trace_memory", "read_memory"}

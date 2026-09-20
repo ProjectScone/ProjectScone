@@ -280,10 +280,13 @@ class OpenAICompatibleTextModel:
                     raise ChatError(f"chat server returned {response.status_code}")
                 if not response.headers.get("content-type", "").startswith("text/event-stream"):
                     await response.aread()
-                    text = _content_of(response)
-                    finish = response.json()["choices"][0].get("finish_reason")
+                    try:
+                        finish = response.json()["choices"][0].get("finish_reason")
+                    except (ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
+                        raise ChatError('malformed chat completion') from error
                     if finish not in (None, "stop"):
-                        raise ChatError("chat response did not finish normally")
+                        raise _incomplete_reply(finish)
+                    text = _content_of(response)
                     if text:
                         yield TextDelta(text)
                     yield ReplyCompleted()
@@ -305,7 +308,7 @@ class OpenAICompatibleTextModel:
                         yield TextDelta(chunk_text)
                     finish = choice.get("finish_reason")
                     if finish is not None and finish != "stop":
-                        raise ChatError("chat response did not finish normally")
+                        raise _incomplete_reply(finish)
                     if finish == "stop":
                         completed = True
                         break
@@ -317,6 +320,11 @@ class OpenAICompatibleTextModel:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+def _incomplete_reply(finish: object) -> ChatError:
+    reason = finish if finish in ('length', 'content_filter', 'tool_calls', 'function_call') else 'unknown'
+    return ChatError(f'chat response did not finish normally ({reason})')
 
 
 def _content_of(response: object) -> str:

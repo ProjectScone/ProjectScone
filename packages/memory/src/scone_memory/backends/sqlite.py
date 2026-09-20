@@ -34,7 +34,7 @@ from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .location import local_identity
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
-from .sqlite_lexical import exact_form_rank, initialize_lexical, lexical_match, synchronize_lexical
+from .sqlite_lexical import exact_form_rank, index_lexical_chunk, initialize_lexical, lexical_match, synchronize_lexical
 from ..core.space_deletion import (
     SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
 )
@@ -477,6 +477,7 @@ class SqliteDocumentStore:
                     (next_id, n.episode_id, n.space, n.ordinal, n.start, n.end, n.text, n.created_at),
                 )
                 out.append(Chunk(chunk_id=next_id, **n.__dict__))
+                index_lexical_chunk(self.conn, next_id, n.space, n.text)
                 next_id += 1
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_chunk_id', ?)", (str(next_id),))
             self.conn.execute("COMMIT")
@@ -540,6 +541,16 @@ class SqliteDocumentStore:
         """Chunks of ``space`` written but not yet in the lexical index after
         the last text search: what the text lane could not see then."""
         return self._lexical_behind.get(space, 0)
+
+    async def sync_text_index(self, space: str) -> tuple[int, int]:
+        """Advance a migrated/external-write index one bounded batch.
+
+        Return (indexed, remaining). Hosts can finish explicit preparation
+        before accepting queries without using a user's search as warmup.
+        """
+        indexed, remaining = synchronize_lexical(self.conn, space)
+        self._lexical_behind[space] = remaining
+        return indexed, remaining
 
     def exact_forms_cut(self, space: str) -> int:
         """Query words the last family search of ``space`` left at their
