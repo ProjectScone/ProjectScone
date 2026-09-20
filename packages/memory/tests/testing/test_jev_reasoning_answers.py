@@ -24,6 +24,9 @@ async def test_reasoning_pilot_preserves_identical_evidence_and_balanced_schedul
     (source/'prepared.jsonl').write_text(''.join(p.model_dump_json()+'\n' for p in prepared))
     save(source/'completion.json', {'terminal': True, 'code_and_inputs_unchanged': True,
                                    'prepared_sha256': digest(source/'prepared.jsonl')})
+    assert len(namespace['selected_requests'](source, per_dataset=100)) == 200
+    with pytest.raises(ValueError):
+        namespace['selected_requests'](source, per_dataset=0)
     calls = []
 
     async def capture(provider, messages, *, timeout):
