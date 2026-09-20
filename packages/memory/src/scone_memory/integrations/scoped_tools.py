@@ -68,7 +68,7 @@ def _unavailable(reason: str) -> dict[str, object]:
 class ScopedMemoryTools:
     """Per-host read-only search/trace/read binding, compatible with tool renderers.
 
-    Search offers at most 20 total candidates from one query, with 32000 evidence
+    Search uses the engine's candidate depth capped at 100, with 32000 evidence
     bytes and a caller-selected return count up to 20. Trace retains its native
     16-fact/32-edge and two-second limits. Read returns up to nine nearby chunks
     from a bounded ten-row window. The whole invocation is additionally
@@ -101,6 +101,7 @@ class ScopedMemoryTools:
             raise ValueError("max_result_bytes must be in 512..64000")
         self._memory, self._space, self._excluded = memory, space, exclude_session_id
         self._timeout, self._max_bytes = float(timeout_s), max_result_bytes
+        self._candidate_limit = min(100, getattr(memory, 'candidate_limit', None) or 20)
 
     def invocation_context(self, deadline: float) -> ToolContext:
         """A detached host scope for explicitly registered application tools."""
@@ -109,8 +110,11 @@ class ScopedMemoryTools:
 
     def journal_binding(self) -> dict[str, object]:
         """Host-owned recall policy and bounds, detached from mutable callers."""
-        return {'space': self._space, 'scope': self._scope.kwargs(), 'excluded_session': self._excluded,
-                'timeout_s': self._timeout, 'max_result_bytes': self._max_bytes, 'computation': self._compute}
+        binding: dict[str, object] = {'space': self._space, 'scope': self._scope.kwargs(), 'excluded_session': self._excluded,
+                   'timeout_s': self._timeout, 'max_result_bytes': self._max_bytes, 'computation': self._compute}
+        if self._candidate_limit != 20:
+            binding['search_candidate_limit'] = self._candidate_limit
+        return binding
 
     async def restore(self, payload: str, source_digest: str) -> PreparedToolEvidence:
         """Recheck a saved packet through current point reads, never a new search.
@@ -196,7 +200,7 @@ class ScopedMemoryTools:
 
     async def _search(self, args: _Search) -> dict[str, object]:
         result = await AdaptiveRetriever(self._memory, _RetainCandidates(),
-            limits=AdaptiveLimits(max_rounds=1, max_queries=1, candidate_limit=20,
+            limits=AdaptiveLimits(max_rounds=1, max_queries=1, candidate_limit=self._candidate_limit,
                                   max_evidence_bytes=32000, timeout_s=self._timeout)).retrieve(
                 self._space, args.query, scope=self._scope, exclude_session_id=self._excluded)
         if result.errors:
