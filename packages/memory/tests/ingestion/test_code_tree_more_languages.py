@@ -176,17 +176,18 @@ def test_solidity_says_its_contracts_functions_and_imports():
 
 
 @pytest.mark.parametrize("path, source", [
-    ("billing.ml", "module Billing = struct\n  let total items = 0\nend\n"),
     ("Invoice.groovy", "class Invoice { int total(List items) { 0 } }\n"),
-], ids=["ocaml", "groovy"])
+    ("build.tcl", "proc total {items} { return 0 }\n"),
+], ids=["groovy", "tcl"])
 def test_a_language_whose_tree_this_reader_cannot_name_stays_prose(path, source):
     """A rule of their own has not been written and checked against these
     trees. A wrong name in the graph is worse than no name, so they say
     nothing: this is what stops a later `just add the suffix`. R, Julia,
-    Haskell and Clojure were each here until their own tree was read --
-    OCaml keeps a definition's name in a binding child, and the Groovy
-    grammar in this pack parses a class as a bare `command`, which names
-    nothing at all."""
+    Haskell, Clojure and OCaml were each here until their own tree was
+    read. The Groovy grammar in this pack parses a class as a bare
+    `command`, which names nothing at all, and Tcl has no rule here
+    either. (Zig, by contrast, is not on this list: the brace family's
+    header rule already reads it.)"""
     assert code_language(path) is None, f"{path} is not claimed to be read"
     assert code_claims(source, path, language=None) == ()
 
@@ -497,3 +498,60 @@ def test_a_clojure_call_that_is_not_a_definition_declares_nothing():
     claims = code_claims('(println "hello")\n(let [x 1] x)\n(defn f [] 1)\n', "a.clj",
                          language=code_language("a.clj"))
     assert said(claims, "defines") == [("a.clj", "defines", "a.clj:f")]
+
+
+# -- OCaml --------------------------------------------------------------------------
+
+
+OCAML = '''open Printf
+open Core.List
+
+(* WHY: totals are integers so rounding is the caller's problem *)
+module Billing = struct
+  let total items = List.fold_left (+) 0 items
+  let rate = 0.2
+
+  type invoice = { id : int }
+
+  type 'a box = { value : 'a }
+
+  exception Missing of string
+end
+
+module type Reporter = sig
+  val report : string -> unit
+end
+
+let apply x = x + 1
+'''
+
+
+def test_ocaml_says_its_modules_values_types_and_what_it_opens():
+    claims = code_claims(OCAML, "lib/billing.ml", language=code_language("lib/billing.ml"))
+    assert said(claims, "defines") == [
+        ("lib/billing.ml", "defines", "lib/billing.ml:Billing"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.total"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.rate"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.invoice"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.box"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.Missing"),
+        ("lib/billing.ml", "defines", "lib/billing.ml:Reporter"),
+        ("lib/billing.ml:Reporter", "defines", "lib/billing.ml:Reporter.report"),
+        ("lib/billing.ml", "defines", "lib/billing.ml:apply"),
+    ], ("a module holds what its structure defines -- values, types and exceptions alike -- and a module "
+        "type holds what its signature promises; a parametrised type is named `box`, never `'a`")
+    assert said(claims, "imports") == [
+        ("lib/billing.ml", "imports", "Printf"),
+        ("lib/billing.ml", "imports", "Core.List"),
+    ], "an open names a module by its whole path"
+    assert said(claims, "notes") == [("lib/billing.ml", "notes",
+                                      "totals are integers so rounding is the caller's problem")]
+
+
+def test_an_ocaml_interface_file_says_what_it_promises():
+    claims = code_claims('val total : int list -> int\ntype invoice\n', "lib/billing.mli",
+                         language=code_language("lib/billing.mli"))
+    assert said(claims, "defines") == [
+        ("lib/billing.mli", "defines", "lib/billing.mli:total"),
+        ("lib/billing.mli", "defines", "lib/billing.mli:invoice"),
+    ], "an .mli declares the surface, which is what another file can reach"
