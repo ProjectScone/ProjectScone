@@ -110,7 +110,7 @@ def mount_model_connection_routes(app: FastAPI, store: ModelConnectionStore,
         except ModelConnectionConflict:
             return JSONResponse({'error': 'Model settings changed; reload the saved revision before saving'}, status_code=409)
         except ValueError:
-            return JSONResponse({'error': 'Invalid model connection; check provider, endpoint, model and token variable (speech requires voice)'}, status_code=400)
+            return JSONResponse({'error': 'Invalid model connection; check provider, self-hosted endpoint or explicit OpenRouter endpoint, model and token variable (speech requires voice)'}, status_code=400)
         except ModelConnectionError:
             return JSONResponse({'error': 'Self-hosted model settings could not be saved'}, status_code=503)
         except HTTPException as error:
@@ -129,7 +129,7 @@ def mount_model_connection_routes(app: FastAPI, store: ModelConnectionStore,
             body = _Probe.model_validate(await _body(request))
             return await probe_model_connection(body.connection)
         except ValueError:
-            return JSONResponse({'error': 'Invalid model connection; check provider, endpoint, model and token variable'}, status_code=400)
+            return JSONResponse({'error': 'Invalid model connection; check provider, self-hosted endpoint or explicit OpenRouter endpoint, model and token variable'}, status_code=400)
         except ModelConnectionError:
             return JSONResponse({'error': 'Self-hosted model discovery is unavailable; check the endpoint and server token configuration'}, status_code=502)
         except HTTPException as error:
