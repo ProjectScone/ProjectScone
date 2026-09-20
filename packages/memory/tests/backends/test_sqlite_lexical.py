@@ -2,10 +2,53 @@
 
 from __future__ import annotations
 
+import pytest
+
 from scone_memory import HashEmbedder, InMemoryVectorIndex, MemoryEngine
 from scone_memory.backends import SqliteDocumentStore
 from scone_memory.backends import sqlite_lexical as module
 from scone_memory.core.ports import TextFilter
+
+
+async def test_failed_lexical_write_cannot_publish_a_partial_chunk_batch(tmp_path, monkeypatch):
+    from scone_memory.backends import sqlite as sqlite_store
+    from scone_memory.core.ports import NewChunk
+    store = SqliteDocumentStore(tmp_path/'atomic.db')
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        saved = await engine.remember('s', 'Existing retained passage.')
+        original = sqlite_store.index_lexical_chunk
+        calls = 0
+        def fail_second(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError('index write failed')
+            return original(*args)
+        monkeypatch.setattr(sqlite_store, 'index_lexical_chunk', fail_second)
+        with pytest.raises(RuntimeError, match='index write failed'):
+            await store.insert_chunks([NewChunk(episode_id=saved.episode_id, space='s', ordinal=i,
+                start=0, end=12, text='Unpublished.', created_at='2026-09-08') for i in (1, 2)])
+        assert store.conn.execute('SELECT count(*) FROM chunks').fetchone()[0] == 1
+        assert store.conn.execute('SELECT count(*) FROM chunk_lexical').fetchone()[0] == 1
+        assert store.conn.execute('SELECT count(*) FROM chunk_lexical_dirty').fetchone()[0] == 0
+    finally:
+        await engine.close()
+
+
+async def test_first_search_after_bulk_ingestion_can_find_the_last_document(tmp_path, monkeypatch):
+    from scone_memory.memory.engine import Record
+    monkeypatch.setattr(module, 'MAX_SYNC_ROWS', 2)
+    store = SqliteDocumentStore(tmp_path / 'first-query.db')
+    engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        await engine.remember_many('s', [Record(f'Unrelated invoice {i}.') for i in range(5)]
+                                   + [Record('The lighthouse custodian is Morgan.')])
+        result = await engine.recall('s', 'lighthouse custodian', lanes=('text',))
+        assert result.items and 'Morgan' in result.items[0].text
+        assert not result.degraded
+    finally:
+        await engine.close()
 
 
 async def test_rows_follow_writes_and_deletions_and_a_query_finds_a_part_of_an_unspaced_run(tmp_path):
@@ -13,7 +56,7 @@ async def test_rows_follow_writes_and_deletions_and_a_query_finds_a_part_of_an_u
     engine = await MemoryEngine(store, InMemoryVectorIndex(), HashEmbedder()).open()
     kept = await engine.remember("s", "東京タワーは1958年に完成した。")
     await engine.remember("s", "Don't forget the résumé for the interview.")
-    assert store.conn.execute("SELECT count(*) FROM chunk_lexical_dirty").fetchone()[0] == 2, "writes are marked, not tokenised yet"
+    assert store.conn.execute("SELECT count(*) FROM chunk_lexical_dirty").fetchone()[0] == 0, "new writes are already searchable"
     found = await store.search_terms("s", "東京", 5, TextFilter(), prefixes=())
     assert len(found) == 1 and store.conn.execute("SELECT count(*) FROM chunk_lexical_dirty").fetchone()[0] == 0
     assert [c for c, _ in await store.search_terms("s", "resume", 5, TextFilter(), prefixes=())] != [], "accents folded on both sides"
@@ -72,6 +115,9 @@ async def test_the_synchronisation_is_bounded_per_query_and_the_backlog_is_said(
     try:
         for number in range(10):
             await engine.remember("s", f"Invoice number {number} for the harbour lights, billing due in March.")
+        # Old tokenizer data is still migrated in bounded query-time batches.
+        monkeypatch.setattr(module, '_VERSION', module._VERSION + ';test-migration')
+        module.initialize_lexical(store.conn)
         first = await engine.recall("s", "billing harbour", limit=3)
         assert store.lexical_backlog("s") == 6, "four chunks synchronised, six still behind"
         assert any("6 chunk(s) not yet in the lexical index" in note for note in first.degraded), first.degraded

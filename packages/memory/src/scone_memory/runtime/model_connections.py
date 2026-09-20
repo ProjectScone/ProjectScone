@@ -13,9 +13,9 @@ import stat
 import tempfile
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, field_validator, model_validator, model_serializer
 
-from ..providers.self_hosted import validate_self_hosted_endpoint
+from ..providers.inference_endpoint import InferenceProvider, inference_endpoint
 
 ModelRole = Literal['chat', 'extraction', 'vision', 'transcription', 'speech']
 MODEL_ROLES: tuple[ModelRole, ...] = ('chat', 'extraction', 'vision', 'transcription', 'speech')
@@ -33,6 +33,7 @@ class ModelConnectionConflict(ModelConnectionError):
 class ModelConnection(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid',
                               hide_input_in_errors=True, revalidate_instances='always')
+    provider: InferenceProvider = 'self_hosted'
     base_url: str
     model: str = Field(min_length=1, max_length=160)
     timeout_s: float = Field(default=180, ge=1, le=600, allow_inf_nan=False)
@@ -41,10 +42,20 @@ class ModelConnection(BaseModel):
     voice: str | None = Field(default=None, min_length=1, max_length=120)
     sample_rate: int = Field(default=24000, ge=8000, le=48000)
 
-    @field_validator('base_url')
-    @classmethod
-    def self_hosted_url(cls, value: str) -> str:
-        return validate_self_hosted_endpoint(value)
+    @model_serializer(mode='wrap')
+    def wire(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = handler(self)
+        if self.provider == 'self_hosted':
+            data.pop('provider', None)
+        return data
+
+    @model_validator(mode='after')
+    def selected_endpoint(self):
+        normalized = inference_endpoint(self.base_url, self.model, self.provider)
+        if self.provider == 'openrouter' and self.api_key_env is None:
+            raise ValueError('OpenRouter requires a server token environment variable')
+        object.__setattr__(self, 'base_url', normalized)
+        return self
 
     @field_validator('model', 'voice')
     @classmethod
@@ -69,6 +80,9 @@ class _Document(BaseModel):
 
     @model_validator(mode='after')
     def speech_voice(self):
+        for role, connection in self.connections.items():
+            if connection is not None and connection.provider != 'self_hosted' and role != 'chat':
+                raise ValueError('Cloud model connections currently support the chat role only')
         speech = self.connections.get('speech')
         if speech is not None and speech.voice is None:
             raise ValueError('speech requires a voice')
