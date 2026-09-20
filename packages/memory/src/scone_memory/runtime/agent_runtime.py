@@ -14,7 +14,7 @@ import stat
 from typing import TYPE_CHECKING, Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..agents.catalog import AgentCatalog, AgentDefinition, AgentModel, Identifier
 from ..agents.custom_tools import AgentTool
@@ -22,7 +22,8 @@ from ..agents.evidence_loop import ToolModel
 from ..agents.plan_store import AgentPlanStore
 from ..agents.run_service import AgentRunService
 from ..memory.engine import MemoryEngine
-from ..providers.self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
+from ..providers.self_hosted import validate_self_hosted_identifier
+from ..providers.inference_endpoint import InferenceProvider
 from ..retrieval.recall_scope import RecallScope
 from .model_connections import ModelConnection, api_key
 
@@ -38,6 +39,7 @@ class LocalAgentModel(BaseModel):
     model_id: Identifier
     label: str = Field(min_length=1, max_length=256)
     revision: Identifier
+    provider: InferenceProvider = 'self_hosted'
     base_url: str
     model: str
     protocol: Literal['native', 'structured'] = 'native'
@@ -47,14 +49,19 @@ class LocalAgentModel(BaseModel):
     think: bool | None = None
     api_key_env: str | None = Field(default=None, min_length=1, max_length=128, pattern=_ENV_NAME)
 
-    @field_validator('base_url')
-    @classmethod
-    def local_endpoint(cls, value: str) -> str:
-        normalized = validate_self_hosted_endpoint(value)
-        host = urlsplit(normalized).hostname
-        if host != 'localhost' and (host is None or not ip_address(host).is_loopback):
-            raise ValueError('agent model endpoint must be loopback')
-        return normalized
+    @model_validator(mode='after')
+    def selected_endpoint(self):
+        connection = self.connection()
+        if self.provider == 'self_hosted':
+            host = urlsplit(connection.base_url).hostname
+            if host != 'localhost' and (host is None or not ip_address(host).is_loopback):
+                raise ValueError('agent model endpoint must be loopback')
+        object.__setattr__(self, 'base_url', connection.base_url)
+        return self
+
+    def connection(self) -> ModelConnection:
+        return ModelConnection(provider=self.provider, base_url=self.base_url, model=self.model,
+            timeout_s=self.timeout_s, api_key_env=self.api_key_env)
 
     @field_validator('model')
     @classmethod
@@ -65,14 +72,15 @@ class LocalAgentModel(BaseModel):
         from ..providers.tool_chat import SelfHostedToolChat
         from ..providers.structured_tool_chat import SelfHostedStructuredToolChat
 
-        connection = ModelConnection(base_url=self.base_url, model=self.model,
-            timeout_s=self.timeout_s, api_key_env=self.api_key_env)
+        connection = self.connection()
         provider = SelfHostedStructuredToolChat if self.protocol == 'structured' else SelfHostedToolChat
         return provider(self.base_url, self.model, api_key=api_key(connection), timeout_s=self.timeout_s,
-            max_tokens=self.max_tokens, max_response_bytes=self.max_response_bytes, think=self.think)
+            max_tokens=self.max_tokens, max_response_bytes=self.max_response_bytes, think=self.think,
+            provider=self.provider)
 
     def registered(self) -> AgentModel:
-        revision = hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+        excluded = {'provider'} if self.provider == 'self_hosted' else None
+        revision = hashlib.sha256(self.model_dump_json(exclude=excluded).encode()).hexdigest()
         return AgentModel(self.model_id, self.label, revision, self.create)
 
 

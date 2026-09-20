@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Literal, cast
 from ..agents.evidence_loop import ToolCall, ToolStep
 from ..agents.usage import ModelTokenUsage
 from .llm import _thinking_options
-from .self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
+from .self_hosted import validate_self_hosted_identifier
+from .inference_endpoint import InferenceProvider, inference_endpoint
 from .tool_diagnostics import ToolCallDiagnostics
 
 if TYPE_CHECKING:
@@ -197,8 +198,10 @@ class SelfHostedToolChat:
     def __init__(self, endpoint: str, model: str, *, api_key: str | None = None,
                  timeout_s: float = 120.0, max_response_bytes: int = 128000,
                  max_tokens: int = 2048, transport: httpx.AsyncBaseTransport | None = None,
-                 think: bool | None = None) -> None:
-        self._endpoint = validate_self_hosted_endpoint(endpoint).rstrip('/') + '/chat/completions'
+                 think: bool | None = None, provider: InferenceProvider = 'self_hosted') -> None:
+        self._endpoint = inference_endpoint(endpoint, model, provider).rstrip('/') + '/chat/completions'
+        if provider == 'openrouter' and not api_key:
+            raise ValueError('OpenRouter requires a server token')
         self._model = validate_self_hosted_identifier(model)
         if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
                 or not math.isfinite(timeout_s) or not 0.01 <= timeout_s <= 600):
