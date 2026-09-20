@@ -3,6 +3,34 @@ import pytest
 from scone_memory.testing.public_qa import Gold, Question
 
 
+async def test_neural_evaluation_uses_qwen_and_fresh_local_qdrant(tmp_path, monkeypatch):
+    qdrant = pytest.importorskip('qdrant_client')
+    client = qdrant.AsyncQdrantClient
+    monkeypatch.setattr(qdrant, 'AsyncQdrantClient', lambda **kwargs: client(':memory:'))
+    from scone_memory.testing.jev_answers import build_engine
+    one = build_engine(tmp_path, 'not-a-real-key', 'http://127.0.0.1:64076')
+    two = build_engine(tmp_path, 'not-a-real-key', 'http://127.0.0.1:64076')
+    try:
+        assert one.embedder.model == 'qwen/qwen3-embedding-8b'
+        assert one.embedder.dim == 4096
+        assert one.embedder.query_prefix.startswith('Instruct:')
+        assert one.vectors.name == 'qdrant'
+        assert one.vectors.collection != two.vectors.collection
+        assert one.vector_weight == 1.0
+        assert one.candidate_limit == 64
+    finally:
+        await one.vectors.close()
+        await two.vectors.close()
+
+
+@pytest.mark.parametrize('url', ['https://hosted.example', 'http://user:secret@localhost:6333',
+                               'http://127.0.0.1:6333/?api_key=secret'])
+def test_neural_evaluation_rejects_nonlocal_or_credential_urls(tmp_path, url):
+    from scone_memory.testing.jev_answers import build_engine
+    with pytest.raises(ValueError, match='local Qdrant'):
+        build_engine(tmp_path, 'not-a-real-key', url)
+
+
 def test_paired_answer_scores_keep_failures_and_regressions_in_denominator():
     from scone_memory.testing.jev_answers import Answer, score_answers
 

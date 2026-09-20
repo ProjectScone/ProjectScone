@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 import statistics
 import time
+import uuid
+from urllib.parse import urlsplit
 from typing import Literal, TYPE_CHECKING, cast
 
 from .jev_public_qa import SPACE, Observer, code_digest, digest, save
@@ -27,6 +29,33 @@ ARMS: tuple[Arm, ...] = ('hybrid', 'hybrid_jev')
 MODEL = 'google/gemma-4-31b-it'
 JEV_MODEL = 'typesafe/jev-1.13-20260917'
 PROTOCOL = Path(__file__).resolve().parents[3] / 'benchmarks/jev-answers-v1.protocol.md'
+QWEN_PROTOCOL = PROTOCOL.with_name('jev-qwen-answers-v1.protocol.md')
+QWEN_MODEL = 'qwen/qwen3-embedding-8b'
+QUERY_PREFIX = 'Instruct: Find passages that provide evidence to answer the question.\nQuery:'
+
+
+def build_engine(output: Path, key: str, qdrant_url: str | None = None) -> MemoryEngine:
+    from .. import HashEmbedder, MemoryEngine
+    from ..backends import SqliteDocumentStore, SqliteVectorIndex
+    from ..core.ports import Embedder, VectorIndex
+
+    embedder: Embedder = HashEmbedder()
+    vectors: VectorIndex = SqliteVectorIndex(output/'memory.db')
+    if qdrant_url is not None:
+        parsed = urlsplit(qdrant_url)
+        if (parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1')
+                or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or parsed.path not in ('', '/')):
+            raise ValueError('evaluation requires a local Qdrant URL without credentials')
+        from ..backends.qdrant import QdrantVectorIndex
+        from ..embedders.remote import RemoteEmbedder
+
+        embedder = RemoteEmbedder('https://openrouter.ai/api/v1', QWEN_MODEL, api_key=key,
+            dim=4096, query_prefix=QUERY_PREFIX, trust_env=False)
+        vectors = QdrantVectorIndex(qdrant_url, 'scone_qwen_answers_' + uuid.uuid4().hex)
+    return MemoryEngine(SqliteDocumentStore(output/'memory.db'), vectors, embedder,
+        chunk_target=700, candidate_limit=64, rerank_limit=32, rerank_max_bytes=64000,
+        rerank_timeout=10)
 
 
 class PreparedAnswer(FrozenRecord):
@@ -86,9 +115,7 @@ def load_questions(dataset: Path) -> list[Question]:
     return questions
 
 
-async def run(dataset: Path, output: Path) -> None:
-    from .. import HashEmbedder, MemoryEngine
-    from ..backends import SqliteDocumentStore, SqliteVectorIndex
+async def run(dataset: Path, output: Path, qdrant_url: str | None = None) -> None:
     from ..memory.engine import Record
     from ..providers.jev import JevReranker
     from ..providers.llm import OpenAICompatibleTextModel
@@ -105,16 +132,20 @@ async def run(dataset: Path, output: Path) -> None:
     observer = Observer(JevReranker(api_key=key, model=JEV_MODEL))
     output.mkdir(parents=True, exist_ok=False)
     inputs = {name: digest(dataset/name) for name in ('dataset.json', 'corpus.jsonl', 'reserved-queries.jsonl')}
-    code, protocol = code_digest(), digest(PROTOCOL)
-    save(output/'manifest.json', {'protocol': 'jev-answers-v1', 'protocol_sha256': protocol,
+    protocol_path = QWEN_PROTOCOL if qdrant_url else PROTOCOL
+    code, protocol = code_digest(), digest(protocol_path)
+    engine = build_engine(output, key, qdrant_url)
+    save(output/'manifest.json', {'protocol': protocol_path.name.removesuffix('.protocol.md'), 'protocol_sha256': protocol,
         'code_sha256': code, 'inputs': inputs, 'questions': [q.model_dump() for q in questions],
         'gold_sha256': json.loads((dataset/'dataset.json').read_text())['files_sha256']['gold.jsonl'],
-        'chat_model': MODEL, 'jev_model': JEV_MODEL, 'arms': ARMS, 'embedder': 'HashEmbedder',
+        'chat_model': MODEL, 'jev_model': JEV_MODEL, 'arms': ARMS, 'embedder': engine.embedder.id,
+        'embedding_model': QWEN_MODEL if qdrant_url else 'HashEmbedder', 'dimensions': engine.embedder.dim,
+        'query_prefix': QUERY_PREFIX if qdrant_url else '', 'vector_weight': engine.vector_weight,
+        'vector_backend': engine.vectors.name, 'qdrant_url': qdrant_url,
+        'qdrant_collection': getattr(engine.vectors, 'collection', None),
         'candidate_limit': 64, 'rerank_limit': 32, 'context_limit': 5, 'max_context_bytes': 8000,
         'temperature': 0, 'think': False, 'max_output_tokens': 256})
-    engine = await MemoryEngine(SqliteDocumentStore(output/'memory.db'), SqliteVectorIndex(output/'memory.db'),
-        HashEmbedder(), chunk_target=700, candidate_limit=64, rerank_limit=32,
-        rerank_max_bytes=64000, rerank_timeout=10).open()
+    await engine.open()
     documents: dict[int, Document] = {}
     try:
         for offset in range(0, len(corpus), 100):
@@ -125,6 +156,7 @@ async def run(dataset: Path, output: Path) -> None:
                 if episode.episode_id in documents:
                     raise ValueError('unexpected corpus deduplication')
                 documents[episode.episode_id] = doc
+            print(f'Indexed {len(documents)}/{len(corpus)}', flush=True)
         with (output/'prepared.jsonl').open('x') as prepared_stream, (output/'answers.jsonl').open('x') as answers_stream:
             for index, question in enumerate(questions):
                 for arm in ARMS if index % 2 == 0 else tuple(reversed(ARMS)):
@@ -148,7 +180,7 @@ async def run(dataset: Path, output: Path) -> None:
                     print(f'{index+1}/200 {arm}: {answer.status}', flush=True)
     finally:
         await engine.close()
-    unchanged = (code_digest() == code and digest(PROTOCOL) == protocol
+    unchanged = (code_digest() == code and digest(protocol_path) == protocol
                  and all(digest(dataset/name) == sha for name, sha in inputs.items()))
     save(output/'completion.json', {'terminal': True, 'code_and_inputs_unchanged': unchanged,
         'manifest_sha256': digest(output/'manifest.json'), 'prepared_sha256': digest(output/'prepared.jsonl'),
@@ -223,6 +255,25 @@ def score(dataset: Path, output: Path) -> None:
             for g in (Gold.model_validate_json(line),)}
     report = score_answers(questions, rows, gold)
     report['jev_applied'] = sum(p.resolved_jev_model is not None for p in prepared if p.arm == 'hybrid_jev')
+    from .jev_public_qa import rank_metrics
+    from .public_qa_score import latency
+    report['resolved_jev_models'] = dict(Counter(p.resolved_jev_model for p in prepared
+                                               if p.resolved_jev_model is not None))
+    report['context'] = []
+    answers = {(r.id, r.arm): r for r in rows}
+    for dataset_name in ('all', 'hotpotqa', 'squad'):
+        for arm in ARMS:
+            selected = [p for p in prepared if p.arm == arm
+                        and (dataset_name == 'all' or p.question.dataset == dataset_name)]
+            metrics = [rank_metrics([s.document_id for s in p.sources],
+                                   set(gold[p.question.id].support_documents)) for p in selected]
+            report['context'].append({'dataset': dataset_name, 'arm': arm, 'n': len(selected),
+                'recall_at_5': statistics.mean(m['recall_at_5'] for m in metrics),
+                'all_at_5': statistics.mean(m['all_at_5'] for m in metrics),
+                'context_status': dict(Counter(p.receipt['status'] for p in selected)),
+                'prepare_latency': latency([p.prepare_ms for p in selected]),
+                'end_to_end_latency': latency([p.prepare_ms + answers[p.question.id, arm].total_ms
+                                              for p in selected])})
     save(output/'scores.json', report)
     print(json.dumps({k: v for k, v in report.items() if k != 'per_question'}, indent=2))
 
@@ -232,9 +283,10 @@ def main() -> None:
     parser.add_argument('command', choices=('run', 'score'))
     parser.add_argument('--dataset', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--qdrant-url', help='Use Qwen 8B embeddings with this local Qdrant server')
     args = parser.parse_args()
     if args.command == 'run':
-        asyncio.run(run(args.dataset, args.output))
+        asyncio.run(run(args.dataset, args.output, args.qdrant_url))
     else:
         score(args.dataset, args.output)
 
