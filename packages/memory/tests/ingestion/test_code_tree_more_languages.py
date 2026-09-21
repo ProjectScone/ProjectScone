@@ -176,17 +176,18 @@ def test_solidity_says_its_contracts_functions_and_imports():
 
 
 @pytest.mark.parametrize("path, source", [
-    ("billing.hs", "module Billing where\ntotal :: [Int] -> Int\ntotal = sum\n"),
-    ("core.clj", "(defn total [items] (reduce + items))\n"),
-    ("billing.ml", "module Billing = struct\n  let total items = 0\nend\n"),
     ("Invoice.groovy", "class Invoice { int total(List items) { 0 } }\n"),
-], ids=["haskell", "clojure", "ocaml", "groovy"])
+    ("build.tcl", "proc total {items} { return 0 }\n"),
+], ids=["groovy", "tcl"])
 def test_a_language_whose_tree_this_reader_cannot_name_stays_prose(path, source):
-    """The generic rule finds nothing in these four, and a rule of their
-    own has not been written and checked against their trees. A wrong
-    name in the graph is worse than no name, so they say nothing: this
-    is what stops a later `just add the suffix`. R and Julia were here
-    until each got the rule its own tree asks for."""
+    """A rule of their own has not been written and checked against these
+    trees. A wrong name in the graph is worse than no name, so they say
+    nothing: this is what stops a later `just add the suffix`. R, Julia,
+    Haskell, Clojure and OCaml were each here until their own tree was
+    read. The Groovy grammar in this pack parses a class as a bare
+    `command`, which names nothing at all, and Tcl has no rule here
+    either. (Zig, by contrast, is not on this list: the brace family's
+    header rule already reads it.)"""
     assert code_language(path) is None, f"{path} is not claimed to be read"
     assert code_claims(source, path, language=None) == ()
 
@@ -383,3 +384,174 @@ def test_r_names_a_function_after_what_it_is_assigned_to_never_after_the_keyword
         ("R/total.R", "imports", "helpers.R"),
     ], "library and require name packages, source names a file, and a path built by a call is not a name"
     assert said(claims, "flags") == [("R/total.R", "flags", "weights are not applied")]
+
+
+# -- one declaration per name ------------------------------------------------------
+
+
+def test_a_function_written_in_several_clauses_is_declared_once():
+    """Elixir writes a function as one clause per shape, and Julia as one
+    method per type. Every clause is a definition node, so a reader that
+    took each would put the same name in the graph three times and give
+    `graph affected` three identical edges to walk."""
+    elixir = code_claims('defmodule M do\n  def total(a), do: a\n  def total(a, b), do: a + b\n'
+                         '  def total(a, b, c), do: 0\n  def other, do: 1\nend\n',
+                         "lib/m.ex", language=code_language("lib/m.ex"))
+    assert said(elixir, "defines") == [
+        ("lib/m.ex", "defines", "lib/m.ex:M"),
+        ("lib/m.ex:M", "defines", "lib/m.ex:M.total"),
+        ("lib/m.ex:M", "defines", "lib/m.ex:M.other"),
+    ]
+    first = next(c for c in elixir if c.object.endswith(".total"))
+    assert first.quote == "def total(a), do: a", "the first clause is where the name is declared"
+
+    julia = code_claims('total(x::Int) = x\ntotal(x::Float64) = x\n', "a.jl", language=code_language("a.jl"))
+    assert said(julia, "defines") == [("a.jl", "defines", "a.jl:total")]
+
+
+def test_two_holders_may_each_declare_the_same_name():
+    """One name per holder, not one name per file: two modules with a
+    `total` of their own are two declarations."""
+    claims = code_claims('defmodule A do\n  def total, do: 1\nend\ndefmodule B do\n  def total, do: 2\nend\n',
+                         "lib/two.ex", language=code_language("lib/two.ex"))
+    assert said(claims, "defines") == [
+        ("lib/two.ex", "defines", "lib/two.ex:A"),
+        ("lib/two.ex:A", "defines", "lib/two.ex:A.total"),
+        ("lib/two.ex", "defines", "lib/two.ex:B"),
+        ("lib/two.ex:B", "defines", "lib/two.ex:B.total"),
+    ]
+
+
+# -- Haskell and Clojure -----------------------------------------------------------
+
+
+HASKELL = '''module Billing.Invoice (total) where
+
+import Data.List (sort)
+import qualified Data.Map as M
+
+-- WHY: totals are integers so rounding is the caller's problem
+data Invoice = Invoice Int
+
+newtype Rate = Rate Double
+
+type Items = [Int]
+
+total :: Items -> Int
+total xs = sum xs
+total [] = 0
+'''
+
+
+def test_haskell_says_its_module_types_and_functions_and_what_it_imports():
+    claims = code_claims(HASKELL, "src/Invoice.hs", language=code_language("src/Invoice.hs"))
+    assert said(claims, "defines") == [
+        ("src/Invoice.hs", "defines", "src/Invoice.hs:Billing.Invoice"),
+        ("src/Invoice.hs", "defines", "src/Invoice.hs:Invoice"),
+        ("src/Invoice.hs", "defines", "src/Invoice.hs:Rate"),
+        ("src/Invoice.hs", "defines", "src/Invoice.hs:Items"),
+        ("src/Invoice.hs", "defines", "src/Invoice.hs:total"),
+    ], "a data type, a newtype and a synonym each declare; a signature is not a second declaration of its function"
+    assert said(claims, "imports") == [
+        ("src/Invoice.hs", "imports", "Data.List"),
+        ("src/Invoice.hs", "imports", "Data.Map"),
+    ], "a qualified import names the module, not the alias it is given"
+    assert said(claims, "notes") == [("src/Invoice.hs", "notes",
+                                      "totals are integers so rounding is the caller's problem")]
+
+
+CLOJURE = '''(ns billing.core
+  (:require [clojure.string :as s]
+            [clojure.set :refer [union]])
+  (:import java.util.Date))
+
+;; WHY: a reduce reads better than a loop here
+(defn total [items]
+  (reduce + items))
+
+(defn- rate [] 0.2)
+
+(def ceiling 10000)
+
+(defmacro with-rate [& body] `(do ~@body))
+'''
+
+
+def test_clojure_says_its_namespace_definitions_and_requires():
+    claims = code_claims(CLOJURE, "src/core.clj", language=code_language("src/core.clj"))
+    assert said(claims, "defines") == [
+        ("src/core.clj", "defines", "src/core.clj:billing.core"),
+        ("src/core.clj", "defines", "src/core.clj:total"),
+        ("src/core.clj", "defines", "src/core.clj:rate"),
+        ("src/core.clj", "defines", "src/core.clj:ceiling"),
+        ("src/core.clj", "defines", "src/core.clj:with-rate"),
+    ], "defn, defn-, def and defmacro all declare, and the namespace declares itself"
+    assert said(claims, "imports") == [
+        ("src/core.clj", "imports", "clojure.string"),
+        ("src/core.clj", "imports", "clojure.set"),
+        ("src/core.clj", "imports", "java.util.Date"),
+    ], "each required library and each imported class, by name"
+    assert said(claims, "notes") == [("src/core.clj", "notes", "a reduce reads better than a loop here")]
+
+
+def test_a_clojure_call_that_is_not_a_definition_declares_nothing():
+    claims = code_claims('(println "hello")\n(let [x 1] x)\n(defn f [] 1)\n', "a.clj",
+                         language=code_language("a.clj"))
+    assert said(claims, "defines") == [("a.clj", "defines", "a.clj:f")]
+
+
+# -- OCaml --------------------------------------------------------------------------
+
+
+OCAML = '''open Printf
+open Core.List
+
+(* WHY: totals are integers so rounding is the caller's problem *)
+module Billing = struct
+  let total items = List.fold_left (+) 0 items
+  let rate = 0.2
+
+  type invoice = { id : int }
+
+  type 'a box = { value : 'a }
+
+  exception Missing of string
+end
+
+module type Reporter = sig
+  val report : string -> unit
+end
+
+let apply x = x + 1
+'''
+
+
+def test_ocaml_says_its_modules_values_types_and_what_it_opens():
+    claims = code_claims(OCAML, "lib/billing.ml", language=code_language("lib/billing.ml"))
+    assert said(claims, "defines") == [
+        ("lib/billing.ml", "defines", "lib/billing.ml:Billing"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.total"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.rate"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.invoice"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.box"),
+        ("lib/billing.ml:Billing", "defines", "lib/billing.ml:Billing.Missing"),
+        ("lib/billing.ml", "defines", "lib/billing.ml:Reporter"),
+        ("lib/billing.ml:Reporter", "defines", "lib/billing.ml:Reporter.report"),
+        ("lib/billing.ml", "defines", "lib/billing.ml:apply"),
+    ], ("a module holds what its structure defines -- values, types and exceptions alike -- and a module "
+        "type holds what its signature promises; a parametrised type is named `box`, never `'a`")
+    assert said(claims, "imports") == [
+        ("lib/billing.ml", "imports", "Printf"),
+        ("lib/billing.ml", "imports", "Core.List"),
+    ], "an open names a module by its whole path"
+    assert said(claims, "notes") == [("lib/billing.ml", "notes",
+                                      "totals are integers so rounding is the caller's problem")]
+
+
+def test_an_ocaml_interface_file_says_what_it_promises():
+    claims = code_claims('val total : int list -> int\ntype invoice\n', "lib/billing.mli",
+                         language=code_language("lib/billing.mli"))
+    assert said(claims, "defines") == [
+        ("lib/billing.mli", "defines", "lib/billing.mli:total"),
+        ("lib/billing.mli", "defines", "lib/billing.mli:invoice"),
+    ], "an .mli declares the surface, which is what another file can reach"

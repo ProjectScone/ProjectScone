@@ -33,6 +33,31 @@ async def test_build_engine_wires_the_named_parts(tmp_path):
     assert (status.document_store, status.vector_index, status.embedder) == ("sqlite", "memory", HashEmbedder(256).id)
 
 
+@pytest.mark.parametrize("prefix", ["", "Instruct: Find supporting passages.\nQuery: "])
+async def test_remote_query_instruction_reaches_embedding_request(prefix):
+    import json
+    import httpx
+
+    from scone_memory.core.embedding import embed_queries
+    from scone_memory.runtime.config import build_embedder
+
+    env = {"SCONE_EMBEDDER": "remote", "SCONE_EMBED_URL": "https://embedding.test/v1",
+           "SCONE_EMBED_MODEL": "instruction-embedder"}
+    if prefix:
+        env["SCONE_EMBED_QUERY_PREFIX"] = prefix
+    embedder = build_embedder(Settings.from_env(env))
+    inputs = []
+
+    def respond(request):
+        inputs.append(json.loads(request.content)["input"])
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [3., 4.]}]})
+
+    embedder._transport = httpx.MockTransport(respond)
+    assert await embedder.embed(["Morgan founded Cedar."]) == [[0.6, 0.8]]
+    assert await embed_queries(embedder, ["Who founded Cedar?"]) == [[0.6, 0.8]]
+    assert inputs == [["Morgan founded Cedar."], [prefix + "Who founded Cedar?"]]
+
+
 def test_missing_url_is_a_configuration_error():
     with pytest.raises(InvalidInput):
         build_engine_sync({"SCONE_DOCUMENTS": "mongo"})

@@ -216,6 +216,7 @@ class Settings:
     embed_url: Optional[str] = None
     embed_api_key: Optional[str] = None
     embed_cache: Optional[str] = None
+    embed_query_prefix: str = ""
     chat_url: Optional[str] = None
     chat_model: Optional[str] = None
     chat_api_key: Optional[str] = None
@@ -584,6 +585,7 @@ class Settings:
             embed_url=env.get("SCONE_EMBED_URL"),
             embed_api_key=env.get("SCONE_EMBED_API_KEY"),
             embed_cache=env.get("SCONE_EMBED_CACHE"),
+            embed_query_prefix=env.get("SCONE_EMBED_QUERY_PREFIX", ""),
             chat_url=env.get("SCONE_CHAT_URL"),
             chat_model=env.get("SCONE_CHAT_MODEL"),
             chat_api_key=env.get("SCONE_CHAT_API_KEY"),
@@ -858,7 +860,8 @@ def build_embedder(settings: Settings):
 
         if not settings.embed_url or not settings.embed_model:
             raise InvalidInput("SCONE_EMBEDDER=remote needs SCONE_EMBED_URL and SCONE_EMBED_MODEL")
-        return RemoteEmbedder(settings.embed_url, settings.embed_model, settings.embed_api_key)
+        return RemoteEmbedder(settings.embed_url, settings.embed_model, settings.embed_api_key,
+                              query_prefix=settings.embed_query_prefix)
     raise InvalidInput(f"unknown SCONE_EMBEDDER {settings.embedder!r}")
 
 

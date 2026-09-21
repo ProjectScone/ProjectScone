@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from ..agents.catalog import AgentCatalog
     from ..agents.plan_store import AgentPlanStore
     from ..agents.run_service import AgentRunService
+    from ..agents.tool_recipe_store import ToolRecipeStore
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -178,7 +179,9 @@ def _is_decision(path: str) -> bool:
     parts = path.rstrip('/').split('/')
     tool_decision = (len(parts) == 7 and parts[1:3] == ['v1', 'agent-runs']
                      and parts[4] == 'approvals' and parts[6] == 'decision')
-    return tool_decision or path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
+    recipe_decision = (len(parts) == 5 and parts[1:3] == ['v1', 'tool-recipes']
+                       and parts[4] in ('decision', 'revoke'))
+    return recipe_decision or tool_decision or path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
 
 
 def _is_space_delete(method: str, path: str) -> bool:
@@ -331,6 +334,7 @@ def create_app(
     agent_catalog: AgentCatalog | None = None,
     agent_plan_store: AgentPlanStore | None = None,
     agent_run_service: AgentRunService | None = None,
+    tool_recipe_store: ToolRecipeStore | None = None,
     document_ocr: DocumentOcr | None = None,
     document_import_service: DocumentImportService | None = None,
     directory_sync_service: DirectorySyncService | None = None,
@@ -552,6 +556,8 @@ def create_app(
             features["agents.output_requirements"] = True
             features["agents.output_schema"] = output_schema_available()
             features["agents.handoffs.output_requirements"] = features["agents.output_schema"]
+        if tool_recipe_store is not None:
+            features["agents.tool_recipes.review"] = True
         if agent_run_service is not None:
             features["agents.runs"] = True
             features["agents.history"] = True
@@ -595,6 +601,14 @@ def create_app(
             token = request.headers.get('authorization', '').partition(' ')[2].strip()
             return agent_run_service.approval_actor(token)
         mount_agent_approval_routes(app, agent_run_service, space_for, assert_current_space, approval_actor)
+
+    if tool_recipe_store is not None:
+        from .tool_recipes import mount_tool_recipe_routes
+        def recipe_actor(request: Request) -> str:
+            current_space_for(request)
+            token = request.headers.get('authorization', '').partition(' ')[2].strip()
+            return tool_recipe_store.review_actor(token)
+        mount_tool_recipe_routes(app, tool_recipe_store, space_for, assert_current_space, recipe_actor)
 
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)

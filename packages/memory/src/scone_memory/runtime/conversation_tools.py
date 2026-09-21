@@ -71,7 +71,8 @@ class ConversationTools:
 
             provider = SelfHostedStructuredToolChat if self.mode == 'structured' else SelfHostedToolChat
             return provider(connection.base_url, connection.model, api_key=api_key(connection),
-                timeout_s=min(connection.timeout_s, self.limits.timeout_s), think=think)
+                timeout_s=min(connection.timeout_s, self.limits.timeout_s), think=think,
+                provider=connection.provider)
         return create
 
 
