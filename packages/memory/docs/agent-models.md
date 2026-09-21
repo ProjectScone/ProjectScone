@@ -77,6 +77,15 @@ values are never written into configuration or public catalog responses. Missing
 tokens fail that selected invocation, with no fallback. No model is contacted at
 startup, and enabling agents does not download or start a model service.
 
+Hosted inference is opt-in per model: add `"provider": "openai-compatible"`,
+an HTTPS `base_url` such as `https://openrouter.ai/api/v1`, the provider's model
+identifier, and `api_key_env` naming its server-side credential. Omit `provider`
+to retain the loopback-only default. Hosted URLs cannot contain credentials,
+query strings or fragments; redirects and environment proxies remain disabled.
+Only inference uses that service; plans, run history and memory stay in the
+configured local stores. Embedding models and TypeSafe judgment models are not
+chat/tool models and should not be added to this catalog as chat choices.
+
 Choose `native` for native tool calls or `structured` for the explicit JSON-schema
 action protocol supported by your model server. Per-model `timeout_s`,
 `max_tokens`, `max_response_bytes` and `think` are optional. Agent `limits` and

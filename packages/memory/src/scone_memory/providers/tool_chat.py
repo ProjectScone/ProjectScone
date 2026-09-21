@@ -194,11 +194,13 @@ class SelfHostedToolChat:
     The surrounding EvidenceToolLoop owns aggregate turn budgets/publication.
     """
 
+    _validate_endpoint = staticmethod(validate_self_hosted_endpoint)
+
     def __init__(self, endpoint: str, model: str, *, api_key: str | None = None,
                  timeout_s: float = 120.0, max_response_bytes: int = 128000,
                  max_tokens: int = 2048, transport: httpx.AsyncBaseTransport | None = None,
                  think: bool | None = None) -> None:
-        self._endpoint = validate_self_hosted_endpoint(endpoint).rstrip('/') + '/chat/completions'
+        self._endpoint = self._validate_endpoint(endpoint).rstrip('/') + '/chat/completions'
         self._model = validate_self_hosted_identifier(model)
         if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
                 or not math.isfinite(timeout_s) or not 0.01 <= timeout_s <= 600):

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -216,7 +217,15 @@ class OpenAICompatibleTextModel:
         transport: httpx.AsyncBaseTransport | None = None,
         trust_env: bool = True,
         max_output_tokens: int | None = None,
+        first_text_timeout: float | None = None,
+        start_retries: int = 0,
     ) -> None:
+        if first_text_timeout is not None and (type(first_text_timeout) not in (int, float)
+                or not math.isfinite(first_text_timeout) or first_text_timeout <= 0):
+            raise ValueError('first_text_timeout must be positive finite seconds')
+        if type(start_retries) is not int or not 0 <= start_retries <= 1:
+            raise ValueError('start_retries must be 0 or 1')
+        self._first_text_timeout, self._start_retries = first_text_timeout, start_retries
         if max_output_tokens is not None and (type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 32768):
             raise ValueError("max_output_tokens must be an integer from 1 to 32768")
         self._max_output_tokens = max_output_tokens
@@ -240,7 +249,7 @@ class OpenAICompatibleTextModel:
                     call_id, self._chat.model, self._chat.timeout,
                     extra={"event": "model_call.started", "call_id": call_id,
                            "model_name": self._chat.model, "mode": "stream", "timeout_s": self._chat.timeout})
-        events = self._respond(messages)
+        events = self._respond_with_start_deadline(messages)
         try:
             async for event in events:
                 if isinstance(event, TextDelta) and first_token_ms is None:
@@ -265,6 +274,27 @@ class OpenAICompatibleTextModel:
             finally:
                 _log_finished(call_id, self._chat.model, "stream", started, outcome,
                               exception_type, first_token_ms)
+
+    async def _respond_with_start_deadline(self, messages: list[dict[str, str]]) -> AsyncGenerator[TextDelta | ReplyCompleted, None]:
+        """Retry only an expired start deadline, before publishing any event."""
+        for attempt in range(self._start_retries + 1):
+            events = self._respond(messages)
+            try:
+                try:
+                    async with asyncio.timeout(self._first_text_timeout):
+                        first = await anext(events)
+                except TimeoutError as error:
+                    if attempt == self._start_retries:
+                        raise ChatError('chat provider did not start a reply before the deadline') from error
+                    logger.warning('model_call.start_retry', extra={'event': 'model_call.start_retry',
+                        'model_name': self._chat.model, 'timeout_s': self._first_text_timeout})
+                    continue
+                yield first
+                async for event in events:
+                    yield event
+                return
+            finally:
+                await events.aclose()
 
     async def _respond(self, messages: list[dict[str, str]]) -> AsyncGenerator[TextDelta | ReplyCompleted, None]:
         from ..realtime.events import ReplyCompleted, TextDelta

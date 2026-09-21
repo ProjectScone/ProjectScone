@@ -4,6 +4,7 @@ streams as public deltas and ends with an explicit completion, or fails."""
 from __future__ import annotations
 
 import json
+import asyncio
 
 import httpx
 import pytest
@@ -34,6 +35,78 @@ async def collect(model):
     async for event in model.respond(MESSAGES):
         events.append(event)
     return events
+
+
+@pytest.mark.parametrize('recover', [True, False])
+async def test_silent_stream_with_heartbeats_has_bounded_start_and_closes_before_retry(recover):
+    calls, closed = [], []
+    class Waiting(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                yield b': heartbeat\n\n'
+                await asyncio.sleep(.002)
+        async def aclose(self):
+            closed.append(True)
+    def handle(request):
+        calls.append(json.loads(request.content))
+        if len(calls) == 2:
+            assert len(closed) == 1
+            if recover:
+                return httpx.Response(200, content=sse(delta('Recovered', 'stop')),
+                    headers={'content-type': 'text/event-stream'})
+        return httpx.Response(200, stream=Waiting(), headers={'content-type': 'text/event-stream'})
+    model = OpenAICompatibleTextModel('https://example.test/v1', 'gemma',
+        first_text_timeout=.03, start_retries=1, transport=httpx.MockTransport(handle))
+    try:
+        async with asyncio.timeout(1):
+            if recover:
+                assert await collect(model) == [TextDelta('Recovered'), ReplyCompleted()]
+            else:
+                with pytest.raises(ChatError, match='deadline'): await collect(model)
+        assert len(calls) == 2 and calls[0] == calls[1]
+        assert len(closed) == (1 if recover else 2)
+    finally:
+        await model.aclose()
+
+
+async def test_never_retries_after_public_text_or_caller_cancellation():
+    calls = []
+    class Partial(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield sse(delta('Partial'), done=False) + b'\n'
+            raise httpx.ReadTimeout('provider stalled')
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, stream=Partial(), headers={'content-type': 'text/event-stream'})
+    model = OpenAICompatibleTextModel('https://example.test/v1', 'gemma',
+        first_text_timeout=.03, start_retries=1, transport=httpx.MockTransport(handle))
+    stream = model.respond(MESSAGES)
+    try:
+        assert await anext(stream) == TextDelta('Partial')
+        with pytest.raises(ChatError): await anext(stream)
+        assert len(calls) == 1
+    finally:
+        await stream.aclose()
+        await model.aclose()
+
+
+async def test_cancelling_silent_start_never_retries():
+    entered = asyncio.Event()
+    calls = []
+    async def handle(request):
+        calls.append(request)
+        entered.set()
+        await asyncio.Event().wait()
+    model = OpenAICompatibleTextModel('https://example.test/v1', 'gemma',
+        first_text_timeout=1, start_retries=1, transport=httpx.MockTransport(handle))
+    task = asyncio.create_task(collect(model))
+    try:
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError): await task
+        assert len(calls) == 1
+    finally:
+        await model.aclose()
 
 
 async def test_a_streamed_reply_arrives_as_deltas_and_ends_with_completion():

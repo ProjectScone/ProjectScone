@@ -4,6 +4,42 @@
 
 Examples below run from `packages/memory/` unless a section names another working directory.
 
+## Direct Jev evidence selection in conversations
+
+The standard server can use TypeSafe directly to judge retrieved evidence:
+
+```dotenv
+SCONE_ADAPTIVE_RETRIEVAL=1
+SCONE_ADAPTIVE_PROVIDER=typesafe
+TYPESAFE_BASE_URL=https://api.typesafe.ai
+TYPESAFE_DEFAULT_MODEL=jev-latest
+TYPESAFE_API_KEY=your-server-side-key
+SCONE_ADAPTIVE_TIMEOUT=2
+SCONE_ADAPTIVE_MAX_ROUNDS=1
+SCONE_ADAPTIVE_MAX_QUERIES=1
+SCONE_ADAPTIVE_CANDIDATE_LIMIT=8
+SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES=8000
+```
+
+This requires the conversation journal and the normal configured reply model.
+The native adapter sends one `/v1/systemone` request for the candidate set, with
+one Noul relevance question per candidate and an independent sufficiency question.
+It does not send Jev requests through the chat provider or use Jev to generate prose.
+Empty retrieval makes no assessment call. Graph expansion and search-history
+assessment are currently unsupported for this provider.
+
+The initial conservative selection policy retains candidates at probability 0.2
+or above, and reports sufficiency only at 0.8 or above with a nonempty selection.
+These thresholds need evaluation on the application's data; they are judgments,
+not proof. Scone rechecks retained sources after selection. A successful empty
+selection remains empty; a provider failure retains verified candidates with an
+uncertain assessment. No model-generated follow-up query is fabricated.
+
+With `SCONE_LOG_PATH` enabled, `typesafe_assessment.finished` records the resolved
+model, elapsed time, candidate count, outcome, and input/output token counts.
+Request content and credentials are excluded. See TypeSafe's
+[HTTP API](https://docs.typesafe.ai/api) and [Noul contract](https://docs.typesafe.ai/primitives/noul).
+
 ## Adaptive evidence retrieval
 
 For applications with an explicit question plan, the SDK also provides a
@@ -434,3 +470,60 @@ construction fails; no source or group is silently clipped to fit.
 
 See [the executable native example](../examples/realtime_conversation.py). It uses
 real Scone memory and scheduling with a scripted provider, not live inference.
+
+
+## Persistent Jev evidence judgments
+
+Scone can keep an encrypted local history of TypeSafe evidence assessments.
+Install `scone-memory[decision-memory]` (also included by `[agents]`) and set:
+
+```dotenv
+SCONE_DECISION_MEMORY=memory/runtime/decision-memory.db
+SCONE_DECISION_MEMORY_KEY=<independent random 32-byte hexadecimal key>
+SCONE_DECISION_MEMORY_MAX_AGE=3600
+```
+
+This requires `SCONE_ADAPTIVE_RETRIEVAL=1` and
+`SCONE_ADAPTIVE_PROVIDER=typesafe`. Create the containing directory first,
+owned by the service user and not writable by others; mode 0700 is recommended.
+Keep the key in the private environment file. The database is mode 0600,
+authenticated and encrypted. A missing dependency, wrong key, or unsafe path
+refuses startup rather than silently disabling configured persistence.
+
+Every request still retrieves current candidates and checks their retained
+sources before and after assessment. Only an exact match of memory space,
+question, recall scope, ordered evidence contents/IDs, endpoint, requested model,
+prompt definitions and decision thresholds can reuse a judgment. Entries expire
+after the configured age (positive, at most 86400 seconds). A moving model alias
+can change behind the same name; age limits bound reuse, while pinning a model
+version gives stronger version control.
+
+Newly retrieved evidence, removal, edits, expiry or changed assessment rules
+trigger a fresh direct Jev call. The history keeps the latest eight revisions,
+including resolved model, probabilities, source-content fingerprints, evaluation
+time, reassessment reason and whether the resulting selection changed. It does
+not duplicate question/source text or insert previous judgments as facts into
+retrieval. This is an evidence-judgment history, not yet a ledger of domain
+choices such as project decisions and their assumptions.
+
+Revalidation happens **when the question is asked again**, within the configured
+retrieval window. It does not proactively scan the corpus or discover a
+contradiction that retrieval never returns. An empty pool returns no remembered
+evidence. Historical revisions are observations, never a claim that old evidence
+remains current. Concurrent writers use revision checks; failed or cancelled
+inference does not replace a saved judgment.
+
+The store defaults to 4096 distinct question/scope records, each bounded to eight
+revisions. On capacity or storage failure, Scone continues with fresh assessment;
+storage reads/writes wait at most 100 ms off the event loop. A timed-out write
+may finish in its worker, but contains only the already validated observation.
+Diagnostics emit `decision_memory.finished` with `recorded`, `reused`,
+`read_unavailable` or `write_unavailable`, timing and revision; no prompts or keys.
+
+SDK composition uses `DecisionMemory` and `RememberedEvidenceAssessor` from
+`scone_memory.retrieval.decision_memory`, wrapping `TypeSafeEvidenceAssessor`.
+Pass the wrapper to `AdaptiveRetriever` to supply the scope automatically.
+`DecisionMemory.history(space, question, scope)` returns historical revisions;
+`forget_space(space)` purges that space's saved judgments. Ordinary source
+forgetting does not erase this separate encrypted history, but removed evidence
+cannot be reused by the retriever. For full erasure, purge both stores.
