@@ -84,9 +84,14 @@ def _role(value: str) -> ModelRole:
 def api_key(connection: ModelConnection) -> str | None:
     """Resolve a selected environment variable at use time, never on save."""
     connection = ModelConnection.model_validate(connection)
-    if connection.api_key_env is None:
+    return service_api_key(connection.api_key_env)
+
+
+def service_api_key(env_name: str | None) -> str | None:
+    """Resolve a host-selected credential without constraining its provider."""
+    if env_name is None:
         return None
-    value = os.environ.get(connection.api_key_env)
+    value = os.environ.get(env_name)
     if not value or len(value) > 4096 or any(not 33 <= ord(char) <= 126 for char in value):
         raise ModelConnectionError('The configured service token environment variable is missing or invalid')
     return value

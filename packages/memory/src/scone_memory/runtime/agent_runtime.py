@@ -24,7 +24,7 @@ from ..agents.run_service import AgentRunService
 from ..memory.engine import MemoryEngine
 from ..providers.self_hosted import validate_self_hosted_endpoint, validate_self_hosted_identifier
 from ..retrieval.recall_scope import RecallScope
-from .model_connections import ModelConnection, api_key
+from .model_connections import ModelConnection, api_key, service_api_key
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -76,12 +76,32 @@ class LocalAgentModel(BaseModel):
         return AgentModel(self.model_id, self.label, revision, self.create)
 
 
+class HostedAgentModel(LocalAgentModel):
+    """Hosted inference is explicitly selected; workflow storage stays local."""
+
+    provider: Literal['openai-compatible']
+
+    @field_validator('base_url')
+    @classmethod
+    def local_endpoint(cls, value: str) -> str:
+        from ..providers.hosted_tool_chat import validate_hosted_endpoint
+        return validate_hosted_endpoint(value)
+
+    def create(self) -> ToolModel:
+        from ..providers.hosted_tool_chat import HostedStructuredToolChat, HostedToolChat
+
+        provider = HostedStructuredToolChat if self.protocol == 'structured' else HostedToolChat
+        return provider(self.base_url, self.model, api_key=service_api_key(self.api_key_env),
+            timeout_s=self.timeout_s, max_tokens=self.max_tokens,
+            max_response_bytes=self.max_response_bytes, think=self.think)
+
+
 class AgentRuntimeConfig(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid', hide_input_in_errors=True)
     schema_version: Literal[1]
     state_dir: str = Field(min_length=1, max_length=4096)
     key_env: str = Field(min_length=1, max_length=128, pattern=_ENV_NAME)
-    models: tuple[LocalAgentModel, ...] = Field(min_length=1, max_length=64)
+    models: tuple[LocalAgentModel | HostedAgentModel, ...] = Field(min_length=1, max_length=64)
     agents: tuple[AgentDefinition, ...] = Field(min_length=1, max_length=32)
     max_active: int = Field(default=4, ge=1, le=32)
     max_parallel_tasks: int = Field(default=1, ge=1, le=8)

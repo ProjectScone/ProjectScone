@@ -4,6 +4,11 @@
 
 Examples below run from `packages/memory/` unless a section names another working directory.
 
+Scone's engine, retrieval pipelines and agent workflows run on native Scone APIs.
+The adapters in this page let other frameworks consume Scone; native execution
+does not import those adapters or require their framework extras. Reference
+projects inform implementation and evaluation without becoming runtime dependencies.
+
 ## LlamaIndex and LangChain workflows
 
 The optional `llamaindex` and `langchain` extras can coexist over one Scone
@@ -31,8 +36,11 @@ Additional package APIs provide [query evidence](../src/scone_memory/retrieval/e
 [structural context](../src/scone_memory/retrieval/structural.py),
 [recorded multi-hop retrieval](../src/scone_memory/retrieval/multihop.py), and
 [encrypted workflow checkpoints](../src/scone_memory/agents/workflow.py).
-The [retrieval workflow builder](../src/scone_memory/agents/retrieval.py) composes
-both frameworks with retained-source checks.
+The native [retrieval workflow builder](../src/scone_memory/agents/retrieval.py)
+calls `MemoryEngine.recall` directly and uses Scone's `WorkflowRunner` for encrypted
+checkpoints and retained-source checks. Install `scone-memory[agents]` for this
+runner; LangChain, LlamaIndex and LangSmith are not needed. The optional composition
+API above is only for applications explicitly combining those frameworks.
 
 `GET /v1/recall?graph_analysis=true` adds bounded community, hub and bridge
 analysis to the scoped query result. Set `evidence_graph=true` as well to receive

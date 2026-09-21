@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import math
-from typing import Optional, Sequence
+import logging
+import time
+from typing import TYPE_CHECKING, Optional, Sequence
+
+if TYPE_CHECKING:
+    import httpx
 
 
 class RemoteEmbedder:
@@ -30,19 +35,45 @@ class RemoteEmbedder:
         self.id = f"remote:{model}"
         self.dim = dim or 0
         self.timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+        self._closed = False
+
+    async def close(self) -> None:
+        """Release pooled connections when the owning engine shuts down."""
+        self._closed = True
+        if self._client is not None:
+            await self._client.aclose()
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        started, outcome = time.perf_counter(), 'cancelled'
+        try:
+            vectors = await self._embed(texts)
+            outcome = 'completed'
+            return vectors
+        except Exception:
+            outcome = 'failed'
+            raise
+        finally:
+            logging.getLogger(__name__).info('embedding_call.finished', extra={
+                'event': 'embedding_call.finished', 'model_name': self.model,
+                'reference_count': len(texts), 'outcome': outcome,
+                'elapsed_ms': round((time.perf_counter() - started) * 1000, 3)})
+
+    async def _embed(self, texts: Sequence[str]) -> list[list[float]]:
+        if self._closed:
+            raise RuntimeError('remote embedder is closed')
         if not texts:
             return []
         headers = {"content-type": "application/json"}
         if self.api_key:
             headers["authorization"] = f"Bearer {self.api_key}"
-        async with self._httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/embeddings",
-                json={"model": self.model, "input": list(texts)},
-                headers=headers,
-            )
+        if self._client is None:
+            self._client = self._httpx.AsyncClient(timeout=self.timeout, trust_env=False)
+        response = await self._client.post(
+            f"{self.base_url}/embeddings",
+            json={"model": self.model, "input": list(texts)},
+            headers=headers,
+        )
         if response.status_code >= 400:
             raise RuntimeError(f"embedding server returned {response.status_code}: {response.text[:200]}")
         data = response.json().get("data") or []
