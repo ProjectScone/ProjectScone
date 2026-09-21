@@ -387,17 +387,19 @@ async def recall(
     else:
         try:
             t0 = time.perf_counter()
+            from ..core.embedding import embed_queries, query_cache_text
             cached: dict[str, list[float]] = {}
-            key = cache_key(runtime.embedder.id, runtime.embedder.dim, query)
-            if runtime.embedding_cache is not None and runtime.embedder.dim:
+            cache_text = query_cache_text(runtime.embedder, query)
+            key = cache_key(runtime.embedder.id, runtime.embedder.dim, cache_text) if cache_text is not None else None
+            if key is not None and runtime.embedding_cache is not None and runtime.embedder.dim:
                 try:
                     cached = runtime.embedding_cache.take([key], runtime.embedder.dim)
                 except Exception as error:
                     runtime.embedding_cache.failed("query lookup", error)
-            if key in cached:
+            if key is not None and key in cached:
                 qvec = cached[key]
             else:
-                [qvec] = await runtime.embedder.embed([query])
+                [qvec] = await embed_queries(runtime.embedder, [query])
             evidence["embedding_cache_hit"] = key in cached
             width = len(qvec)
             latency["embed"] = _ms(t0)

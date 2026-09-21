@@ -1,6 +1,7 @@
 """Explicit HTTPS inference endpoints using Scone's native tool protocol."""
 from urllib.parse import unquote, urlsplit
 
+from .inference_endpoint import InferenceProvider, inference_endpoint
 from .structured_tool_chat import SelfHostedStructuredToolChat
 from .tool_chat import SelfHostedToolChat
 
@@ -24,13 +25,19 @@ def validate_hosted_endpoint(value: str) -> str:
     return value.rstrip('/') + '/'
 
 
+def _hosted_inference_endpoint(endpoint: str, model: str, provider: InferenceProvider) -> str:
+    if provider != 'self_hosted':
+        return inference_endpoint(endpoint, model, provider)
+    return validate_hosted_endpoint(endpoint)
+
+
 class HostedToolChat(SelfHostedToolChat):
     """Native tool calls to an operator-selected HTTPS inference service."""
 
-    _validate_endpoint = staticmethod(validate_hosted_endpoint)
+    _validate_endpoint = staticmethod(_hosted_inference_endpoint)
 
 
 class HostedStructuredToolChat(SelfHostedStructuredToolChat):
     """Structured actions to an operator-selected HTTPS inference service."""
 
-    _validate_endpoint = staticmethod(validate_hosted_endpoint)
+    _validate_endpoint = staticmethod(_hosted_inference_endpoint)

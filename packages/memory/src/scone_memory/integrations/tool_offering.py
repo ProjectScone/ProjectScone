@@ -157,7 +157,8 @@ class ToolIndex:
         unknown = [name for name in kept if name not in known]
         if unknown:
             raise InvalidInput(f"not among these tools: {', '.join(unknown)}")
-        embedded = await self.embedder.embed([query])
+        from ..core.embedding import embed_queries
+        embedded = await embed_queries(self.embedder, [query])
         if len(embedded) != 1:
             raise InvalidInput("the embedder returned a vector count that is not one")
         asked = embedded[0]

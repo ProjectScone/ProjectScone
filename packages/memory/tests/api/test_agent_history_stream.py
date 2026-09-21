@@ -178,20 +178,27 @@ async def test_a_delivery_that_overruns_its_bound_is_refused_not_published(setup
     refuse admission; blocking a later one must end the stream with the
     fixed refusal, never a healthy frame that arrived late.
     """
-    import time
     from scone_memory.api import agent_history
 
     _, app, service, _, _, _, _ = setup
     await start(setup)
-    monkeypatch.setattr(agent_history, 'VERIFY_SECONDS', 0.05, raising=False)
+    # Advance the loop clock only at the intended delivery. A 50 ms real
+    # deadline also refused the *unblocked* admission under suite load.
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    elapsed_stall = 0.0
+    monkeypatch.setattr(loop, 'time', lambda: real_time() + elapsed_stall)
+    monkeypatch.setattr(agent_history, 'VERIFY_SECONDS', 60.0)
+    monkeypatch.setattr(agent_history, 'STREAM_SECONDS', 60.0)
     original = service.history_for_delivery
     calls = []
 
     async def stalled(*args, **kwargs):
+        nonlocal elapsed_stall
         calls.append(None)
         page = await original(*args, **kwargs)
         if len(calls) == blocked_call:
-            time.sleep(0.2)   # synchronous: the loop cannot run the timeout's callback
+            elapsed_stall += 120.0  # no await: the timeout callback cannot run
         return page
 
     monkeypatch.setattr(service, 'history_for_delivery', stalled)

@@ -428,6 +428,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--max-hops", type=int, default=4, help="hops to follow (1 to 8)")
     g.add_argument("--limit", type=int, default=200, help="entities to list (1 to 1000)")
     g.add_argument("--max-bytes", type=int, default=16000, help="byte budget for the answer")
+    g = graph.add_parser("callflow", help="the calls out of a declaration and the calls into it: what runs "
+                                          "when it runs, and who reaches it")
+    g.add_argument("name", help="the declaration to follow the calls from, as the graph labels it "
+                                "(for example pkg/api.py:put)")
+    g.add_argument("--downstream-hops", type=int, default=3, help="hops to follow into what it calls (1 to 8)")
+    g.add_argument("--upstream-hops", type=int, default=3, help="hops to follow back to what calls it (1 to 8)")
+    g.add_argument("--max-reached", type=int, default=200, help="declarations to name over both directions")
+    g.add_argument("--mermaid", action="store_true", help="draw it as a Mermaid flowchart instead of listing it")
     g = graph.add_parser("impact", help="what rests on the changes in a diff (git diff's output): the "
                                         "declarations its hunks touch, and everything here that depends on them")
     g.add_argument("diff", nargs="?", default="-", help="a unified diff file, or - for stdin (default)")
@@ -1809,6 +1817,23 @@ async def graph_command(args: argparse.Namespace, engine: MemoryEngine, out, std
                               for depth, count in sorted(blast.by_depth.items()))
             print(f"reached: {shape}", file=out)
         return 0 if blast.status in ("found", "nothing") else 1
+    if command == "callflow":
+        from ..entities.callflow import call_flow, mermaid
+
+        flow = await call_flow(engine, space, args.name, downstream_hops=args.downstream_hops,
+                               upstream_hops=args.upstream_hops, max_reached=args.max_reached)
+        if args.json:
+            print(json.dumps(flow.record()), file=out)
+            return 0 if flow.status in ("found", "empty") else 1
+        if args.mermaid:
+            print(mermaid(flow), file=out)
+            return 0 if flow.status in ("found", "empty") else 1
+        print(flow.why, file=out)
+        for step in flow.upstream:
+            print(f"  calls it   {step.hop}  {step.label} -> {step.through}", file=out)
+        for step in flow.downstream:
+            print(f"  it calls   {step.hop}  {step.through} -> {step.label}", file=out)
+        return 0 if flow.status in ("found", "empty") else 1
     if command == "changes":
         from ..entities.changes import ChangesError, graph_changes
 

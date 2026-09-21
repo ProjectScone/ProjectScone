@@ -41,7 +41,35 @@ TREE_SUFFIXES: dict[str, str] = {
     ".ps1": "powershell", ".psm1": "powershell",
     ".jl": "julia",
     ".r": "r", ".R": "r",
+    ".hs": "haskell",
+    ".ml": "ocaml", ".mli": "ocaml",
+    ".clj": "clojure", ".cljs": "clojure", ".cljc": "clojure", ".edn": "clojure",
 }
+#: The words that open a definition in Clojure, where a definition is a
+#: list like any other and the first symbol tells them apart.
+_CLOJURE_DEFINES: dict[str, str] = {
+    "ns": "namespace", "def": "value", "defn": "function", "defn-": "function", "defmacro": "macro",
+    "defmulti": "function", "defmethod": "function", "defprotocol": "protocol", "defrecord": "record",
+    "deftype": "type", "definterface": "interface", "defonce": "value",
+}
+#: OCaml declaration nodes, and where each keeps its name. Every one is
+#: a child node rather than a ``name`` field, which is why the generic
+#: rule finds nothing in an OCaml file.
+_OCAML_DEFINES: dict[str, tuple[str, str, str]] = {
+    # node type: (kind, the child holding the binding, the child holding the name)
+    "module_definition": ("module", "module_binding", "module_name"),
+    "module_type_definition": ("module type", "", "module_type_name"),
+    "value_definition": ("value", "let_binding", "value_name"),
+    "value_specification": ("value", "", "value_name"),
+    "type_definition": ("type", "type_binding", "type_constructor"),
+    "exception_definition": ("exception", "constructor_declaration", "constructor_name"),
+}
+
+#: Haskell declaration nodes, and what each declares. A `signature` is
+#: left out: it says what a function's type is, not that it exists, and
+#: the function's own equation declares it.
+_HASKELL_DEFINES: dict[str, str] = {"data_type": "data", "newtype": "newtype", "type_synonym": "type",
+                                    "class": "class", "function": "function", "bind": "value"}
 #: The words that open a definition in Elixir, and what each defines.
 #: Elixir has no definition node: ``defmodule`` and ``def`` are calls
 #: like ``IO.puts``, and only the word tells them apart.
@@ -205,6 +233,54 @@ def _r_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
     return _text_of(left, raw), "function"
 
 
+def dotted_module(node: Any, raw: bytes) -> str:
+    """A Haskell module name, whose parts the tree keeps one by one:
+    ``Data.Map`` arrives as ``Data`` and ``Map``."""
+    parts = [_text_of(part, raw) for part in node.named_children if part.type == "module_id"]
+    return ".".join(part for part in parts if part) or _text_of(node, raw)
+
+
+def _haskell_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
+    """Haskell's header declares the module; a data type and a class keep
+    their name in a ``name`` child, and a function equation in the
+    ``variable`` it opens with."""
+    if node.type == "header":
+        module = _first(node, "module")
+        return (dotted_module(module, raw), "module") if module is not None else None
+    kind = _HASKELL_DEFINES.get(node.type)
+    if kind is None:
+        return None
+    named = _first(node, "name") or _first(node, "variable")
+    return (_text_of(named, raw), kind) if named is not None else None
+
+
+def _ocaml_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
+    """What an OCaml definition declares. The name sits one or two nodes
+    in -- a module's inside its binding, a value's inside its let -- and
+    a signature file (.mli) states the same names without their bodies,
+    which is the surface another file can reach."""
+    rule = _OCAML_DEFINES.get(node.type)
+    if rule is None:
+        return None
+    kind, binding, holds = rule
+    inner = _first(node, binding) if binding else node
+    named = _first(inner, holds) if inner is not None else None
+    return (_text_of(named, raw), kind) if named is not None else None
+
+
+def _clojure_declared(node: Any, raw: bytes) -> Optional[tuple[str, str]]:
+    """Clojure writes every definition as a list whose first symbol is
+    the word that defines: ``(defn total [items] ...)``. The name is the
+    symbol after it, and a list opening with anything else is a call."""
+    if node.type != "list_lit" or len(node.named_children) < 2:
+        return None
+    word, named = node.named_children[0], node.named_children[1]
+    if word.type != "sym_lit" or named.type != "sym_lit":
+        return None
+    kind = _CLOJURE_DEFINES.get(_text_of(word, raw))
+    return (_text_of(named, raw), kind) if kind is not None else None
+
+
 def _quoted(node: Any, raw: bytes) -> str:
     """The text inside a quoted literal, without its quotes."""
     return _text_of(node, raw).strip().strip('"\'')
@@ -231,6 +307,12 @@ def _declared(node: Any, raw: bytes, grammar: str) -> Optional[tuple[str, str]]:
         return _julia_declared(node, raw)
     if grammar == "r":
         return _r_declared(node, raw)
+    if grammar == "haskell":
+        return _haskell_declared(node, raw)
+    if grammar == "clojure":
+        return _clojure_declared(node, raw)
+    if grammar == "ocaml":
+        return _ocaml_declared(node, raw)
     if grammar == "powershell":
         if node.type != "function_statement":
             return None
@@ -284,4 +366,12 @@ def tree_declarations(content: str, grammar: str) -> tuple[Any, ...]:
             walk(child, named, depth + 1)
 
     walk(tree.root_node, (), 0)
-    return tuple(found)
+    # One declaration per qualified name. A language that writes a
+    # function as one clause per shape (Elixir) or one method per type
+    # (Julia) has a definition node for each, and all of them declare
+    # the same name: the first is where it is declared, and the rest
+    # would be the same edge drawn again.
+    once: dict[str, Any] = {}
+    for declaration in found:
+        once.setdefault(declaration.name, declaration)
+    return tuple(once.values())

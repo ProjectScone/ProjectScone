@@ -195,6 +195,21 @@ async def test_optional_output_token_budget_is_forwarded():
     assert bodies[0]["max_tokens"] == 512
 
 
+@pytest.mark.parametrize('streamed', [True, False])
+@pytest.mark.parametrize('content', ['Partial answer', None])
+async def test_real_token_exhaustion_is_classified_as_truncation(streamed, content):
+    from scone_memory.testing.generation_ablation import capture_public_reply
+
+    response = (httpx.Response(200, content=sse(delta(content, 'length')),
+        headers={'content-type': 'text/event-stream'}) if streamed else
+        httpx.Response(200, json={'choices': [{'message': {'content': content}, 'finish_reason': 'length'}]}))
+    model = OpenAICompatibleTextModel('http://llm.local/v1', 'test',
+        transport=httpx.MockTransport(lambda request: response))
+    captured = await capture_public_reply(model, MESSAGES, timeout=1)
+    assert captured['status'] == 'truncated'
+    assert captured['truncated'] is True and captured['completed'] is False
+
+
 @pytest.mark.parametrize("budget", [True, 0, -1, 1.5, 32769])
 def test_invalid_output_token_budget_is_rejected_before_opening_transport(budget):
     with pytest.raises(ValueError, match="max_output_tokens"):

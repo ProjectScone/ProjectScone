@@ -268,7 +268,10 @@ class _Scorer:
             raise InvalidInput(f"a step of the descent has {len(candidates)} candidates and one step scores at most "
                                f"{MAX_CANDIDATES}; name fewer documents or narrow the scope")
         if not self.question:
-            [self.question] = await self.embed([self.query])
+            from ..core.embedding import embed_queries
+            self.embed_calls += 1
+            self.embedded_texts += 1
+            [self.question] = await embed_queries(self.engine.embedder, [self.query])
         stored = await self.stored(candidates)
         if stored is not None:
             self.vectors["index"] += 1

@@ -17,7 +17,7 @@ async def test_remote_embedding_reuses_client_after_error_and_engine_closes_it(m
         return httpx.Response(200, json={'data': [{'index': 0, 'embedding': [3, 4]}]})
 
     def client(**options):
-        instance = original(transport=httpx.MockTransport(respond), **options)
+        instance = original(**{**options, 'transport': httpx.MockTransport(respond)})
         clients.append(instance)
         return instance
 

@@ -205,8 +205,13 @@ async def compress(items: Sequence[RecallItem], query: str, *, hits: Sequence[Re
         texts = [plan.raw[begin:stop].decode() for plan in plans
                  for number, (begin, stop) in enumerate(plan.sentences) if number not in plan.hits]
         if texts:
-            vectors = await embedder.embed([query, *texts])
-            asked, rest = vectors[0], iter(vectors[1:])
+            from ..core.embedding import QueryEmbedder, embed_queries
+            if isinstance(embedder, QueryEmbedder):
+                [asked] = await embed_queries(embedder, [query])
+                rest = iter(await embedder.embed(texts))
+            else:
+                vectors = await embedder.embed([query, *texts])
+                asked, rest = vectors[0], iter(vectors[1:])
             for plan in plans:
                 for number in range(len(plan.sentences)):
                     if number not in plan.hits:
