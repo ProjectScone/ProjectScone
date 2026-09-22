@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ..memory.profile_buckets import BucketBounds
 from uuid import uuid4
 
+from ..core.models import Episode
 from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
 from ..agents.model_lifecycle import owned_model
 from ..integrations.scoped_tools import ScopedMemoryTools
@@ -316,6 +317,60 @@ class TextConversation:
     @property
     def closed(self):
         return self._closed
+
+    async def restore(self, completed_episode_ids: tuple[int, ...]) -> dict[str, int]:
+        """Rebuild a bounded recent history from retained, completed native turns.
+
+        No model calls, inference receipts, summaries or failed turns are replayed.
+        The service supplies the assistant IDs confirmed by its durable journal.
+        """
+        if self._closed or self._active is not None or len(self._history) != 1:
+            raise RuntimeError("history restoration requires a fresh runtime")
+        if (type(completed_episode_ids) is not tuple or len(completed_episode_ids) > 100
+                or any(type(value) is not int or value <= 0 for value in completed_episode_ids)):
+            raise ValueError("invalid completed episode IDs")
+        revision = await self._memory.revision(self._space)
+        episodes = await self._memory.episodes(self._space, {"session_id": self._session_id}, limit=200)
+        groups: dict[str, list[Episode]] = {}
+        for episode in episodes:
+            meta = episode.metadata
+            if (episode.kind != "conversation" or episode.source != self._session_id
+                    or meta.get("integration") != "scone-text" or meta.get("role") not in ("user", "assistant")):
+                continue
+            turn_id = meta.get("turn_id")
+            if not isinstance(turn_id, str) or not turn_id:
+                continue
+            groups.setdefault(turn_id, []).append(episode)
+        pairs = {}
+        for turn_id, group in groups.items():
+            if len(group) != 2 or [e.metadata['role'] for e in group] != ['user', 'assistant']:
+                continue
+            user, assistant = group
+            pairs[assistant.episode_id] = (turn_id, user.content, assistant.content)
+        messages = list(self._history)
+        turns: list[str | None] = [None]
+        restored = 0
+        # Leave half the context for a new message and reply. Older completed
+        # turns stay in the saved transcript and can still be retrieved.
+        budget = max(_bytes(messages), self._room() // 2)
+        for episode_id in reversed(completed_episode_ids):
+            pair = pairs.get(episode_id)
+            if pair is None:
+                continue
+            turn_id, user_text, assistant_text = pair
+            additions = [{"role": "user", "content": user_text}, {"role": "assistant", "content": assistant_text}]
+            candidate = [messages[0], *additions, *messages[1:]]
+            if _bytes(candidate) > budget:
+                break
+            messages = candidate
+            turns = [turns[0], turn_id, turn_id, *turns[1:]]
+            restored += 1
+        if revision != await self._memory.revision(self._space):
+            raise RuntimeError("saved messages changed during history restoration")
+        self._history, self._turns = messages, turns
+        self._evicted_turns.update(pair[0] for episode_id, pair in pairs.items()
+                                   if episode_id in completed_episode_ids and pair[0] not in turns)
+        return {"restored_turns": restored}
 
     async def reply(self, text: str, *, on_text: Callable[[str], Awaitable[None]] | None = None) -> dict:
         """Observe provisional chunks, or one checked final text; return confirms capture."""
