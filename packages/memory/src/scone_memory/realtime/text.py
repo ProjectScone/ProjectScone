@@ -423,6 +423,7 @@ class TextConversation:
                 raise asyncio.CancelledError()
 
     async def _record(self, turn_id, role, text, *, extractive=False, tool_source_status=None, evidence_abstention=False):
+        from ..observability.turn_performance import observe
         started = time.perf_counter()
         self._cancel_reusable = False
         metadata = dict(integration="scone-text", session_id=self._session_id,
@@ -441,10 +442,13 @@ class TextConversation:
                 text, kind="conversation", source=self._session_id, metadata=metadata,
                 dedup_key=f"scone-text:{self._session_id}:{turn_id}:{role}")])
         except BaseException as error:
+            observe('capture_' + role, outcome='cancelled' if isinstance(error, asyncio.CancelledError) else 'failed',
+                    elapsed_ms=(time.perf_counter() - started) * 1000)
             logging.getLogger(__name__).warning("capture.failed", extra={"event": "capture.failed",
                 "session_id": self._session_id, "role": role, "exception_type": type(error).__name__,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
             raise
+        observe('capture_' + role, outcome='completed', elapsed_ms=(time.perf_counter() - started) * 1000)
         logging.getLogger(__name__).info("capture.finished", extra={"event": "capture.finished",
             "session_id": self._session_id, "role": role, "episode_id": added.episode_id,
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})

@@ -758,6 +758,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
     async def run_turn(space, sid, entry, request_id, text):
         from ..runtime.diagnostics import context
+        from ..observability.turn_performance import TurnPerformance
+        performance = TurnPerformance()
+        performance.__enter__()
         log_token = context.set({"session_id": sid, "request_id": request_id})
         started = time.perf_counter()
         logger = logging.getLogger(__name__)
@@ -769,6 +772,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             if shutting_down or receipt["status"] != "pending" or journal.get(space, sid)["state"] != "running":
                 raise RuntimeError("text observation is closed")
             window.append(chunk)
+            if chunk:
+                performance.first_text()
 
         try:
             result = await entry.runtime.reply(text, on_text=observe) if window is not None else await entry.runtime.reply(text)
@@ -839,6 +844,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                 journal.transition(space, sid, "failure:" + uuid4().hex, "fail", current["revision"])
                 entry.cleanup_task = asyncio.create_task(finish_cleanup(entry))
         finally:
+            receipt['performance'] = performance.snapshot()
+            performance.__exit__(None, None, None)
             logger.info("conversation.finished", extra={"event": "conversation.finished", "outcome": receipt["status"],
                         "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
             context.reset(log_token)
