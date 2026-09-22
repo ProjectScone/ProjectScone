@@ -174,6 +174,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
         runtime_available = lambda: store.get('chat') is not None
     return finish(create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    public_text_streaming=scoped is not None or catalog is not None,
+                                   text_resumption=scoped is not None or catalog is not None,
                                    worker=worker, catalog=catalog,
                                    document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media, document_video=document_video,
                                    directory_sync_service=directory_sync_service,

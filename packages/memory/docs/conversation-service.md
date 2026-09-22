@@ -109,6 +109,7 @@ app = create_conversation_app(
     memory, space_keys, "conversation-sessions.db",
     lambda space, sid: TextConversation(memory, space, sid, model_factory),
     public_text_streaming=True,  # known-compatible native runtime; default is False
+    text_resumption=True,       # opt into native retained-history restoration
 )
 ```
 
@@ -389,8 +390,10 @@ original create replay signature. Back up the journal before upgrading: older
 versions of Scone cannot open a newer schema. Runtime enforcement is separate
 from persistence and is supplied by the scoped factory described above.
 
-States are created, running, stopping, ended, failed and interrupted. Terminal
-sessions cannot restart. Reopening preserves recorded state; `running` does not
+States are created, running, stopping, ended, failed and interrupted. Ended,
+failed and interrupted text sessions can transition to running through an
+explicit `resume` command once all accepted turns have settled. Opening the
+journal preserves recorded state; `running` does not
 prove a provider task is still alive. Runtime ownership and crash reconciliation
 are not implemented by this journal. The text/voice mode field is metadata, not
 a claim that either runtime is configured. No transcripts or media are stored.
@@ -398,6 +401,37 @@ a claim that either runtime is configured. No transcripts or media are stored.
 Unrelated and unsupported-version databases are refused. Use one owned connection
 per serialized caller, not one connection shared across threads. Separate
 connections serialize writes through SQLite. Protect the selected path with
-appropriate filesystem permissions. Authenticated session APIs, model execution,
-the conversation UI, transport/reconnect handling and voice/video remain separate
-work; the existing memory server is not a conversation server.
+appropriate filesystem permissions. The journal itself does not authenticate
+requests, execute models or reconnect transports; those responsibilities belong
+to the conversation service and its runtimes.
+
+
+## Resume a saved text conversation
+
+The native launchers advertise `text_resumption: true` when a text runtime is
+configured. The webapp then offers **Resume conversation** for ended, failed or
+interrupted text sessions. A provider failure or server restart still settles
+in-flight turns accurately; resuming does not retry them.
+
+Send `POST /v1/conversations/{sid}/resume` with a new `request_id` and the current
+`expected_revision`. The response is the same session, now running with a higher
+revision. Retrying the same resume command returns the current session state
+without starting another runtime. Stale revisions, concurrent resumes, running
+sessions and voice sessions are refused. The original authenticated space,
+recall scope and persona are preserved. A missing or changed recorded persona
+requires a new conversation instead of silently replacing its configuration.
+Server-default sessions use the currently configured server-default model.
+
+Restoration invokes no model. It reads the latest 100 completed turn receipts
+and up to 200 recent retained session episodes, admitting only complete native
+user/assistant pairs corroborated by the journal. Forgotten, expired, failed,
+cancelled and incomplete turns do not become model history. Whole recent turns
+are restored within half the runtime history-byte budget, leaving room for the
+next message and answer. Older messages remain in the transcript; restored
+summaries and unbounded full-history prompts are not part of this feature.
+
+Custom service compositions opt in with `text_resumption=True` and must produce
+native `TextConversation` runtimes. Failure to restore leaves the saved lifecycle
+state unchanged. A deleted session cannot be recreated by a pending resume.
+Submitting an already-settled turn ID after resumption returns the durable
+receipt and never invokes the model again.

@@ -102,7 +102,7 @@ def _without_cached_graph(result):
 
 
 def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scoped_runtime_factory=None,
-                            max_sessions=100, max_turns=100, public_text_streaming=False,
+                            max_sessions=100, max_turns=100, public_text_streaming=False, text_resumption=False,
                             worker=None, catalog=None, ingest_concurrency=4, roles=None,
                             runtime_available=None, model_connections_available=False,
                             vision_available=None, vision_factory=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
@@ -181,6 +181,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         raise ValueError("a voice_turn_strategy that waits for a submit key needs voice_keypad append or collect")
     if type(public_text_streaming) is not bool or (public_text_streaming and not configured):
         raise ValueError("public_text_streaming requires a configured compatible runtime")
+    if type(text_resumption) is not bool or (text_resumption and not configured):
+        raise ValueError("text_resumption requires a configured native text runtime")
+    resuming: set[tuple[str, str]] = set()
     owned: dict[tuple[str, str], OwnedSession] = {}
     creates: dict[tuple[str, str], str] = {}
     journal = None
@@ -436,6 +439,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                                   "max_chunks": MAX_CHUNKS} if public_text_streaming else None),
                 "reply_transport": "poll", "reply_replay": "durable_receipts",
                 "session_deletion": True,
+                "text_resumption": text_resumption,
                 "turn_cancellation": True,
                 "transcript_pagination": True,
                 "provider_completion": "unverified", "max_sessions": max_sessions, "max_turns": max_turns}
@@ -453,6 +457,20 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         for item in page["items"]:
             describe(item)
         return page
+
+    def make_text_runtime(space, sid, current, chosen):
+        fixed = RecallScope.from_mapping(current["recall_scope"])
+        conversation_options: dict[str, object] = dict(answer_review.options()) if answer_review is not None else {}
+        if adaptive_retriever is not None:
+            conversation_options.update(adaptive_retriever=adaptive_retriever, recall_timeout=adaptive_retriever.limits.timeout_s)
+        # Follow-up queries (SCONE_FOLLOWUP_QUERIES) reach every text runtime the same way.
+        conversation_options.update(followup or {})
+        if chosen is not None:
+            runtime = chosen.text(engine, space, sid, **fixed.kwargs(), **conversation_options)
+        else:
+            runtime = (scoped_runtime_factory(space, sid, fixed, **conversation_options)
+                       if scoped_runtime_factory is not None else runtime_factory(space, sid, **conversation_options))
+        return runtime
 
     @app.post("/v1/conversations")
     async def create(body: Create, space=Depends(space_for)):
@@ -506,23 +524,69 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             # A voice session starts when its audio socket arrives.
             return inspect(space, sid)
         try:
-            fixed = RecallScope.from_mapping(current["recall_scope"])
-            conversation_options: dict[str, object] = dict(answer_review.options()) if answer_review is not None else {}
-            if adaptive_retriever is not None:
-                conversation_options.update(adaptive_retriever=adaptive_retriever, recall_timeout=adaptive_retriever.limits.timeout_s)
-            # Follow-up queries (SCONE_FOLLOWUP_QUERIES) reach every text runtime the same way.
-            conversation_options.update(followup or {})
-            if chosen is not None:
-                runtime = chosen.text(engine, space, sid, **fixed.kwargs(), **conversation_options)
-            else:
-                runtime = (scoped_runtime_factory(space, sid, fixed, **conversation_options)
-                           if scoped_runtime_factory is not None else runtime_factory(space, sid, **conversation_options))
+            runtime = make_text_runtime(space, sid, current, chosen)
             owned[(space, sid)] = OwnedSession(runtime)
             journal.transition(space, sid, "start:" + uuid4().hex, "start", current["revision"])
         except Exception:
             journal.transition(space, sid, "fail:" + uuid4().hex, "fail", current["revision"])
             raise HTTPException(503, "conversation runtime failed to initialize") from None
         return inspect(space, sid)
+
+    @app.post("/v1/conversations/{sid}/resume")
+    async def resume(sid: str, body: Stop, space=Depends(space_for)):
+        if shutting_down:
+            raise HTTPException(503, "conversation service is shutting down")
+        current = journal.get(space, sid)
+        if journal.transition_receipt(space, sid, body.request_id, "resume", body.expected_revision) is not None:
+            return inspect(space, sid)
+        if not text_resumption:
+            raise HTTPException(409, "text resumption is not configured")
+        if current["mode"] != "text" or current["state"] not in ("ended", "failed", "interrupted"):
+            raise Conflict("only closed text conversations can resume", current["revision"])
+        if body.expected_revision != current["revision"] or (space, sid) in resuming:
+            raise Conflict("stale or busy resume request", current["revision"])
+        if (space, sid) not in owned and len(owned) + len(resuming) >= max_sessions:
+            raise HTTPException(429, "conversation process capacity reached")
+        chosen = None
+        if current["persona"] is not None:
+            chosen = catalog.get(current["persona"]) if catalog is not None else None
+            if (chosen is None or current["persona_fingerprint"] is None
+                    or current["persona_fingerprint"] != catalog.fingerprint(current["persona"])):
+                raise HTTPException(409, "saved persona is unavailable or changed; start a new conversation")
+        elif not bare_runtime_available():
+            raise HTTPException(503, "text conversation runtime is not configured")
+        if current["recall_scope"] and scoped_runtime_factory is None and chosen is None:
+            raise HTTPException(409, "this runtime cannot preserve the session recall scope")
+        resuming.add((space, sid))
+        runtime = None
+        try:
+            old = owned.get((space, sid))
+            if old is not None:
+                if old.cleanup_task is not None:
+                    if not await asyncio.shield(old.cleanup_task):
+                        raise HTTPException(503, "previous runtime cleanup did not complete")
+                elif not await finish_cleanup(old):
+                    raise HTTPException(503, "previous runtime cleanup did not complete")
+            runtime = make_text_runtime(space, sid, current, chosen)
+            from ..realtime.text import TextConversation
+            if not isinstance(runtime, TextConversation):
+                raise HTTPException(409, "this runtime does not support native history restoration")
+            async with asyncio.timeout(5):
+                await runtime.restore(journal.completed_episode_ids(space, sid))
+            if shutting_down:
+                raise HTTPException(503, "conversation service is shutting down")
+            journal.transition(space, sid, body.request_id, "resume", body.expected_revision)
+            owned[(space, sid)] = OwnedSession(runtime)
+            runtime = None  # ownership transferred without an intervening await
+            return inspect(space, sid)
+        except (HTTPException, Conflict, NotFound):
+            raise
+        except Exception:
+            raise HTTPException(503, "saved conversation could not be restored; no reply was retried") from None
+        finally:
+            resuming.discard((space, sid))
+            if runtime is not None:
+                await runtime.close()
 
     @app.get("/v1/conversations/{sid}")
     async def session(sid: str, space=Depends(space_for)):
@@ -752,7 +816,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                                                sid, request_id, "/".join(causes),
                                                extra={"event": "conversation.failed", "exception_type": "/".join(causes)})
             message = ("Conversation timed out before the reply completed. Check Sources to confirm what was saved, "
-                       "then check the model connection and timeout before starting a new conversation."
+                       "then check the model connection and timeout before resuming this conversation."
                        if isinstance(error, TimeoutError) else "conversation turn failed; do not automatically retry")
             from ..realtime.text import _AnswerReviewFailure
             if isinstance(error, _AnswerReviewFailure):
@@ -800,6 +864,13 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             return await resolved(space, journal.turn(space, sid, body.request_id), entry)
         if current["state"] != "running" or entry is None:
             raise Conflict("conversation is not running in this process", current["revision"])
+        try:
+            kept = journal.turn(space, sid, body.request_id)
+        except NotFound:
+            pass
+        else:
+            journal.start_turn(space, sid, body.request_id, signature)  # validate the durable signature
+            return await resolved(space, kept, entry)
         if body.expected_revision != current["revision"] or entry.active_id is not None:
             raise Conflict("stale or busy conversation", current["revision"])
         if not body.text.strip() or len(body.text.encode()) > 32000:
