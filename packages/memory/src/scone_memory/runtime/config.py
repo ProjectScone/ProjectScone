@@ -143,6 +143,7 @@ from typing import TYPE_CHECKING, Mapping, Optional, cast
 
 if TYPE_CHECKING:
     from ..providers.aws_auth import AwsSigV4Auth
+    from ..providers.llm import OpenAICompatibleTextModel
 
 from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
@@ -224,6 +225,8 @@ class Settings:
     #: local model on a busy machine is the ordinary case, and 180 is not
     #: always enough for it.
     chat_timeout: float = 180.0
+    chat_first_text_timeout: float | None = None
+    chat_start_retries: int = 0
     distill_interval_s: float = 30.0
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
@@ -335,6 +338,7 @@ class Settings:
     document_layout_executable: Optional[str] = None
     conversations_journal: Optional[str] = None
     conversations_model_factory: Optional[str] = None
+    conversations_recall_timeout: float = 2.0
     # A persona catalog (JSON array of Persona documents) needs a registry
     # (trusted module:callable returning a ProviderRegistry) to bind it.
     conversations_personas: Optional[str] = None
@@ -353,6 +357,7 @@ class Settings:
     answer_review_timeout: float = 20.0
     answer_review_quote_mode: str = "text"
     adaptive_retrieval: bool = False
+    adaptive_provider: str = 'self-hosted'
     adaptive_url: str | None = None
     adaptive_model: str | None = None
     adaptive_api_key: str | None = field(default=None, repr=False)
@@ -363,6 +368,9 @@ class Settings:
     adaptive_max_evidence_bytes: int = 16000
     adaptive_graph_hops: int = 0
     adaptive_search_history: bool = False
+    decision_memory: str | None = None
+    decision_memory_key: str | None = field(default=None, repr=False)
+    decision_memory_max_age: float = 3600.0
     #: SCONE_FOLLOWUP_QUERIES: off, carry (earlier turns' named terms searched
     #: beside a follow-up), or rewrite (a self-hosted model restates it).
     followup_queries: str = "off"
@@ -398,6 +406,16 @@ class Settings:
         validate_adaptive_settings(self)
         validate_followup_settings(self)
         validate_tool_settings(self)
+        if self.chat_first_text_timeout is not None and (type(self.chat_first_text_timeout) not in (int, float)
+                or not math.isfinite(self.chat_first_text_timeout) or self.chat_first_text_timeout <= 0):
+            raise InvalidInput('SCONE_CHAT_FIRST_TEXT_TIMEOUT must be positive finite seconds')
+        if type(self.chat_start_retries) is not int or not 0 <= self.chat_start_retries <= 1:
+            raise InvalidInput('SCONE_CHAT_START_RETRIES must be 0 or 1')
+        if (isinstance(self.conversations_recall_timeout, bool)
+                or not isinstance(self.conversations_recall_timeout, (int, float))
+                or not math.isfinite(self.conversations_recall_timeout)
+                or self.conversations_recall_timeout <= 0):
+            raise InvalidInput("SCONE_CONVERSATIONS_RECALL_TIMEOUT must be positive finite seconds")
         if self.qdrant_hnsw_ef is not None and (type(self.qdrant_hnsw_ef) is not int or self.qdrant_hnsw_ef < 1):
             raise InvalidInput("SCONE_QDRANT_HNSW_EF must be a positive integer")
         if self.blobs not in ("auto", "memory", "file", "s3"):
@@ -573,6 +591,9 @@ class Settings:
             chat_api_key=env.get("SCONE_CHAT_API_KEY"),
             chat_think={"true": True, "false": False}.get((env.get("SCONE_CHAT_THINK") or "").lower()),
             chat_timeout=parse_seconds("SCONE_CHAT_TIMEOUT", env.get("SCONE_CHAT_TIMEOUT"), 180.0),
+            chat_first_text_timeout=(parse_seconds('SCONE_CHAT_FIRST_TEXT_TIMEOUT',
+                env.get('SCONE_CHAT_FIRST_TEXT_TIMEOUT'), 5.0) if env.get('SCONE_CHAT_FIRST_TEXT_TIMEOUT') else None),
+            chat_start_retries=_environment_integer('SCONE_CHAT_START_RETRIES', env.get('SCONE_CHAT_START_RETRIES', '0')),
             distill_interval_s=float(env.get("SCONE_DISTILL_INTERVAL_S", "30")),
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
             derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
@@ -675,6 +696,8 @@ class Settings:
             document_layout_executable=env.get('SCONE_DOCUMENT_LAYOUT_EXECUTABLE') or None,
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
+            conversations_recall_timeout=parse_seconds("SCONE_CONVERSATIONS_RECALL_TIMEOUT",
+                env.get("SCONE_CONVERSATIONS_RECALL_TIMEOUT"), 2.0),
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
             conversations_registry=env.get("SCONE_CONVERSATIONS_REGISTRY") or None,
             answer_review_policy=env.get("SCONE_ANSWER_REVIEW_POLICY", "off"),
@@ -684,15 +707,22 @@ class Settings:
             answer_review_timeout=parse_seconds("SCONE_ANSWER_REVIEW_TIMEOUT", env.get("SCONE_ANSWER_REVIEW_TIMEOUT"), 20.0),
             answer_review_quote_mode=env.get("SCONE_ANSWER_REVIEW_QUOTE_MODE", "text"),
             adaptive_retrieval=parse_flag("SCONE_ADAPTIVE_RETRIEVAL", env.get("SCONE_ADAPTIVE_RETRIEVAL")),
-            adaptive_url=env.get("SCONE_ADAPTIVE_URL") or None,
-            adaptive_model=env.get("SCONE_ADAPTIVE_MODEL") or None,
-            adaptive_api_key=env.get("SCONE_ADAPTIVE_API_KEY") or None,
+            adaptive_provider=env.get('SCONE_ADAPTIVE_PROVIDER', 'self-hosted'),
+            adaptive_url=env.get("SCONE_ADAPTIVE_URL") or (env.get('TYPESAFE_BASE_URL', 'https://api.typesafe.ai')
+                if env.get('SCONE_ADAPTIVE_PROVIDER') == 'typesafe' else None),
+            adaptive_model=env.get("SCONE_ADAPTIVE_MODEL") or (env.get('TYPESAFE_DEFAULT_MODEL', 'jev-latest')
+                if env.get('SCONE_ADAPTIVE_PROVIDER') == 'typesafe' else None),
+            adaptive_api_key=env.get("SCONE_ADAPTIVE_API_KEY") or (env.get('TYPESAFE_API_KEY')
+                if env.get('SCONE_ADAPTIVE_PROVIDER') == 'typesafe' else None),
             adaptive_timeout=parse_seconds("SCONE_ADAPTIVE_TIMEOUT", env.get("SCONE_ADAPTIVE_TIMEOUT"), 15.0),
             adaptive_max_rounds=_environment_integer("SCONE_ADAPTIVE_MAX_ROUNDS", env.get("SCONE_ADAPTIVE_MAX_ROUNDS", "3")),
             adaptive_max_queries=_environment_integer("SCONE_ADAPTIVE_MAX_QUERIES", env.get("SCONE_ADAPTIVE_MAX_QUERIES", "6")),
             adaptive_candidate_limit=_environment_integer("SCONE_ADAPTIVE_CANDIDATE_LIMIT", env.get("SCONE_ADAPTIVE_CANDIDATE_LIMIT", "20")),
             adaptive_max_evidence_bytes=_environment_integer("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", env.get("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", "16000")),
             adaptive_graph_hops=_environment_integer("SCONE_ADAPTIVE_GRAPH_HOPS", env.get("SCONE_ADAPTIVE_GRAPH_HOPS", "0")),
+            decision_memory=env.get('SCONE_DECISION_MEMORY') or None,
+            decision_memory_key=env.get('SCONE_DECISION_MEMORY_KEY') or None,
+            decision_memory_max_age=parse_seconds('SCONE_DECISION_MEMORY_MAX_AGE', env.get('SCONE_DECISION_MEMORY_MAX_AGE'), 3600.0),
             adaptive_search_history=parse_flag("SCONE_ADAPTIVE_SEARCH_HISTORY", env.get("SCONE_ADAPTIVE_SEARCH_HISTORY")),
             followup_queries=env.get("SCONE_FOLLOWUP_QUERIES") or "off",
             followup_url=env.get("SCONE_FOLLOWUP_URL") or None,
@@ -1129,6 +1159,20 @@ def build_chat(settings: Settings):
 
     return OpenAICompatibleChat(settings.chat_url, settings.chat_model, api_key=settings.chat_api_key,
                                 think=settings.chat_think, timeout=settings.chat_timeout)
+
+
+def configured_text_model() -> "OpenAICompatibleTextModel":
+    """Conversation factory using the operator's SCONE_CHAT_* environment."""
+    from ..providers.llm import OpenAICompatibleTextModel
+
+    settings = Settings.from_env()
+    if not settings.chat_url or not settings.chat_model:
+        raise InvalidInput("text conversations need SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+    return OpenAICompatibleTextModel(
+        settings.chat_url, settings.chat_model, api_key=settings.chat_api_key,
+        think=settings.chat_think, timeout=settings.chat_timeout, trust_env=False,
+        first_text_timeout=settings.chat_first_text_timeout, start_retries=settings.chat_start_retries,
+    )
 
 
 def build_worker(engine: MemoryEngine, settings: Settings, spaces):

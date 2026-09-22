@@ -25,7 +25,7 @@ from ..memory.engine import MemoryEngine
 from ..providers.self_hosted import validate_self_hosted_identifier
 from ..providers.inference_endpoint import InferenceProvider
 from ..retrieval.recall_scope import RecallScope
-from .model_connections import ModelConnection, api_key
+from .model_connections import ModelConnection, api_key, service_api_key
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -34,12 +34,11 @@ _MAX_CONFIG_BYTES = 1048576
 _ENV_NAME = r'^[A-Za-z_][A-Za-z0-9_]*$'
 
 
-class LocalAgentModel(BaseModel):
+class _AgentModelConfig(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid', hide_input_in_errors=True)
     model_id: Identifier
     label: str = Field(min_length=1, max_length=256)
     revision: Identifier
-    provider: InferenceProvider = 'self_hosted'
     base_url: str
     model: str
     protocol: Literal['native', 'structured'] = 'native'
@@ -48,6 +47,15 @@ class LocalAgentModel(BaseModel):
     max_response_bytes: int = Field(default=128000, ge=1024, le=512000)
     think: bool | None = None
     api_key_env: str | None = Field(default=None, min_length=1, max_length=128, pattern=_ENV_NAME)
+
+    @field_validator('model')
+    @classmethod
+    def model_identifier(cls, value: str) -> str:
+        return validate_self_hosted_identifier(value)
+
+
+class LocalAgentModel(_AgentModelConfig):
+    provider: InferenceProvider = 'self_hosted'
 
     @model_validator(mode='after')
     def selected_endpoint(self):
@@ -62,11 +70,6 @@ class LocalAgentModel(BaseModel):
     def connection(self) -> ModelConnection:
         return ModelConnection(provider=self.provider, base_url=self.base_url, model=self.model,
             timeout_s=self.timeout_s, api_key_env=self.api_key_env)
-
-    @field_validator('model')
-    @classmethod
-    def model_identifier(cls, value: str) -> str:
-        return validate_self_hosted_identifier(value)
 
     def create(self) -> ToolModel:
         from ..providers.tool_chat import SelfHostedToolChat
@@ -84,12 +87,36 @@ class LocalAgentModel(BaseModel):
         return AgentModel(self.model_id, self.label, revision, self.create)
 
 
+class HostedAgentModel(_AgentModelConfig):
+    """Hosted inference is explicitly selected; workflow storage stays local."""
+
+    provider: Literal['openai-compatible']
+
+    @model_validator(mode='after')
+    def selected_endpoint(self):
+        from ..providers.hosted_tool_chat import validate_hosted_endpoint
+        object.__setattr__(self, 'base_url', validate_hosted_endpoint(self.base_url))
+        return self
+
+    def create(self) -> ToolModel:
+        from ..providers.hosted_tool_chat import HostedStructuredToolChat, HostedToolChat
+
+        provider = HostedStructuredToolChat if self.protocol == 'structured' else HostedToolChat
+        return provider(self.base_url, self.model, api_key=service_api_key(self.api_key_env),
+            timeout_s=self.timeout_s, max_tokens=self.max_tokens,
+            max_response_bytes=self.max_response_bytes, think=self.think)
+
+    def registered(self) -> AgentModel:
+        revision = hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+        return AgentModel(self.model_id, self.label, revision, self.create)
+
+
 class AgentRuntimeConfig(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid', hide_input_in_errors=True)
     schema_version: Literal[1]
     state_dir: str = Field(min_length=1, max_length=4096)
     key_env: str = Field(min_length=1, max_length=128, pattern=_ENV_NAME)
-    models: tuple[LocalAgentModel, ...] = Field(min_length=1, max_length=64)
+    models: tuple[LocalAgentModel | HostedAgentModel, ...] = Field(min_length=1, max_length=64)
     agents: tuple[AgentDefinition, ...] = Field(min_length=1, max_length=32)
     max_active: int = Field(default=4, ge=1, le=32)
     max_parallel_tasks: int = Field(default=1, ge=1, le=8)

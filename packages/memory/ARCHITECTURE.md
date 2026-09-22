@@ -4,6 +4,13 @@
 Retrieval, ingestion and archive components depend on typed ports rather than
 on an engine instance.
 
+Native framework code must not depend on optional framework adapters. LangChain,
+LlamaIndex and OpenAI Agents integrations consume Scone's APIs at the boundary;
+Scone's own retrieval and agent execution use its engine, protocols and workflow
+runner directly. Upstream projects under `reference/` are research material, not
+runtime dependencies. Comparative benchmarks may explicitly load a competitor
+to measure it, without introducing that dependency into native execution.
+
 | Component | Responsibility |
 |---|---|
 | `core/validation.py` | Shared names, metadata, tags, timestamps and retention rules |

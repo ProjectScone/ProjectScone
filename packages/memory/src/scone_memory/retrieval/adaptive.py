@@ -94,6 +94,11 @@ class EvidenceAssessor(Protocol):
     async def assess(self, question: str, candidates: tuple[EvidenceCandidate, ...]) -> EvidenceDecision: ...
 
 
+class ScopedEvidenceAssessor(EvidenceAssessor, Protocol):
+    async def assess_scoped(self, question: str, candidates: tuple[EvidenceCandidate, ...], *,
+                            space: str, scope: RecallScope) -> EvidenceDecision: ...
+
+
 class ContextualEvidenceAssessor(EvidenceAssessor, Protocol):
     async def assess_with_context(self, question: str, candidates: tuple[EvidenceCandidate, ...],
                                   context: EvidenceAssessmentContext) -> EvidenceDecision: ...
@@ -635,6 +640,9 @@ class _Run:
                         queries_remaining=self.limits.max_queries - len(self.queries))
                     raw_decision = await cast(ContextualEvidenceAssessor, self.assessor).assess_with_context(
                         self.question, offered, context)
+                elif callable(getattr(self.assessor, 'assess_scoped', None)):
+                    raw_decision = await cast(ScopedEvidenceAssessor, self.assessor).assess_scoped(
+                        self.question, offered, space=self.space, scope=self.scope)
                 else:
                     raw_decision = await self.assessor.assess(self.question, offered)
                 self.check_deadline()

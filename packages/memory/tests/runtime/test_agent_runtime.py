@@ -18,6 +18,39 @@ def write(tmp_path,value):
     path=tmp_path/'agents.json';path.write_text(json.dumps(value));path.chmod(0o600);return path
 
 
+@pytest.mark.parametrize('protocol', ['native', 'structured'])
+async def test_explicit_hosted_inference_uses_selected_endpoint_and_private_token(tmp_path, monkeypatch, protocol):
+    from scone_memory.runtime.agent_runtime import AgentRuntimeConfig, HostedAgentModel
+    monkeypatch.setenv('SCONE_TEST_HOSTED_KEY', 'private-test-token')
+    value = document(tmp_path)
+    value['models'][0].update(provider='openai-compatible', base_url='https://openrouter.ai/api/v1',
+        model='google/gemma-4-31b-it', api_key_env='SCONE_TEST_HOSTED_KEY', protocol=protocol)
+    configured = AgentRuntimeConfig.read(write(tmp_path, value)).models[0]
+    assert isinstance(configured, HostedAgentModel)
+    provider = configured.create()
+    calls = []
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={'choices':[{'message':{'role':'assistant','content':'Ready.'},'finish_reason':'stop'}]})
+    provider._transport = httpx.MockTransport(respond)
+    result = await provider.complete([{'role':'user','content':'Ready?'}], [])
+    assert result.content == 'Ready.'
+    assert str(calls[0].url) == 'https://openrouter.ai/api/v1/chat/completions'
+    assert calls[0].headers['authorization'] == 'Bearer private-test-token'
+    assert json.loads(calls[0].content)['model'] == 'google/gemma-4-31b-it'
+    assert 'private-test-token' not in configured.model_dump_json()
+
+
+@pytest.mark.parametrize('endpoint', ['http://openrouter.ai/api/v1', 'https://key@openrouter.ai/v1',
+    'https://openrouter.ai/v1?key=secret', 'https://openrouter.ai/%2e%2e/v1'])
+def test_hosted_inference_rejects_unsafe_endpoint(tmp_path, endpoint):
+    from scone_memory.runtime.agent_runtime import AgentRuntimeConfig
+    value = document(tmp_path)
+    value['models'][0].update(provider='openai-compatible', base_url=endpoint)
+    with pytest.raises(ValueError):
+        AgentRuntimeConfig.read(write(tmp_path, value))
+
+
 async def test_runtime_binds_only_host_supplied_tools_before_opening_state(tmp_path, memory, monkeypatch):
     from scone_memory.agents.custom_tools import AgentTool
     from scone_memory.agents.evidence_loop import ToolCall, ToolStep

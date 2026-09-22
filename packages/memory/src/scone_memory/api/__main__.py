@@ -164,6 +164,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
         from ..realtime.text import TextConversation
 
         def scoped(space, sid, scope, **conversation_options):
+            conversation_options.setdefault('recall_timeout', settings.conversations_recall_timeout)
             return TextConversation(engine, space, sid, factory, turn_timeout=settings.chat_timeout,
                                     **scope.kwargs(), **conversation_options)
     elif store is not None:

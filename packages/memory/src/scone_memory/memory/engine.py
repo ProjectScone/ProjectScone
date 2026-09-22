@@ -610,7 +610,8 @@ class MemoryEngine:
         self._closed = True
         await self.entities.aclose()
         first: Optional[BaseException] = None
-        for store in (self.documents, self.vectors, self.image_vectors, self.events, self.blobs, self.embedding_cache):
+        for store in (self.documents, self.vectors, self.image_vectors, self.events, self.blobs,
+                      self.embedding_cache, self.embedder):
             closer = getattr(store, "close", None)
             if store is None or not callable(closer):
                 continue
@@ -1338,6 +1339,7 @@ class MemoryEngine:
                 unavailable = f"{type(error).__name__}: {error}"
         runtime = RecallRuntime(
             documents=self.documents, vectors=self.vectors, embedder=self.embedder,
+            embedding_cache=self.embedding_cache,
             clock=self.clock, emit=self._emit, query_for_evidence=self._query_for_evidence,
             candidate_limit=self.candidate_limit, reranker=self.reranker,
             rerank_limit=self.rerank_limit, rerank_max_bytes=self.rerank_max_bytes,
