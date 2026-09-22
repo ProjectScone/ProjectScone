@@ -70,6 +70,7 @@ class RemoteEmbedder:
         return await self.embed([self.query_prefix + text for text in texts])
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        from ..observability.turn_performance import observe, provider_name
         started, outcome = time.perf_counter(), 'cancelled'
         try:
             vectors = await self._embed(texts)
@@ -79,6 +80,8 @@ class RemoteEmbedder:
             outcome = 'failed'
             raise
         finally:
+            observe('embedding', elapsed_ms=(time.perf_counter() - started) * 1000,
+                    outcome=outcome, model=self.model, provider=provider_name(self.base_url))
             logging.getLogger(__name__).info('embedding_call.finished', extra={
                 'event': 'embedding_call.finished', 'model_name': self.model,
                 'reference_count': len(texts), 'outcome': outcome,

@@ -134,6 +134,10 @@ class TypeSafeEvidenceAssessor:
             outcome = 'failed'
             raise EvidenceAssessmentError('invalid_assessment' if phase == 'parse' else 'assessment_provider_failed') from None
         finally:
+            from ..observability.turn_performance import observe
+            observe('assessment', model=response.model if response else self._model,
+                    provider='typesafe', outcome=outcome,
+                    elapsed_ms=(time.perf_counter() - started) * 1000)
             details: dict[str, object] = {'event': 'typesafe_assessment.finished',
                 'model_name': response.model if response else self._model, 'outcome': outcome,
                 'reference_count': len(checked), 'elapsed_ms': round((time.perf_counter() - started) * 1000, 3)}
