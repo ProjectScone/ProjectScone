@@ -15,6 +15,23 @@ from scone_memory.runtime.config import Settings
 AUTH = {"Authorization": "Bearer fixture-key"}
 
 
+def test_typesafe_runtime_uses_direct_credentials_without_chat_fallback(tmp_path):
+    from scone_memory.runtime.conversation_retrieval import build_adaptive_retrieval
+    from scone_memory.providers.typesafe_evidence import TypeSafeEvidenceAssessor
+    env = {'SCONE_CONVERSATIONS_JOURNAL': str(tmp_path / 'sessions.db'),
+        'SCONE_ADAPTIVE_RETRIEVAL': '1', 'SCONE_ADAPTIVE_PROVIDER': 'typesafe',
+        'TYPESAFE_API_KEY': 'jev-secret', 'SCONE_CHAT_API_KEY': 'different-secret'}
+    settings = Settings.from_env(env)
+    assert settings.adaptive_api_key == 'jev-secret'
+    assert settings.adaptive_url == 'https://api.typesafe.ai'
+    engine = MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder())
+    strategy = build_adaptive_retrieval(settings, engine)
+    assert isinstance(strategy.assessor, TypeSafeEvidenceAssessor)
+    assert strategy.evidence_policy == 'model_selected' and strategy.empty_selection_policy == 'empty'
+    del env['TYPESAFE_API_KEY']
+    with pytest.raises(InvalidInput): Settings.from_env(env)
+
+
 def environment(tmp_path):
     return {"SCONE_API_KEY": "fixture-key", "SCONE_CONVERSATIONS_JOURNAL": str(tmp_path / "sessions.db"),
         "SCONE_ADAPTIVE_RETRIEVAL": "1", "SCONE_ADAPTIVE_URL": "http://127.0.0.1:11434/v1",
@@ -376,3 +393,27 @@ def test_embedded_service_rejects_adaptive_retriever_bound_to_another_engine(tmp
         create_conversation_app(first, {"fixture-key": "default"}, tmp_path / "journal.db", None,
                                 adaptive_retriever=AdaptiveRetriever(second, object()))
     assert not (tmp_path / "journal.db").exists()
+
+
+def test_encrypted_decision_memory_runtime_configuration(tmp_path):
+    from scone_memory.runtime.conversation_retrieval import build_adaptive_retrieval
+    from scone_memory.retrieval.decision_memory import RememberedEvidenceAssessor
+    env = {'SCONE_CONVERSATIONS_JOURNAL': str(tmp_path / 'sessions.db'),
+        'SCONE_ADAPTIVE_RETRIEVAL': '1', 'SCONE_ADAPTIVE_PROVIDER': 'typesafe',
+        'TYPESAFE_API_KEY': 'jev-secret', 'SCONE_DECISION_MEMORY': str(tmp_path / 'decisions.db'),
+        'SCONE_DECISION_MEMORY_KEY': 'ab' * 32, 'SCONE_DECISION_MEMORY_MAX_AGE': '300'}
+    settings = Settings.from_env(env)
+    engine = MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder())
+    strategy = build_adaptive_retrieval(settings, engine)
+    assert isinstance(strategy.assessor, RememberedEvidenceAssessor)
+    assert strategy.assessor.max_age_s == 300
+    assert 'ab' * 32 not in repr(settings)
+    with pytest.raises(InvalidInput, match='cannot open encrypted decision memory'):
+        build_adaptive_retrieval(Settings.from_env(env | {'SCONE_DECISION_MEMORY_KEY': 'cd' * 32}), engine)
+    for changes in [
+        {'SCONE_DECISION_MEMORY_KEY': ''}, {'SCONE_DECISION_MEMORY_KEY': 'secret'},
+        {'SCONE_DECISION_MEMORY': ''}, {'SCONE_ADAPTIVE_RETRIEVAL': '0'},
+        {'SCONE_ADAPTIVE_PROVIDER': 'self-hosted'}, {'SCONE_DECISION_MEMORY_MAX_AGE': 'nan'},
+        {'SCONE_DECISION_MEMORY_MAX_AGE': '0'}, {'SCONE_DECISION_MEMORY_MAX_AGE': '86401'},
+    ]:
+        with pytest.raises(InvalidInput): Settings.from_env(env | changes)

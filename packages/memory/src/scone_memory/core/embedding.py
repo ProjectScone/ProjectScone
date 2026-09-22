@@ -15,3 +15,17 @@ async def embed_queries(embedder: Embedder, texts: Sequence[str]) -> list[list[f
     if isinstance(embedder, QueryEmbedder):
         return await embedder.embed_queries(texts)
     return await embedder.embed(texts)
+
+
+@runtime_checkable
+class QueryCacheText(Protocol):
+    """Explicit document-encoding input equivalent to a query encoding."""
+    def query_cache_text(self, text: str) -> str: ...
+
+
+def query_cache_text(embedder: Embedder, text: str) -> str | None:
+    if isinstance(embedder, QueryCacheText):
+        return embedder.query_cache_text(text)
+    # Custom query encoders cannot reuse document vectors without an explicit
+    # equivalence contract, even when their input strings match.
+    return None if isinstance(embedder, QueryEmbedder) else text

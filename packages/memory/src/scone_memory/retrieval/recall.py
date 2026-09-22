@@ -16,6 +16,7 @@ from ..core import forget_after
 from ..core.errors import InvalidInput
 from ..core.timeutil import parse_rfc3339
 from ..ingestion.code import code_language, declaration_at, line_span
+from ..ingestion.embedding_cache import EmbeddingCache, cache_key
 from ..core.models import Chunk, DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search, question_index
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
@@ -75,6 +76,7 @@ class RecallRuntime:
     clock: Callable[[], str]
     emit: EventEmitter
     query_for_evidence: QueryEvidence
+    embedding_cache: EmbeddingCache | None = None
     candidate_limit: int | None = None
     reranker: Reranker | None = None
     rerank_limit: int = 32
@@ -385,8 +387,20 @@ async def recall(
     else:
         try:
             t0 = time.perf_counter()
-            from ..core.embedding import embed_queries
-            [qvec] = await embed_queries(runtime.embedder, [query])
+            from ..core.embedding import embed_queries, query_cache_text
+            cached: dict[str, list[float]] = {}
+            cache_text = query_cache_text(runtime.embedder, query)
+            key = cache_key(runtime.embedder.id, runtime.embedder.dim, cache_text) if cache_text is not None else None
+            if key is not None and runtime.embedding_cache is not None and runtime.embedder.dim:
+                try:
+                    cached = runtime.embedding_cache.take([key], runtime.embedder.dim)
+                except Exception as error:
+                    runtime.embedding_cache.failed("query lookup", error)
+            if key is not None and key in cached:
+                qvec = cached[key]
+            else:
+                [qvec] = await embed_queries(runtime.embedder, [query])
+            evidence["embedding_cache_hit"] = key in cached
             width = len(qvec)
             latency["embed"] = _ms(t0)
             t0 = time.perf_counter()

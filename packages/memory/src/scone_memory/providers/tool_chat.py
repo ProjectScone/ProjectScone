@@ -195,11 +195,13 @@ class SelfHostedToolChat:
     The surrounding EvidenceToolLoop owns aggregate turn budgets/publication.
     """
 
+    _validate_endpoint = staticmethod(inference_endpoint)
+
     def __init__(self, endpoint: str, model: str, *, api_key: str | None = None,
                  timeout_s: float = 120.0, max_response_bytes: int = 128000,
                  max_tokens: int = 2048, transport: httpx.AsyncBaseTransport | None = None,
                  think: bool | None = None, provider: InferenceProvider = 'self_hosted') -> None:
-        self._endpoint = inference_endpoint(endpoint, model, provider).rstrip('/') + '/chat/completions'
+        self._endpoint = self._validate_endpoint(endpoint, model, provider).rstrip('/') + '/chat/completions'
         if provider == 'openrouter' and not api_key:
             raise ValueError('OpenRouter requires a server token')
         self._model = validate_self_hosted_identifier(model)

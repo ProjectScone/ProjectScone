@@ -78,3 +78,47 @@ async def test_cached_queries_never_reuse_document_vectors_for_same_text():
     assert await embed_queries(cached, ['same']) == [[0, 1]]
     assert await cached.embed(['same']) == [[1, 0]]
     assert calls == [['same'], ['query:same']]
+
+
+@pytest.mark.parametrize('prefix', ['', 'query:'])
+async def test_recall_cache_respects_query_encoding_and_reuses_only_equivalent_text(prefix):
+    from scone_memory.ingestion.embedding_cache import InMemoryEmbeddingCache
+    calls = []
+    def serve(request):
+        texts = json.loads(request.content)['input']
+        calls.append(texts)
+        return httpx.Response(200, json={'data': [
+            {'index': i, 'embedding': [0, 1] if text.startswith('query:') else [1, 0]}
+            for i, text in enumerate(texts)]})
+    embedder = RemoteEmbedder('https://example.test/v1', 'test', dim=2,
+        query_prefix=prefix, transport=httpx.MockTransport(serve), trust_env=False)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
+                                embedding_cache=InMemoryEmbeddingCache()).open()
+    try:
+        await engine.remember('test', 'same')
+        calls.clear()
+        result = await engine.recall('test', 'same', lanes=('vector',))
+        assert result.items and not result.degraded
+        assert calls == ([[prefix + 'same']] if prefix else [])
+    finally:
+        await engine.close()
+
+
+async def test_custom_query_encoder_without_cache_contract_never_reuses_document_vector():
+    from scone_memory.ingestion.embedding_cache import InMemoryEmbeddingCache
+    calls = []
+    class SeparateEncoder:
+        id, dim = 'separate', 2
+        async def embed(self, texts):
+            return [[1., 0.] for _ in texts]
+        async def embed_queries(self, texts):
+            calls.extend(texts)
+            return [[0., 1.] for _ in texts]
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), SeparateEncoder(),
+                                embedding_cache=InMemoryEmbeddingCache()).open()
+    try:
+        await engine.remember('test', 'same')
+        await engine.recall('test', 'same', lanes=('vector',))
+        assert calls == ['same']
+    finally:
+        await engine.close()

@@ -35,6 +35,36 @@ async def open_memory(cache, embedder=None, **settings):
                               embedding_cache=cache, chunk_target=300, **settings).open()
 
 
+async def test_recall_reuses_exact_saved_embedding_but_rechecks_live_sources():
+    memory = await open_memory(InMemoryEmbeddingCache())
+    query = 'What are cats? Answer in two short sentences.'
+    try:
+        await memory.remember_many('s', [Record(query, kind='conversation')])
+        memory.embedder.texts.clear()
+        result = await memory.recall('s', query)
+        assert result.items and not result.degraded
+        assert memory.embedder.texts == []
+        # A matching vector never grants access to another space's sources.
+        assert not (await memory.recall('other', query)).items
+        assert memory.embedder.texts == []
+        await memory.recall('s', query + ' Please.')
+        assert memory.embedder.texts == [query + ' Please.']
+    finally:
+        await memory.close()
+
+
+async def test_recall_does_not_reuse_context_prefixed_embedding():
+    memory = await open_memory(InMemoryEmbeddingCache(), contextual_embeddings=True)
+    query = 'What are cats?'
+    try:
+        await memory.remember_many('s', [Record(query, kind='conversation', source='chat')])
+        memory.embedder.texts.clear()
+        await memory.recall('s', query)
+        assert memory.embedder.texts == [query]
+    finally:
+        await memory.close()
+
+
 async def test_a_replaced_record_embeds_only_the_chunks_that_changed():
     cache = InMemoryEmbeddingCache()
     memory = await open_memory(cache)
