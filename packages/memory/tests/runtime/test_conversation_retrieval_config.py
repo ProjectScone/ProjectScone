@@ -15,6 +15,36 @@ from scone_memory.runtime.config import Settings
 AUTH = {"Authorization": "Bearer fixture-key"}
 
 
+@pytest.mark.parametrize('changes', [
+    {}, {'SCONE_ADAPTIVE_RETRIEVAL': '0'}, {'SCONE_ADAPTIVE_PROVIDER': 'self_hosted'},
+    {'SCONE_ANSWER_GROUNDING': 'maybe'},
+])
+def test_invalid_grounding_configuration_refuses_startup(tmp_path, changes):
+    env = environment(tmp_path) | {'SCONE_ANSWER_GROUNDING': '1'} | changes
+    with pytest.raises(InvalidInput):
+        Settings.from_env(env)
+
+
+async def test_grounding_configuration_reaches_served_capability(tmp_path):
+    from scone_memory.runtime.conversation_retrieval import build_answer_grounder
+    from scone_memory.providers.typesafe_grounding import TypeSafeAnswerGrounder
+    settings = Settings.from_env({'SCONE_API_KEY': 'fixture-key',
+        'SCONE_CONVERSATIONS_JOURNAL': str(tmp_path / 'sessions.db'),
+        'SCONE_ADAPTIVE_RETRIEVAL': '1', 'SCONE_ADAPTIVE_PROVIDER': 'typesafe',
+        'TYPESAFE_API_KEY': 'fixture-jev-key', 'SCONE_ANSWER_GROUNDING': '1'})
+    assert isinstance(build_answer_grounder(settings), TypeSafeAnswerGrounder)
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        app = build_app(settings, engine)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://scone.test', headers=AUTH) as client:
+                capability = (await client.get('/v1/conversations/capabilities')).json()
+                assert capability['answer_grounding']['configured'] is True
+                assert capability['adaptive_retrieval']['lexical_fallback'] is True
+    finally:
+        await engine.close()
+
+
 def test_typesafe_runtime_uses_direct_credentials_without_chat_fallback(tmp_path):
     from scone_memory.runtime.conversation_retrieval import build_adaptive_retrieval
     from scone_memory.providers.typesafe_evidence import TypeSafeEvidenceAssessor
@@ -284,7 +314,8 @@ async def test_adaptive_capability_is_separate_from_reply_model_availability(tmp
                 assert capability['adaptive_retrieval']['search_history'] is history
                 if not enabled:
                     assert capability["adaptive_retrieval"] == {
-                        "configured": False, "limits": None, "graph_max_hops": 0, 'search_history': False}
+                        "configured": False, "limits": None, "graph_max_hops": 0,
+                        'search_history': False, 'lexical_fallback': False}
     finally:
         await engine.close()
 

@@ -106,6 +106,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             worker=None, catalog=None, ingest_concurrency=4, roles=None,
                             runtime_available=None, model_connections_available=False,
                             vision_available=None, vision_factory=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
+                            answer_grounder=None,
                             agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None, document_video=None,
                             directory_sync_service=None, synthesis_factory=None, url_import=None, followup=None,
                             semantic_turn=False, voice_keypad="off", voice_idle=None, voice_turn_strategy=None):
@@ -160,6 +161,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         raise ValueError("catalog must be a bound PersonaCatalog or None")
     if answer_review is not None and not isinstance(answer_review, ConversationReview):
         raise ValueError("answer_review must be a ConversationReview or None")
+    if answer_grounder is not None and (not callable(getattr(answer_grounder, 'assess', None)) or tool_retrieval is not None):
+        raise ValueError('answer_grounder requires an assess method and non-tool text runtime')
     if adaptive_retriever is not None and (
             not isinstance(adaptive_retriever, AdaptiveRetriever) or adaptive_retriever.memory is not engine):
         raise ValueError("adaptive_retriever must use this memory engine")
@@ -417,7 +420,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                     "applies_to": "text", "verified_accuracy": False},
                 "answer_review": {"configured": answer_review is not None,
                                   "policy": answer_review.policy if answer_review is not None else "off"},
+                "answer_grounding": {"configured": answer_grounder is not None},
                 "adaptive_retrieval": {"configured": adaptive_retriever is not None,
+                    "lexical_fallback": adaptive_retriever.lexical_fallback if adaptive_retriever is not None else False,
                     "limits": adaptive_retriever.limits.model_dump(mode="json") if adaptive_retriever is not None else None,
                     "search_history": adaptive_retriever.include_search_history if adaptive_retriever is not None else False,
                     "graph_max_hops": adaptive_retriever.graph_limits.max_hops
@@ -463,6 +468,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         conversation_options: dict[str, object] = dict(answer_review.options()) if answer_review is not None else {}
         if adaptive_retriever is not None:
             conversation_options.update(adaptive_retriever=adaptive_retriever, recall_timeout=adaptive_retriever.limits.timeout_s)
+        if answer_grounder is not None:
+            conversation_options['answer_grounder'] = answer_grounder
         # Follow-up queries (SCONE_FOLLOWUP_QUERIES) reach every text runtime the same way.
         conversation_options.update(followup or {})
         if chosen is not None:
