@@ -42,6 +42,45 @@ Request content and credentials are excluded. See TypeSafe's
 
 ## Adaptive evidence retrieval
 
+### Optional conversation input grounding
+
+Set `SCONE_ANSWER_GROUNDING=1` alongside direct TypeSafe adaptive retrieval to
+check whether a reply needs workspace facts and whether those facts are present.
+This is opt-in and requires non-tool conversations. Scone owns the publication
+decision; Jev supplies two probabilities through its direct HTTP API.
+`SCONE_ANSWER_GROUNDING_WORKSPACE` optionally identifies the application's
+project and aliases (at most 4000 UTF-8 bytes). This disambiguates named-project
+questions without embedding any particular application's identity in the
+framework. It supplies identity, not evidence for the requested answer.
+
+Private questions without enough support receive a missing-evidence reply before
+the prose model runs. A failed check withholds generation with a distinct retry
+message. General questions can still use the configured reply model. Earlier
+assistant answers and filenames are not treated as independent factual support.
+Retrieved candidates include retained source, kind, role and creation time;
+changes to these fields invalidate saved evidence judgments.
+
+The native controller validates the delivered source packet before and after
+the judgment. Only explicitly admitted, evicted turns may return as same-session
+evidence; current-window turns cannot crowd source candidates out of retrieval.
+Corrections must be supported by source content or explicit user statements:
+storage recency alone does not decide which conflicting claim is true.
+
+The `memory_context.answer_grounding` receipt records `general`, `supported`,
+`insufficient`, or `unavailable`, with probabilities and source-check status
+when available. `verified_answer` is always false: this judges input support,
+not the correctness of generated prose. It does not replace answer review.
+The policy thresholds are 0.2 for a general question and 0.8 for sufficient
+support; these require application-specific evaluation.
+
+This option adds one bounded Jev request before generation (at most three
+seconds, within a four-second grounding deadline). It also reserves half the
+remaining retrieval deadline for scoped local text search when hybrid retrieval
+stalls. The original retrieval deadline still applies, and receipts identify
+`lexical_fallback`. Text search can recover matching words during an embedding
+outage; it cannot guarantee synonym or semantic-only matches. Message capture
+and generated-answer persistence still await their configured embeddings.
+
 For applications with an explicit question plan, the SDK also provides a
 model-free `StructuredEvidenceAssessor`. Each requirement asks for recorded
 values of an exact subject/predicate, subjects of an exact predicate/object,

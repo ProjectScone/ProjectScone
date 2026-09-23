@@ -77,6 +77,7 @@ _ADAPTIVE_DIAGNOSTICS = frozenset({
     "atomic_group_omitted",
     "empty_selection_retained",
     "original_query_blended",
+    "lexical_fallback",
 }) | GRAPH_REASONS
 
 
@@ -116,6 +117,7 @@ def _overview_coverage(considered: int, has_more: bool) -> dict[str, object]:
 
 
 class ContextReceipt(TypedDict):
+    answer_grounding: NotRequired[dict[str, object]]
     request_id: str
     session_id: str
     status: str
@@ -427,6 +429,8 @@ class MemoryContext:
                     "timeout_s": self._timeout})
 
         def finished() -> None:
+            from ..observability.turn_performance import observe
+            observe('recall', outcome=receipt['status'], elapsed_ms=(time.perf_counter() - started) * 1000)
             logger.info("recall.finished", extra={"event": "recall.finished",
                 "session_id": self._session_id, "outcome": receipt["status"],
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
@@ -505,7 +509,8 @@ class MemoryContext:
                             receipt["followup"] = followup.record()  # again: fusion's cut is known only now
                     else:
                         adaptive = await self._adaptive_retriever.retrieve(self._space, plan.query,
-                            scope=self._scope, exclude_session_id=self._session_id)
+                            scope=self._scope, exclude_session_id=self._session_id,
+                            **({'admit_turn_ids': admit} if admit else {}))
                         result = adaptive.recall
                         reasons = sorted({reason if reason in _ADAPTIVE_DIAGNOSTICS else "unknown"
                                           for reason in adaptive.reasons})
