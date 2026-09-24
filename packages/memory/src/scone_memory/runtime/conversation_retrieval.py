@@ -22,6 +22,13 @@ def retrieval_limits(settings: Settings) -> AdaptiveLimits:
 
 
 def validate_adaptive_settings(settings: Settings) -> None:
+    if type(settings.answer_grounding) is not bool:
+        raise InvalidInput('SCONE_ANSWER_GROUNDING must be a boolean')
+    if not isinstance(settings.answer_grounding_workspace, str) or len(settings.answer_grounding_workspace.encode()) > 4000:
+        raise InvalidInput('SCONE_ANSWER_GROUNDING_WORKSPACE must be at most 4000 UTF-8 bytes')
+    if settings.answer_grounding and (not settings.adaptive_retrieval or settings.adaptive_provider != 'typesafe'
+                                     or settings.conversations_tool_mode != 'off'):
+        raise InvalidInput('answer grounding requires TypeSafe adaptive retrieval and non-tool conversations')
     if (type(settings.decision_memory_max_age) not in (int, float)
             or not math.isfinite(settings.decision_memory_max_age)
             or not 0 < settings.decision_memory_max_age <= 86400):
@@ -99,7 +106,8 @@ def build_adaptive_retrieval(settings: Settings, engine: MemoryEngine) -> Adapti
                 raise InvalidInput('cannot open encrypted decision memory; check path, key and decision-memory extra') from None
             selected = RememberedEvidenceAssessor(direct, memory, max_age_s=settings.decision_memory_max_age)
         return AdaptiveRetriever(engine, selected, limits=limits,
-            failure_policy='retain_verified', empty_selection_policy='empty', evidence_policy='model_selected')
+            failure_policy='retain_verified', empty_selection_policy='empty', evidence_policy='model_selected',
+            lexical_fallback=settings.answer_grounding)
     graph = MultiHopLimits(max_hops=settings.adaptive_graph_hops) if settings.adaptive_graph_hops else None
     assessor = SelfHostedEvidenceAssessor(settings.adaptive_url, settings.adaptive_model,
         api_key=settings.adaptive_api_key, timeout=settings.adaptive_timeout,
@@ -107,3 +115,14 @@ def build_adaptive_retrieval(settings: Settings, engine: MemoryEngine) -> Adapti
     return AdaptiveRetriever(engine, assessor, limits=limits, graph_limits=graph,
         include_search_history=settings.adaptive_search_history,
         failure_policy="retain_verified", empty_selection_policy="retain_verified", evidence_policy="original_and_selected")
+
+
+def build_answer_grounder(settings: Settings):
+    from ..providers.typesafe_grounding import TypeSafeAnswerGrounder
+    validate_adaptive_settings(settings)
+    if not settings.answer_grounding:
+        return None
+    assert settings.adaptive_url is not None and settings.adaptive_model is not None
+    return TypeSafeAnswerGrounder(settings.adaptive_url, settings.adaptive_model,
+        api_key=settings.adaptive_api_key or '', timeout=min(settings.adaptive_timeout, 3.0),
+        workspace=settings.answer_grounding_workspace)

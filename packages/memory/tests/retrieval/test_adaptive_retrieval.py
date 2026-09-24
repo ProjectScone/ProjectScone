@@ -26,7 +26,8 @@ async def test_followup_queries_share_free_candidate_capacity(memory, monkeypatc
     bridge = await fact(memory, 'root', 'uses', 'branch')
     noise = [await fact(memory, f'noise-{i}', 'uses', f'value-{i}') for i in range(4)]
     if constraint == 'bytes':
-        quote = 'Noise uses Value. ' * 40
+        # Fits the whole packet budget, including provenance, but not its query share.
+        quote = 'Noise uses Value. ' * 30
         episode = await memory.remember('alpha',quote)
         noise = [await memory.documents.insert_fact(NewFact(space='alpha',subject='Noise',predicate='uses',
             object='Value',quote=quote,source_episode_id=episode.episode_id,valid_from=STAMP))]
