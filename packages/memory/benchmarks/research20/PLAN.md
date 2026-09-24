@@ -50,4 +50,8 @@ Execution checklist:
 - [x] Track 3: cost/accuracy simulations with unused work included.
 - [x] Track 4: direct Jev diagnostics and split calibration.
 - [x] Run twenty, preserve reports, inspect failures and type-check.
-- [ ] Independent review, commit, push and draft MR.
+- [x] Independent review, commit, push and draft MR.
+
+Delivered in [draft MR 161](https://github.com/ProjectScone/ProjectScone/pull/161),
+stacked on the experimental memory-contract branch. See [results](RESULTS.md)
+for completed measurements, negative findings and remaining research gates.
