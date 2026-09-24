@@ -20,7 +20,7 @@ independent by topic, and public data may overlap model training.
 
 ## Isolated environment and local storage
 
-Create an external virtual environment and install `requirements.txt` there.
+Create an external Python 3.12 virtual environment and install `requirements.txt` there.
 Do not add competitor dependencies to Scone's runtime environment or package.
 Use a local Qdrant 1.19.1 server dedicated to this benchmark. The configured
 endpoint is validated as loopback-only. Keep its storage and all generated
@@ -101,6 +101,11 @@ Normal scoring requires every scheduled pair and matching artifact hashes.
 observed denominators and comparisons only for fully observed pairs. Partial
 scores are not full-dataset results. All failures score zero on answer EM/F1;
 generation failure does not erase measured retrieval coverage.
+
+Compare identical-request pairs when interpreting answer differences: even at
+temperature zero, separate provider calls can disagree on identical evidence.
+Shared Jev judgments remove one source of that variation; they do not make
+generation deterministic or prove that every answer gain came from retrieval.
 
 ```sh
 python -m pytest packages/memory/benchmarks/matched_qa -q
