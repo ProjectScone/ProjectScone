@@ -26,6 +26,9 @@ _TRANSITIONS = {
     "created": {"start": "running", "stop": "ended", "fail": "failed", "interrupt": "interrupted"},
     "running": {"stop": "stopping", "end": "ended", "fail": "failed", "interrupt": "interrupted"},
     "stopping": {"end": "ended", "fail": "failed", "interrupt": "interrupted"},
+    "ended": {"resume": "running"},
+    "failed": {"resume": "running"},
+    "interrupted": {"resume": "running"},
 }
 
 
@@ -235,7 +238,7 @@ class SessionJournal:
         _key(session_id)
         _key(request_id)
         _integer(expected_revision, 1)
-        if action not in ("start", "stop", "end", "fail", "interrupt"):
+        if action not in ("start", "stop", "end", "fail", "interrupt", "resume"):
             raise InvalidInput("unknown session lifecycle action")
         signature = json.dumps([action, expected_revision])
         with self._transaction():
@@ -245,6 +248,10 @@ class SessionJournal:
                 return replay
             if session["revision"] != expected_revision:
                 raise Conflict("session revision changed; inspect current state before retrying", session["revision"])
+            if action == "resume" and (session["mode"] != "text" or self._db.execute(
+                    "SELECT 1 FROM session_turns WHERE space=? AND session_id=? AND status='accepted' LIMIT 1",
+                    (space, session_id)).fetchone() is not None):
+                raise Conflict("only settled text conversations can resume", session["revision"])
             state = _TRANSITIONS.get(session["state"], {}).get(action)
             if state is None:
                 raise Conflict("action is not allowed in this session state", session["revision"])
@@ -252,6 +259,27 @@ class SessionJournal:
             self._db.execute("UPDATE sessions SET state=?, revision=?, updated_at=? WHERE space=? AND session_id=?",
                              (state, revision, now, space, session_id))
             return self._append(space, session_id, revision, request_id, signature, action, session["state"], state, now)
+
+    def transition_receipt(self, space: str, session_id: str, request_id: str,
+                           action: str, expected_revision: int) -> dict | None:
+        """Read a matching command without applying a new transition."""
+        check_space(space)
+        _key(session_id)
+        _key(request_id)
+        _integer(expected_revision, 1)
+        self._session(space, session_id)
+        return self._event(space, session_id, request_id, json.dumps([action, expected_revision]))
+
+    def completed_episode_ids(self, space: str, session_id: str, limit: int = 100) -> tuple[int, ...]:
+        check_space(space)
+        _key(session_id)
+        _integer(limit, 1, 100)
+        self._session(space, session_id)
+        rows = self._db.execute(
+            "SELECT episode_id FROM session_turns WHERE space=? AND session_id=? "
+            "AND status='completed' AND episode_id IS NOT NULL ORDER BY rowid DESC LIMIT ?",
+            (space, session_id, limit)).fetchall()
+        return tuple(row["episode_id"] for row in reversed(rows))
 
     # -- turns ------------------------------------------------------------
 

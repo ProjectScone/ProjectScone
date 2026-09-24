@@ -44,8 +44,12 @@ def _thinking_options(think: bool | None) -> dict[str, str]:
 def _log_finished(
     call_id: str, model: str, mode: str, started: float, outcome: str,
     exception_type: Optional[str] = None, first_token_ms: Optional[float] = None,
+    base_url: str = '',
 ) -> None:
+    from ..observability.turn_performance import observe, provider_name
     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+    observe('generation', elapsed_ms=elapsed_ms, outcome=outcome, model=model,
+            first_text_ms=first_token_ms, provider=provider_name(base_url), mode=mode)
     logger.log(
         logging.INFO if outcome == "completed" else logging.WARNING,
         "model_call.finished call_id=%s mode=%s model=%r outcome=%s elapsed_ms=%.3f "
@@ -171,7 +175,7 @@ class OpenAICompatibleChat:
             outcome, exception_type = "failed", type(error.__cause__ or error).__name__
             raise
         finally:
-            _log_finished(call_id, self.model, mode, started, outcome, exception_type)
+            _log_finished(call_id, self.model, mode, started, outcome, exception_type, base_url=self.base_url)
 
     async def _send(self, body: dict[str, object], *, require_complete: bool = False) -> str:
         httpx = self._httpx
@@ -273,17 +277,21 @@ class OpenAICompatibleTextModel:
                 await events.aclose()
             finally:
                 _log_finished(call_id, self._chat.model, "stream", started, outcome,
-                              exception_type, first_token_ms)
+                              exception_type, first_token_ms, base_url=self._chat.base_url)
 
     async def _respond_with_start_deadline(self, messages: list[dict[str, str]]) -> AsyncGenerator[TextDelta | ReplyCompleted, None]:
         """Retry only an expired start deadline, before publishing any event."""
+        from ..observability.turn_performance import observe, provider_name
         for attempt in range(self._start_retries + 1):
+            attempt_started = time.perf_counter()
             events = self._respond(messages)
             try:
                 try:
                     async with asyncio.timeout(self._first_text_timeout):
                         first = await anext(events)
                 except TimeoutError as error:
+                    observe('model_start_timeout', elapsed_ms=(time.perf_counter() - attempt_started) * 1000,
+                            outcome='timeout', model=self._chat.model, provider=provider_name(self._chat.base_url))
                     if attempt == self._start_retries:
                         raise ChatError('chat provider did not start a reply before the deadline') from error
                     logger.warning('model_call.start_retry', extra={'event': 'model_call.start_retry',
