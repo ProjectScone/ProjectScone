@@ -14,7 +14,7 @@ import hashlib
 import json
 from itertools import islice, zip_longest
 import time
-from typing import Annotated, Literal, Protocol, cast
+from typing import Annotated, Literal, Protocol, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -69,6 +69,25 @@ class EvidenceCandidate(BaseModel):
     subject: str | None = Field(default=None, max_length=128_000)
     predicate: str | None = Field(default=None, max_length=128_000)
     object: str | None = Field(default=None, max_length=128_000)
+    # Retained source metadata is provenance, never a grant of trust or access.
+    source: str | None = Field(default=None, max_length=128_000)
+    kind: str | None = Field(default=None, max_length=128)
+    role: Literal['user', 'assistant', 'system', 'tool'] | None = None
+    created_at: str | None = Field(default=None, max_length=128)
+
+
+class SourceProvenance(TypedDict):
+    source: str | None
+    kind: str
+    role: Literal['user', 'assistant', 'system', 'tool'] | None
+    created_at: str
+
+
+def source_provenance(source: Episode) -> SourceProvenance:
+    role = source.metadata.get('role')
+    return {'source': source.source, 'kind': source.kind, 'created_at': source.created_at,
+            'role': cast(Literal['user', 'assistant', 'system', 'tool'], role)
+            if role in ('user', 'assistant', 'system', 'tool') else None}
 
 
 class EvidenceDecision(BaseModel):
@@ -201,7 +220,8 @@ class _Run:
                  space: str, question: str, scope: RecallScope, excluded: str | None,
                  failure_policy: FailurePolicy, graph_limits: MultiHopLimits | None,
                  empty_selection_policy: EmptySelectionPolicy, evidence_policy: EvidencePolicy,
-                 include_search_history: bool) -> None:
+                 include_search_history: bool, lexical_fallback: bool = False,
+                 admit_turn_ids: frozenset[str] = frozenset()) -> None:
         self.memory, self.assessor, self.limits = memory, assessor, limits
         self.space, self.question, self.scope, self.excluded = space, question, scope, excluded
         self.boundary = memory.clock()
@@ -210,6 +230,8 @@ class _Run:
         self.empty_selection_policy = empty_selection_policy
         self.evidence_policy = evidence_policy
         self.include_search_history = include_search_history
+        self.lexical_fallback = lexical_fallback
+        self.admit_turn_ids = admit_turn_ids
         self.searches: list[EvidenceSearchAttempt] = []
         self.original_pool: dict[str, _Evidence] = {}
         self.original_groups: tuple[tuple[str, ...], ...] = ()
@@ -243,7 +265,8 @@ class _Run:
     def source_valid(self, source: Episode, episode_id: int) -> bool:
         try:
             return (source.space == self.space and source.episode_id == episode_id
-                    and _source_matches(source, self.filter, self.excluded))
+                    and _source_matches(source, self.filter,
+                        None if source.metadata.get('turn_id') in self.admit_turn_ids else self.excluded))
         except ValueError:
             return False
 
@@ -292,7 +315,7 @@ class _Run:
                 return None
             return self.retain_snapshot(_Evidence(EvidenceCandidate(id=f"fact:{retained.fact_id}", episode_id=episode_id,
                 text=retained.quote, subject=retained.subject, predicate=retained.predicate,
-                object=retained.object), source.model_copy(deep=True), fact=retained))
+                object=retained.object, **source_provenance(source)), source.model_copy(deep=True), fact=retained))
         chunks = await documents.get_chunks(self.space, [item.chunk_id])
         self.check_deadline()
         if len(chunks) != 1:
@@ -316,7 +339,7 @@ class _Run:
         if item.source != source.source or item.metadata != source.metadata or item.tags != source.tags:
             return None
         return self.retain_snapshot(_Evidence(EvidenceCandidate(id=f"chunk:{chunk.chunk_id}", episode_id=chunk.episode_id,
-            text=chunk.text), source.model_copy(deep=True), item=item.model_copy(deep=True), chunk=chunk))
+            text=chunk.text, **source_provenance(source)), source.model_copy(deep=True), item=item.model_copy(deep=True), chunk=chunk))
 
     async def verify(self, pool: dict[str, _Evidence]) -> dict[str, _Evidence]:
         """Fresh bounded point reads plus a revision guard around the snapshot.
@@ -349,8 +372,29 @@ class _Run:
     async def gather(self, query: str, pool: dict[str, _Evidence], groups: tuple[tuple[str, ...], ...],
                      queries_remaining: int = 1, *, round_number: int = 1
                      ) -> tuple[dict[str, _Evidence], tuple[tuple[str, ...], ...]]:
-        result = await self.memory.recall(self.space, query, limit=self.limits.candidate_limit,
-            candidate_limit=self.limits.candidate_limit, rerank=False, **self.scope.kwargs())
+        # Remove this session before ranking so its repeated questions cannot
+        # consume the candidate window. Retained-source checks still run below.
+        conditions = None if self.excluded is None else {'any': [
+            {'field': 'session_id', 'absent': True},
+            {'field': 'session_id', 'is': self.excluded, 'not': True},
+        ]}
+        if conditions is not None and self.admit_turn_ids:
+            conditions['any'].append({'field': 'turn_id', 'in': sorted(self.admit_turn_ids)})
+        if self.lexical_fallback:
+            # Reserve time for local retrieval and judgment if hosted embeddings stall.
+            # The outer run deadline still bounds all work, including cancellation.
+            try:
+                async with asyncio.timeout(max(0.0, self.deadline - time.monotonic()) / 2):
+                    result = await self.memory.recall(self.space, query, limit=self.limits.candidate_limit,
+                        candidate_limit=self.limits.candidate_limit, rerank=False, conditions=conditions, **self.scope.kwargs())
+            except TimeoutError:
+                self.check_deadline()
+                self.notice('lexical_fallback', truncated=True)
+                result = await self.memory.recall(self.space, query, limit=self.limits.candidate_limit,
+                    candidate_limit=self.limits.candidate_limit, rerank=False, conditions=conditions, lanes=('text',), **self.scope.kwargs())
+        else:
+            result = await self.memory.recall(self.space, query, limit=self.limits.candidate_limit,
+                candidate_limit=self.limits.candidate_limit, rerank=False, conditions=conditions, **self.scope.kwargs())
         self.check_deadline()
         # A follow-up can yield while carried evidence is deleted or replaced.
         pool = await self.verify(pool)
@@ -767,7 +811,11 @@ class AdaptiveRetriever:
                  limits: AdaptiveLimits | None = None, failure_policy: FailurePolicy = "retain_verified",
                  graph_limits: MultiHopLimits | None = None,
                  empty_selection_policy: EmptySelectionPolicy = "retain_verified",
-                 evidence_policy: EvidencePolicy = "model_selected", include_search_history: bool = False) -> None:
+                 evidence_policy: EvidencePolicy = "model_selected", include_search_history: bool = False,
+                 lexical_fallback: bool = False) -> None:
+        if type(lexical_fallback) is not bool:
+            raise ValueError('lexical_fallback must be a boolean')
+        self.lexical_fallback = lexical_fallback
         if type(include_search_history) is not bool:
             raise ValueError('include_search_history must be a boolean')
         if include_search_history and not callable(getattr(assessor, 'assess_with_context', None)):
@@ -816,16 +864,19 @@ class AdaptiveRetriever:
         return self._graph_limits
 
     async def retrieve(self, space: str, query: str, *, scope: RecallScope,
-                       exclude_session_id: str | None = None) -> AdaptiveResult:
+                       exclude_session_id: str | None = None,
+                       admit_turn_ids: frozenset[str] = frozenset()) -> AdaptiveResult:
         check_space(space)
         if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY:
             raise InvalidInput(f"query must be 1..={MAX_QUERY} chars")
         if exclude_session_id is not None and not isinstance(exclude_session_id, str):
             raise InvalidInput("exclude_session_id must be a string")
+        if not isinstance(admit_turn_ids, frozenset) or any(not isinstance(turn, str) or not turn for turn in admit_turn_ids):
+            raise InvalidInput('admit_turn_ids must be a frozenset of nonempty turn IDs')
         fixed_scope = RecallScope.validated(**scope.kwargs())
         run = _Run(self.memory, self.assessor, self.limits, space, query.strip(), fixed_scope, exclude_session_id,
             self.failure_policy, self.graph_limits, self.empty_selection_policy, self.evidence_policy,
-            self.include_search_history)
+            self.include_search_history, self.lexical_fallback, admit_turn_ids)
         try:
             return await asyncio.wait_for(run.execute(), timeout=max(0.0, run.deadline - time.monotonic()))
         except asyncio.CancelledError:

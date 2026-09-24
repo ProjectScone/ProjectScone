@@ -124,7 +124,7 @@ def main(settings: Settings, *, journal: str, model_factory: str | None = None) 
                     return runtime_type(engine, space, sid, factory, **scope.kwargs(), **options)
             app = create_conversation_app(engine, settings.keys, path, None,
                                           scoped_runtime_factory=scoped,
-                                          public_text_streaming=scoped is not None, followup=followup)
+                                          public_text_streaming=scoped is not None, text_resumption=scoped is not None, followup=followup)
             server = create_server(app, host=settings.host, port=settings.port)
             await server.serve()
             if not server.started:

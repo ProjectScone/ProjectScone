@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ..memory.profile_buckets import BucketBounds
 from uuid import uuid4
 
+from ..core.models import Episode
 from ..agents.evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
 from ..agents.model_lifecycle import owned_model
 from ..integrations.scoped_tools import ScopedMemoryTools
@@ -38,6 +39,7 @@ from .timing import TurnTiming
 #: Seconds a turn's timing may take to record before the turn goes on without it.
 NOTE_TIMEOUT = 2.0
 from .review_evidence import prepare_review_evidence
+from .grounding import AnswerGrounder, GROUNDED_INSTRUCTIONS, check_answer
 from .tool_answer import tool_context_receipt, review_tool_answer
 
 _OWNER = ContextVar("scone_text_owner", default=None)
@@ -183,6 +185,7 @@ class TextConversation:
                  source_prefix=None, since=None, until=None, turn_timeout=30.0,
                  max_reply_bytes=64000, max_history_bytes=128000,
                  adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0,
+                 answer_grounder: AnswerGrounder | None = None,
                  neighbor_chunks: int = 0,
                  reading_order: str = "ranked",
                  answer_reviewer: AnswerReviewer | None = None, review_limits: AnswerReviewLimits | None = None,
@@ -200,6 +203,9 @@ class TextConversation:
                  followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S,
                  profile_buckets: "BucketBounds | None" = None):
         check_space(space)
+        if answer_grounder is not None and (not callable(getattr(answer_grounder, 'assess', None)) or tool_model_factory is not None):
+            raise ValueError('answer_grounder requires a native non-tool text runtime and assess method')
+        self._answer_grounder = answer_grounder
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
         if type(evidence_answer_policy) is not str or evidence_answer_policy not in ("when_available", "required"):
@@ -317,6 +323,60 @@ class TextConversation:
     def closed(self):
         return self._closed
 
+    async def restore(self, completed_episode_ids: tuple[int, ...]) -> dict[str, int]:
+        """Rebuild a bounded recent history from retained, completed native turns.
+
+        No model calls, inference receipts, summaries or failed turns are replayed.
+        The service supplies the assistant IDs confirmed by its durable journal.
+        """
+        if self._closed or self._active is not None or len(self._history) != 1:
+            raise RuntimeError("history restoration requires a fresh runtime")
+        if (type(completed_episode_ids) is not tuple or len(completed_episode_ids) > 100
+                or any(type(value) is not int or value <= 0 for value in completed_episode_ids)):
+            raise ValueError("invalid completed episode IDs")
+        revision = await self._memory.revision(self._space)
+        episodes = await self._memory.episodes(self._space, {"session_id": self._session_id}, limit=200)
+        groups: dict[str, list[Episode]] = {}
+        for episode in episodes:
+            meta = episode.metadata
+            if (episode.kind != "conversation" or episode.source != self._session_id
+                    or meta.get("integration") != "scone-text" or meta.get("role") not in ("user", "assistant")):
+                continue
+            turn_id = meta.get("turn_id")
+            if not isinstance(turn_id, str) or not turn_id:
+                continue
+            groups.setdefault(turn_id, []).append(episode)
+        pairs = {}
+        for turn_id, group in groups.items():
+            if len(group) != 2 or [e.metadata['role'] for e in group] != ['user', 'assistant']:
+                continue
+            user, assistant = group
+            pairs[assistant.episode_id] = (turn_id, user.content, assistant.content)
+        messages = list(self._history)
+        turns: list[str | None] = [None]
+        restored = 0
+        # Leave half the context for a new message and reply. Older completed
+        # turns stay in the saved transcript and can still be retrieved.
+        budget = max(_bytes(messages), self._room() // 2)
+        for episode_id in reversed(completed_episode_ids):
+            pair = pairs.get(episode_id)
+            if pair is None:
+                continue
+            turn_id, user_text, assistant_text = pair
+            additions = [{"role": "user", "content": user_text}, {"role": "assistant", "content": assistant_text}]
+            candidate = [messages[0], *additions, *messages[1:]]
+            if _bytes(candidate) > budget:
+                break
+            messages = candidate
+            turns = [turns[0], turn_id, turn_id, *turns[1:]]
+            restored += 1
+        if revision != await self._memory.revision(self._space):
+            raise RuntimeError("saved messages changed during history restoration")
+        self._history, self._turns = messages, turns
+        self._evicted_turns.update(pair[0] for episode_id, pair in pairs.items()
+                                   if episode_id in completed_episode_ids and pair[0] not in turns)
+        return {"restored_turns": restored}
+
     async def reply(self, text: str, *, on_text: Callable[[str], Awaitable[None]] | None = None) -> dict:
         """Observe provisional chunks, or one checked final text; return confirms capture."""
         if self._closed:
@@ -368,6 +428,7 @@ class TextConversation:
                 raise asyncio.CancelledError()
 
     async def _record(self, turn_id, role, text, *, extractive=False, tool_source_status=None, evidence_abstention=False):
+        from ..observability.turn_performance import observe
         started = time.perf_counter()
         self._cancel_reusable = False
         metadata = dict(integration="scone-text", session_id=self._session_id,
@@ -386,10 +447,13 @@ class TextConversation:
                 text, kind="conversation", source=self._session_id, metadata=metadata,
                 dedup_key=f"scone-text:{self._session_id}:{turn_id}:{role}")])
         except BaseException as error:
+            observe('capture_' + role, outcome='cancelled' if isinstance(error, asyncio.CancelledError) else 'failed',
+                    elapsed_ms=(time.perf_counter() - started) * 1000)
             logging.getLogger(__name__).warning("capture.failed", extra={"event": "capture.failed",
                 "session_id": self._session_id, "role": role, "exception_type": type(error).__name__,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
             raise
+        observe('capture_' + role, outcome='completed', elapsed_ms=(time.perf_counter() - started) * 1000)
         logging.getLogger(__name__).info("capture.finished", extra={"event": "capture.finished",
             "session_id": self._session_id, "role": role, "episode_id": added.episode_id,
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
@@ -548,6 +612,14 @@ class TextConversation:
             timing.mark("context")
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
+        if self._answer_grounder is not None:
+            withheld = await check_answer(self._answer_grounder, self._memory, self._space,
+                self._scope, self._session_id, messages, request, receipt, admit_turn_ids=frozenset(evicted))
+            if withheld is not None:
+                await self._emit_final(messages, withheld, on_text)
+                return withheld, receipt, None, None
+            if receipt['answer_grounding']['status'] == 'supported':
+                request = [{'role': 'system', 'content': GROUNDED_INSTRUCTIONS}, *request]
         if self._evidence_selector is not None and receipt["status"] == "prepared":
             text, evidence_answer = await self._construct_answer(messages[-1]["content"], request, receipt)
             await self._emit_final(messages, text, on_text)
