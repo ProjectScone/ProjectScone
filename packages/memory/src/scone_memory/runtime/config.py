@@ -357,6 +357,8 @@ class Settings:
     answer_review_timeout: float = 20.0
     answer_review_quote_mode: str = "text"
     adaptive_retrieval: bool = False
+    answer_grounding: bool = False
+    answer_grounding_workspace: str = ''
     adaptive_provider: str = 'self-hosted'
     adaptive_url: str | None = None
     adaptive_model: str | None = None
@@ -707,6 +709,8 @@ class Settings:
             answer_review_timeout=parse_seconds("SCONE_ANSWER_REVIEW_TIMEOUT", env.get("SCONE_ANSWER_REVIEW_TIMEOUT"), 20.0),
             answer_review_quote_mode=env.get("SCONE_ANSWER_REVIEW_QUOTE_MODE", "text"),
             adaptive_retrieval=parse_flag("SCONE_ADAPTIVE_RETRIEVAL", env.get("SCONE_ADAPTIVE_RETRIEVAL")),
+            answer_grounding=parse_flag("SCONE_ANSWER_GROUNDING", env.get("SCONE_ANSWER_GROUNDING")),
+            answer_grounding_workspace=env.get('SCONE_ANSWER_GROUNDING_WORKSPACE', ''),
             adaptive_provider=env.get('SCONE_ADAPTIVE_PROVIDER', 'self-hosted'),
             adaptive_url=env.get("SCONE_ADAPTIVE_URL") or (env.get('TYPESAFE_BASE_URL', 'https://api.typesafe.ai')
                 if env.get('SCONE_ADAPTIVE_PROVIDER') == 'typesafe' else None),

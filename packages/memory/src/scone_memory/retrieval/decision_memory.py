@@ -233,6 +233,8 @@ class RememberedEvidenceAssessor:
 
     @staticmethod
     def _log(outcome: str, started: float, revision: int | None = None) -> None:
+        from ..observability.turn_performance import observe
+        observe('decision_memory', outcome=outcome, elapsed_ms=(time.perf_counter() - started) * 1000)
         logging.getLogger(__name__).info('decision_memory.finished', extra={
             'event': 'decision_memory.finished', 'outcome': outcome, 'decision_revision': revision,
             'elapsed_ms': round((time.perf_counter() - started) * 1000, 3)})

@@ -131,7 +131,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
     from .conversation_server import journal_path, load_model_factory
     from .conversations import create_conversation_app
     from ..runtime.conversation_review import build_conversation_review
-    from ..runtime.conversation_retrieval import build_adaptive_retrieval
+    from ..runtime.conversation_retrieval import build_adaptive_retrieval, build_answer_grounder
     from ..runtime.conversation_followup import build_followup
     from ..runtime.voice_turns import build_voice_turns
     from ..runtime.conversation_tools import build_conversation_tools
@@ -139,6 +139,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
     journal = journal_path(settings, settings.conversations_journal)
     answer_review = build_conversation_review(settings)
     adaptive_retriever = build_adaptive_retrieval(settings, engine)
+    answer_grounder = build_answer_grounder(settings)
     conversation_tools = build_conversation_tools(settings)
     catalog: PersonaCatalog | DynamicLocalCatalog | None = None
     if settings.conversations_personas:
@@ -185,7 +186,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                                    runtime_available=runtime_available,
                                    model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory,
                                    synthesis_factory=synthesis_factory, url_import=url_import,
-                                   answer_review=answer_review, adaptive_retriever=adaptive_retriever,
+                                   answer_review=answer_review, adaptive_retriever=adaptive_retriever, answer_grounder=answer_grounder,
                                    tool_retrieval=conversation_tools, followup=build_followup(settings),
                                    semantic_turn=settings.semantic_turn, voice_keypad=settings.voice_keypad,
                                    **build_voice_turns(settings)))

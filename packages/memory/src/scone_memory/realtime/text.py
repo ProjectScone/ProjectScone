@@ -39,6 +39,7 @@ from .timing import TurnTiming
 #: Seconds a turn's timing may take to record before the turn goes on without it.
 NOTE_TIMEOUT = 2.0
 from .review_evidence import prepare_review_evidence
+from .grounding import AnswerGrounder, GROUNDED_INSTRUCTIONS, check_answer
 from .tool_answer import tool_context_receipt, review_tool_answer
 
 _OWNER = ContextVar("scone_text_owner", default=None)
@@ -184,6 +185,7 @@ class TextConversation:
                  source_prefix=None, since=None, until=None, turn_timeout=30.0,
                  max_reply_bytes=64000, max_history_bytes=128000,
                  adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0,
+                 answer_grounder: AnswerGrounder | None = None,
                  neighbor_chunks: int = 0,
                  reading_order: str = "ranked",
                  answer_reviewer: AnswerReviewer | None = None, review_limits: AnswerReviewLimits | None = None,
@@ -201,6 +203,9 @@ class TextConversation:
                  followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S,
                  profile_buckets: "BucketBounds | None" = None):
         check_space(space)
+        if answer_grounder is not None and (not callable(getattr(answer_grounder, 'assess', None)) or tool_model_factory is not None):
+            raise ValueError('answer_grounder requires a native non-tool text runtime and assess method')
+        self._answer_grounder = answer_grounder
         if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session_id):
             raise ValueError("session_id must be an opaque identifier of 1..128 characters")
         if type(evidence_answer_policy) is not str or evidence_answer_policy not in ("when_available", "required"):
@@ -423,6 +428,7 @@ class TextConversation:
                 raise asyncio.CancelledError()
 
     async def _record(self, turn_id, role, text, *, extractive=False, tool_source_status=None, evidence_abstention=False):
+        from ..observability.turn_performance import observe
         started = time.perf_counter()
         self._cancel_reusable = False
         metadata = dict(integration="scone-text", session_id=self._session_id,
@@ -441,10 +447,13 @@ class TextConversation:
                 text, kind="conversation", source=self._session_id, metadata=metadata,
                 dedup_key=f"scone-text:{self._session_id}:{turn_id}:{role}")])
         except BaseException as error:
+            observe('capture_' + role, outcome='cancelled' if isinstance(error, asyncio.CancelledError) else 'failed',
+                    elapsed_ms=(time.perf_counter() - started) * 1000)
             logging.getLogger(__name__).warning("capture.failed", extra={"event": "capture.failed",
                 "session_id": self._session_id, "role": role, "exception_type": type(error).__name__,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
             raise
+        observe('capture_' + role, outcome='completed', elapsed_ms=(time.perf_counter() - started) * 1000)
         logging.getLogger(__name__).info("capture.finished", extra={"event": "capture.finished",
             "session_id": self._session_id, "role": role, "episode_id": added.episode_id,
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
@@ -603,6 +612,14 @@ class TextConversation:
             timing.mark("context")
         if self._closed or asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
+        if self._answer_grounder is not None:
+            withheld = await check_answer(self._answer_grounder, self._memory, self._space,
+                self._scope, self._session_id, messages, request, receipt, admit_turn_ids=frozenset(evicted))
+            if withheld is not None:
+                await self._emit_final(messages, withheld, on_text)
+                return withheld, receipt, None, None
+            if receipt['answer_grounding']['status'] == 'supported':
+                request = [{'role': 'system', 'content': GROUNDED_INSTRUCTIONS}, *request]
         if self._evidence_selector is not None and receipt["status"] == "prepared":
             text, evidence_answer = await self._construct_answer(messages[-1]["content"], request, receipt)
             await self._emit_final(messages, text, on_text)

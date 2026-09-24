@@ -194,7 +194,7 @@ def _packet(request: list[dict[str, object]], receipt: ContextReceipt, session_i
 
 
 async def _capture(memory: MemoryEngine, space: str, scope: RecallScope, session_id: str,
-                   packet: _Packet) -> tuple[str, ...]:
+                   packet: _Packet, admit_turn_ids: frozenset[str] = frozenset()) -> tuple[str, ...]:
     documents = memory.documents
     if await documents.revision(space) != packet.revision:
         raise _Changed()
@@ -211,7 +211,8 @@ async def _capture(memory: MemoryEngine, space: str, scope: RecallScope, session
             raise _Changed()
         episode = await documents.get_episode(space, episode_id)
         if (episode is None or episode.episode_id != episode_id or episode.space != space
-                or not _source_matches(episode, scope_filter, session_id)
+                or not _source_matches(episode, scope_filter,
+                    None if episode.metadata.get('turn_id') in admit_turn_ids else session_id)
                 or parse_rfc3339(episode.created_at) > parse_rfc3339(boundary)):
             raise _Changed()
         proof = packet.graph_sources.get(episode_id)
@@ -280,7 +281,8 @@ async def _capture(memory: MemoryEngine, space: str, scope: RecallScope, session
 
 
 async def prepare_review_evidence(memory: MemoryEngine, space: str, scope: RecallScope, session_id: str,
-                                  request: list[dict[str, object]], receipt: ContextReceipt) -> PreparedReviewEvidence:
+                                  request: list[dict[str, object]], receipt: ContextReceipt, *,
+                                  admit_turn_ids: frozenset[str] = frozenset()) -> PreparedReviewEvidence:
     """Freeze delivered evidence, rejecting unavailable or changed preparation.
 
     Each read pass has a one-second cooperative timeout. Revision changes or
@@ -291,10 +293,12 @@ async def prepare_review_evidence(memory: MemoryEngine, space: str, scope: Recal
         check_space(space)
         if not isinstance(session_id, str) or not 1 <= len(session_id) <= 128:
             raise _Changed()
+        if not isinstance(admit_turn_ids, frozenset) or any(not isinstance(turn, str) or not turn for turn in admit_turn_ids):
+            raise _Changed()
         fixed_scope = RecallScope.validated(**scope.kwargs())
         packet = _packet(request, receipt, session_id)
         async with asyncio.timeout(1.0):
-            original = await _capture(memory, space, fixed_scope, session_id, packet)
+            original = await _capture(memory, space, fixed_scope, session_id, packet, admit_turn_ids)
     except asyncio.CancelledError:
         raise
     except TimeoutError:
@@ -305,7 +309,7 @@ async def prepare_review_evidence(memory: MemoryEngine, space: str, scope: Recal
     async def validate() -> bool:
         try:
             async with asyncio.timeout(1.0):
-                return await _capture(memory, space, fixed_scope, session_id, packet) == original
+                return await _capture(memory, space, fixed_scope, session_id, packet, admit_turn_ids) == original
         except asyncio.CancelledError:
             raise
         except _Changed:
