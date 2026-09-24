@@ -1,0 +1,11 @@
+# Benchmark-only environment. Do not install in Scone's runtime environment.
+llama-index-core==0.14.24
+llama-index-retrievers-bm25==0.8.0
+llama-index-vector-stores-qdrant==0.10.3
+qdrant-client==1.19.0
+httpx==0.28.1
+pydantic==2.13.5
+cryptography==50.0.1
+pytest==9.1.1
+pytest-asyncio==1.4.0
+mypy==2.3.1
