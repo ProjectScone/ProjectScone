@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 import time
-from typing import TextIO, cast
+from typing import Literal, TextIO, cast
 
 import httpx
 from llama_index.core.schema import QueryBundle
@@ -25,7 +25,8 @@ from scone_memory.ingestion.embedding_cache import SqliteEmbeddingCache
 from scone_memory.testing.public_qa import Document, Question, _mapping
 
 from .indexes import SPACE, Indices, build, validate_url, warm_vectors
-from .pipeline import EMBED_MODEL, MODEL, QUERY_PREFIX, Passage, credential, error_name, generate, messages, pack_context, rank, rerank, unique_passages
+from .embedding_profiles import embedding_profile
+from .pipeline import MODEL, OPENROUTER_JEV_MODEL, Passage, credential, error_name, generate, messages, pack_context, rank, rerank, unique_passages
 
 ARMS = ('scone', 'llamaindex')
 
@@ -108,7 +109,8 @@ def failed_row(identifier: str, arm: str, error: str) -> dict[str, object]:
 
 
 async def evaluate(indices: Indices, cached: CachedEmbedder, questions: list[Question],
-                   output: Path, concurrency: int) -> None:
+                   output: Path, concurrency: int, *,
+                   rerank_provider: Literal['typesafe', 'openrouter'] = 'typesafe') -> None:
     for name in ('observations.jsonl', 'attempts.jsonl', 'judgments.jsonl'):
         repair_journal_tail(output / name)
     old = previous_rows(output / 'observations.jsonl')
@@ -159,7 +161,8 @@ async def evaluate(indices: Indices, cached: CachedEmbedder, questions: list[Que
                 audit: dict[str, object]
                 started = time.perf_counter()
                 try:
-                    scores, audit, rerank_ms = await rank(client, question.question, unique_passages(candidates))
+                    scores, audit, rerank_ms = await rank(client, question.question, unique_passages(candidates),
+                                                        provider=rerank_provider)
                 except Exception as error:
                     rerank_ms = (time.perf_counter() - started) * 1000
                     audit = {'error': error_name(error), 'question': question.question,
@@ -196,14 +199,19 @@ async def evaluate(indices: Indices, cached: CachedEmbedder, questions: list[Que
 
 
 async def run(dataset: Path, output: Path, url: str, concurrency: int, resume: bool) -> None:
+    await run_profile(dataset, output, url, concurrency, resume, 'qwen')
+
+
+async def run_profile(dataset: Path, output: Path, url: str, concurrency: int,
+                      resume: bool, profile_name: str) -> None:
+    profile = embedding_profile(profile_name)
     validate_url(url)
     if not 1 <= concurrency <= 8:
         raise ValueError('concurrency must be 1..8')
     credential('chat')
     credential('embed')
-    for name in ('TYPESAFE_API_KEY',):
-        if not os.environ.get(name):
-            raise ValueError('required API credentials missing')
+    if profile.rerank_provider == 'typesafe' and not os.environ.get('TYPESAFE_API_KEY'):
+        raise ValueError('required API credentials missing')
     if version('llama-index-core') != '0.14.24':
         raise ValueError('use the protocol-pinned LlamaIndex version')
     data = json.loads((dataset / 'dataset.json').read_text())
@@ -221,24 +229,41 @@ async def run(dataset: Path, output: Path, url: str, concurrency: int, resume: b
     with (output / '.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         sources = source_hashes()
-        manifest = {'protocol': 'matched-qa-full-v1', 'input_hashes': inputs, 'source_sha256': sources,
+        manifest = {'protocol': 'matched-qa-nemotron-full-v1' if profile.name == 'nemotron' else 'matched-qa-full-v1',
+            'input_hashes': inputs, 'source_sha256': sources,
             'scheduled': [{'id': q.id, 'arm': arm} for q in questions for arm in ARMS],
             'versions': {name: version(name) for name in ('llama-index-core', 'llama-index-retrievers-bm25',
                 'llama-index-vector-stores-qdrant', 'qdrant-client', 'httpx')},
-            'chat_model': MODEL, 'embedding_model': EMBED_MODEL, 'dimensions': 4096,
-            'jev_model': os.environ.get('TYPESAFE_DEFAULT_MODEL', 'jev-latest'), 'qdrant_url': url,
+            'chat_model': MODEL, 'embedding_model': profile.model, 'dimensions': profile.dimensions,
+            'embedding_profile': profile.name, 'query_prefix': profile.query_prefix,
+            'document_prefix': profile.document_prefix, 'vector_collection': profile.collection,
+            'embedding_batch_size': profile.batch_size, 'embedding_request_interval': profile.minimum_request_interval,
+            'rerank_provider': profile.rerank_provider,
+            'jev_model': OPENROUTER_JEV_MODEL if profile.rerank_provider == 'openrouter'
+                else os.environ.get('TYPESAFE_DEFAULT_MODEL', 'jev-latest'), 'qdrant_url': url,
             'chunk_target': 700, 'lane_candidates': 64, 'fused_candidates': 32,
             'context_chunks': 5, 'context_bytes': 8000, 'warm_query_embeddings': True,
             'concurrency': concurrency,
             'scope': 'complete development splits, shared Scone chunking and answer/reranking stages'}
+        if profile.name == 'nemotron':
+            manifest['profile_protocol_sha256'] = digest(Path(__file__).with_name('NEMOTRON.md'))
         if resume:
             if json.loads((output / 'manifest.json').read_text()) != manifest:
                 raise ValueError('resume requires unchanged sources, inputs, versions and configuration')
         else:
             save(output / 'manifest.json', manifest)
-        remote = RemoteEmbedder('https://openrouter.ai/api/v1', EMBED_MODEL,
-            api_key=credential('embed'), dim=4096, query_prefix=QUERY_PREFIX, trust_env=False)
+        remote = RemoteEmbedder('https://openrouter.ai/api/v1', profile.model,
+            api_key=credential('embed'), dim=profile.dimensions, query_prefix=profile.query_prefix,
+            document_prefix=profile.document_prefix, trust_env=False)
+        request_lock = asyncio.Lock()
+        last_embedding_request = 0.0
         async def embedding_started(request: httpx.Request) -> None:
+            nonlocal last_embedding_request
+            async with request_lock:
+                delay = last_embedding_request + profile.minimum_request_interval - time.perf_counter()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                last_embedding_request = time.perf_counter()
             request.extensions['benchmark_started'] = time.perf_counter()
 
         async def embedding_finished(response: httpx.Response) -> None:
@@ -258,21 +283,21 @@ async def run(dataset: Path, output: Path, url: str, concurrency: int, resume: b
         cache = SqliteEmbeddingCache(output / 'embeddings.db', max_entries=500000)
         cached = CachedEmbedder(remote, cache)
         engine = MemoryEngine(SqliteDocumentStore(output / 'memory.db'),
-            QdrantVectorIndex(url, 'matched_scone'), cached, chunk_target=700, candidate_limit=64)
+            QdrantVectorIndex(url, profile.collection), cached, chunk_target=700, candidate_limit=64)
         complete = False
         failure: str | None = None
         indices: Indices | None = None
         try:
             started = time.perf_counter()
             save(output / 'progress.json', {'phase': 'embedding', 'questions': len(questions), 'documents': len(documents)})
-            await warm_vectors(cached, documents, questions, concurrency)
+            await warm_vectors(cached, documents, questions, concurrency, batch_size=profile.batch_size)
             await engine.open()
             save(output / 'progress.json', {'phase': 'indexing', 'questions': len(questions), 'documents': len(documents)})
             indices = await build(engine, cached, documents, output, url)
             save(output / 'index.json', {'documents': len(documents), 'chunks': len(indices.passages),
                 'preparation_ms_this_process': (time.perf_counter() - started) * 1000,
                 'embedding_cache': cached.record(), 'scone_vector_weight': engine.vector_weight})
-            await evaluate(indices, cached, questions, output, concurrency)
+            await evaluate(indices, cached, questions, output, concurrency, rerank_provider=profile.rerank_provider)
             complete = len(previous_rows(output / 'observations.jsonl')) == len(questions) * 2
         except BaseException as error:
             failure = type(error).__name__
@@ -280,6 +305,8 @@ async def run(dataset: Path, output: Path, url: str, concurrency: int, resume: b
         finally:
             unchanged = sources == source_hashes() and all(digest(dataset / name) == sha
                 for name, sha in inputs.items() if name != 'gold.jsonl')
+            if profile.name == 'nemotron':
+                unchanged = unchanged and manifest['profile_protocol_sha256'] == digest(Path(__file__).with_name('NEMOTRON.md'))
             save(output / 'completion.json', {'completed': complete, 'error': failure,
                 'code_and_inputs_unchanged': unchanged, 'embedding_cache': cached.record(),
                 'artifact_hashes': {name: digest(output / name)
@@ -299,5 +326,8 @@ if __name__ == '__main__':
     parser.add_argument('--qdrant-url', default='http://127.0.0.1:16437')
     parser.add_argument('--concurrency', type=int, default=4)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--embedding-profile', choices=('qwen', 'nemotron'),
+                        default=os.environ.get('SCONE_BENCH_EMBEDDING_PROFILE', 'qwen'))
     args = parser.parse_args()
-    asyncio.run(run(args.dataset, args.output, args.qdrant_url, args.concurrency, args.resume))
+    asyncio.run(run_profile(args.dataset, args.output, args.qdrant_url, args.concurrency,
+                            args.resume, args.embedding_profile))
