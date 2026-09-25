@@ -6,6 +6,7 @@ current authorized snapshot on every call; a route is not evidence or authority.
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 import hashlib
@@ -126,11 +127,16 @@ def _menu(snapshot: SectionSnapshot, path: _Path) -> RouteMenu:
     node = next(node for node in snapshot.nodes if node.id == path.section_id)
     children = tuple(n for n in snapshot.nodes if n.parent_id == node.id)
     parents = {n.parent_id for n in snapshot.nodes}
-    options = tuple(RouteOption(n.id, n.title or '(untitled)', n.id not in parents,
-        tuple(desc.title for desc in snapshot.nodes if n.start < desc.start < n.end and desc.title))
-        for n in children)
+    options = tuple(RouteOption(n.id, n.title or '(untitled)', n.id not in parents) for n in children)
     if node.text.strip() or children:
         options += (RouteOption(node.id, 'Read this entire section, including its subsections', True),)
+    if len(options) > 254:
+        return RouteMenu(snapshot.path(node.id), options)
+    starts = [n.start for n in snapshot.nodes]
+    outlined = tuple(replace(option, outline=tuple(desc.title for desc in snapshot.nodes[
+        bisect_right(starts, child.start):bisect_left(starts, child.end)] if desc.title))
+        for option, child in zip(options, children))
+    options = outlined + options[len(children):]
     return RouteMenu(snapshot.path(node.id), options)
 
 
