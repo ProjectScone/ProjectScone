@@ -106,3 +106,11 @@ async def test_ancestor_menu_exposes_descendant_addresses() -> None:
             return await super().choose(query, menus)
     result = await SectionRouter(Inspect()).route('cats', snapshot())
     assert result.reason == 'routed'
+
+
+def test_oversized_menu_skips_descendant_outline_construction() -> None:
+    from scone_memory.retrieval.section_routing import _Path, _menu
+    book = snapshot(''.join(f'# Topic {i}\n## Details {i}\nbody\n' for i in range(255)))
+    menu = _menu(book, _Path(book.nodes[0].id))
+    assert len(menu.options) > 254
+    assert all(not option.outline for option in menu.options)

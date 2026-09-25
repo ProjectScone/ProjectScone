@@ -48,7 +48,7 @@ Local evidence lives under `bench-runs/structure-routing-2026-09-24/smoke-3/`:
 - observations SHA-256: `5d403e34da46f96332d55d06924f29f5c5a343040b4c2d873de9b1b3ddb6207c`
 - summary SHA-256: `2cefee6e7be4139a68cc8871eef555028cb496a22b2637096625b735b8a7d5e3`
 
-Relevant tests: **72 passed**. Strict mypy: **four modules passed**. Independent
+Relevant tests: **73 passed**. Strict mypy: **four modules passed**. Independent
 review also reproduced and verified fixes for scoped-search fallback, heading-only
 sources, malformed fetch decisions and quadratic ancestor lookup. Constructor-only
 cost for 8,000 headings fell from approximately 2,419 ms to 3.6 ms in that check;
@@ -57,3 +57,9 @@ this is prototype bookkeeping, not an end-to-end retrieval speedup.
 Promotion remains contingent on matched full-corpus evaluation, including ordinary
 Scone retrieval and LlamaIndex, answer quality, source coverage, added latency,
 cost and document updates. Current results establish working mechanics only.
+
+The live probe used native checkpoint `3b2d5375`. A subsequent bounded-menu
+preparation fix skips descendant outline work when a menu is too wide and uses
+source offsets for valid menus. At 8,000 headings, rejected-menu preparation fell
+from approximately 1,866 ms to 5.4 ms; the functional/type checks above include
+that fix. The recorded live API hashes remain those of the original probe.
