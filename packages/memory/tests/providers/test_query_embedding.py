@@ -7,6 +7,39 @@ from scone_memory import InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngin
 from scone_memory.embedders.remote import RemoteEmbedder
 
 
+async def test_document_and_query_prefixes_are_separate_and_cache_safe():
+    from scone_memory.core.embedding import query_cache_text
+    from scone_memory.ingestion.embedding_cache import InMemoryEmbeddingCache
+    calls = []
+
+    def serve(request):
+        texts = json.loads(request.content)['input']
+        calls.append(texts)
+        return httpx.Response(200, json={'data': [
+            {'index': i, 'embedding': [0., 1.] if text.startswith('query: ') else [1., 0.]}
+            for i, text in enumerate(texts)]})
+
+    embedder = RemoteEmbedder('https://embedding.test/v1', 'nemotron', dim=2,
+        query_prefix='query: ', document_prefix='passage: ', transport=httpx.MockTransport(serve))
+    original = RemoteEmbedder('https://embedding.test/v1', 'nemotron', dim=2, query_prefix='query: ')
+    assert embedder.id != original.id
+    assert query_cache_text(embedder, 'same') is None
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
+                                embedding_cache=InMemoryEmbeddingCache()).open()
+    try:
+        await engine.remember('test', 'same')
+        await engine.recall('test', 'same', lanes=('vector',))
+        assert calls == [['passage: same'], ['query: same']]
+    finally:
+        await engine.close()
+
+
+def test_equal_prefixes_allow_equivalent_document_cache_reuse():
+    embedder = RemoteEmbedder('https://embedding.test/v1', 'test',
+        query_prefix='text: ', document_prefix='text: ')
+    assert embedder.query_cache_text('same') == 'same'
+
+
 async def test_query_instruction_reaches_vector_search_without_changing_documents():
     requests = []
 

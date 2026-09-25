@@ -18,10 +18,9 @@ class RemoteEmbedder:
     ``dim`` is learned from the first response, so the caller does not
     need to know the model's width up front.
 
-    ``embed`` encodes documents unchanged. ``embed_queries`` prepends an
-    explicit ``query_prefix`` for instruction-aware retrieval models. The
-    prefix is part of the embedder identity; use a fresh index when changing
-    it. No provider-specific instruction is silently inferred from a name.
+    ``embed`` and ``embed_queries`` apply their explicit document/query
+    prefixes independently. Both are part of the embedder identity; use a
+    fresh index when changing either. No instruction is inferred from a name.
     """
 
     def __init__(
@@ -33,6 +32,7 @@ class RemoteEmbedder:
         timeout: float = 60.0,
         *,
         query_prefix: str = "",
+        document_prefix: str = "",
         transport: httpx.AsyncBaseTransport | None = None,
         trust_env: bool = True,
     ) -> None:
@@ -47,9 +47,14 @@ class RemoteEmbedder:
         self.id = f"remote:{model}"
         if not isinstance(query_prefix, str):
             raise ValueError("query_prefix must be text")
+        if not isinstance(document_prefix, str):
+            raise ValueError("document_prefix must be text")
         if query_prefix:
             self.id += ":query:" + hashlib.sha256(query_prefix.encode()).hexdigest()[:16]
         self.query_prefix = query_prefix
+        if document_prefix:
+            self.id += ":document:" + hashlib.sha256(document_prefix.encode()).hexdigest()[:16]
+        self.document_prefix = document_prefix
         self._transport = transport
         self._trust_env = trust_env
         self.dim = dim or 0
@@ -63,13 +68,19 @@ class RemoteEmbedder:
         if self._client is not None:
             await self._client.aclose()
 
-    def query_cache_text(self, text: str) -> str:
-        return self.query_prefix + text
+    def query_cache_text(self, text: str) -> str | None:
+        encoded = self.query_prefix + text
+        if not encoded.startswith(self.document_prefix):
+            return None
+        return encoded[len(self.document_prefix):]
 
     async def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
-        return await self.embed([self.query_prefix + text for text in texts])
+        return await self._observe_embed([self.query_prefix + text for text in texts])
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        return await self._observe_embed([self.document_prefix + text for text in texts])
+
+    async def _observe_embed(self, texts: Sequence[str]) -> list[list[float]]:
         from ..observability.turn_performance import observe, provider_name
         started, outcome = time.perf_counter(), 'cancelled'
         try:
