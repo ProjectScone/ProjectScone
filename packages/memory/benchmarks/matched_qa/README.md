@@ -1,5 +1,9 @@
 # Full-dataset comparison with LlamaIndex
 
+The [September 24 results](RESULTS.md) cover every scheduled question. Jev
+HTTP 402 failures prevented 3,483 questions from producing answers in either
+arm; the fully answered HotpotQA split did not show a Scone win.
+
 This benchmark runs all **17,975 development questions** from HotpotQA
 (7,405) and SQuAD 1.1 (10,570), with **35,950 answer attempts** across Scone
 and LlamaIndex. It does not sample questions. The pooled corpus contains
