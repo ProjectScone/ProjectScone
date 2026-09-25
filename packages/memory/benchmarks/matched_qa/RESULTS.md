@@ -1,6 +1,62 @@
-# Full scheduled run: Scone versus LlamaIndex
+# Complete answer results: Scone versus LlamaIndex
 
-The September 24, 2026 run does **not** demonstrate a Scone win. Every
+All **17,975 questions now have answers from both systems**: 35,950 successful
+answers, zero missing answers. The OpenRouter recovery supplied the 6,966
+missing answers and preserved all 28,984 original successful answers exactly
+as JSON values. Full-schedule scoring and artifact/input integrity checks passed.
+
+| Evaluation | Scone EM | LlamaIndex EM | Scone F1 | LlamaIndex F1 | Missing answers per arm |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| HotpotQA, all 7,405 questions | 49.60% | 50.05% | 61.53% | 61.83% | 0 |
+| SQuAD, all 10,570 questions | 75.77% | 75.99% | 84.75% | 84.77% | 0 |
+| Combined, all 17,975 questions | 64.99% | 65.30% | 75.19% | 75.32% | 0 |
+
+**Scone remains slightly behind in answer quality for this configuration.**
+The combined exact-match difference is -0.312 percentage points: 269 paired
+Scone wins, 325 losses and 17,381 ties. The descriptive paired-question
+bootstrap 95% interval is [-0.562, -0.056] percentage points. Topic dependence
+and generation variability limit interpretation; this is not a universal
+ranking of the frameworks.
+
+Scone's combined candidate document recall at 32 is 96.02% versus 95.72%.
+Context document recall at five is 90.57% versus 90.34%. The small coverage
+advantage did not produce an answer-quality win. Among 10,823 pairs with
+identical generation requests, raw answers differed on 418; exact match
+favored Scone on 74 and LlamaIndex on 108. Some observed answer differences
+therefore reflect provider generation variability rather than retrieval.
+
+### Recovery provenance
+
+This is a **composite evaluation with an explicit provider switch**. Original
+successful questions used direct Jev `jev-1.13.0`; the 3,483 previously blocked
+question pairs used OpenRouter `typesafe/jev-1.13-20260917`, as authorized by
+the user. Both arms shared each reranking batch. Saved candidates, their order,
+relevance rubric, context limits and paid Gemma generation parameters were
+preserved. This does not establish identical behavior across provider deployments.
+
+OpenRouter returned one HTTP 529 during recovery. The runner stopped, and an
+explicit checkpoint resume finished the remaining work without repeating any
+completed answer. The rejection remains in the provider error journal; zero
+missing answers does not mean zero historical request errors.
+
+Recovery Jev receipts report 29,353,323 input tokens, 2,560,347 output tokens
+and $1.232840. Recovery generation reports 4,842,596 prompt tokens, 46,626
+completion tokens and $0.549732. These amounts supplement the original usage
+below. Reused retrieval timings and later API timings must not be presented
+as a new end-to-end wall-clock measurement.
+
+Verified local evidence: `bench-runs/llamaindex-full-2026-09-24/recovery-openrouter-1/`.
+
+- Manifest SHA-256: `0e10bb2106689f5b1b9a710a3e928d9180b7ae1d08b4e7c66b76692baa1b5ace`
+- Completion SHA-256: `134c7a5b033f29d82e16e0118b4e57214d438150fc596d1d2e373efb59667c05`
+
+See [RECOVERY.md](RECOVERY.md) for the frozen recovery protocol. The original
+attempt-level findings below remain preserved for availability and cost auditing;
+their zero-filled failed answers are superseded by the recovered quality table above.
+
+## Original run before recovery
+
+The original September 24, 2026 run did **not** demonstrate a Scone win. Every
 scheduled question was attempted, but a provider failure prevented a complete
 answer-quality evaluation. This report preserves those failures rather than
 presenting the successful subset as the full dataset.
@@ -91,11 +147,9 @@ offline `scores.json`. Generated artifacts are not committed.
 - Completion receipt SHA-256:
   `8a22279f57519e5ea267e3899a0c49af50980207faf1fdaeec82251a879b6346`
 
-First resolve the Jev HTTP 402 condition. The frozen no-retry protocol cannot
-silently replace failed outcomes: any recovery experiment must be separately
-identified and preserve this original run. Add a provider-failure circuit
-breaker to future runners so a persistent rejection pauses remaining work.
-Profile Scone's retrieval path, then investigate evidence selection and answer
+The separate recovery above resolved missing-answer coverage and added a
+provider-failure stop while preserving this original run. Next, profile
+Scone's retrieval path, then investigate evidence selection and answer
 errors under a separately frozen protocol. Do not tune on these results and
 call the same data an untouched holdout.
 
