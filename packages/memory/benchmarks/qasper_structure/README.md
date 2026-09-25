@@ -2,7 +2,9 @@
 
 Evaluate native structure-address retrieval against a native vector control and
 installed LlamaIndex hybrid retrieval. See [PROTOCOL.md](PROTOCOL.md) for the
-frozen resource budgets, task scope and scoring limitations.
+frozen resource budgets, task scope and scoring limitations. The complete first
+run is recorded in [RESULTS.md](RESULTS.md): improved evidence retrieval, no clear
+answer-accuracy win, and higher latency.
 
 Use the isolated LlamaIndex benchmark environment, not Scone's runtime. Install
 the optional benchmark dependencies used by `matched_qa`, including
