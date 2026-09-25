@@ -20,7 +20,7 @@ async def embed_queries(embedder: Embedder, texts: Sequence[str]) -> list[list[f
 @runtime_checkable
 class QueryCacheText(Protocol):
     """Explicit document-encoding input equivalent to a query encoding."""
-    def query_cache_text(self, text: str) -> str: ...
+    def query_cache_text(self, text: str) -> str | None: ...
 
 
 def query_cache_text(embedder: Embedder, text: str) -> str | None:
