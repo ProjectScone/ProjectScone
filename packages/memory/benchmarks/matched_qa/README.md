@@ -1,5 +1,10 @@
 # Full-dataset comparison with LlamaIndex
 
+For the Nemotron embedding configuration, see [NEMOTRON.md](NEMOTRON.md).
+Select it with `--embedding-profile nemotron` or
+`SCONE_BENCH_EMBEDDING_PROFILE=nemotron`; both arms use the same profile and
+separate vector collections. The Qwen results below remain the completed baseline.
+
 The [completed results](RESULTS.md) include all 35,950 successful answers after
 an explicitly recorded OpenRouter Jev recovery of 3,483 question pairs blocked
 by direct-provider billing. Combined EM is 64.99% for Scone versus 65.30% for
