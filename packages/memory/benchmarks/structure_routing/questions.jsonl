@@ -1,0 +1,6 @@
+{"id":"owner","question":"Who maintains the Aurora observatory?","evidence_contains":["Nia Patel"]}
+{"id":"retention","question":"How long are raw camera frames retained?","evidence_contains":["21 days"]}
+{"id":"procedure","question":"Give the complete collector restart procedure and explain the precautions.","evidence_contains":["Pause the intake queue","Save the collector checkpoint","calibration timestamp","health indicator reports ready","prevents duplicate exposures"]}
+{"id":"calibration","question":"When does nightly calibration run and how many dark frames does it capture?","evidence_contains":["02:15 UTC","five dark frames"]}
+{"id":"replacement","question":"What must happen after a sensor is replaced, before normal observation?","evidence_contains":["discard previous dark-frame corrections","new calibration series"]}
+{"id":"cross_section","question":"Who maintains Aurora and how long are calibrated observations retained?","evidence_contains":["Nia Patel","180 days"]}
