@@ -167,7 +167,12 @@ def score(dataset: Path, run: Path, *, allow_partial: bool = False) -> dict[str,
                       'scone_wins': sum(delta > 0 for delta in deltas),
                       'scone_losses': sum(delta < 0 for delta in deltas),
                       'ties': sum(delta == 0 for delta in deltas), **bootstrap(deltas)})
-    return {'protocol': 'scone-llamaindex-matched-full-v1', 'planned_observations': len(planned),
+    recovery = ({'provider': manifest['recovery_provider'], 'model': manifest['recovery_jev_model'],
+                 'question_count': len(_array(manifest['recovery_ids'])),
+                 'parent_completion_sha256': manifest['parent_completion_sha256']}
+                if manifest.get('protocol') == 'matched-qa-openrouter-recovery-v1' else None)
+    return {'protocol': manifest['protocol'] if recovery else 'scone-llamaindex-matched-full-v1',
+            'recovery': recovery, 'planned_observations': len(planned),
             'observed': len(observations), 'partial': partial,
             'completion_fraction': len(observations) / len(planned),
             'partial_policy': 'Progress only: observed-arm denominators and fully observed pairs; incomplete results must not rank systems.',
