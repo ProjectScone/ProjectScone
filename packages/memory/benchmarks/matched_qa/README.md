@@ -1,8 +1,15 @@
 # Full-dataset comparison with LlamaIndex
 
-The [September 24 results](RESULTS.md) cover every scheduled question. Jev
-HTTP 402 failures prevented 3,483 questions from producing answers in either
-arm; the fully answered HotpotQA split did not show a Scone win.
+For the Nemotron embedding configuration, see [NEMOTRON.md](NEMOTRON.md).
+Select it with `--embedding-profile nemotron` or
+`SCONE_BENCH_EMBEDDING_PROFILE=nemotron`; both arms use the same profile and
+separate vector collections. The Qwen results below remain the completed baseline.
+
+The [completed results](RESULTS.md) include all 35,950 successful answers after
+an explicitly recorded OpenRouter Jev recovery of 3,483 question pairs blocked
+by direct-provider billing. Combined EM is 64.99% for Scone versus 65.30% for
+LlamaIndex; F1 is 75.19% versus 75.32%. The [recovery protocol](RECOVERY.md)
+preserves original outcomes and successful answers and identifies the provider switch.
 
 This benchmark runs all **17,975 development questions** from HotpotQA
 (7,405) and SQuAD 1.1 (10,570), with **35,950 answer attempts** across Scone

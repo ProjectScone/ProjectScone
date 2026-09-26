@@ -6,17 +6,18 @@ import asyncio
 import json
 import os
 import time
-from typing import Mapping, Sequence
+from typing import Literal, Mapping, Sequence
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from scone_memory.providers.typesafe_evidence import _Response
-from scone_memory.testing.public_qa import FORMAT_INSTRUCTION
+from scone_memory.testing.public_qa import FORMAT_INSTRUCTION, _mapping
 
 MODEL = 'google/gemma-4-31b-it'
 EMBED_MODEL = 'qwen/qwen3-embedding-8b'
 QUERY_PREFIX = 'Instruct: Find passages that provide evidence to answer the question.\nQuery:'
+OPENROUTER_JEV_MODEL = 'typesafe/jev-1.13-20260917'
 
 
 def credential(kind: str) -> str:
@@ -97,7 +98,8 @@ class _Generation(BaseModel):
 
 
 async def rank(client: httpx.AsyncClient, question: str,
-               passages: Sequence[Passage]) -> tuple[dict[str, float], dict[str, object], float]:
+               passages: Sequence[Passage], *, provider: Literal['typesafe', 'openrouter'] = 'typesafe'
+               ) -> tuple[dict[str, float], dict[str, object], float]:
     if not passages or len(passages) > 64 or len({p.key for p in passages}) != len(passages):
         raise ValueError('reranking requires one to 64 distinct passages')
     questions = {f'p_{index}': {'type': 'noul', 'instructions':
@@ -109,18 +111,26 @@ async def rank(client: httpx.AsyncClient, question: str,
         for index, passage in enumerate(passages)}
     payload: dict[str, object] = {'model': os.environ.get('TYPESAFE_DEFAULT_MODEL', 'jev-latest'),
         'state': {'scope': 'independent evidence relevance judgments'}, 'questions': questions}
+    if provider == 'openrouter':
+        payload['model'] = OPENROUTER_JEV_MODEL
+        endpoint, key = 'https://openrouter.ai/api/alpha/decisions', credential('chat')
+    else:
+        endpoint, key = 'https://api.typesafe.ai/v1/systemone', os.environ['TYPESAFE_API_KEY']
     started = time.perf_counter()
     async with asyncio.timeout(30):
-        response = await client.post('https://api.typesafe.ai/v1/systemone', json=payload,
-            headers={'Authorization': 'Bearer ' + os.environ['TYPESAFE_API_KEY']}, timeout=30)
+        response = await client.post(endpoint, json=payload,
+            headers={'Authorization': 'Bearer ' + key}, timeout=30)
     response.raise_for_status()
     if len(response.content) > 128000:
         raise ValueError('oversized judgment response')
     parsed = _Response.model_validate_json(response.content)
+    if provider == 'openrouter' and parsed.model != OPENROUTER_JEV_MODEL:
+        raise ValueError('OpenRouter Jev model differs from recovery protocol')
     if set(parsed.answers) != set(questions):
         raise ValueError('mismatched judgment keys')
     scores = {p.key: parsed.answers[f'p_{i}'].noul for i, p in enumerate(passages)}
-    return scores, {'request': payload, 'response': parsed.model_dump()}, (time.perf_counter() - started) * 1000
+    receipt = _mapping(response.json()) if provider == 'openrouter' else parsed.model_dump()
+    return scores, {'request': payload, 'response': receipt}, (time.perf_counter() - started) * 1000
 
 
 def rerank(passages: Sequence[Passage], scores: Mapping[str, float]) -> list[Passage]:

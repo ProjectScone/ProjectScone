@@ -65,7 +65,9 @@ class Indices:
 
 
 async def warm_vectors(cached: CachedEmbedder, documents: list[Document],
-                       questions: list[Question], concurrency: int) -> None:
+                       questions: list[Question], concurrency: int, *, batch_size: int = 32) -> None:
+    if not 1 <= batch_size <= 128:
+        raise ValueError('embedding batch size must be 1..128')
     texts = list(dict.fromkeys(doc.content[span.start:span.end]
         for doc in documents for span in chunk_spans(doc.content, 700)))
     print(f'Preparing {len(texts)} distinct chunk vectors and {len(questions)} query vectors', flush=True)
@@ -74,17 +76,17 @@ async def warm_vectors(cached: CachedEmbedder, documents: list[Document],
     async def batch(offset: int, query: bool = False) -> None:
         async with semaphore:
             if query:
-                await cached.embed_queries([q.question.strip() for q in questions[offset:offset + 32]])
+                await cached.embed_queries([q.question.strip() for q in questions[offset:offset + batch_size]])
             else:
-                await cached.embed(texts[offset:offset + 32])
+                await cached.embed(texts[offset:offset + batch_size])
             if offset % 1024 == 0:
                 print(f'Vectors {"query" if query else "corpus"} {offset}/{len(questions) if query else len(texts)}', flush=True)
 
     # Bounded task groups also bound in-flight response memory.
     for query, size in ((False, len(texts)), (True, len(questions))):
-        for start in range(0, size, 32 * concurrency):
+        for start in range(0, size, batch_size * concurrency):
             async with asyncio.TaskGroup() as group:
-                for offset in range(start, min(start + 32 * concurrency, size), 32):
+                for offset in range(start, min(start + batch_size * concurrency, size), batch_size):
                     group.create_task(batch(offset, query))
 
 

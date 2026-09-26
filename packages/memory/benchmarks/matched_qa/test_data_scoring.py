@@ -120,6 +120,32 @@ def test_scoring_counts_failure_and_pairs_all_questions(tmp_path: Path) -> None:
     assert bootstrap([1., 0., -1.]) == bootstrap([1., 0., -1.])
 
 
+def test_scoring_labels_provider_recovery(tmp_path: Path) -> None:
+    dataset, run = fixture_run(tmp_path)
+    manifest = _mapping(json.loads((run / 'manifest.json').read_text()))
+    manifest.update({'protocol': 'matched-qa-openrouter-recovery-v1',
+        'recovery_provider': 'openrouter', 'recovery_jev_model': 'typesafe/jev-1.13-20260917',
+        'parent_completion_sha256': 'parent-hash', 'recovery_ids': ['squad:0']})
+    save(run / 'manifest.json', manifest)
+    finish(run)
+    report = score(dataset, run)
+    assert report['protocol'] == 'matched-qa-openrouter-recovery-v1'
+    provenance = _mapping(report['recovery'])
+    assert provenance['provider'] == 'openrouter'
+    assert provenance['parent_completion_sha256'] == 'parent-hash'
+    assert provenance['question_count'] == 1
+
+
+def test_scoring_preserves_nemotron_run_identity(tmp_path: Path) -> None:
+    dataset, run = fixture_run(tmp_path)
+    manifest = _mapping(json.loads((run / 'manifest.json').read_text()))
+    manifest.update({'protocol': 'matched-qa-nemotron-full-v1', 'embedding_profile': 'nemotron',
+        'embedding_model': 'nvidia/nemotron-3-embed-1b:free', 'dimensions': 2048})
+    save(run / 'manifest.json', manifest)
+    finish(run)
+    assert score(dataset, run)['protocol'] == 'matched-qa-nemotron-full-v1'
+
+
 def test_rejects_tampered_artifact_and_input(tmp_path: Path) -> None:
     dataset, run = fixture_run(tmp_path)
     with (run / 'observations.jsonl').open('a') as stream:
