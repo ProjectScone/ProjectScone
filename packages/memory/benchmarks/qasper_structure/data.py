@@ -4,13 +4,16 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Self
+import re
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from scone_memory.retrieval.section_routing import SectionSnapshot
+from scone_memory.ingestion.structure import parse_structure
 
 EXPECTED_COUNTS = (416, 1451)
+DEV_COUNTS = (281, 1005)
 
 
 class _Frozen(BaseModel):
@@ -108,9 +111,15 @@ def render_paper(paper_id: str, source: _RawPaper) -> Paper:
         expected_paths.append(path)
 
     def paragraph(text: str) -> None:
+        marker = ''
+        if any(block.kind in ('heading', 'fenced_code') for block in parse_structure(text).blocks):
+            marker = '`' * max(3, max((len(run) for run in re.findall(r'`+', text)), default=0) + 1)
+            append(marker + '\n')
         start = byte_offset
         append(text)
         paragraphs.append(Paragraph(text=text, start=start, end=byte_offset))
+        if marker:
+            append('\n' + marker)
         append("\n\n")
 
     heading((title,))
@@ -159,12 +168,14 @@ def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def export(raw_path: Path, output: Path) -> None:
+def export(raw_path: Path, output: Path, *, split: Literal['test', 'dev'] = 'test') -> None:
     """Validate the full official test split and write a reproducible inference bundle.
 
     Annotation values never enter Paper or Question. The source file's SHA-256
     binds the separate gold data for later scoring without exposing it here.
     """
+    if split not in ('test', 'dev'):
+        raise ValueError('unsupported QASPER split')
     raw_bytes = raw_path.read_bytes()
     decoded: object = json.loads(raw_bytes, object_pairs_hook=_unique_object)
     source = TypeAdapter(dict[str, _RawPaper]).validate_python(decoded, strict=True)
@@ -182,14 +193,15 @@ def export(raw_path: Path, output: Path) -> None:
             seen_questions.add(question.question_id)
             questions.append(Question(id=question.question_id, paper_id=paper_id, question=question.question))
     counts = (len(papers), len(questions))
-    if counts != EXPECTED_COUNTS:
-        raise ValueError(f"expected full official QASPER test counts {EXPECTED_COUNTS}, got {counts}")
+    expected = DEV_COUNTS if split == 'dev' else EXPECTED_COUNTS
+    if counts != expected:
+        raise ValueError(f"expected full official QASPER {split} counts {expected}, got {counts}")
     files = {
         "corpus.jsonl": b"".join(_json_bytes(paper.model_dump(mode="json")) for paper in papers),
         "questions.jsonl": b"".join(_json_bytes(question.model_dump(mode="json")) for question in questions),
     }
     metadata = {
-        "dataset": "QASPER", "version": "0.3", "split": "test", "schema_version": 1,
+        "dataset": "QASPER", "version": "0.3", "split": split, "schema_version": 1,
         "source": {"filename": raw_path.name, "sha256": hashlib.sha256(raw_bytes).hexdigest(),
                    "bytes": len(raw_bytes)},
         "counts": {"papers": len(papers), "questions": len(questions),
