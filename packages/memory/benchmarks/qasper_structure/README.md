@@ -6,6 +6,14 @@ frozen resource budgets, task scope and scoring limitations. The complete first
 run is recorded in [RESULTS.md](RESULTS.md): improved evidence retrieval, no clear
 answer-accuracy win, and higher latency.
 
+The separate four-arm development evaluation is documented in
+[DEV_PROTOCOL.md](DEV_PROTOCOL.md) and [DEV_RESULTS.md](DEV_RESULTS.md).
+Vector-guided routing reduced retrieval time versus hierarchy and improved evidence
+over the controls, without establishing an answer-accuracy advantage over LlamaIndex.
+Export with `split='dev'`, run with `--split dev`, and score with
+`development=True`; the full schedule is 281 papers, 1,005 questions, and 4,020
+answers. Development and test artifacts use separate directories and manifests.
+
 Use the isolated LlamaIndex benchmark environment, not Scone's runtime. Install
 the optional benchmark dependencies used by `matched_qa`, including
 `llama-index-retrievers-bm25`. Run from the repository root with
