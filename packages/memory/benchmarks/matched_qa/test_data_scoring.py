@@ -136,6 +136,16 @@ def test_scoring_labels_provider_recovery(tmp_path: Path) -> None:
     assert provenance['question_count'] == 1
 
 
+def test_scoring_preserves_nemotron_run_identity(tmp_path: Path) -> None:
+    dataset, run = fixture_run(tmp_path)
+    manifest = _mapping(json.loads((run / 'manifest.json').read_text()))
+    manifest.update({'protocol': 'matched-qa-nemotron-full-v1', 'embedding_profile': 'nemotron',
+        'embedding_model': 'nvidia/nemotron-3-embed-1b:free', 'dimensions': 2048})
+    save(run / 'manifest.json', manifest)
+    finish(run)
+    assert score(dataset, run)['protocol'] == 'matched-qa-nemotron-full-v1'
+
+
 def test_rejects_tampered_artifact_and_input(tmp_path: Path) -> None:
     dataset, run = fixture_run(tmp_path)
     with (run / 'observations.jsonl').open('a') as stream:
