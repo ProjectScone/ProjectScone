@@ -64,6 +64,25 @@ def _arm(report: dict[str, object], name: str = 'scone_structure') -> dict[str, 
     return cast(dict[str, dict[str, object]], report['by_arm'])[name]
 
 
+def test_development_scoring_pairs_candidate_policy_and_rejects_wrong_schedule(tmp_path: Path) -> None:
+    rows = _rows()
+    rows += [{**row, 'arm': 'scone_vector_candidates', 'completed': False, 'error': 'failed'}
+             for row in rows if row['arm'] == 'scone_structure']
+    paths = _write(tmp_path, _raw(), rows)
+    report = score(*paths, development=True)
+    assert report['planned_observations'] == 12
+    assert report['missing'] == 0
+    assert _arm(report, 'scone_vector_candidates')['failures'] == 3
+    paired = cast(dict[str, dict[str, object]], report['paired'])
+    comparison = paired['scone_vector_candidates_minus_scone_structure']
+    metrics = cast(dict[str, dict[str, object]], comparison['metrics'])
+    assert metrics['answer_f1']['delta'] == -1
+    with pytest.raises(ValueError, match='arm'):
+        score(*paths)
+    with pytest.raises(ValueError, match='schedule'):
+        score(*_write(tmp_path, _raw(), _rows()), development=True)
+
+
 def test_annotation_maxima_and_figure_evidence_are_reported_separately(tmp_path: Path) -> None:
     report = score(*_write(tmp_path, _raw(), _rows()))
     arm = _arm(report)

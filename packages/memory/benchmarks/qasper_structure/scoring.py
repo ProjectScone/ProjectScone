@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 ARMS = ('scone_flat', 'scone_structure', 'llamaindex')
+DEV_ARMS = ('scone_flat', 'scone_structure', 'scone_vector_candidates', 'llamaindex')
 TIMINGS = ('retrieval_ms', 'route_ms', 'fetch_ms', 'rerank_ms', 'generation_ms', 'total_ms')
 METRICS = ('answer_f1', 'normalized_em', 'evidence_f1', 'evidence_recall',
            'text_evidence_f1', 'text_evidence_recall')
@@ -64,7 +65,7 @@ class _Paper(_StrictModel):
 class Observation(_StrictModel):
     id: str
     paper_id: str
-    arm: Literal['scone_flat', 'scone_structure', 'llamaindex']
+    arm: Literal['scone_flat', 'scone_structure', 'scone_vector_candidates', 'llamaindex']
     completed: bool
     answer: str
     error: str | None
@@ -204,15 +205,16 @@ def _paired(
     question_papers: dict[str, str],
     values: dict[tuple[str, str], dict[str, float]],
     baseline: str,
+    treatment: str = 'scone_structure',
 ) -> dict[str, object]:
     clusters: dict[str, list[str]] = {}
     for question, paper in question_papers.items():
         clusters.setdefault(paper, []).append(question)
     cluster_questions = list(clusters.values())
     sizes = [len(questions) for questions in cluster_questions]
-    deltas = {metric: [values[(question, 'scone_structure')][metric] - values[(question, baseline)][metric]
+    deltas = {metric: [values[(question, treatment)][metric] - values[(question, baseline)][metric]
                        for question in question_papers] for metric in METRICS}
-    cluster_sums = {metric: [sum(values[(question, 'scone_structure')][metric] - values[(question, baseline)][metric]
+    cluster_sums = {metric: [sum(values[(question, treatment)][metric] - values[(question, baseline)][metric]
                                 for question in questions) for questions in cluster_questions] for metric in METRICS}
     rng = random.Random(BOOTSTRAP_SEED)
     samples: dict[str, list[float]] = {metric: [] for metric in METRICS}
@@ -233,13 +235,15 @@ def _paired(
             'method': 'paired paper-cluster bootstrap; sample papers with replacement, preserve every question in each selected paper; question-weighted mean; nearest-rank 95% percentile interval'}
 
 
-def score(raw_path: Path, observations_path: Path, *, allow_partial: bool = False) -> dict[str, object]:
+def score(raw_path: Path, observations_path: Path, *, allow_partial: bool = False,
+          development: bool = False) -> dict[str, object]:
     """Score a manifest-verified frozen run; raw answer annotations are read only here.
 
     Strict mode requires all question/arm rows, including explicit failures.
     Partial mode preserves the full dataset denominator with zero missing scores
     and labels results as progress only. It is never a system ranking.
     """
+    arms = DEV_ARMS if development else ARMS
     papers = TypeAdapter(dict[str, _Paper]).validate_json(raw_path.read_bytes(), strict=True)
     question_papers: dict[str, str] = {}
     gold: dict[str, list[_Reference]] = {}
@@ -260,6 +264,8 @@ def score(raw_path: Path, observations_path: Path, *, allow_partial: bool = Fals
         if not line.strip():
             continue
         row = Observation.model_validate_json(line)
+        if row.arm not in arms:
+            raise ValueError('observation arm differs from schedule: ' + row.arm)
         pair = row.id, row.arm
         if pair in observations:
             raise ValueError('duplicate observation: ' + row.id + '/' + row.arm)
@@ -267,14 +273,14 @@ def score(raw_path: Path, observations_path: Path, *, allow_partial: bool = Fals
             raise ValueError('foreign question ID: ' + row.id)
         _validate_observation(row, question_papers[row.id], paragraphs[question_papers[row.id]])
         observations[pair] = row
-    planned = len(gold) * len(ARMS)
+    planned = len(gold) * len(arms)
     missing = planned - len(observations)
     if missing and not allow_partial:
         raise ValueError(f'incomplete observation schedule: {missing} missing question/arm rows')
     values: dict[tuple[str, str], dict[str, float]] = {}
     scores: list[dict[str, object]] = []
     by_arm: dict[str, object] = {}
-    for arm in ARMS:
+    for arm in arms:
         selected = [row for row in observations.values() if row.arm == arm]
         for identifier, references in gold.items():
             observation = observations.get((identifier, arm))
@@ -293,8 +299,9 @@ def score(raw_path: Path, observations_path: Path, *, allow_partial: bool = Fals
         'questions': len(gold), 'papers': len(set(question_papers.values())),
         'planned_observations': planned, 'observed': len(observations), 'missing': missing,
         'partial': bool(missing), 'by_arm': by_arm,
-        'paired': {'scone_structure_minus_' + baseline: _paired(question_papers, values, baseline)
-                   for baseline in ('scone_flat', 'llamaindex')},
+        'paired': {treatment + '_minus_' + baseline: _paired(question_papers, values, baseline, treatment)
+                   for treatment in (('scone_structure', 'scone_vector_candidates') if development else ('scone_structure',))
+                   for baseline in arms if baseline != treatment and baseline != 'scone_vector_candidates'},
         'scores': scores,
         'integrity_policy': 'Caller must verify dataset, schedule, source, manifest and frozen-run artifact integrity before scoring.',
         'failure_policy': 'Missing and failed observations score zero on every quality metric; every gold question remains in every arm and paired denominator. Observed timings and usage include failures.',

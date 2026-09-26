@@ -39,7 +39,9 @@ class NoRoute:
         return ChoiceBatch(tuple(tuple(0. for _ in menu.options) + (1.,) for menu in menus), 'fixture')
 
 
-async def test_real_three_arm_pipeline_resumes_identical_contexts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('development', [False, True])
+async def test_real_pipeline_resumes_identical_contexts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      development: bool) -> None:
     text = '# Animals\n## Cats\nCats purr.\n## Dogs\nDogs bark.'
     start = text.index('Cats purr.')
     paper = Paper(id='paper', content=text, paragraphs=(Paragraph(text='Cats purr.', start=start, end=start+10),))
@@ -66,23 +68,28 @@ async def test_real_three_arm_pipeline_resumes_identical_contexts(tmp_path: Path
     monkeypatch.setattr(run, 'generate', generate)
     cache = SqliteEmbeddingCache(tmp_path / 'cache.db')
     cached = CachedEmbedder(Embeddings(), cache)
+    expected_arms = {'scone_flat', 'scone_structure', 'llamaindex'}
+    if development:
+        expected_arms.add('scone_vector_candidates')
     try:
         with pytest.raises(RuntimeError, match='evaluation paused'):
-            await run.evaluate([paper], questions, tmp_path, cached, 1)
+            await run.evaluate([paper], questions, tmp_path, cached, 1, development=development)
         prepared = (tmp_path / 'prepared.jsonl').read_bytes()
-        await run.evaluate([paper], questions, tmp_path, cached, 1)
+        await run.evaluate([paper], questions, tmp_path, cached, 1, development=development)
         assert (tmp_path / 'prepared.jsonl').read_bytes() == prepared
         rows = run.records(tmp_path / 'observations.jsonl')
-        assert len(rows) == generate_calls == 3
+        assert len(rows) == generate_calls == len(expected_arms)
         assert rank_calls == 1
-        assert sum(row['completed'] is True for row in rows) == 2
-        assert {row['arm'] for row in rows} == set(run.ARMS)
+        assert sum(row['completed'] is True for row in rows) == len(expected_arms) - 1
+        assert {row['arm'] for row in rows} == expected_arms
         frozen = json.loads(prepared)['arms']
         for row in rows:
             assert row['context_text'] == frozen[row['arm']]['context']
             assert isinstance(row['context_bytes'], int)
             assert row['context_bytes'] <= 8000
-        await run.evaluate([paper], questions, tmp_path, cached, 1)
-        assert generate_calls == 3
+        await run.evaluate([paper], questions, tmp_path, cached, 1, development=development)
+        assert generate_calls == len(expected_arms)
+        with pytest.raises(ValueError, match='schedule|arms'):
+            await run.evaluate([paper], questions, tmp_path, cached, 1, development=not development)
     finally:
         await cache.close()

@@ -153,3 +153,31 @@ def test_types_frozen_strict_and_offsets_validated() -> None:
         Paper(id="p", content="different", paragraphs=(Paragraph(text="é", start=0, end=2),))
     with pytest.raises(ValidationError):
         Question.model_validate({"id": "q", "paper_id": "p", "question": "What?", "answers": []})
+
+
+def test_development_export_keeps_split_and_drops_annotations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(data, 'DEV_COUNTS', (1, 2), raising=False)
+    raw = tmp_path / 'dev.json'
+    raw.write_text(json.dumps({'p': _paper()}))
+    export(raw, tmp_path / 'bundle', split='dev')
+    metadata = json.loads((tmp_path / 'bundle/dataset.json').read_text())
+    assert metadata['split'] == 'dev'
+    assert metadata['counts']['questions'] == 2
+    assert 'SECRET_GOLD' not in (tmp_path / 'bundle/questions.jsonl').read_text()
+    with pytest.raises(ValueError, match='test counts'):
+        export(raw, tmp_path / 'wrong')
+
+
+@pytest.mark.parametrize('literal', ['# a tweet, not a paper heading\\', '```python\nprint("é")\n```',
+                                    '~~~\n# quoted heading\n~~~~\n``````'])
+def test_literal_markdown_in_paragraph_does_not_change_paper_hierarchy(literal: str) -> None:
+    source = _paper()
+    source['full_text'] = [{'section_name': 'Cleaning', 'paragraphs': [literal]},
+                           {'section_name': 'Results', 'paragraphs': ['correct result']}]
+    paper = render_paper('p', _RawPaper.model_validate(source))
+    snapshot = SectionSnapshot.from_markdown('dev', 'p', paper.content)
+    paths = [snapshot.path(node.id) for node in snapshot.nodes if node.title]
+    assert paths == [('Résumé Ω',), ('Résumé Ω', 'Abstract'), ('Résumé Ω', 'Cleaning'),
+                     ('Résumé Ω', 'Results'), ('Résumé Ω', 'Figure and table captions')]
+    paragraph = next(p for p in paper.paragraphs if p.text == literal)
+    assert paper.content.encode()[paragraph.start:paragraph.end].decode() == literal
