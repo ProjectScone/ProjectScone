@@ -34,7 +34,8 @@ async def test_build_engine_wires_the_named_parts(tmp_path):
 
 
 @pytest.mark.parametrize("prefix", ["", "Instruct: Find supporting passages.\nQuery: "])
-async def test_remote_query_instruction_reaches_embedding_request(prefix):
+@pytest.mark.parametrize("document_prefix", ["", "passage: "])
+async def test_remote_query_instruction_reaches_embedding_request(prefix, document_prefix):
     import json
     import httpx
 
@@ -45,6 +46,7 @@ async def test_remote_query_instruction_reaches_embedding_request(prefix):
            "SCONE_EMBED_MODEL": "instruction-embedder"}
     if prefix:
         env["SCONE_EMBED_QUERY_PREFIX"] = prefix
+    env["SCONE_EMBED_DOCUMENT_PREFIX"] = document_prefix
     embedder = build_embedder(Settings.from_env(env))
     inputs = []
 
@@ -55,7 +57,7 @@ async def test_remote_query_instruction_reaches_embedding_request(prefix):
     embedder._transport = httpx.MockTransport(respond)
     assert await embedder.embed(["Morgan founded Cedar."]) == [[0.6, 0.8]]
     assert await embed_queries(embedder, ["Who founded Cedar?"]) == [[0.6, 0.8]]
-    assert inputs == [["Morgan founded Cedar."], [prefix + "Who founded Cedar?"]]
+    assert inputs == [[document_prefix + "Morgan founded Cedar."], [prefix + "Who founded Cedar?"]]
 
 
 def test_missing_url_is_a_configuration_error():
