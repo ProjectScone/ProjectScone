@@ -167,16 +167,30 @@ class SectionRouter:
         self.cache_size = cache_size
         self._cache: OrderedDict[str, RouteResult] = OrderedDict()
 
-    async def route(self, query: str, snapshot: SectionSnapshot) -> RouteResult:
+    async def route(self, query: str, snapshot: SectionSnapshot, *,
+                    candidate_section_ids: tuple[str, ...] | None = None) -> RouteResult:
         if not query.strip() or len(query.encode()) > 8000:
             raise ValueError('invalid routing query')
         if SectionSnapshot.from_markdown(snapshot.scope, snapshot.document_id, snapshot.content) != snapshot:
             raise ValueError('snapshot does not match source structure')
+        candidate_menu: RouteMenu | None = None
+        if candidate_section_ids is not None:
+            known = {node.id for node in snapshot.nodes}
+            if (type(candidate_section_ids) is not tuple or len(candidate_section_ids) > 254
+                    or any(type(identifier) is not str or identifier not in known
+                           for identifier in candidate_section_ids)):
+                raise ValueError('invalid candidate section addresses')
+            candidate_section_ids = tuple(dict.fromkeys(candidate_section_ids))
+            candidate_menu = RouteMenu((), tuple(RouteOption(identifier,
+                ' / '.join(snapshot.path(identifier)) or '(whole document)', True)
+                for identifier in candidate_section_ids))
         if not snapshot.content.strip():
             return RouteResult(snapshot.version, (), (), 'empty_document')
+        if candidate_section_ids == ():
+            return RouteResult(snapshot.version, (), (), 'no_match')
         started = time.perf_counter()
         identity = (snapshot.scope, snapshot.document_id, snapshot.version, snapshot.nodes, snapshot.content,
-                    query, self.chooser.definition, self.beam_width, self.max_rounds)
+                    query, self.chooser.definition, self.beam_width, self.max_rounds, candidate_section_ids)
         key = hashlib.sha256(repr(identity).encode()).hexdigest()
         if key in self._cache:
             self._cache.move_to_end(key)
@@ -193,7 +207,8 @@ class SectionRouter:
                     pending = [p for p in beam if not p.terminal]
                     if not pending:
                         break
-                    menus = tuple(_menu(snapshot, p) for p in pending)
+                    menus = ((candidate_menu,) if candidate_menu is not None
+                             else tuple(_menu(snapshot, p) for p in pending))
                     if any(len(menu.options) > 254 for menu in menus):
                         result = replace(result, reason='menu_too_wide')
                         break
