@@ -137,3 +137,80 @@ async def test_weaker_ancestor_does_not_replace_the_best_section_with_whole_book
     route = RouteResult(snapshot.version, (cat.id, parent.id), (.9, .2), 'routed')
     originals = index._originals(route)
     assert [item.section_id for item in originals] == [cat.id]
+
+
+async def test_vector_guided_routing_reaches_deep_original_with_one_address_call() -> None:
+    snapshot = book('# Animals\nOverview.\n## Cats\nCats purr.\n## Dogs\nDogs bark.')
+
+    class PathDecisions(Decisions):
+        async def choose(self, query: str, menus: tuple[RouteMenu, ...]) -> ChoiceBatch:
+            rows = []
+            for menu in menus:
+                scores = [0.] * (len(menu.options) + 1)
+                target = next((i for i, option in enumerate(menu.options)
+                               if option.title in ('Animals / Cats', 'Cats')), 0)
+                scores[target] = 1.
+                rows.append(tuple(scores))
+            return ChoiceBatch(tuple(rows), 'test')
+
+    decisions = PathDecisions()
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings())
+    old = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions)
+    guided = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  routing='vector_candidates')
+    assert old.route is not None and old.route.requests == 2
+    assert guided.route is not None and guided.route.requests == 1
+    assert guided.mode == 'original'
+    assert [p.text for p in guided.evidence] == ['## Cats\nCats purr.\n']
+    assert guided.evidence == old.evidence
+    assert guided.baseline == old.baseline
+
+
+@pytest.mark.parametrize('outcome', ['none', 'invalid', 'failed'])
+async def test_vector_guided_route_failures_preserve_broad_evidence(outcome: str) -> None:
+    class FailedRoute(Decisions):
+        async def choose(self, query: str, menus: tuple[RouteMenu, ...]) -> ChoiceBatch:
+            if outcome == 'failed':
+                raise RuntimeError('unavailable')
+            if outcome == 'invalid':
+                return ChoiceBatch(((float('nan'),),), 'test')
+            return ChoiceBatch(tuple((0.,) * len(m.options) + (1.,) for m in menus), 'test')
+
+    snapshot = book()
+    decisions = FailedRoute()
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings())
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  routing='vector_candidates')
+    assert result.mode == 'flat_vector'
+    assert result.reason == {'none': 'no_match', 'invalid': 'invalid_response',
+                             'failed': 'provider_failed'}[outcome]
+    assert result.evidence == result.baseline
+    assert result.baseline
+
+
+async def test_vector_guided_flat_mode_still_skips_address_routing() -> None:
+    snapshot = book()
+    decisions = Decisions()
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings())
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  mode='flat_vector', routing='vector_candidates')
+    assert result.route is None
+    assert result.evidence == result.baseline
+
+
+async def test_empty_vector_results_do_not_misreport_an_empty_document() -> None:
+    from scone_memory.backends.memory import InMemoryVectorIndex
+
+    class NoHits(InMemoryVectorIndex):
+        async def search(self, space, vector, limit, as_of=None, tags=(), where=None, conditions=None):
+            return []
+
+    snapshot = book()
+    decisions = Decisions()
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings(), vectors=NoHits())
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  routing='vector_candidates')
+    assert result.reason == 'no_vector_candidates'
+    assert result.mode == 'flat_vector'
+    assert result.route is None
+    assert result.evidence == result.baseline == ()

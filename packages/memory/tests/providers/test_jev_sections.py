@@ -55,3 +55,30 @@ async def test_failure_does_not_leak_provider_body() -> None:
         with pytest.raises(RuntimeError, match='unavailable') as error:
             await chooser.choose('question', (MENU,))
     assert 'PRIVATE' not in str(error.value)
+
+
+async def test_vector_candidate_addresses_round_trip_through_jev_contract() -> None:
+    from scone_memory.retrieval.section_routing import SectionRouter, SectionSnapshot
+
+    snapshot = SectionSnapshot.from_markdown('authorized', 'book',
+        '# Animals\n## Cats\nCats purr.\n# Devices\n## Cats\nA tool name.')
+    animal_cat, device_cat = [n.id for n in snapshot.nodes if n.title == 'Cats']
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        options = body['questions']['menu_0']['criteria']
+        assert options['option_0']['title'] == 'Animals / Cats'
+        assert options['option_1']['title'] == 'Devices / Cats'
+        return httpx.Response(200, json={'model': MODEL, 'answers': {'menu_0': {
+            'type': 'choice', 'choice': 'option_0', 'confidence': .8,
+            'probabilities': {'option_0': .9, 'option_1': .05, 'none': .05}}},
+            'usage': {'input_tokens': 25, 'output_tokens': 4}})
+
+    async with JevSectionChooser(api_key='test', transport=httpx.MockTransport(serve)) as chooser:
+        result = await SectionRouter(chooser).route('Which cats purr?', snapshot,
+            candidate_section_ids=(animal_cat, device_cat))
+    assert result.section_ids == (animal_cat,)
+    assert snapshot.original(result.section_ids[0]) == '## Cats\nCats purr.\n'
+    assert result.requests == 1
+    assert result.model == MODEL
+    assert (result.input_tokens, result.output_tokens) == (25, 4)

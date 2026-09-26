@@ -114,3 +114,53 @@ def test_oversized_menu_skips_descendant_outline_construction() -> None:
     menu = _menu(book, _Path(book.nodes[0].id))
     assert len(menu.options) > 254
     assert all(not option.outline for option in menu.options)
+
+
+async def test_vector_addresses_skip_ancestors_and_keep_complete_paths() -> None:
+    book = snapshot()
+    cats = next(n.id for n in book.nodes if n.title == 'Cats')
+
+    class Inspect(Chooser):
+        async def choose(self, query: str, menus: tuple[RouteMenu, ...]) -> ChoiceBatch:
+            assert len(menus) == 1
+            assert [(o.section_id, o.title, o.terminal) for o in menus[0].options] == [
+                (cats, 'Animals / Cats', True)]
+            return await super().choose(query, menus)
+
+    result = await SectionRouter(Inspect(), max_rounds=1).route(
+        'cats', book, candidate_section_ids=(cats, cats))
+    assert result.reason == 'routed'
+    assert result.section_ids == (cats,)
+    assert result.requests == 1
+
+
+async def test_vector_address_cache_cannot_reuse_a_different_candidate_set() -> None:
+    book = snapshot()
+    cats = next(n.id for n in book.nodes if n.title == 'Cats')
+    dogs = next(n.id for n in book.nodes if n.title == 'Dogs')
+    router = SectionRouter(Chooser(), max_rounds=1)
+    first = await router.route('pets', book, candidate_section_ids=(cats,))
+    repeated = await router.route('pets', book, candidate_section_ids=(cats,))
+    changed = await router.route('pets', book, candidate_section_ids=(dogs,))
+    hierarchical = await router.route('pets', book)
+    assert first.section_ids == (cats,)
+    assert repeated.cache_hit and repeated.requests == 0
+    assert changed.section_ids == (dogs,) and not changed.cache_hit
+    assert not hierarchical.cache_hit
+    assert hierarchical.reason == 'budget_exhausted'
+
+
+@pytest.mark.parametrize('kind', ['foreign', 'oversized'])
+async def test_foreign_or_unbounded_vector_addresses_are_rejected(kind: str) -> None:
+    book = snapshot()
+    identifiers = (('foreign-document-section',) if kind == 'foreign'
+                   else (book.nodes[0].id,) * 255)
+    with pytest.raises(ValueError, match='candidate'):
+        await SectionRouter(Chooser()).route('cats', book, candidate_section_ids=identifiers)
+
+
+async def test_empty_vector_addresses_do_not_invoke_the_provider() -> None:
+    result = await SectionRouter(Chooser()).route('cats', snapshot(), candidate_section_ids=())
+    assert result.reason == 'no_match'
+    assert result.section_ids == ()
+    assert result.requests == 0

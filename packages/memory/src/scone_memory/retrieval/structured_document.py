@@ -21,6 +21,7 @@ from ..ingestion.vectors import validated_vectors
 from .section_routing import FetchChooser, FetchDecision, RouteResult, SectionRouter, SectionSnapshot
 
 Mode = Literal['auto', 'flat_vector', 'section_vector', 'original']
+Routing = Literal['hierarchy', 'vector_candidates']
 
 
 @dataclass(frozen=True)
@@ -161,10 +162,11 @@ class StructuredDocumentIndex:
 
     async def retrieve(self, query: str, snapshot: SectionSnapshot, router: SectionRouter,
                        fetch_chooser: FetchChooser, *, mode: Mode = 'auto', limit: int = 5,
-                       max_bytes: int = 8000) -> StructuredResult:
+                       max_bytes: int = 8000, routing: Routing = 'hierarchy') -> StructuredResult:
         if (snapshot != self.snapshot or self.embedder.id != self._embedder_id):
             raise ValueError('snapshot or embedder changed; rebuild the document index')
         if (mode not in ('auto', 'flat_vector', 'section_vector', 'original')
+                or routing not in ('hierarchy', 'vector_candidates')
                 or type(limit) is not int or not 1 <= limit <= 64
                 or type(max_bytes) is not int or not 1 <= max_bytes <= 128000
                 or not query.strip() or len(query.encode()) > 8000):
@@ -180,7 +182,7 @@ class StructuredDocumentIndex:
             return encoded
 
         route: RouteResult | None = None
-        if mode == 'flat_vector' or not self.passages:
+        if mode == 'flat_vector' or not self.passages or routing == 'vector_candidates':
             vector = await encode() if self.passages else []
         else:
             async with asyncio.TaskGroup() as group:
@@ -191,10 +193,15 @@ class StructuredDocumentIndex:
         broad = await self._search(vector, max(32, limit)) if self.passages else []
         vector_ms = (time.perf_counter() - before) * 1000
         baseline = _bounded(broad, limit, max_bytes)
+        if routing == 'vector_candidates' and mode != 'flat_vector' and broad:
+            route = await router.route(query, snapshot, candidate_section_ids=tuple(
+                dict.fromkeys(passage.section_id for passage in broad)))
         effective, reason = 'flat_vector', 'flat_requested' if mode == 'flat_vector' else 'empty_document'
         evidence, fetch, fetch_ms = baseline, None, 0.0
         if route is not None:
             reason = route.reason
+        elif mode != 'flat_vector' and self.passages and routing == 'vector_candidates':
+            reason = 'no_vector_candidates'
         if route is not None and route.reason == 'routed':
             originals = self._originals(route)
             effective, reason = mode, 'explicit_mode'

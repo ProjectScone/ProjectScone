@@ -98,6 +98,31 @@ sensitive query/source receipts in a broader evaluation. It will refuse to
 reuse a nonempty output directory. An interrupted run leaves partial observations
 without a completed summary; do not present these as complete.
 
+## Experimental vector-guided addresses
+
+Pass `routing='vector_candidates'` to `index.retrieve(...)` to search vectors
+first, then give Jev the distinct section addresses of the top `max(32, limit)`
+passages in one Choice request. Full ancestor paths distinguish repeated headings.
+Each selected address can still fetch its original section, use scoped vectors,
+or fall back to broad vectors through the existing fetch decision. The evidence
+budget, snapshot validation, and failure fallback remain enforced.
+
+This avoids serial hierarchy decisions for addresses already found by vector
+search. A cold successful route takes one address request plus the existing fetch
+decision in auto mode. Query embedding and broad search precede that request;
+the default hierarchy path can overlap embedding with routing. The candidate
+policy therefore needs measured end-to-end latency, not just request counts.
+
+The default remains `routing='hierarchy'`. Candidate routing can miss sections
+outside the vector shortlist, so it is opt-in and not yet quality-validated.
+The cache binds the ordered candidate IDs as well as the source, query and chooser
+definition; changing policies or candidate sets cannot reuse another route.
+An empty candidate set makes no provider request. Unknown addresses are rejected.
+
+The existing full QASPER results describe the hierarchy policy only. Use a separate
+development split to evaluate candidate routing before freezing another comparison;
+do not use those test answers to tune the shortlist or promote this policy.
+
 ## Relationship to STAIR
 
 The inspiration is structure as an address space, not replication of a trained
