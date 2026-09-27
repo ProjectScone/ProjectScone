@@ -73,6 +73,13 @@ paper is known. No generated answers were evaluated, so neither answer accuracy
 nor full chat latency is established. Smaller context may affect later generation,
 but that effect is unmeasured.
 
+A subsequent [evidence representation audit](../answer_target/RESULTS.md)
+identified caption-marker, heading, substring, and whitespace alignment limits in
+the frozen evidence extraction policy. The scores above remain unchanged; they
+must not be read as a complete audit of whether every relevant source fact was
+available. Official evaluator parity verifies the scores for the extracted
+predictions, not the completeness of that extraction policy.
+
 Local artifacts remain under `bench-runs/compact-paragraph-jev-2026-09-27/full-v1/`.
 The retained audit scorer verified all scheduled identities, 2,010 current arm
 contexts, final/candidate byte bounds, pinned model receipts, frozen source/input
