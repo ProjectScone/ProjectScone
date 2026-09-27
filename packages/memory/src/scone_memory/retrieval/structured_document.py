@@ -20,9 +20,10 @@ from ..core.ports import Embedder, VectorIndex, VectorPoint
 from ..ingestion.chunker import byte_spans, chunk_spans
 from ..ingestion.structure import parse_structure
 from ..ingestion.vectors import validated_vectors
+from .lexical import Bm25
 from .section_routing import FetchChooser, FetchDecision, RouteResult, SectionRouter, SectionSnapshot
 
-Mode = Literal['auto', 'flat_vector', 'section_vector', 'original', 'local_structure']
+Mode = Literal['auto', 'flat_vector', 'section_vector', 'original', 'local_structure', 'local_hybrid']
 Routing = Literal['hierarchy', 'vector_candidates']
 
 
@@ -106,6 +107,14 @@ class StructuredDocumentIndex:
         self._paragraphs = _paragraph_spans(snapshot)
         self._paragraph_starts = tuple(start for start, _ in self._paragraphs)
         self._paragraph_ends = tuple(end for _, end in self._paragraphs)
+        nodes = sorted(snapshot.nodes, key=lambda n: (n.start, len(self._depth[n.id])))
+        node_starts = [n.start for n in nodes]
+        self._paragraph_items = tuple(SectionEvidence(
+            nodes[bisect_right(node_starts, start) - 1].id,
+            self._raw[start:end].decode(), start, end) for start, end in self._paragraphs)
+        self._paragraph_lexical = Bm25()
+        for identifier, item in enumerate(self._paragraph_items):
+            self._paragraph_lexical.add(identifier, item.text)
 
     def _ancestors(self, identifier: str) -> tuple[str, ...]:
         ancestors: list[str] = []
@@ -212,12 +221,46 @@ class StructuredDocumentIndex:
             remaining -= sum(p.end - p.start for p in bounded)
         return tuple(result)
 
+    def _hybrid_evidence(self, query: str, broad: Sequence[SectionEvidence], limit: int,
+                         max_bytes: int) -> tuple[SectionEvidence, ...]:
+        semantic: dict[int, float] = {}
+        unprojected: list[SectionEvidence] = []
+        for hit in broad:
+            first = bisect_right(self._paragraph_ends, hit.start)
+            after = bisect_left(self._paragraph_starts, hit.end)
+            if first == after:
+                unprojected.append(hit)
+            for identifier in range(first, after):
+                semantic[identifier] = max(semantic.get(identifier, -math.inf), hit.score)
+        vectors = [replace(self._paragraph_items[i], score=semantic[i])
+                   for i in semantic] + unprojected
+        vectors.sort(key=lambda item: (-item.score, item.start))
+        lexical = [replace(self._paragraph_items[i], score=score)
+                   for i, score in self._paragraph_lexical.search(query, max(32, limit))]
+        ranked = _fuse(vectors, lexical)
+        result: list[SectionEvidence] = []
+        remaining = max_bytes
+        for item in ranked:
+            if item.end - item.start > remaining:
+                hit = next((hit for hit in broad if hit.start < item.end and item.start < hit.end), item)
+                bounded = _bounded((replace(hit, score=item.score),), 1, remaining)
+                if not bounded:
+                    continue
+                item = bounded[0]
+            if any(p.start < item.end and item.start < p.end for p in result):
+                continue
+            result.append(item)
+            remaining -= item.end - item.start
+            if len(result) >= limit or remaining <= 0:
+                break
+        return tuple(result) if result else _bounded(broad, limit, max_bytes)
+
     async def retrieve(self, query: str, snapshot: SectionSnapshot, router: SectionRouter,
                        fetch_chooser: FetchChooser, *, mode: Mode = 'auto', limit: int = 5,
                        max_bytes: int = 8000, routing: Routing = 'hierarchy') -> StructuredResult:
         if (snapshot != self.snapshot or self.embedder.id != self._embedder_id):
             raise ValueError('snapshot or embedder changed; rebuild the document index')
-        if (mode not in ('auto', 'flat_vector', 'section_vector', 'original', 'local_structure')
+        if (mode not in ('auto', 'flat_vector', 'section_vector', 'original', 'local_structure', 'local_hybrid')
                 or routing not in ('hierarchy', 'vector_candidates')
                 or type(limit) is not int or not 1 <= limit <= 64
                 or type(max_bytes) is not int or not 1 <= max_bytes <= 128000
@@ -234,7 +277,7 @@ class StructuredDocumentIndex:
             return encoded
 
         route: RouteResult | None = None
-        if mode in ('flat_vector', 'local_structure') or not self.passages or routing == 'vector_candidates':
+        if mode in ('flat_vector', 'local_structure', 'local_hybrid') or not self.passages or routing == 'vector_candidates':
             vector = await encode() if self.passages else []
         else:
             async with asyncio.TaskGroup() as group:
@@ -245,6 +288,11 @@ class StructuredDocumentIndex:
         broad = await self._search(vector, max(32, limit)) if self.passages else []
         vector_ms = (time.perf_counter() - before) * 1000
         baseline = _bounded(broad, limit, max_bytes)
+        if mode == 'local_hybrid':
+            evidence = self._hybrid_evidence(query, broad, limit, max_bytes)
+            reason = 'local_hybrid' if evidence else ('no_candidates' if self.passages else 'empty_document')
+            return StructuredResult('local_hybrid', reason, evidence, baseline, None, None,
+                encoded_ms, vector_ms, 0.0, (time.perf_counter() - started) * 1000)
         if mode == 'local_structure':
             evidence = self._local_evidence(broad, limit, max_bytes)
             reason = 'local_expansion' if broad else ('no_vector_candidates' if self.passages else 'empty_document')
