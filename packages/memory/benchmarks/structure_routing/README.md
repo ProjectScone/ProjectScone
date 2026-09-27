@@ -168,3 +168,6 @@ This policy trades some candidate breadth for coherent source text. It is opt-in
 not a claim that every query benefits. The latency-focused development comparison
 is defined in `../local_structure/PROTOCOL.md` and runs retrieval plus shared
 reranking only; it does not measure generated-answer quality or chat latency.
+The [completed development results](../local_structure/RESULTS.md) show lower
+retrieval latency and higher evidence recall, with lower evidence F1 than
+vector-guided routing. The mode remains opt-in.
