@@ -1,8 +1,37 @@
 from __future__ import annotations
 
 import pytest
+import httpx
+import json
 
 from .pipeline import Passage, messages, pack_context, rerank, unique_passages
+
+
+@pytest.mark.asyncio
+async def test_openrouter_uses_same_judgment_payload_and_keeps_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    from .pipeline import rank
+    monkeypatch.setenv('SCONE_CHAT_API_KEY', 'test-router-key')
+    monkeypatch.setenv('TYPESAFE_API_KEY', 'test-direct-key')
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append((str(request.url), body))
+        router = request.url.host == 'openrouter.ai'
+        assert request.headers['authorization'] == 'Bearer ' + ('test-router-key' if router else 'test-direct-key')
+        return httpx.Response(200, json={'model': body['model'],
+            'answers': {'p_0': {'type': 'noul', 'noul': .9}}, 'usage': {'input_tokens': 20, 'output_tokens': 5, 'cost': .001}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        passages = [Passage('a', 'A', 'The sky is blue.')]
+        direct, _, _ = await rank(client, 'Which color?', passages)
+        recovered, audit, _ = await rank(client, 'Which color?', passages, provider='openrouter')
+    assert direct == recovered == {'a': .9}
+    assert calls[1][0] == 'https://openrouter.ai/api/alpha/decisions'
+    assert calls[1][1]['model'] == 'typesafe/jev-1.13-20260917'
+    assert {k: v for k, v in calls[0][1].items() if k != 'model'} == {k: v for k, v in calls[1][1].items() if k != 'model'}
+    assert audit['response'] == {'model': 'typesafe/jev-1.13-20260917',
+        'answers': {'p_0': {'type': 'noul', 'noul': .9}}, 'usage': {'input_tokens': 20, 'output_tokens': 5, 'cost': .001}}
 
 
 def test_byte_budget_preserves_unicode_and_limits_sources() -> None:
