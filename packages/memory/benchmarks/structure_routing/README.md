@@ -189,3 +189,10 @@ fetch-selection, or reranking model is used. The router/chooser arguments are
 unused. The paragraph lexical index is prepared at construction for every mode.
 This policy is opt-in; the default is unchanged. See the
 [development protocol](../local_structure/HYBRID_PROTOCOL.md) for evaluation limits.
+The [completed local-only results](../local_structure/HYBRID_RESULTS.md) compare
+this mode with flat vectors and section expansion without reranking.
+The [standalone Jev comparison](../local_structure/COMPACT_RESULTS.md) shows that
+reranking paragraph candidates improves evidence F1 over reranked section
+expansion, with lower recall and similar hosted latency. For that policy, retrieve
+up to 32 hybrid candidates and pass them to the existing evidence reranker before
+packing the final five items.
