@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from qasper_structure.data import Paper, Paragraph, Question
+from qasper_structure.data import Paper, Question
 from qasper_structure.test_run import Embeddings
 from scone_memory.bench.comparative import CachedEmbedder
 from scone_memory.ingestion.embedding_cache import InMemoryEmbeddingCache
