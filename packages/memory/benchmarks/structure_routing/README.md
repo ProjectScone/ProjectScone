@@ -146,3 +146,25 @@ retrieval without disclosing that difference.
 References: [STAIR](https://arxiv.org/html/2609.03874v1),
 [TypeSafe hierarchy cookbook](https://docs.typesafe.ai/cookbooks/hierarchical_classification),
 [Choice API](https://docs.typesafe.ai/primitives/choice).
+
+### Local structure expansion
+
+Use `mode='local_structure'` on `StructuredDocumentIndex.retrieve` to construct
+source-original candidates without address-routing or fetch-selection calls.
+The existing `router` and `fetch_chooser` arguments are unused by this mode.
+Rerank the returned candidates using the normal evidence reranker. Callers can
+explicitly request `mode='auto', routing='vector_candidates'` when additional
+routing is wanted; this mode does not invent an unvalidated confidence gate.
+
+Vector hits expand to their original section if it is at most 2,000 bytes.
+Otherwise, expand to the complete overlapping paragraphs, fenced code, or tables
+when their span fits that ceiling. An oversized expansion keeps the indexed hit;
+the ceiling is not a size limit on original chunks. Later overlapping candidates
+are skipped so nested sections cannot consume duplicate result slots. Existing
+item limits, aggregate UTF-8 byte caps, snapshot validation, and source offsets
+remain enforced. Paragraph boundaries are prepared at index construction.
+
+This policy trades some candidate breadth for coherent source text. It is opt-in,
+not a claim that every query benefits. The latency-focused development comparison
+is defined in `../local_structure/PROTOCOL.md` and runs retrieval plus shared
+reranking only; it does not measure generated-answer quality or chat latency.
