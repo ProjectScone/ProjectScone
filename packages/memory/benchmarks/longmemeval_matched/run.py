@@ -209,10 +209,13 @@ async def prefill(items: Sequence[Item], run_dir: Path, depth: int, embed_model:
         started = time.perf_counter()
         def clip(text: str) -> str:
             return clip_to_window(local, text)
-        sent = await fill(cache, remote, local.id, local.dim, sorted(recorder.documents), clip=clip)
-        sent += await fill(cache, remote, local.id + ':query-cache', local.dim, sorted(recorder.queries), clip=clip)
+        sent, shortened = await fill(cache, remote, local.id, local.dim, sorted(recorder.documents), clip=clip)
+        query_sent, query_shortened = await fill(cache, remote, local.id + ':query-cache', local.dim,
+                                                 sorted(recorder.queries), clip=clip)
+        sent, shortened = sent + query_sent, shortened + query_shortened
         print(f'prefilled items {start + 1}-{start + len(group)}: {len(recorder.documents)} documents, '
-              f'{len(recorder.queries)} queries, {sent} embedded in {time.perf_counter() - started:.0f}s', flush=True)
+              f'{len(recorder.queries)} queries, {sent} embedded ({shortened} only shortened further than the local '
+              f'window, their vectors differ from local) in {time.perf_counter() - started:.0f}s', flush=True)
 
 
 def load_rankings(run_dir: Path) -> dict[str, dict[str, object]]:
