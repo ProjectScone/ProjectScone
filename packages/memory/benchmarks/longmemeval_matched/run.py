@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from scone_memory.bench.comparative import CachedEmbedder
     from scone_memory.bench.runner import BenchItem
     from scone_memory.core.ports import Embedder
+    from scone_memory.embedders.local import LocalEmbedder
+    from scone_memory.embedders.remote import RemoteEmbedder
 
 from .prompts import Session, Turn, UPSTREAM_COMMIT, is_abstention, judge_prompt, judged_correct, reader_prompt
 
@@ -98,11 +100,36 @@ def append(path: Path, row: dict[str, object]) -> None:
 
 # ---------------------------------------------------------------- rank
 
-def _embedder(embed_model: str, embed_cache: Path | None) -> tuple[Embedder, CachedEmbedder | None]:
+HOSTED_EMBEDDINGS = 'https://openrouter.ai/api/v1'
+
+
+def _local(embed_model: str) -> LocalEmbedder:
+    from scone_memory.embedders.local import LocalEmbedder
+
+    return LocalEmbedder(embed_model)
+
+
+def _hosted(embed_model: str, key: str) -> RemoteEmbedder:
+    from scone_memory.embedders.remote import RemoteEmbedder
+
+    # OpenRouter serves the BAAI models under lowercase 'baai/'; no prefixes, as the local model uses none.
+    return RemoteEmbedder(HOSTED_EMBEDDINGS, 'baai/' + embed_model, key, dim=_local(embed_model).dim, timeout=120)
+
+
+def _embedder(embed_model: str, embed_cache: Path | None,
+              hosted_key: str | None = None) -> tuple[Embedder, CachedEmbedder | None]:
     from scone_memory.bench.comparative import CachedEmbedder, OneThreadCache, bench_embedder
     from scone_memory.ingestion.embedding_cache import SqliteEmbeddingCache
 
-    model = bench_embedder(embed_model)
+    from .prefill import HostedTwin
+
+    if hosted_key is not None:
+        if embed_cache is None:
+            raise SystemExit('--embed-hosted needs --embed-cache: the hosted copy fills it before ranking')
+        local = _local(embed_model)
+        model: Embedder = cast('Embedder', HostedTwin(local, _hosted(embed_model, hosted_key)))
+    else:
+        model = bench_embedder(embed_model)
     if embed_cache is None:
         return model, None
     # Sized to hold every chunk of a run: an evicting cache would re-embed and misreport the cost.
@@ -123,7 +150,7 @@ def parse_variant(spec: str) -> tuple[str, dict[str, str]]:
 
 
 async def rank_variant(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path | None,
-                       name: str, env: dict[str, str]) -> None:
+                       name: str, env: dict[str, str], hosted_key: str | None = None) -> None:
     """Scone's ranking under extra engine settings, as arm ``name@k``, in its own file."""
     from scone_memory.bench.comparative import distinct_sessions
     from scone_memory.bench.runner import run as run_bench
@@ -135,7 +162,7 @@ async def rank_variant(items: Sequence[Item], run_dir: Path, depth: int, embed_m
     wanted = [i for i in items if i.question_id not in done]
     if not wanted:
         return
-    embedder, cached = _embedder(embed_model, embed_cache)
+    embedder, cached = _embedder(embed_model, embed_cache, hosted_key)
     settings = Settings.from_env({**os.environ, 'SCONE_EMBEDDER': 'local', 'SCONE_EMBED_MODEL': embed_model, **env})
 
     async def make() -> object:
@@ -155,6 +182,37 @@ async def rank_variant(items: Sequence[Item], run_dir: Path, depth: int, embed_m
         print(f'ranked {name} {item.question_id}' + (f' cache {cached.record()}' if cached else ''), flush=True)
 
 
+async def prefill(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path,
+                  hosted_key: str) -> None:
+    """Dry-runs the ranking of every unranked item to learn its texts, then fills the cache from the hosted copy."""
+    import shutil
+
+    from scone_memory.ingestion.embedding_cache import SqliteEmbeddingCache
+
+    from .prefill import Recorder, fill
+
+    done = {str(r['question_id']) for r in read_jsonl(run_dir / 'rankings.jsonl')}
+    todo = [i for i in items if i.question_id not in done]
+    if not todo:
+        return
+    local = _local(embed_model)
+    remote = _hosted(embed_model, hosted_key)
+    cache = SqliteEmbeddingCache(str(embed_cache), max_entries=50_000_000)
+    for start in range(0, len(todo), 10):  # ten items at a time keeps the recorded texts bounded
+        group = todo[start:start + 10]
+        recorder = Recorder(local)
+        dry_dir = run_dir / '.prefill-dry'
+        shutil.rmtree(dry_dir, ignore_errors=True)
+        dry_dir.mkdir()
+        await rank(group, dry_dir, depth, embed_model, None, dry=cast('Embedder', recorder))
+        shutil.rmtree(dry_dir)
+        started = time.perf_counter()
+        sent = await fill(cache, remote, local.id, local.dim, sorted(recorder.documents))
+        sent += await fill(cache, remote, local.id + ':query-cache', local.dim, sorted(recorder.queries))
+        print(f'prefilled items {start + 1}-{start + len(group)}: {len(recorder.documents)} documents, '
+              f'{len(recorder.queries)} queries, {sent} embedded in {time.perf_counter() - started:.0f}s', flush=True)
+
+
 def load_rankings(run_dir: Path) -> dict[str, dict[str, object]]:
     """The base rankings with every variant's list merged in under its name."""
     rankings = {str(r['question_id']): dict(r) for r in read_jsonl(run_dir / 'rankings.jsonl')}
@@ -165,7 +223,8 @@ def load_rankings(run_dir: Path) -> dict[str, dict[str, object]]:
     return rankings
 
 
-async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path | None) -> None:
+async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path | None,
+               hosted_key: str | None = None, dry: Embedder | None = None) -> None:
     from scone_memory.bench.comparative import distinct_sessions, llamaindex_session_ranking
     from scone_memory.bench.runner import run as run_bench
     from scone_memory.retrieval.fusion import PER_EPISODE_CAP
@@ -176,7 +235,7 @@ async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: st
     wanted = {item.question_id for item in items if item.question_id not in done}
     if not wanted:
         return
-    embedder, cached = _embedder(embed_model, embed_cache)
+    embedder, cached = (dry, None) if dry is not None else _embedder(embed_model, embed_cache, hosted_key)
     settings = Settings.from_env({**os.environ, 'SCONE_EMBEDDER': 'local', 'SCONE_EMBED_MODEL': embed_model})
 
     async def make() -> object:
@@ -330,7 +389,7 @@ def report(items: Sequence[Item], arms: Sequence[str], run_dir: Path) -> dict[st
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('stage', choices=['rank', 'answer', 'judge', 'report', 'all'])
+    parser.add_argument('stage', choices=['prefill', 'rank', 'answer', 'judge', 'report', 'all'])
     parser.add_argument('--dataset', type=Path, required=True)
     parser.add_argument('--run-dir', type=Path, required=True)
     parser.add_argument('--sample', type=int, default=100, help='stratified sample size; 0 for every item')
@@ -338,6 +397,8 @@ def main() -> None:
     parser.add_argument('--depth', type=int, default=10, help='sessions each system ranks')
     parser.add_argument('--arms', default='full,oracle,scone@5,llamaindex@5')
     parser.add_argument('--embed-model', default='bge-base-en-v1.5')
+    parser.add_argument('--embed-hosted', action='store_true',
+                        help="embed with OpenRouter's copy of the model (fills --embed-cache first; 'all' prefills)")
     parser.add_argument('--embed-cache', type=Path, help='SQLite file reusing vectors across items and runs')
     parser.add_argument('--variant', action='append', default=[], metavar='NAME:SCONE_KEY=VALUE;...',
                         help='also rank with Scone under these settings, as arm NAME@k (repeatable)')
@@ -348,13 +409,22 @@ def main() -> None:
     items = load(args.dataset, args.sample, args.seed)
     arms = [a.strip() for a in args.arms.split(',') if a.strip()]
     key = os.environ.get('OPENROUTER_API_KEY') or os.environ.get('SCONE_CHAT_API_KEY') or ''
-    if args.stage in ('answer', 'judge', 'all') and not key:
+    if args.stage == 'prefill':
+        if not (args.embed_hosted and args.embed_cache and key):
+            raise SystemExit('prefill needs --embed-hosted, --embed-cache and an API key')
+        asyncio.run(prefill(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, key))
+        return
+    if (args.stage in ('answer', 'judge', 'all') or args.embed_hosted) and not key:
         raise SystemExit('set OPENROUTER_API_KEY or SCONE_CHAT_API_KEY')
     if args.stage in ('rank', 'all') and any('@' in a for a in arms):
+        hosted = key if args.embed_hosted else None
         if any(a.split('@')[0] in ('scone', 'llamaindex') for a in arms):
-            asyncio.run(rank(items, args.run_dir, args.depth, args.embed_model, args.embed_cache))
+            if hosted and args.stage == 'all':
+                asyncio.run(prefill(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, hosted))
+            asyncio.run(rank(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, hosted))
         for name, env in map(parse_variant, args.variant):
-            asyncio.run(rank_variant(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, name, env))
+            asyncio.run(rank_variant(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, name, env,
+                                     hosted))
     if args.stage in ('answer', 'all'):
         asyncio.run(answer(items, arms, args.run_dir, key, args.cot, args.concurrency))
     if args.stage in ('judge', 'all'):
