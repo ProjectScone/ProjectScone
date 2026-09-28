@@ -189,7 +189,7 @@ async def prefill(items: Sequence[Item], run_dir: Path, depth: int, embed_model:
 
     from scone_memory.ingestion.embedding_cache import SqliteEmbeddingCache
 
-    from .prefill import Recorder, fill
+    from .prefill import Recorder, clip_to_window, fill
 
     done = {str(r['question_id']) for r in read_jsonl(run_dir / 'rankings.jsonl')}
     todo = [i for i in items if i.question_id not in done]
@@ -207,8 +207,10 @@ async def prefill(items: Sequence[Item], run_dir: Path, depth: int, embed_model:
         await rank(group, dry_dir, depth, embed_model, None, dry=cast('Embedder', recorder))
         shutil.rmtree(dry_dir)
         started = time.perf_counter()
-        sent = await fill(cache, remote, local.id, local.dim, sorted(recorder.documents))
-        sent += await fill(cache, remote, local.id + ':query-cache', local.dim, sorted(recorder.queries))
+        def clip(text: str) -> str:
+            return clip_to_window(local, text)
+        sent = await fill(cache, remote, local.id, local.dim, sorted(recorder.documents), clip=clip)
+        sent += await fill(cache, remote, local.id + ':query-cache', local.dim, sorted(recorder.queries), clip=clip)
         print(f'prefilled items {start + 1}-{start + len(group)}: {len(recorder.documents)} documents, '
               f'{len(recorder.queries)} queries, {sent} embedded in {time.perf_counter() - started:.0f}s', flush=True)
 

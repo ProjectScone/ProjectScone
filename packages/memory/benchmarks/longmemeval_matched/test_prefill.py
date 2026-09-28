@@ -73,3 +73,39 @@ def test_fill_sends_only_what_the_cache_lacks_under_the_identity_given() -> None
 def test_fill_refuses_vectors_of_the_wrong_width() -> None:
     with pytest.raises(ValueError):
         asyncio.run(fill(_Cache(), _Remote(width=3), 'm', 4, ['x']))
+
+
+class _Encoding:
+    def __init__(self, text: str) -> None:
+        words, position = text.split(' '), 0
+        self.offsets = [(0, 0)]  # the leading special token
+        for word in words:
+            self.offsets.append((position, position + len(word)))
+            position += len(word) + 1
+        self.offsets.append((0, 0))  # the trailing special token
+
+
+class _Counter:
+    def encode(self, text: str) -> _Encoding:
+        return _Encoding(text)
+
+
+class _WindowedLocal(_Local):
+    max_input_tokens: int | None = 5  # two special tokens and three words
+
+    def __init__(self) -> None:
+        self._counter = _Counter()
+
+    def count_tokens(self, text: str) -> int:
+        return len(text.split(' ')) + 2
+
+
+def test_clipping_keeps_exactly_the_words_the_local_window_reads() -> None:
+    from .prefill import clip_to_window
+
+    local = _WindowedLocal()
+    assert clip_to_window(local, 'one two three') == 'one two three'
+    assert clip_to_window(local, 'one two three four five') == 'one two three'
+    twin_remote = _Remote()
+    asyncio.run(HostedTwin(local, twin_remote).embed(['one two three four']))
+    assert twin_remote.calls == [['one two three']]
