@@ -23,9 +23,12 @@ import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import httpx
+
+if TYPE_CHECKING:
+    from scone_memory.bench.runner import BenchItem
 
 from .prompts import Session, Turn, UPSTREAM_COMMIT, is_abstention, judge_prompt, judged_correct, reader_prompt
 
@@ -48,14 +51,36 @@ class Item:
         self.sessions = {sid: Session(sid, date, tuple(Turn(t['role'], t['content']) for t in body))
                          for sid, date, body in zip(ids, dates, bodies, strict=True)}
         self.evidence = [str(s) for s in cast(list[str], raw.get('answer_session_ids', []))]
+        self.raw = raw
+
+
+def _bench_item(raw: dict[str, object], *, with_sessions: bool) -> BenchItem:
+    """``scone_memory.bench.runner.load_items``'s conversion of one item. Without
+    sessions it is only good for sampling, which reads ids and types."""
+    from scone_memory.bench.runner import BenchItem, iso_date
+
+    bodies = cast(list[list[dict[str, str]]], raw['haystack_sessions']) if with_sessions else []
+    return BenchItem(
+        question_id=str(raw['question_id']), question_type=str(raw['question_type']),
+        question=str(raw['question']), question_date=str(raw['question_date']),
+        sessions=tuple(tuple(f"{t.get('role', 'user')}: {t.get('content', '')}" for t in body) for body in bodies),
+        session_ids=tuple(str(x) for x in cast(list[str], raw['haystack_session_ids'])) if with_sessions else (),
+        session_dates=tuple(iso_date(str(d)) for d in cast(list[str], raw['haystack_dates'])) if with_sessions else (),
+        answer_session_ids=tuple(str(x) for x in cast(list[str], raw.get('answer_session_ids', []))),
+    )
 
 
 def load(dataset: Path, sample: int, seed: int) -> list[Item]:
-    from scone_memory.bench.runner import load_items, stratified_sample
+    """Parses the dataset once and keeps only the sampled items: LongMemEval-M is
+    2.7 GB of JSON, and a second parse or a copy of every session would not fit."""
+    from scone_memory.bench.runner import stratified_sample
 
-    raw = {str(r['question_id']): r for r in json.loads(dataset.read_text(encoding='utf-8'))}
-    chosen = load_items(dataset) if sample <= 0 else stratified_sample(load_items(dataset), sample, seed)
-    return [Item(raw[b.question_id]) for b in chosen]
+    raw = cast(list[dict[str, object]], json.loads(dataset.read_text(encoding='utf-8')))
+    stubs = [_bench_item(r, with_sessions=False) for r in raw]
+    chosen = stubs if sample <= 0 else stratified_sample(stubs, sample, seed)
+    by_id = {str(r['question_id']): r for r in raw}
+    del raw
+    return [Item(by_id[b.question_id]) for b in chosen]
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -71,9 +96,11 @@ def append(path: Path, row: dict[str, object]) -> None:
 
 # ---------------------------------------------------------------- rank
 
-async def rank(items: Sequence[Item], dataset: Path, run_dir: Path, depth: int, embed_model: str) -> None:
-    from scone_memory.bench.comparative import bench_embedder, distinct_sessions, llamaindex_session_ranking
-    from scone_memory.bench.runner import load_items, run as run_bench
+async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path | None) -> None:
+    from scone_memory.bench.comparative import (CachedEmbedder, OneThreadCache, bench_embedder, distinct_sessions,
+                                                llamaindex_session_ranking)
+    from scone_memory.bench.runner import run as run_bench
+    from scone_memory.ingestion.embedding_cache import SqliteEmbeddingCache
     from scone_memory.retrieval.fusion import PER_EPISODE_CAP
     from scone_memory.runtime.config import Settings, build_in_process_engine
 
@@ -82,13 +109,19 @@ async def rank(items: Sequence[Item], dataset: Path, run_dir: Path, depth: int, 
     wanted = {item.question_id for item in items if item.question_id not in done}
     if not wanted:
         return
-    embedder = bench_embedder(embed_model)
+    model = bench_embedder(embed_model)
+    cached: CachedEmbedder | None = None
+    if embed_cache is not None:
+        # Sized to hold every chunk of a run: an evicting cache would re-embed and misreport the cost.
+        path = str(embed_cache)
+        cached = CachedEmbedder(model, OneThreadCache(lambda: SqliteEmbeddingCache(path, max_entries=50_000_000)))
+    embedder = cached or model
     settings = Settings.from_env({**os.environ, 'SCONE_EMBEDDER': 'local', 'SCONE_EMBED_MODEL': embed_model})
 
     async def make() -> object:
         return await build_in_process_engine(settings, embedder)
 
-    for bench_item in (b for b in load_items(dataset) if b.question_id in wanted):
+    for bench_item in (_bench_item(i.raw, with_sessions=True) for i in items if i.question_id in wanted):
         started = time.perf_counter()
         report = await run_bench(make, [bench_item], ks=(depth,), limit=depth * PER_EPISODE_CAP)  # type: ignore[arg-type]
         scone_ms = (time.perf_counter() - started) * 1000
@@ -99,7 +132,7 @@ async def rank(items: Sequence[Item], dataset: Path, run_dir: Path, depth: int, 
         append(out, {'question_id': bench_item.question_id, 'embedder': embed_model,
                      'scone': list(distinct_sessions(result.retrieved_sessions, depth)), 'scone_ms': scone_ms,
                      'scone_recall_ms': result.recall_ms, 'llamaindex': llama, 'llamaindex_ms': llama_ms})
-        print(f'ranked {bench_item.question_id}', flush=True)
+        print(f'ranked {bench_item.question_id}' + (f' cache {cached.record()}' if cached else ''), flush=True)
 
 
 # ---------------------------------------------------------------- answer / judge
@@ -242,6 +275,7 @@ def main() -> None:
     parser.add_argument('--depth', type=int, default=10, help='sessions each system ranks')
     parser.add_argument('--arms', default='full,oracle,scone@5,llamaindex@5')
     parser.add_argument('--embed-model', default='bge-base-en-v1.5')
+    parser.add_argument('--embed-cache', type=Path, help='SQLite file reusing vectors across items and runs')
     parser.add_argument('--cot', action='store_true', help="upstream's step-by-step reader prompt")
     parser.add_argument('--concurrency', type=int, default=8)
     args = parser.parse_args()
@@ -252,7 +286,7 @@ def main() -> None:
     if args.stage in ('answer', 'judge', 'all') and not key:
         raise SystemExit('set OPENROUTER_API_KEY or SCONE_CHAT_API_KEY')
     if args.stage in ('rank', 'all') and any('@' in a for a in arms):
-        asyncio.run(rank(items, args.dataset, args.run_dir, args.depth, args.embed_model))
+        asyncio.run(rank(items, args.run_dir, args.depth, args.embed_model, args.embed_cache))
     if args.stage in ('answer', 'all'):
         asyncio.run(answer(items, arms, args.run_dir, key, args.cot, args.concurrency))
     if args.stage in ('judge', 'all'):
