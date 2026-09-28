@@ -45,6 +45,22 @@ class _Remote(Protocol):
     async def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
 
 
+def clip_to_window(local: _Local, text: str) -> str:
+    """The prefix of ``text`` the local model actually reads.
+
+    fastembed truncates past the window without saying so; the hosted copy refuses such a text instead. Cutting at
+    the character where the last kept token ends hands the hosted copy the tokens the local model embeds. The window
+    counts the two special tokens, so the last kept content token is at ``window - 2``."""
+    window = local.max_input_tokens
+    if window is None or local.count_tokens(text) <= window:
+        return text
+    counter = getattr(local, '_counter', None)  # built by count_tokens: the untruncated tokenizer (embedders/local.py)
+    offsets = counter.encode(text).offsets if counter is not None else None
+    if not offsets:
+        raise RuntimeError('cannot find where the local model stops reading: no tokenizer offsets')
+    return text[:offsets[window - 2][1]]
+
+
 class HostedTwin:
     """The local model as both systems see it; the vectors come from a hosted copy.
 
@@ -56,10 +72,11 @@ class HostedTwin:
         self.dim = local.dim
         self.max_input_tokens = local.max_input_tokens
         self.count_tokens: Callable[[str], int] = local.count_tokens
+        self._local = local
         self._remote = remote
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        return await self._remote.embed(texts)
+        return await self._remote.embed([clip_to_window(self._local, text) for text in texts])
 
 
 def placeholder(text: str, dim: int) -> list[float]:
@@ -101,8 +118,10 @@ class _Cache(Protocol):
 
 
 async def fill(cache: _Cache, remote: _Remote, identity: str, dim: int, texts: Sequence[str], *,
-               batch: int = 96, concurrency: int = 12, progress: Callable[[int, int], None] | None = None) -> int:
-    """Embeds the texts the cache lacks under ``identity``; returns how many it sent."""
+               batch: int = 96, concurrency: int = 12, progress: Callable[[int, int], None] | None = None,
+               clip: Callable[[str], str] = lambda text: text) -> int:
+    """Embeds the texts the cache lacks under ``identity``; returns how many it sent. The cache is keyed by the text
+    as asked; ``clip`` is what the hosted copy is sent instead (the local model's truncation)."""
     from scone_memory.ingestion.embedding_cache import cache_key
 
     by_key = {cache_key(identity, dim, text): text for text in texts}
@@ -114,7 +133,7 @@ async def fill(cache: _Cache, remote: _Remote, identity: str, dim: int, texts: S
     async def one(chunk: Sequence[tuple[str, str]]) -> None:
         nonlocal sent
         async with gate:
-            vectors = await remote.embed([text for _, text in chunk])
+            vectors = await remote.embed([clip(text) for _, text in chunk])
         if len(vectors) != len(chunk) or any(len(v) != dim for v in vectors):
             raise ValueError(f'the hosted model returned {len(vectors)} vectors for {len(chunk)} texts, or the wrong width')
         cache.keep({key: vector for (key, _), vector in zip(chunk, vectors, strict=True)}, dim)
