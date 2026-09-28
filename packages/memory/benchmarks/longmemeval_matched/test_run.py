@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 
 from .prompts import Session, Turn, history, is_abstention, judge_prompt, judged_correct, reader_prompt
-from .run import Item, arm_sessions, report, wilson
+from .run import Item, arm_sessions, load_rankings, parse_variant, report, wilson
 
 
 def _raw(question_id: str = 'q1', question_type: str = 'multi-session') -> dict[str, object]:
@@ -95,3 +95,20 @@ def test_report_measures_evidence_coverage_at_the_arms_depth(tmp_path: Path) -> 
     result = _arms(report(items, ['scone@1', 'scone@2'], tmp_path))
     assert result['scone@1']['all_evidence_in_context'] == 0.5
     assert result['scone@2']['all_evidence_in_context'] == 1.0
+
+
+def test_variants_need_a_new_name_and_only_scone_settings() -> None:
+    assert parse_variant('rr:SCONE_RERANK_LIMIT=40;SCONE_QUESTION_LANE=1') == (
+        'rr', {'SCONE_RERANK_LIMIT': '40', 'SCONE_QUESTION_LANE': '1'})
+    for bad in ('scone:SCONE_X=1', 'rr:', 'rr:PATH=/tmp', '2x:SCONE_X=1'):
+        with pytest.raises(ValueError):
+            parse_variant(bad)
+
+
+def test_variant_rankings_merge_under_their_name(tmp_path: Path) -> None:
+    _write(tmp_path / 'rankings.jsonl', [{'question_id': 'q1', 'scone': ['s1'], 'llamaindex': ['s2']}])
+    _write(tmp_path / 'rankings-rr.jsonl', [{'question_id': 'q1', 'rr': ['s3', 's1']}])
+    merged = load_rankings(tmp_path)
+    assert merged['q1']['scone'] == ['s1'] and merged['q1']['rr'] == ['s3', 's1']
+    item = Item(_raw('q1'))
+    assert [s.session_id for s in arm_sessions(item, 'rr@1', merged)] == ['s3']

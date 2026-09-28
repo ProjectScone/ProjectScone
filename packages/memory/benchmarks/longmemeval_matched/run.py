@@ -28,7 +28,9 @@ from typing import TYPE_CHECKING, cast
 import httpx
 
 if TYPE_CHECKING:
+    from scone_memory.bench.comparative import CachedEmbedder
     from scone_memory.bench.runner import BenchItem
+    from scone_memory.core.ports import Embedder
 
 from .prompts import Session, Turn, UPSTREAM_COMMIT, is_abstention, judge_prompt, judged_correct, reader_prompt
 
@@ -96,11 +98,76 @@ def append(path: Path, row: dict[str, object]) -> None:
 
 # ---------------------------------------------------------------- rank
 
-async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path | None) -> None:
-    from scone_memory.bench.comparative import (CachedEmbedder, OneThreadCache, bench_embedder, distinct_sessions,
-                                                llamaindex_session_ranking)
-    from scone_memory.bench.runner import run as run_bench
+def _embedder(embed_model: str, embed_cache: Path | None) -> tuple[Embedder, CachedEmbedder | None]:
+    from scone_memory.bench.comparative import CachedEmbedder, OneThreadCache, bench_embedder
     from scone_memory.ingestion.embedding_cache import SqliteEmbeddingCache
+
+    model = bench_embedder(embed_model)
+    if embed_cache is None:
+        return model, None
+    # Sized to hold every chunk of a run: an evicting cache would re-embed and misreport the cost.
+    path = str(embed_cache)
+    cached = CachedEmbedder(model, OneThreadCache(lambda: SqliteEmbeddingCache(path, max_entries=50_000_000)))
+    return cast('Embedder', cached), cached
+
+
+def parse_variant(spec: str) -> tuple[str, dict[str, str]]:
+    """``name:KEY=VALUE;KEY=VALUE`` -> the arm's system name and the environment it adds."""
+    name, _, settings = spec.partition(':')
+    if not name.isidentifier() or name in ('scone', 'llamaindex', 'full', 'oracle'):
+        raise ValueError(f'variant name {name!r} must be a new identifier')
+    env = dict(pair.split('=', 1) for pair in settings.split(';') if pair.strip())
+    if not env or any(not key.startswith('SCONE_') for key in env):
+        raise ValueError(f'variant {name!r} must set at least one SCONE_ setting and nothing else')
+    return name, env
+
+
+async def rank_variant(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path | None,
+                       name: str, env: dict[str, str]) -> None:
+    """Scone's ranking under extra engine settings, as arm ``name@k``, in its own file."""
+    from scone_memory.bench.comparative import distinct_sessions
+    from scone_memory.bench.runner import run as run_bench
+    from scone_memory.retrieval.fusion import PER_EPISODE_CAP
+    from scone_memory.runtime.config import Settings, build_in_process_engine
+
+    out = run_dir / f'rankings-{name}.jsonl'
+    done = {str(r['question_id']) for r in read_jsonl(out)}
+    wanted = [i for i in items if i.question_id not in done]
+    if not wanted:
+        return
+    embedder, cached = _embedder(embed_model, embed_cache)
+    settings = Settings.from_env({**os.environ, 'SCONE_EMBEDDER': 'local', 'SCONE_EMBED_MODEL': embed_model, **env})
+
+    async def make() -> object:
+        return await build_in_process_engine(settings, embedder)
+
+    for item in wanted:
+        bench_item = _bench_item(item.raw, with_sessions=True)
+        started = time.perf_counter()
+        report = await run_bench(make, [bench_item], ks=(depth,), limit=depth * PER_EPISODE_CAP)  # type: ignore[arg-type]
+        result = report.results[0]
+        if result.error:
+            raise SystemExit(f'variant {name} failed to rank {item.question_id}: {result.error}')
+        append(out, {'question_id': item.question_id, 'embedder': embed_model, 'env': env,
+                     name: list(distinct_sessions(result.retrieved_sessions, depth)),
+                     'ms': (time.perf_counter() - started) * 1000, 'recall_ms': result.recall_ms,
+                     })
+        print(f'ranked {name} {item.question_id}' + (f' cache {cached.record()}' if cached else ''), flush=True)
+
+
+def load_rankings(run_dir: Path) -> dict[str, dict[str, object]]:
+    """The base rankings with every variant's list merged in under its name."""
+    rankings = {str(r['question_id']): dict(r) for r in read_jsonl(run_dir / 'rankings.jsonl')}
+    for path in sorted(run_dir.glob('rankings-*.jsonl')):
+        name = path.stem.removeprefix('rankings-')
+        for row in read_jsonl(path):
+            rankings.setdefault(str(row['question_id']), {})[name] = row[name]
+    return rankings
+
+
+async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path | None) -> None:
+    from scone_memory.bench.comparative import distinct_sessions, llamaindex_session_ranking
+    from scone_memory.bench.runner import run as run_bench
     from scone_memory.retrieval.fusion import PER_EPISODE_CAP
     from scone_memory.runtime.config import Settings, build_in_process_engine
 
@@ -109,13 +176,7 @@ async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: st
     wanted = {item.question_id for item in items if item.question_id not in done}
     if not wanted:
         return
-    model = bench_embedder(embed_model)
-    cached: CachedEmbedder | None = None
-    if embed_cache is not None:
-        # Sized to hold every chunk of a run: an evicting cache would re-embed and misreport the cost.
-        path = str(embed_cache)
-        cached = CachedEmbedder(model, OneThreadCache(lambda: SqliteEmbeddingCache(path, max_entries=50_000_000)))
-    embedder = cached or model
+    embedder, cached = _embedder(embed_model, embed_cache)
     settings = Settings.from_env({**os.environ, 'SCONE_EMBEDDER': 'local', 'SCONE_EMBED_MODEL': embed_model})
 
     async def make() -> object:
@@ -126,6 +187,8 @@ async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: st
         report = await run_bench(make, [bench_item], ks=(depth,), limit=depth * PER_EPISODE_CAP)  # type: ignore[arg-type]
         scone_ms = (time.perf_counter() - started) * 1000
         result = report.results[0]
+        if result.error:
+            raise SystemExit(f'scone failed to rank {bench_item.question_id}: {result.error}')
         started = time.perf_counter()
         llama = await llamaindex_session_ranking(bench_item, embedder, k=depth, hybrid=True)
         llama_ms = (time.perf_counter() - started) * 1000
@@ -183,7 +246,7 @@ async def gather_bounded(jobs: Sequence[Callable[[], Awaitable[None]]], concurre
 async def answer(items: Sequence[Item], arms: Sequence[str], run_dir: Path, key: str, cot: bool, concurrency: int) -> None:
     out = run_dir / 'answers.jsonl'
     done = {(str(r['arm']), str(r['question_id'])) for r in read_jsonl(out)}
-    rankings = {str(r['question_id']): r for r in read_jsonl(run_dir / 'rankings.jsonl')}
+    rankings = load_rankings(run_dir)
     async with httpx.AsyncClient() as client:
         def job(item: Item, arm: str) -> Callable[[], Awaitable[None]]:
             async def go() -> None:
@@ -229,7 +292,7 @@ def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
 def report(items: Sequence[Item], arms: Sequence[str], run_dir: Path) -> dict[str, object]:
     answers = {(str(r['arm']), str(r['question_id'])): r for r in read_jsonl(run_dir / 'answers.jsonl')}
     verdicts = {(str(r['arm']), str(r['question_id'])): r for r in read_jsonl(run_dir / 'judgments.jsonl')}
-    rankings = {str(r['question_id']): r for r in read_jsonl(run_dir / 'rankings.jsonl')}
+    rankings = load_rankings(run_dir)
 
     def correct(arm: str, qid: str) -> bool:
         row = verdicts.get((arm, qid))
@@ -276,6 +339,8 @@ def main() -> None:
     parser.add_argument('--arms', default='full,oracle,scone@5,llamaindex@5')
     parser.add_argument('--embed-model', default='bge-base-en-v1.5')
     parser.add_argument('--embed-cache', type=Path, help='SQLite file reusing vectors across items and runs')
+    parser.add_argument('--variant', action='append', default=[], metavar='NAME:SCONE_KEY=VALUE;...',
+                        help='also rank with Scone under these settings, as arm NAME@k (repeatable)')
     parser.add_argument('--cot', action='store_true', help="upstream's step-by-step reader prompt")
     parser.add_argument('--concurrency', type=int, default=8)
     args = parser.parse_args()
@@ -286,7 +351,10 @@ def main() -> None:
     if args.stage in ('answer', 'judge', 'all') and not key:
         raise SystemExit('set OPENROUTER_API_KEY or SCONE_CHAT_API_KEY')
     if args.stage in ('rank', 'all') and any('@' in a for a in arms):
-        asyncio.run(rank(items, args.run_dir, args.depth, args.embed_model, args.embed_cache))
+        if any(a.split('@')[0] in ('scone', 'llamaindex') for a in arms):
+            asyncio.run(rank(items, args.run_dir, args.depth, args.embed_model, args.embed_cache))
+        for name, env in map(parse_variant, args.variant):
+            asyncio.run(rank_variant(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, name, env))
     if args.stage in ('answer', 'all'):
         asyncio.run(answer(items, arms, args.run_dir, key, args.cot, args.concurrency))
     if args.stage in ('judge', 'all'):
