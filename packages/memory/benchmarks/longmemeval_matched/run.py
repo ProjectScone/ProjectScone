@@ -119,9 +119,8 @@ def _hosted(embed_model: str, key: str) -> RemoteEmbedder:
 def _embedder(embed_model: str, embed_cache: Path | None,
               hosted_key: str | None = None) -> tuple[Embedder, CachedEmbedder | None]:
     from scone_memory.bench.comparative import CachedEmbedder, OneThreadCache, bench_embedder
-    from scone_memory.ingestion.embedding_cache import SqliteEmbeddingCache
-
     from .prefill import HostedTwin
+    from .vector_store import Float32Cache
 
     if hosted_key is not None:
         if embed_cache is None:
@@ -132,9 +131,9 @@ def _embedder(embed_model: str, embed_cache: Path | None,
         model = bench_embedder(embed_model)
     if embed_cache is None:
         return model, None
-    # Sized to hold every chunk of a run: an evicting cache would re-embed and misreport the cost.
+    # Never evicts: an evicting cache would re-embed and misreport the cost. float32 halves the file (vector_store.py).
     path = str(embed_cache)
-    cached = CachedEmbedder(model, OneThreadCache(lambda: SqliteEmbeddingCache(path, max_entries=50_000_000)))
+    cached = CachedEmbedder(model, OneThreadCache(lambda: Float32Cache(path)))
     return cast('Embedder', cached), cached
 
 
@@ -187,9 +186,8 @@ async def prefill(items: Sequence[Item], run_dir: Path, depth: int, embed_model:
     """Dry-runs the ranking of every unranked item to learn its texts, then fills the cache from the hosted copy."""
     import shutil
 
-    from scone_memory.ingestion.embedding_cache import SqliteEmbeddingCache
-
     from .prefill import Recorder, clip_to_window, fill
+    from .vector_store import Float32Cache
 
     done = {str(r['question_id']) for r in read_jsonl(run_dir / 'rankings.jsonl')}
     todo = [i for i in items if i.question_id not in done]
@@ -197,7 +195,7 @@ async def prefill(items: Sequence[Item], run_dir: Path, depth: int, embed_model:
         return
     local = _local(embed_model)
     remote = _hosted(embed_model, hosted_key)
-    cache = SqliteEmbeddingCache(str(embed_cache), max_entries=50_000_000)
+    cache = Float32Cache(embed_cache)
     for start in range(0, len(todo), 10):  # ten items at a time keeps the recorded texts bounded
         group = todo[start:start + 10]
         recorder = Recorder(local)
