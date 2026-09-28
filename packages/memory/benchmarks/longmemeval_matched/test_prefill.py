@@ -137,3 +137,31 @@ def test_a_text_refused_at_every_length_stops_the_fill() -> None:
 
     with pytest.raises(RuntimeError, match='even cut'):
         asyncio.run(fill(_Cache(), _Never(), 'm', 4, ['anything']))
+
+
+def test_float32_cache_round_trips_at_model_width_and_checks_width(tmp_path: object) -> None:
+    from pathlib import Path
+
+    from .vector_store import Float32Cache, migrate_doubles
+
+    root = Path(str(tmp_path))
+    cache = Float32Cache(root / 'v.db')
+    cache.keep({'a': [0.1, 0.2, 0.3, 0.4]}, 4)
+    got = cache.take(['a', 'missing', 'a'], 4)
+    assert list(got) == ['a'] and got['a'] == pytest.approx([0.1, 0.2, 0.3, 0.4], rel=1e-7)
+    assert cache.record()['found'] == 2 and cache.count() == 1
+    with pytest.raises(ValueError):
+        cache.take(['a'], 3)
+    with pytest.raises(ValueError):
+        cache.keep({'b': [1.0]}, 4)
+
+    import sqlite3
+    from array import array
+    old = sqlite3.connect(str(root / 'old.db'))
+    old.execute('CREATE TABLE vectors (key TEXT PRIMARY KEY, dim INTEGER NOT NULL, vector BLOB NOT NULL, '
+                'used INTEGER NOT NULL)')
+    old.execute('INSERT INTO vectors VALUES (?, ?, ?, ?)', ('d', 2, array('d', [0.5, -0.25]).tobytes(), 1))
+    old.commit()
+    old.close()
+    target = Float32Cache(root / 'new.db')
+    assert migrate_doubles(root / 'old.db', target) == 1 and target.take(['d'], 2)['d'] == [0.5, -0.25]
