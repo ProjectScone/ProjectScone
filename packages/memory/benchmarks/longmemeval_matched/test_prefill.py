@@ -64,8 +64,8 @@ def test_fill_sends_only_what_the_cache_lacks_under_the_identity_given() -> None
 
     cache, remote = _Cache(), _Remote()
     cache.keep({cache_key('m', 4, 'held'): [0.0, 0.0, 0.0, 1.0]}, 4)
-    sent = asyncio.run(fill(cache, remote, 'm', 4, ['held', 'new', 'new', 'other'], batch=1))
-    assert sent == 2 and sorted(t for call in remote.calls for t in call) == ['new', 'other']
+    sent, shortened = asyncio.run(fill(cache, remote, 'm', 4, ['held', 'new', 'new', 'other'], batch=1))
+    assert sent == 2 and shortened == 0 and sorted(t for call in remote.calls for t in call) == ['new', 'other']
     assert cache.store[cache_key('m', 4, 'new')] == [3.0, 0.0, 0.0, 1.0]
     assert cache_key('m:query-cache', 4, 'new') not in cache.store
 
@@ -109,3 +109,31 @@ def test_clipping_keeps_exactly_the_words_the_local_window_reads() -> None:
     twin_remote = _Remote()
     asyncio.run(HostedTwin(local, twin_remote).embed(['one two three four']))
     assert twin_remote.calls == [['one two three']]
+
+
+class _Refusing(_Remote):
+    """Refuses any batch holding a text longer than ten characters, as the hosted copy refuses an over-long text."""
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        if any(len(t) > 10 for t in texts):
+            raise RuntimeError('embedding server returned 400')
+        return await super().embed(texts)
+
+
+def test_a_refused_text_is_found_shortened_and_counted_while_its_batch_mates_embed_whole() -> None:
+    from scone_memory.ingestion.embedding_cache import cache_key
+
+    cache, remote = _Cache(), _Refusing()
+    sent, shortened = asyncio.run(fill(cache, remote, 'm', 4, ['ok', 'fine', 'x' * 20], batch=3))
+    assert (sent, shortened) == (3, 1)
+    assert cache.store[cache_key('m', 4, 'ok')][0] == 2.0  # embedded whole
+    assert cache.store[cache_key('m', 4, 'x' * 20)][0] <= 10.0  # keyed as asked, embedded shortened
+
+
+def test_a_text_refused_at_every_length_stops_the_fill() -> None:
+    class _Never(_Remote):
+        async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+            raise RuntimeError('embedding server returned 400')
+
+    with pytest.raises(RuntimeError, match='even cut'):
+        asyncio.run(fill(_Cache(), _Never(), 'm', 4, ['anything']))

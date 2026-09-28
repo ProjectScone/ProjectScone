@@ -119,21 +119,49 @@ class _Cache(Protocol):
 
 async def fill(cache: _Cache, remote: _Remote, identity: str, dim: int, texts: Sequence[str], *,
                batch: int = 96, concurrency: int = 12, progress: Callable[[int, int], None] | None = None,
-               clip: Callable[[str], str] = lambda text: text) -> int:
-    """Embeds the texts the cache lacks under ``identity``; returns how many it sent. The cache is keyed by the text
-    as asked; ``clip`` is what the hosted copy is sent instead (the local model's truncation)."""
+               clip: Callable[[str], str] = lambda text: text) -> tuple[int, int]:
+    """Embeds the texts the cache lacks under ``identity``; returns how many it sent and how many of those the
+    hosted copy took only shortened. The cache is keyed by the text as asked; ``clip`` is what the hosted copy is
+    sent instead (the local model's truncation).
+
+    The hosted copy counts some scripts (Korean, seen) as longer than the local tokenizer does and refuses a text
+    the local window would keep whole. Such a text is cut to four fifths until it is taken, at most eight times;
+    its vector then differs from the local one, so every one is counted and the count is reported."""
     from scone_memory.ingestion.embedding_cache import cache_key
 
     by_key = {cache_key(identity, dim, text): text for text in texts}
     held = set(cache.take(list(by_key), dim))
     wanted = [(key, text) for key, text in by_key.items() if key not in held]
     gate = asyncio.Semaphore(concurrency)
-    sent = 0
+    sent = shortened = 0
+
+    async def embed(chunk: Sequence[tuple[str, str]]) -> list[list[float]]:
+        """The batch's vectors; a refused batch is halved until the text the server refuses is found and named."""
+        try:
+            return await remote.embed([clip(text) for _, text in chunk])
+        except RuntimeError:
+            if len(chunk) == 1:
+                return [await shorten(clip(chunk[0][1]))]
+            half = len(chunk) // 2
+            return await embed(chunk[:half]) + await embed(chunk[half:])
+
+    async def shorten(text: str) -> list[float]:
+        nonlocal shortened
+        cut = text
+        for _ in range(8):
+            cut = cut[:max(1, len(cut) * 4 // 5)]
+            try:
+                vector = (await remote.embed([cut]))[0]
+            except RuntimeError:
+                continue
+            shortened += 1
+            return vector
+        raise RuntimeError(f'the hosted model refused one text even cut to {len(cut)} chars: {text[:120]!r}')
 
     async def one(chunk: Sequence[tuple[str, str]]) -> None:
         nonlocal sent
         async with gate:
-            vectors = await remote.embed([clip(text) for _, text in chunk])
+            vectors = await embed(chunk)
         if len(vectors) != len(chunk) or any(len(v) != dim for v in vectors):
             raise ValueError(f'the hosted model returned {len(vectors)} vectors for {len(chunk)} texts, or the wrong width')
         cache.keep({key: vector for (key, _), vector in zip(chunk, vectors, strict=True)}, dim)
@@ -142,4 +170,4 @@ async def fill(cache: _Cache, remote: _Remote, identity: str, dim: int, texts: S
             progress(sent, len(wanted))
 
     await asyncio.gather(*(one(wanted[i:i + batch]) for i in range(0, len(wanted), batch)))
-    return sent
+    return sent, shortened
