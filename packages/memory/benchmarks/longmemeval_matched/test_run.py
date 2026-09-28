@@ -112,3 +112,17 @@ def test_variant_rankings_merge_under_their_name(tmp_path: Path) -> None:
     assert merged['q1']['scone'] == ['s1'] and merged['q1']['rr'] == ['s3', 's1']
     item = Item(_raw('q1'))
     assert [s.session_id for s in arm_sessions(item, 'rr@1', merged)] == ['s3']
+
+
+def test_a_jsonl_dataset_keeps_offsets_and_reads_histories_on_demand(tmp_path: Path) -> None:
+    from .run import load, to_jsonl
+
+    source = tmp_path / 'data.json'
+    source.write_text(json.dumps([_raw('q1'), _raw('q2', 'temporal-reasoning')]), encoding='utf-8')
+    target = tmp_path / 'data.jsonl'
+    assert to_jsonl(source, target) == 2 and target.read_text(encoding='utf-8').count('\n') == 2
+    lazy = {i.question_id: i for i in load(target, 0, 42)}
+    eager = {i.question_id: i for i in load(source, 0, 42)}
+    assert set(lazy) == {'q1', 'q2'}
+    assert lazy['q2'].question_type == 'temporal-reasoning' and lazy['q2']._raw is None
+    assert lazy['q1'].sessions == eager['q1'].sessions and lazy['q2'].raw == eager['q2'].raw
