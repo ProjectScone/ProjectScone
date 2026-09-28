@@ -154,7 +154,7 @@ async def rank_variant(items: Sequence[Item], run_dir: Path, depth: int, embed_m
     from scone_memory.bench.comparative import distinct_sessions
     from scone_memory.bench.runner import run as run_bench
     from scone_memory.retrieval.fusion import PER_EPISODE_CAP
-    from scone_memory.runtime.config import Settings, build_in_process_engine
+    from scone_memory.runtime.config import Settings
 
     out = run_dir / f'rankings-{name}.jsonl'
     done = {str(r['question_id']) for r in read_jsonl(out)}
@@ -165,16 +165,17 @@ async def rank_variant(items: Sequence[Item], run_dir: Path, depth: int, embed_m
     settings = Settings.from_env({**os.environ, 'SCONE_EMBEDDER': 'local', 'SCONE_EMBED_MODEL': embed_model, **env})
 
     async def make() -> object:
-        return await build_in_process_engine(settings, embedder)
+        return await engine_at(settings, embedder, now)
 
     for item in wanted:
         bench_item = _bench_item(item.raw, with_sessions=True)
+        now = question_clock(bench_item.question_date)
         started = time.perf_counter()
         report = await run_bench(make, [bench_item], ks=(depth,), limit=depth * PER_EPISODE_CAP)  # type: ignore[arg-type]
         result = report.results[0]
         if result.error:
             raise SystemExit(f'variant {name} failed to rank {item.question_id}: {result.error}')
-        append(out, {'question_id': item.question_id, 'embedder': embed_model, 'env': env,
+        append(out, {'question_id': item.question_id, 'embedder': embed_model, 'env': env, 'engine_now': now,
                      name: list(distinct_sessions(result.retrieved_sessions, depth)),
                      'ms': (time.perf_counter() - started) * 1000, 'recall_ms': result.recall_ms,
                      })
@@ -216,6 +217,30 @@ async def prefill(items: Sequence[Item], run_dir: Path, depth: int, embed_model:
               f'window, their vectors differ from local) in {time.perf_counter() - started:.0f}s', flush=True)
 
 
+def question_clock(question_date: str) -> str:
+    """The engine's "now" for an item: the date LongMemEval asks the question on.
+
+    The engine favours newer memory by a recency term measured from its clock. At the wall clock, sessions dated
+    2023 are years old and the term shrinks to about 1e-15, near the rounding of a fused score, so exact ties
+    were broken by rounding that moved with the time of day: one of 100 LongMemEval-M items ranked differently
+    at 00:48 and 16:30 over the same vectors. At the question's own date (the reader's "Current Date") the term
+    is what it is in use, and a rerun ranks the same."""
+    from scone_memory.bench.runner import iso_date
+
+    stamp = iso_date(question_date)
+    if not stamp:
+        raise ValueError(f'unreadable question date {question_date!r}')
+    return stamp
+
+
+async def engine_at(settings: object, embedder: Embedder, now: str) -> object:
+    from scone_memory.runtime.config import Settings, build_in_process_engine
+
+    engine = await build_in_process_engine(cast(Settings, settings), embedder)
+    engine.clock = lambda: now
+    return engine
+
+
 def load_rankings(run_dir: Path) -> dict[str, dict[str, object]]:
     """The base rankings with every variant's list merged in under its name."""
     rankings = {str(r['question_id']): dict(r) for r in read_jsonl(run_dir / 'rankings.jsonl')}
@@ -231,7 +256,7 @@ async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: st
     from scone_memory.bench.comparative import distinct_sessions, llamaindex_session_ranking
     from scone_memory.bench.runner import run as run_bench
     from scone_memory.retrieval.fusion import PER_EPISODE_CAP
-    from scone_memory.runtime.config import Settings, build_in_process_engine
+    from scone_memory.runtime.config import Settings
 
     out = run_dir / 'rankings.jsonl'
     done = {str(r['question_id']) for r in read_jsonl(out)}
@@ -242,9 +267,10 @@ async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: st
     settings = Settings.from_env({**os.environ, 'SCONE_EMBEDDER': 'local', 'SCONE_EMBED_MODEL': embed_model})
 
     async def make() -> object:
-        return await build_in_process_engine(settings, embedder)
+        return await engine_at(settings, embedder, now)
 
     for bench_item in (_bench_item(i.raw, with_sessions=True) for i in items if i.question_id in wanted):
+        now = question_clock(bench_item.question_date)
         started = time.perf_counter()
         report = await run_bench(make, [bench_item], ks=(depth,), limit=depth * PER_EPISODE_CAP)  # type: ignore[arg-type]
         scone_ms = (time.perf_counter() - started) * 1000
@@ -254,7 +280,7 @@ async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: st
         started = time.perf_counter()
         llama = await llamaindex_session_ranking(bench_item, embedder, k=depth, hybrid=True)
         llama_ms = (time.perf_counter() - started) * 1000
-        append(out, {'question_id': bench_item.question_id, 'embedder': embed_model,
+        append(out, {'question_id': bench_item.question_id, 'embedder': embed_model, 'engine_now': now,
                      'scone': list(distinct_sessions(result.retrieved_sessions, depth)), 'scone_ms': scone_ms,
                      'scone_recall_ms': result.recall_ms, 'llamaindex': llama, 'llamaindex_ms': llama_ms})
         print(f'ranked {bench_item.question_id}' + (f' cache {cached.record()}' if cached else ''), flush=True)
