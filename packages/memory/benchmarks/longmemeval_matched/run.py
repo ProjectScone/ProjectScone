@@ -43,19 +43,37 @@ RETRIES = 3
 
 
 class Item:
-    def __init__(self, raw: dict[str, object]) -> None:
+    """One question. From a JSONL dataset it keeps only where its line starts and reads the history when asked:
+    LongMemEval-M's 500 histories are about 15 GB as Python objects, too much to hold through a run."""
+
+    def __init__(self, raw: dict[str, object], *, source: tuple[Path, int] | None = None) -> None:
         self.question_id = str(raw['question_id'])
         self.question_type = str(raw['question_type'])
         self.question = str(raw['question'])
         self.answer = str(raw['answer'])
         self.question_date = str(raw['question_date'])
+        self.evidence = [str(s) for s in cast(list[str], raw.get('answer_session_ids', []))]
+        self._source = source
+        self._raw = None if source is not None else raw
+
+    @property
+    def raw(self) -> dict[str, object]:
+        if self._raw is not None:
+            return self._raw
+        assert self._source is not None
+        path, offset = self._source
+        with path.open('rb') as handle:
+            handle.seek(offset)
+            return cast(dict[str, object], json.loads(handle.readline()))
+
+    @property
+    def sessions(self) -> dict[str, Session]:
+        raw = self.raw
         ids = cast(list[str], raw['haystack_session_ids'])
         dates = cast(list[str], raw['haystack_dates'])
         bodies = cast(list[list[dict[str, str]]], raw['haystack_sessions'])
-        self.sessions = {sid: Session(sid, date, tuple(Turn(t['role'], t['content']) for t in body))
-                         for sid, date, body in zip(ids, dates, bodies, strict=True)}
-        self.evidence = [str(s) for s in cast(list[str], raw.get('answer_session_ids', []))]
-        self.raw = raw
+        return {sid: Session(sid, date, tuple(Turn(t['role'], t['content']) for t in body))
+                for sid, date, body in zip(ids, dates, bodies, strict=True)}
 
 
 def _bench_item(raw: dict[str, object], *, with_sessions: bool) -> BenchItem:
@@ -75,16 +93,43 @@ def _bench_item(raw: dict[str, object], *, with_sessions: bool) -> BenchItem:
 
 
 def load(dataset: Path, sample: int, seed: int) -> list[Item]:
-    """Parses the dataset once and keeps only the sampled items: LongMemEval-M is
-    2.7 GB of JSON, and a second parse or a copy of every session would not fit."""
+    """The sampled items. A JSON array is parsed whole (LongMemEval-S); a JSONL file with one item per line
+    (LongMemEval-M, converted once by ``to_jsonl``) is scanned a line at a time and each chosen item keeps only
+    its line's offset, so no history stays in memory."""
     from scone_memory.bench.runner import stratified_sample
 
-    raw = cast(list[dict[str, object]], json.loads(dataset.read_text(encoding='utf-8')))
-    stubs = [_bench_item(r, with_sessions=False) for r in raw]
+    if dataset.suffix == '.jsonl':
+        stubs, found = [], {}
+        with dataset.open('rb') as handle:
+            while True:
+                offset = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                if not line.strip():
+                    continue
+                raw = cast(dict[str, object], json.loads(line))
+                stubs.append(_bench_item(raw, with_sessions=False))
+                found[stubs[-1].question_id] = Item(raw, source=(dataset, offset))
+        chosen = stubs if sample <= 0 else stratified_sample(stubs, sample, seed)
+        return [found[b.question_id] for b in chosen]
+    raw_items = cast(list[dict[str, object]], json.loads(dataset.read_text(encoding='utf-8')))
+    stubs = [_bench_item(r, with_sessions=False) for r in raw_items]
     chosen = stubs if sample <= 0 else stratified_sample(stubs, sample, seed)
-    by_id = {str(r['question_id']): r for r in raw}
-    del raw
+    by_id = {str(r['question_id']): r for r in raw_items}
+    del raw_items
     return [Item(by_id[b.question_id]) for b in chosen]
+
+
+def to_jsonl(source: Path, target: Path) -> int:
+    """Rewrites a JSON-array dataset one item per line, in the same order; returns the items written."""
+    items = cast(list[dict[str, object]], json.loads(source.read_text(encoding='utf-8')))
+    partial = target.with_suffix('.jsonl.part')
+    with partial.open('w', encoding='utf-8') as handle:
+        for item in items:
+            handle.write(json.dumps(item, ensure_ascii=False) + '\n')
+    partial.rename(target)
+    return len(items)
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -313,13 +358,14 @@ async def chat(client: httpx.AsyncClient, key: str, model: str, prompt: str, max
 
 
 def arm_sessions(item: Item, arm: str, rankings: dict[str, dict[str, object]]) -> list[Session]:
+    sessions = item.sessions  # read once: from a JSONL dataset each read parses the item's line
     if arm == 'full':
-        return list(item.sessions.values())
+        return list(sessions.values())
     if arm == 'oracle':
-        return [item.sessions[s] for s in item.evidence if s in item.sessions]
+        return [sessions[s] for s in item.evidence if s in sessions]
     system, _, k = arm.partition('@')
     ranked = cast(list[str], rankings[item.question_id][system])
-    return [item.sessions[s] for s in ranked[:int(k)]]
+    return [sessions[s] for s in ranked[:int(k)]]
 
 
 async def gather_bounded(jobs: Sequence[Callable[[], Awaitable[None]]], concurrency: int) -> None:
