@@ -69,3 +69,33 @@ Index build: LlamaIndex took 2,356 s over 66,745 nodes. Scone ingested from the 
 - **Answer accuracy (exact match and F1).** The answer stage is ready and smoke-tested. It needs a reader for about
   36,000 answers: hosted Gemma 4 31B waits on the API spending cap, and local Gemma 4 E4B would take about a day.
 - **Other competitors.** Systems other than LlamaIndex have not been run in this harness.
+
+## Experiment: a second hop without a model ([`twohop.py`](twohop.py)) — not adopted
+
+- **What it does:** after Scone's recall, it recalls again with the question plus each of the first two documents'
+  text, up to the engine's 1,000-character query limit.
+- **How results combine:** the three lists are fused by reciprocal rank with equal weights.
+- **Discipline:** parameters were fixed before any result was seen. All 7,405 questions ran, and the first pass
+  matched the main run on every question.
+
+| Metric | Scone | Scone + two-hop | LlamaIndex |
+| --- | ---: | ---: | ---: |
+| hit@1 | **87.1%** | 81.0% | 87.4% |
+| all@2 | **37.9%** | 36.1% | 37.7% |
+| all@5 | **65.5%** | 64.1% | 65.0% |
+| all@10 | 76.9% | **82.3%** | 76.6% |
+| bridge all@10 | 71.5% | **79.1%** (642–190 vs Scone, p < 1e-50) | 71.2% |
+| comparison all@5 | **91.7%** | 75.8% | 91.3% |
+| median latency | **113 ms** | 868 ms | 1,051 ms |
+
+### Verdict
+
+**Not adopted.** Deep recall rises, but the top ranks and comparison questions suffer.
+
+- **The second hop is reachable without a model.** Bridge all@10 rises 7.6 points.
+- **Equal-weight fusion is the wrong combination.** Documents found only by a hop displace correct first-pass
+  documents from the top ranks.
+- **Next:**
+  - Let hops fill positions below the first pass's leading documents, and only when the first pass looks incomplete.
+  - Tune that on a fixed half of the questions and report on the other half. These results have now been seen, so
+    they cannot also be a clean test.

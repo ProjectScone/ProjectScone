@@ -48,3 +48,12 @@ def test_a_write_invalidates_the_snapshot() -> None:
                                         vector=[0.0, 1.0])])
         assert first[0][0] != 9999 and (await index.search('s', [0.0, 1.0], 1))[0][0] == 9999
     asyncio.run(go())
+
+
+def test_twohop_fusion_keeps_the_agreed_leader_and_lifts_what_hops_share() -> None:
+    from .twohop import fuse
+
+    first = ['a', 'b', 'c']
+    hops = [['a', 'x', 'y'], ['b', 'x', 'z']]
+    fused = fuse([first, *hops], 4)
+    assert fused[0] == 'a' and fused.index('x') < fused.index('c') and len(fused) == 4
