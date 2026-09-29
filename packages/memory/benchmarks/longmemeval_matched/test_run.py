@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 
 from .prompts import Session, Turn, history, is_abstention, judge_prompt, judged_correct, reader_prompt
-from .run import Item, arm_sessions, load_rankings, parse_variant, report, wilson
+from .run import Item, arm_sessions, latest, load_rankings, parse_variant, report, settled_answers, wilson
 
 
 def _raw(question_id: str = 'q1', question_type: str = 'multi-session') -> dict[str, object]:
@@ -126,3 +126,26 @@ def test_a_jsonl_dataset_keeps_offsets_and_reads_histories_on_demand(tmp_path: P
     assert set(lazy) == {'q1', 'q2'}
     assert lazy['q2'].question_type == 'temporal-reasoning' and lazy['q2']._raw is None
     assert lazy['q1'].sessions == eager['q1'].sessions and lazy['q2'].raw == eager['q2'].raw
+
+
+def test_resume_asks_again_after_a_refused_request_but_not_after_the_readers_own_cutoff() -> None:
+    rows: list[dict[str, object]] = [
+        {'arm': 'a', 'question_id': 'q1', 'completed': True, 'error': None},
+        {'arm': 'a', 'question_id': 'q2', 'completed': False, 'error': 'incomplete_generation'},
+        {'arm': 'a', 'question_id': 'q3', 'completed': False, 'error': 'HTTPStatusError_403'},
+        {'arm': 'a', 'question_id': 'q4', 'completed': False, 'error': 'HTTPStatusError_403'},
+        {'arm': 'a', 'question_id': 'q4', 'completed': True, 'error': None},  # retried and answered
+    ]
+    assert settled_answers(rows) == {('a', 'q1'), ('a', 'q2'), ('a', 'q4')}
+    assert [r['completed'] for r in latest(rows) if r['question_id'] == 'q4'] == [True]
+
+
+def test_report_scores_the_retried_judgment_not_the_refused_one(tmp_path: Path) -> None:
+    items = [Item(_raw('q1'))]
+    _write(tmp_path / 'answers.jsonl', [{'arm': 'full', 'question_id': 'q1', 'completed': True, 'text': 'Paris',
+                                         'usage': None}])
+    _write(tmp_path / 'judgments.jsonl', [
+        {'arm': 'full', 'question_id': 'q1', 'correct': False, 'judge_error': 'HTTPStatusError_403'},
+        {'arm': 'full', 'question_id': 'q1', 'correct': True, 'judge_error': None},
+    ])
+    assert _arms(report(items, ['full'], tmp_path))['full']['correct'] == 1
