@@ -214,3 +214,69 @@ async def test_empty_vector_results_do_not_misreport_an_empty_document() -> None
     assert result.mode == 'flat_vector'
     assert result.route is None
     assert result.evidence == result.baseline == ()
+
+
+class UnusedDecisions(Decisions):
+    async def choose(self, query, menus):
+        pytest.fail('local structure retrieval must not call address routing')
+
+    async def choose_fetch(self, query, sections, max_bytes):
+        pytest.fail('local structure retrieval must not call fetch selection')
+
+
+async def test_local_structure_restores_a_split_paragraph_without_model_decisions() -> None:
+    paragraph = 'Cats need fresh water and balanced food. ' * 24
+    snapshot = book('# Cats\n' + paragraph + '\n\n' + 'Unrelated background. ' * 100 + '\n# Dogs\nDogs bark.')
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings(), chunk_size=120)
+    decisions = UnusedDecisions()
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_structure', limit=5)
+    assert paragraph not in result.baseline[0].text
+    assert paragraph in result.evidence[0].text
+    assert 'Dogs bark.' not in result.evidence[0].text
+    assert result.route is result.fetch is None
+    assert result.fetch_decision_ms == 0
+    raw = snapshot.content.encode()
+    assert all(raw[p.start:p.end].decode() == p.text for p in result.evidence)
+    assert len({(p.start, p.end) for p in result.evidence}) == len(result.evidence)
+
+
+async def test_local_structure_can_read_a_short_original_section() -> None:
+    snapshot = book('# Cats\nCats purr.\n\nThey also sleep.\n# Dogs\nDogs bark.')
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings(), chunk_size=120)
+    decisions = UnusedDecisions()
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_structure', limit=1)
+    assert result.evidence[0].text == '# Cats\nCats purr.\n\nThey also sleep.\n'
+    assert result.route is result.fetch is None
+
+
+@pytest.mark.parametrize('budget', [1, 17, 300])
+async def test_local_structure_respects_utf8_and_small_budgets(budget: int) -> None:
+    snapshot = book('# Cats\n' + 'Cats café 🐈. ' * 100 + '\n# Dogs\nOther facts.')
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings(), chunk_size=120)
+    decisions = UnusedDecisions()
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_structure', limit=2, max_bytes=budget)
+    assert sum(len(p.text.encode()) for p in result.evidence) <= budget
+    assert len(result.evidence) <= 2
+    assert all(snapshot.content.encode()[p.start:p.end].decode() == p.text for p in result.evidence)
+
+
+async def test_local_structure_does_not_expand_a_huge_section_or_paragraph() -> None:
+    snapshot = book('# Cats\n' + 'Cats facts. ' * 1000)
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings(), chunk_size=120)
+    decisions = UnusedDecisions()
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_structure', limit=1, max_bytes=8000)
+    assert result.evidence == result.baseline
+    assert len(result.evidence[0].text.encode()) < 2000
+
+
+async def test_local_structure_does_not_spend_two_slots_on_child_and_parent() -> None:
+    snapshot = book('# Parent\nIntroduction.\n## Child\nCats purr.\n# Other\nDogs bark.')
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings(), chunk_size=120)
+    decisions = UnusedDecisions()
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_structure', limit=2)
+    assert [p.text for p in result.evidence] == ['## Child\nCats purr.\n', '# Other\nDogs bark.']
