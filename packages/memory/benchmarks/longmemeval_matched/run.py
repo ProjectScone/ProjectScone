@@ -357,6 +357,19 @@ async def chat(client: httpx.AsyncClient, key: str, model: str, prompt: str, max
             'ms': (time.perf_counter() - started) * 1000, 'attempts': RETRIES}
 
 
+def latest(rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    """The last row per (arm, question): a retried request appends, and the retry is the answer that counts."""
+    return list({(str(r['arm']), str(r['question_id'])): r for r in rows}.values())
+
+
+def settled_answers(rows: Sequence[dict[str, object]]) -> set[tuple[str, str]]:
+    """Answers a resume must not ask again: completed ones, and ones the reader itself cut off
+    (``incomplete_generation`` recurs at temperature 0). A refused or failed request (an HTTP status, a
+    timeout, a spent key) says nothing about the reader and is asked again."""
+    return {(str(r['arm']), str(r['question_id'])) for r in latest(rows)
+            if r['completed'] or r['error'] == 'incomplete_generation'}
+
+
 def arm_sessions(item: Item, arm: str, rankings: dict[str, dict[str, object]]) -> list[Session]:
     sessions = item.sessions  # read once: from a JSONL dataset each read parses the item's line
     if arm == 'full':
@@ -379,7 +392,7 @@ async def gather_bounded(jobs: Sequence[Callable[[], Awaitable[None]]], concurre
 
 async def answer(items: Sequence[Item], arms: Sequence[str], run_dir: Path, key: str, cot: bool, concurrency: int) -> None:
     out = run_dir / 'answers.jsonl'
-    done = {(str(r['arm']), str(r['question_id'])) for r in read_jsonl(out)}
+    done = settled_answers(read_jsonl(out))
     rankings = load_rankings(run_dir)
     async with httpx.AsyncClient() as client:
         def job(item: Item, arm: str) -> Callable[[], Awaitable[None]]:
@@ -395,9 +408,9 @@ async def answer(items: Sequence[Item], arms: Sequence[str], run_dir: Path, key:
 
 async def judge(items: Sequence[Item], run_dir: Path, key: str, concurrency: int) -> None:
     out = run_dir / 'judgments.jsonl'
-    done = {(str(r['arm']), str(r['question_id'])) for r in read_jsonl(out)}
+    done = {(str(r['arm']), str(r['question_id'])) for r in latest(read_jsonl(out)) if not r['judge_error']}
     by_id = {item.question_id: item for item in items}
-    answers = [a for a in read_jsonl(run_dir / 'answers.jsonl')
+    answers = [a for a in latest(read_jsonl(run_dir / 'answers.jsonl'))
                if a['completed'] and str(a['question_id']) in by_id and (str(a['arm']), str(a['question_id'])) not in done]
     async with httpx.AsyncClient() as client:
         def job(row: dict[str, object]) -> Callable[[], Awaitable[None]]:
