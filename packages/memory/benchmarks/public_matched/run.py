@@ -183,6 +183,82 @@ async def rank(dataset: str, data_dir: Path, run_dir: Path, depth: int, embed_mo
                 print(f'  ranked {number}/{len(todo)}', flush=True)
 
 
+# ---------------------------------------------------------------- answer
+
+MAX_CONTEXT_BYTES = 8000  # the earlier public QA protocol's budget
+
+
+def context(docs: dict[str, Doc], ranked: Sequence[str], k: int) -> str:
+    """The top k documents in rank order, numbered, cut at the byte budget; the same for every system."""
+    parts, used = [], 0
+    for number, doc_id in enumerate(ranked[:k], 1):
+        block = f'[{number}] {docs[doc_id].text}\n\n'
+        size = len(block.encode())
+        if used + size > MAX_CONTEXT_BYTES:
+            remaining = MAX_CONTEXT_BYTES - used
+            if remaining > 200:
+                parts.append(block.encode()[:remaining].decode(errors='ignore'))
+            break
+        parts.append(block)
+        used += size
+    return ''.join(parts)
+
+
+def messages(question: Question, sources: str) -> list[dict[str, str]]:
+    from scone_memory.testing.public_qa import FORMAT_INSTRUCTION
+
+    return [{'role': 'system', 'content': 'Answer from the numbered sources. ' + FORMAT_INSTRUCTION},
+            {'role': 'user', 'content': f'Sources:\n{sources}\nQuestion: {question.question}'}]
+
+
+async def answer(dataset: str, data_dir: Path, run_dir: Path, arms: Sequence[str], reader_url: str, reader_model: str,
+                 concurrency: int, limit: int | None) -> None:
+    import httpx
+
+    docs_list, questions = load(dataset, data_dir)
+    docs = {d.id: d for d in docs_list}
+    rankings = {r['id']: r for r in read_jsonl(run_dir / f'rankings-{dataset}.jsonl')}
+    questions = [q for q in (questions[:limit] if limit else questions) if q.id in rankings]
+    out = run_dir / f'answers-{dataset}.jsonl'
+    settled = {(r['arm'], r['id']) for r in read_jsonl(out) if r['completed'] or r['error'] == 'incomplete_generation'}
+    jobs = [(arm, q) for arm in arms for q in questions if (arm, q.id) not in settled]
+    print(f'{dataset}: {len(jobs)} answers to generate with {reader_model}', flush=True)
+    gate = asyncio.Semaphore(concurrency)
+    lock = asyncio.Lock()
+    done = 0
+
+    async def one(client: httpx.AsyncClient, arm: str, question: Question) -> None:
+        nonlocal done
+        system, _, k = arm.partition('@')
+        request = messages(question, context(docs, rankings[question.id][system], int(k)))
+        # Reasoning off: Gemma 4 through Ollama otherwise spends the 64-token answer budget on hidden thinking and
+        # returns nothing (7 of 20 smoke-test answers; `think: false` is ignored on this endpoint, this is not).
+        payload = {'model': reader_model, 'messages': request, 'temperature': 0, 'max_tokens': 64, 'stream': False,
+                   'reasoning_effort': 'none'}
+        async with gate:
+            started = time.perf_counter()
+            try:
+                response = await client.post(reader_url.rstrip('/') + '/chat/completions', json=payload, timeout=300)
+                response.raise_for_status()
+                choice = response.json()['choices'][0]
+                text = (choice['message'].get('content') or '').strip()
+                completed = choice.get('finish_reason') == 'stop' and bool(text)
+                error = None if completed else 'incomplete_generation'
+            except (httpx.HTTPError, KeyError, ValueError) as caught:
+                text, completed, error = '', False, type(caught).__name__
+            ms = (time.perf_counter() - started) * 1000
+        async with lock:
+            with out.open('a', encoding='utf-8') as handle:
+                handle.write(json.dumps({'arm': arm, 'id': question.id, 'answer': text, 'completed': completed,
+                                         'error': error, 'ms': ms, 'reader': reader_model}) + '\n')
+            done += 1
+            if done % 500 == 0:
+                print(f'  answered {done}/{len(jobs)}', flush=True)
+
+    async with httpx.AsyncClient() as client:
+        await asyncio.gather(*(one(client, arm, q) for arm, q in jobs))
+
+
 # ---------------------------------------------------------------- report
 
 def sign_test(wins: int, losses: int) -> float:
@@ -223,6 +299,25 @@ def report(dataset: str, data_dir: Path, run_dir: Path) -> dict[str, Any]:
             losses = sum(1 for x, y in zip(a, b) if y > x)
             entry[f'paired_all@{k}'] = {'scone_only': wins, 'llamaindex_only': losses, 'sign_p': sign_test(wins, losses)}
         result['by_kind'][kind] = entry
+    answers = {(r['arm'], r['id']): r for r in read_jsonl(run_dir / f'answers-{dataset}.jsonl')}
+    arms = sorted({arm for arm, _ in answers})
+    if arms:
+        from scone_memory.testing.public_qa import answer_score
+
+        name = cast(Any, dataset)
+        graded = {arm: {q.id: answer_score(str(answers[(arm, q.id)]['answer']) if (arm, q.id) in answers else '',
+                                           q.answers, name, bool(answers.get((arm, q.id), {}).get('completed')))
+                        for q in scored} for arm in arms}
+        result['answers'] = {arm: {'n': len(scored), 'answered': sum((arm, q.id) in answers for q in scored),
+                                   'em': sum(g['em'] for g in graded[arm].values()) / len(scored),
+                                   'f1': sum(g['f1'] for g in graded[arm].values()) / len(scored)} for arm in arms}
+        for left in arms:
+            for right in arms:
+                if left < right and left.split('@')[1] == right.split('@')[1]:
+                    wins = sum(1 for q in scored if graded[left][q.id]['em'] > graded[right][q.id]['em'])
+                    losses = sum(1 for q in scored if graded[right][q.id]['em'] > graded[left][q.id]['em'])
+                    result['answers'][f'{left} vs {right} (em)'] = {'left_only': wins, 'right_only': losses,
+                                                                     'sign_p': sign_test(wins, losses)}
     ms = sorted(r['scone_ms'] for r in rows.values())
     lms = sorted(r['llamaindex_ms'] for r in rows.values())
     if ms:
@@ -233,20 +328,29 @@ def report(dataset: str, data_dir: Path, run_dir: Path) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('stage', choices=['rank', 'report'])
+    parser.add_argument('stage', choices=['rank', 'answer', 'report'])
+    parser.add_argument('--arms', default='scone@5,llamaindex@5')
+    parser.add_argument('--reader-url', default='http://localhost:11434/v1')
+    parser.add_argument('--reader-model', default='gemma4-e4b-ctx8k:latest')
+    parser.add_argument('--concurrency', type=int, default=4)
     parser.add_argument('--dataset', choices=DATASETS, action='append', required=True)
     parser.add_argument('--data-dir', type=Path, required=True, help='holds squad_dev_v1.1.json, hotpot_dev_distractor_v1.json')
     parser.add_argument('--run-dir', type=Path, required=True)
     parser.add_argument('--depth', type=int, default=10)
     parser.add_argument('--embed-model', default='bge-base-en-v1.5')
-    parser.add_argument('--embed-cache', type=Path, required=True)
+    parser.add_argument('--embed-cache', type=Path)
     parser.add_argument('--limit', type=int, help='first N questions only (smoke tests)')
     args = parser.parse_args()
     args.run_dir.mkdir(parents=True, exist_ok=True)
     for dataset in args.dataset:
         if args.stage == 'rank':
+            if args.embed_cache is None:
+                raise SystemExit('rank needs --embed-cache')
             asyncio.run(rank(dataset, args.data_dir, args.run_dir, args.depth, args.embed_model, args.embed_cache,
                              args.limit))
+        if args.stage == 'answer':
+            asyncio.run(answer(dataset, args.data_dir, args.run_dir, [a.strip() for a in args.arms.split(',') if a.strip()],
+                               args.reader_url, args.reader_model, args.concurrency, args.limit))
         result = report(dataset, args.data_dir, args.run_dir)
         (args.run_dir / f'report-{dataset}.json').write_text(json.dumps(result, indent=1), encoding='utf-8')
         print(json.dumps(result, indent=1))
