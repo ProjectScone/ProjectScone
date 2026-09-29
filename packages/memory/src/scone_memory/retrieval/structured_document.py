@@ -7,6 +7,7 @@ are never migrated or switched by importing this module.
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, replace
 import hashlib
 import math
@@ -17,10 +18,11 @@ from ..backends.memory import InMemoryVectorIndex
 from ..core.embedding import embed_queries
 from ..core.ports import Embedder, VectorIndex, VectorPoint
 from ..ingestion.chunker import byte_spans, chunk_spans
+from ..ingestion.structure import parse_structure
 from ..ingestion.vectors import validated_vectors
 from .section_routing import FetchChooser, FetchDecision, RouteResult, SectionRouter, SectionSnapshot
 
-Mode = Literal['auto', 'flat_vector', 'section_vector', 'original']
+Mode = Literal['auto', 'flat_vector', 'section_vector', 'original', 'local_structure']
 Routing = Literal['hierarchy', 'vector_candidates']
 
 
@@ -73,6 +75,24 @@ def _fuse(broad: Sequence[SectionEvidence], scoped: Sequence[SectionEvidence]) -
             key=lambda k: (-scores[k], k))]
 
 
+def _paragraph_spans(snapshot: SectionSnapshot) -> tuple[tuple[int, int], ...]:
+    raw = snapshot.content.encode()
+    spans: list[tuple[int, int]] = []
+    pending: tuple[int, int] | None = None
+    for block in parse_structure(snapshot.content).blocks:
+        if block.kind == 'text' and raw[block.start:block.end].strip():
+            pending = (pending[0] if pending else block.start, block.end)
+            continue
+        if pending is not None:
+            spans.append(pending)
+            pending = None
+        if block.kind in ('fenced_code', 'table'):
+            spans.append((block.start, block.end))
+    if pending is not None:
+        spans.append(pending)
+    return tuple(spans)
+
+
 class StructuredDocumentIndex:
     def __init__(self, snapshot: SectionSnapshot, embedder: Embedder, vectors: VectorIndex,
                  space: str, passages: dict[int, SectionEvidence]) -> None:
@@ -82,6 +102,10 @@ class StructuredDocumentIndex:
         self._nodes = {n.id: n for n in snapshot.nodes}
         self.space, self.passages = space, passages
         self._depth = {n.id: self._ancestors(n.id) for n in snapshot.nodes}
+        self._raw = snapshot.content.encode()
+        self._paragraphs = _paragraph_spans(snapshot)
+        self._paragraph_starts = tuple(start for start, _ in self._paragraphs)
+        self._paragraph_ends = tuple(end for _, end in self._paragraphs)
 
     def _ancestors(self, identifier: str) -> tuple[str, ...]:
         ancestors: list[str] = []
@@ -160,12 +184,40 @@ class StructuredDocumentIndex:
             result.append(SectionEvidence(identifier, self.snapshot.original(identifier), node.start, node.end, score))
         return result
 
+    def _local_evidence(self, broad: Sequence[SectionEvidence], limit: int,
+                        max_bytes: int) -> tuple[SectionEvidence, ...]:
+        result: list[SectionEvidence] = []
+        remaining = max_bytes
+        for hit in broad:
+            if len(result) >= limit or remaining <= 0:
+                break
+            ceiling = min(2000, remaining)
+            node = self._nodes[hit.section_id]
+            start, end = hit.start, hit.end
+            if node.end - node.start <= ceiling:
+                start, end = node.start, node.end
+            else:
+                first = bisect_right(self._paragraph_ends, hit.start)
+                after = bisect_left(self._paragraph_starts, hit.end)
+                if first < after:
+                    start = min(start, self._paragraphs[first][0])
+                    end = max(end, self._paragraphs[after - 1][1])
+                if end - start > ceiling:
+                    start, end = hit.start, hit.end
+            if any(p.start < end and start < p.end for p in result):
+                continue
+            item = replace(hit, start=start, end=end, text=self._raw[start:end].decode())
+            bounded = _bounded((item,), 1, remaining)
+            result.extend(bounded)
+            remaining -= sum(p.end - p.start for p in bounded)
+        return tuple(result)
+
     async def retrieve(self, query: str, snapshot: SectionSnapshot, router: SectionRouter,
                        fetch_chooser: FetchChooser, *, mode: Mode = 'auto', limit: int = 5,
                        max_bytes: int = 8000, routing: Routing = 'hierarchy') -> StructuredResult:
         if (snapshot != self.snapshot or self.embedder.id != self._embedder_id):
             raise ValueError('snapshot or embedder changed; rebuild the document index')
-        if (mode not in ('auto', 'flat_vector', 'section_vector', 'original')
+        if (mode not in ('auto', 'flat_vector', 'section_vector', 'original', 'local_structure')
                 or routing not in ('hierarchy', 'vector_candidates')
                 or type(limit) is not int or not 1 <= limit <= 64
                 or type(max_bytes) is not int or not 1 <= max_bytes <= 128000
@@ -182,7 +234,7 @@ class StructuredDocumentIndex:
             return encoded
 
         route: RouteResult | None = None
-        if mode == 'flat_vector' or not self.passages or routing == 'vector_candidates':
+        if mode in ('flat_vector', 'local_structure') or not self.passages or routing == 'vector_candidates':
             vector = await encode() if self.passages else []
         else:
             async with asyncio.TaskGroup() as group:
@@ -193,6 +245,11 @@ class StructuredDocumentIndex:
         broad = await self._search(vector, max(32, limit)) if self.passages else []
         vector_ms = (time.perf_counter() - before) * 1000
         baseline = _bounded(broad, limit, max_bytes)
+        if mode == 'local_structure':
+            evidence = self._local_evidence(broad, limit, max_bytes)
+            reason = 'local_expansion' if broad else ('no_vector_candidates' if self.passages else 'empty_document')
+            return StructuredResult('local_structure', reason, evidence, baseline, None, None,
+                encoded_ms, vector_ms, 0.0, (time.perf_counter() - started) * 1000)
         if routing == 'vector_candidates' and mode != 'flat_vector' and broad:
             route = await router.route(query, snapshot, candidate_section_ids=tuple(
                 dict.fromkeys(passage.section_id for passage in broad)))
