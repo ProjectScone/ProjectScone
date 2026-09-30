@@ -125,3 +125,36 @@ Paired counts on all@k (Scone + hop wins vs the other side's wins):
 - **Cost:** one extra recall per question, plus a small loss on comparison questions (all@5 2–20 against Scone).
 - **Next:** the rule is benchmark code so far. The next step is to make it an engine option and measure it there
   end to end.
+
+### The engine's implementation, end to end on the held-out half ([`enginehop.py`](enginehop.py))
+
+The rule above was measured over saved document lists. `retrieval.second_hop.recall_with_hop` implements it in the
+engine, over passages:
+- it seeds the hop with the leading passage, not the leading document;
+- it keeps the leading three episodes whole;
+- it holds to the per-episode cap.
+
+That code ran on all 3,676 test-half questions:
+
+| Test half | Scone | **Scone + engine hop** | LlamaIndex |
+| --- | ---: | ---: | ---: |
+| hit@1 | 87.2% | **87.2%** | 87.4% |
+| all@2 | 37.3% | **37.3%** | 36.8% |
+| all@5 | 64.8% | **69.8%** | 64.2% |
+| all@10 | 76.4% | **83.2%** | 75.9% |
+| bridge all@5 / all@10 | 58.5% / 71.2% | **65.4% / 80.0%** | 57.8% / 70.8% |
+| comparison all@5 / all@10 | 91.3% / 98.3% | 88.6% / 96.6% | 91.2% / 97.6% |
+| latency p50 / p95 | 113 ms / 179 ms | 424 ms / 659 ms | 1,051 ms / 1,068 ms |
+
+Paired counts on all@k (engine hop wins vs the other side's wins):
+
+| Against | all@5 | all@10 |
+| --- | --- | --- |
+| Scone | 283–99 (p = 1e-21) | 344–93 (p = 6e-35) |
+| LlamaIndex | 348–142 (p = 5e-21) | 369–101 (p = 7e-37) |
+
+- **Agreement with the estimate:** the engine reproduces the estimate from the saved lists within 0.2 points. It
+  keeps hit@1 and all@2 unchanged and still searches 2.5x faster than LlamaIndex.
+- **What it costs:** on comparison questions (19% of HotpotQA), it trails plain Scone (all@5 2–21). It is still level
+  with LlamaIndex at all@10 (3–10, p = 0.09).
+- **Next:** gate the hop on bridge-like questions. That gate must be chosen on the development half.
