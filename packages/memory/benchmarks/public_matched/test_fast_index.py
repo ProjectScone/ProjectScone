@@ -57,3 +57,10 @@ def test_twohop_fusion_keeps_the_agreed_leader_and_lifts_what_hops_share() -> No
     hops = [['a', 'x', 'y'], ['b', 'x', 'z']]
     fused = fuse([first, *hops], 4)
     assert fused[0] == 'a' and fused.index('x') < fused.index('c') and len(fused) == 4
+
+
+def test_keep_then_fill_keeps_the_leaders_and_takes_turns_without_repeats() -> None:
+    from .hop_rule import keep_then_fill
+
+    assert keep_then_fill(['a', 'b', 'c', 'd', 'e'], [['a', 'x', 'b', 'y']], keep=3, depth=6) == ['a', 'b', 'c', 'x', 'd', 'y']
+    assert keep_then_fill(['a'], [[]], keep=3, depth=4) == ['a']

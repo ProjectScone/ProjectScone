@@ -99,3 +99,29 @@ Index build: LlamaIndex took 2,356 s over 66,745 nodes. Scone ingested from the 
   - Let hops fill positions below the first pass's leading documents, and only when the first pass looks incomplete.
   - Tune that on a fixed half of the questions and report on the other half. These results have now been seen, so
     they cannot also be a clean test.
+
+## Second hop, rule chosen on one half and tested on the other ([`hop_rule.py`](hop_rule.py))
+
+**Rule:** keep the first pass's top 3 whole, then fill the remaining places round-robin from one hop search and
+the rest of the first pass. The hop searches with the question plus the top document's text. The rule was chosen on
+the development half (3,729 questions). The test half (3,676) was then scored once:
+
+| Test half | Scone | **Scone + hop** | LlamaIndex |
+| --- | ---: | ---: | ---: |
+| hit@1 | 87.2% | **87.2%** | 87.4% |
+| all@2 | 37.3% | **37.3%** | 36.8% |
+| all@5 | 64.8% | **69.8%** | 64.2% |
+| all@10 | 76.4% | **83.1%** | 75.9% |
+| bridge all@5 / all@10 | 58.5% / 71.2% | **65.4% / 79.9%** | 57.8% / 70.8% |
+| comparison all@5 / all@10 | 91.3% / 98.3% | 88.8% / 96.7% | 91.2% / 97.6% |
+
+Paired counts on all@k (Scone + hop wins vs the other side's wins):
+
+| Against | all@5 | all@10 |
+| --- | --- | --- |
+| Scone | 281–96 (p = 4e-22) | 346–98 (p = 2e-33) |
+| LlamaIndex | 346–139 (p = 2e-21) | 372–107 (p = 2e-35) |
+
+- **Cost:** one extra recall per question, plus a small loss on comparison questions (all@5 2–20 against Scone).
+- **Next:** the rule is benchmark code so far. The next step is to make it an engine option and measure it there
+  end to end.
