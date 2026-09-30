@@ -57,3 +57,26 @@ Each stage (`rank`, `answer`, `judge`) appends to its own JSONL file and resumes
 - 100 items gives roughly ±10-point intervals, which is enough to find large gaps but not small ones. A headline claim
   needs all 500 items.
 - Competitors beyond LlamaIndex (Mem0 OSS, Graphiti, Mastra) are not wired in yet.
+
+## Is LlamaIndex handicapped by the chunk settings? ([`llama_sensitivity.py`](llama_sensitivity.py))
+
+The matched runs split LlamaIndex's documents at 512 model tokens with no overlap, so that no node exceeds bge's
+512-token window. LlamaIndex's own default is 1,024 tokens with 200 of overlap, and zero overlap can cut evidence
+across long chat sessions. The check re-ranked the saved LongMemEval-S 100-item run (bge-small; 94 items have
+evidence) under LlamaIndex's alternatives:
+
+| Configuration | all@5 | all@10 | Scone-only / this-only at all@5 |
+| --- | ---: | ---: | --- |
+| Scone (saved) | **92.6%** | **96.8%** | |
+| LlamaIndex 512/0, vector + BM25 (saved, as benchmarked) | 88.3% | 96.8% | 6 / 2 |
+| The same, re-run | 88.3% | 96.8% | identical on 94 of 94 |
+| 512 tokens, 200 overlap, vector + BM25 | 87.2% | 96.8% | 6 / 1 |
+| Its defaults (1,024 / 200), vector + BM25 | 88.3% | 96.8% | 6 / 2 |
+| Its defaults, vector only (out of the box) | 89.4% | 94.7% | 6 / 3 |
+
+**None of LlamaIndex's own settings does better than the configuration benchmarked.** Overlap slightly lowers its
+all@5, and its defaults change nothing at all@5 or all@10. Scone leads every variant at all@5, but at 94 items none
+of these differences is significant (sign test p from 0.13 to 0.51).
+
+LongMemEval-M was not re-ranked under these variants. Its long sessions would need about a million new embeddings,
+which waits on the hosted prefill.
