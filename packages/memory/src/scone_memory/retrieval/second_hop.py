@@ -23,6 +23,11 @@ documents folded from passages; ``benchmarks/public_matched/hop_rule.py``):
 
 It costs one more recall, and a small loss on comparison questions (all@5 91.3% to 88.8%).
 
+This module's own code, run through the engine on the same 3,676 held-out questions
+(``benchmarks/public_matched/enginehop.py``), measured hit@1 87.2% (unchanged), all@5 69.8% and all@10 83.2%.
+Against LlamaIndex's vector + BM25 fusion it won 348 to 142 at all@5 and 369 to 101 at all@10. Its two recalls
+took 424 ms at the median (659 ms p95), against 113 ms for one.
+
 ``recall`` is any callable that recalls for a query with the caller's own options, so the second search runs
 under the same scope, filters and limits as the first.
 """
