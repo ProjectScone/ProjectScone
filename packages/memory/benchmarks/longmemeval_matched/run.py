@@ -336,7 +336,8 @@ async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: st
 async def chat(client: httpx.AsyncClient, key: str, model: str, prompt: str, max_tokens: int) -> dict[str, object]:
     payload: dict[str, object] = {'model': model, 'messages': [{'role': 'user', 'content': prompt}],
                                   'temperature': 0, 'max_tokens': max_tokens, 'stream': False}
-    if model == READER_MODEL:
+    if model == READER_MODEL or model.startswith('google/gemma'):
+        # Reasoning off: a Gemma judge given 10 tokens would otherwise spend them thinking and return nothing.
         payload['reasoning'] = {'effort': 'none'}
     error = ''
     started = time.perf_counter()
@@ -406,8 +407,14 @@ async def answer(items: Sequence[Item], arms: Sequence[str], run_dir: Path, key:
         await gather_bounded([job(i, a) for a in arms for i in items if (a, i.question_id) not in done], concurrency)
 
 
-async def judge(items: Sequence[Item], run_dir: Path, key: str, concurrency: int) -> None:
-    out = run_dir / 'judgments.jsonl'
+def judge_suffix(judge_model: str) -> str:
+    """'' for the official judge, so its files keep their names; otherwise the model, made safe for a file name."""
+    return '' if judge_model == JUDGE_MODEL else '-' + judge_model.replace('/', '_').replace(':', '_')
+
+
+async def judge(items: Sequence[Item], run_dir: Path, key: str, concurrency: int,
+                judge_model: str = JUDGE_MODEL) -> None:
+    out = run_dir / f'judgments{judge_suffix(judge_model)}.jsonl'
     done = {(str(r['arm']), str(r['question_id'])) for r in latest(read_jsonl(out)) if not r['judge_error']}
     by_id = {item.question_id: item for item in items}
     answers = [a for a in latest(read_jsonl(run_dir / 'answers.jsonl'))
@@ -417,7 +424,7 @@ async def judge(items: Sequence[Item], run_dir: Path, key: str, concurrency: int
             async def go() -> None:
                 item = by_id[str(row['question_id'])]
                 prompt = judge_prompt(item.question_type, item.question_id, item.question, item.answer, str(row['text']))
-                result = await chat(client, key, JUDGE_MODEL, prompt, 10)
+                result = await chat(client, key, judge_model, prompt, 10)
                 append(out, {'arm': row['arm'], 'question_id': item.question_id, 'verdict': result['text'],
                              'correct': bool(result['completed']) and judged_correct(str(result['text'])),
                              'judge_error': result['error']})
@@ -436,9 +443,11 @@ def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (centre - half, centre + half)
 
 
-def report(items: Sequence[Item], arms: Sequence[str], run_dir: Path) -> dict[str, object]:
+def report(items: Sequence[Item], arms: Sequence[str], run_dir: Path,
+           judge_model: str = JUDGE_MODEL) -> dict[str, object]:
     answers = {(str(r['arm']), str(r['question_id'])): r for r in read_jsonl(run_dir / 'answers.jsonl')}
-    verdicts = {(str(r['arm']), str(r['question_id'])): r for r in read_jsonl(run_dir / 'judgments.jsonl')}
+    verdicts = {(str(r['arm']), str(r['question_id'])): r
+                for r in read_jsonl(run_dir / f'judgments{judge_suffix(judge_model)}.jsonl')}
     rankings = load_rankings(run_dir)
 
     def correct(arm: str, qid: str) -> bool:
@@ -446,7 +455,7 @@ def report(items: Sequence[Item], arms: Sequence[str], run_dir: Path) -> dict[st
         return bool(row and row['correct'] and not row['judge_error'])
 
     out: dict[str, object] = {'items': len(items), 'upstream_commit': UPSTREAM_COMMIT,
-                              'reader': READER_MODEL, 'judge': JUDGE_MODEL, 'arms': {}}
+                              'reader': READER_MODEL, 'judge': judge_model, 'arms': {}}
     for arm in arms:
         hits = [correct(arm, i.question_id) for i in items]
         missing = sum((arm, i.question_id) not in answers for i in items)
@@ -491,6 +500,8 @@ def main() -> None:
     parser.add_argument('--variant', action='append', default=[], metavar='NAME:SCONE_KEY=VALUE;...',
                         help='also rank with Scone under these settings, as arm NAME@k (repeatable)')
     parser.add_argument('--cot', action='store_true', help="upstream's step-by-step reader prompt")
+    parser.add_argument('--judge-model', default=JUDGE_MODEL,
+                        help='a second judge, written to judgments-<model>.jsonl; the official one keeps judgments.jsonl')
     parser.add_argument('--concurrency', type=int, default=8)
     args = parser.parse_args()
     args.run_dir.mkdir(parents=True, exist_ok=True)
@@ -516,9 +527,10 @@ def main() -> None:
     if args.stage in ('answer', 'all'):
         asyncio.run(answer(items, arms, args.run_dir, key, args.cot, args.concurrency))
     if args.stage in ('judge', 'all'):
-        asyncio.run(judge(items, args.run_dir, key, args.concurrency))
-    result = report(items, arms, args.run_dir)
-    (args.run_dir / 'report.json').write_text(json.dumps(result, indent=1), encoding='utf-8')
+        asyncio.run(judge(items, args.run_dir, key, args.concurrency, args.judge_model))
+    result = report(items, arms, args.run_dir, args.judge_model)
+    (args.run_dir / f'report{judge_suffix(args.judge_model)}.json').write_text(json.dumps(result, indent=1),
+                                                                              encoding='utf-8')
     print(json.dumps(result, indent=1))
 
 
