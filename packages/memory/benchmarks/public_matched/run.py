@@ -215,6 +215,9 @@ async def answer(dataset: str, data_dir: Path, run_dir: Path, arms: Sequence[str
                  concurrency: int, limit: int | None) -> None:
     import httpx
 
+    # A hosted reader needs its key; a local one (Ollama) takes none.
+    key = '' if reader_url.startswith(('http://localhost', 'http://127.0.0.1')) else (
+        os.environ.get('OPENROUTER_API_KEY') or os.environ.get('SCONE_CHAT_API_KEY') or '')
     docs_list, questions = load(dataset, data_dir)
     docs = {d.id: d for d in docs_list}
     rankings = {r['id']: r for r in read_jsonl(run_dir / f'rankings-{dataset}.jsonl')}
@@ -237,20 +240,25 @@ async def answer(dataset: str, data_dir: Path, run_dir: Path, arms: Sequence[str
                    'reasoning_effort': 'none'}
         async with gate:
             started = time.perf_counter()
+            usage = None
             try:
-                response = await client.post(reader_url.rstrip('/') + '/chat/completions', json=payload, timeout=300)
+                response = await client.post(reader_url.rstrip('/') + '/chat/completions', json=payload, timeout=300,
+                                             headers={'Authorization': 'Bearer ' + key} if key else {})
                 response.raise_for_status()
-                choice = response.json()['choices'][0]
+                body = response.json()
+                usage = body.get('usage')
+                choice = body['choices'][0]
                 text = (choice['message'].get('content') or '').strip()
                 completed = choice.get('finish_reason') == 'stop' and bool(text)
                 error = None if completed else 'incomplete_generation'
             except (httpx.HTTPError, KeyError, ValueError) as caught:
-                text, completed, error = '', False, type(caught).__name__
+                text, completed, error, usage = '', False, type(caught).__name__, None
             ms = (time.perf_counter() - started) * 1000
         async with lock:
             with out.open('a', encoding='utf-8') as handle:
                 handle.write(json.dumps({'arm': arm, 'id': question.id, 'answer': text, 'completed': completed,
-                                         'error': error, 'ms': ms, 'reader': reader_model}) + '\n')
+                                         'error': error, 'ms': ms, 'reader': reader_model,
+                                         'usage': usage}) + '\n')
             done += 1
             if done % 500 == 0:
                 print(f'  answered {done}/{len(jobs)}', flush=True)
