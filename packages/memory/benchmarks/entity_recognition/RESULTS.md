@@ -67,4 +67,4 @@
 
 ## Cost
 
-Gemma's two runs cost about $1.26 in provider charges (45,910 sentences). Everything else ran locally.
+Gemma's two runs cost $2.39 in provider charges, read from each row's usage record ($0.35 for OntoNotes, $2.04 for Few-NERD; 45,910 sentences). Everything else ran locally.
