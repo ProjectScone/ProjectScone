@@ -23,7 +23,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..agents.tool_evidence import PreparedToolEvidence, prepare_tool_evidence
 
 from ..memory.engine import MemoryEngine, check_space
-from ..retrieval.adaptive import AdaptiveLimits, AdaptiveRetriever, EvidenceCandidate, EvidenceDecision
+from ..core.validation import MAX_QUERY
+from ..retrieval.adaptive import AdaptiveLimits, AdaptiveResult, AdaptiveRetriever, EvidenceCandidate, EvidenceDecision
+from ..retrieval.second_hop import KEEP as HOP_KEEP, merge, should_hop
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.listwise import ListwiseReranker
 from ..retrieval.reranking import RerankCandidate, rerank_candidates
@@ -80,9 +82,13 @@ class ScopedMemoryTools:
     def __init__(self, memory: MemoryEngine, space: str, *, scope: RecallScope,
                  exclude_session_id: str | None = None, timeout_s: float = 2.0,
                  max_result_bytes: int = 64000, enable_computation: bool = False,
-                 enable_tables: bool = False) -> None:
+                 enable_tables: bool = False, second_hop: bool = False) -> None:
         if type(enable_computation) is not bool:
             raise ValueError("enable_computation must be a boolean")
+        if type(second_hop) is not bool:
+            raise ValueError("second_hop must be a boolean")
+        #: Whether search_memory searches again from its leading passage (retrieval.second_hop).
+        self._second_hop = second_hop
         if type(enable_tables) is not bool:
             raise ValueError("enable_tables must be a boolean")
         self._compute = enable_computation
@@ -198,14 +204,40 @@ class ScopedMemoryTools:
             return await prepare_tool_evidence(self._memory, self._space, self._scope,
                 self._excluded, _unavailable('evidence_unavailable'), self._timeout)
 
-    async def _search(self, args: _Search) -> dict[str, object]:
-        result = await AdaptiveRetriever(self._memory, _RetainCandidates(),
+    async def _retrieve(self, query: str, timeout: float) -> AdaptiveResult:
+        return await AdaptiveRetriever(self._memory, _RetainCandidates(),
             limits=AdaptiveLimits(max_rounds=1, max_queries=1, candidate_limit=self._candidate_limit,
-                                  max_evidence_bytes=32000, timeout_s=self._timeout)).retrieve(
-                self._space, args.query, scope=self._scope, exclude_session_id=self._excluded)
+                                  max_evidence_bytes=32000, timeout_s=timeout)).retrieve(
+                self._space, query, scope=self._scope, exclude_session_id=self._excluded)
+
+    async def _search(self, args: _Search) -> dict[str, object]:
+        started = time.monotonic()
+        result = await self._retrieve(args.query, self._timeout)
         if result.errors:
             return _unavailable("timeout" if "timeout" in result.errors else "retrieval_failed")
         ranked_items = result.recall.items
+        hop_note: dict[str, object] | None = None
+        if self._second_hop and ranked_items:
+            # The second search goes through the same retriever, so the scope,
+            # the session exclusion and the source checks hold for it too. It
+            # gets what is left of the deadline; when it fails, the first
+            # search stands alone and the packet says so.
+            room = MAX_QUERY - len(args.query) - 1
+            left = self._timeout - (time.monotonic() - started)
+            if not should_hop(args.query) or room <= 0:
+                hop_note = {"ran": False, "reason": "comparison" if room > 0 else "no_room"}
+            elif left < 1.0:  # the retriever takes no deadline under a second
+                hop_note = {"ran": False, "reason": "no_time"}
+            else:
+                hopped = await self._retrieve(args.query + "\n" + ranked_items[0].text[:room], left)
+                if hopped.errors:
+                    hop_note = {"ran": False, "reason": "hop_failed"}
+                else:
+                    merged = merge(ranked_items, hopped.recall.items, keep=HOP_KEEP,
+                                   limit=max(len(ranked_items), self._candidate_limit))
+                    first_ids = {item.chunk_id for item in ranked_items}
+                    hop_note = {"ran": True, "added": sum(1 for item in merged if item.chunk_id not in first_ids)}
+                    ranked_items = merged
         ranking = None
         if (self._memory.reranker is not None
                 and not isinstance(self._memory.reranker, ListwiseReranker) and ranked_items):
@@ -233,6 +265,8 @@ class ScopedMemoryTools:
                 "facts": [_claim(row) for row in facts], "verified_accuracy": False,
                 "coverage": {"bounded": True, "complete": False, "truncated": result.truncated or omitted > 0,
                              "output_omitted_count": omitted, "reasons": list(result.reasons)}}
+        if hop_note is not None:
+            packet['hop'] = hop_note
         if ranking is not None:
             packet['rerank'] = ranking.trace.model_dump()
             # A source may change while an async scorer runs. Revalidate even

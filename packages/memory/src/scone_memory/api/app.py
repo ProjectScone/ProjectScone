@@ -940,6 +940,8 @@ def create_app(
         whole: bool = Query(False, description="Show each passage whole instead of its first 200 characters."),
         synthesis_mode: Optional[str] = Query(default=None,
                                               description="With route=synthesize: evidence (default), refine, accumulate or facts."),
+        hop: bool = Query(False, description="Let the recall route search again from its leading passage, for answers "
+                                             "one step away; questions comparing named things are searched once."),
         space: str = Depends(space_for),
     ) -> dict:
         """One question answered by whichever machinery suits it, saying
@@ -957,7 +959,7 @@ def create_app(
         synthesis = synthesis_factory() if route == "synthesize" and synthesis_factory is not None else None
         return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
                                       max_item_chars=0 if whole else DEFAULT_ITEM_CHARS,
-                                      synthesis=synthesis, synthesis_mode=synthesis_mode)).record(space)
+                                      synthesis=synthesis, synthesis_mode=synthesis_mode, hop=hop)).record(space)
 
     @app.get("/v1/recall/tree")
     async def get_recall_tree(
