@@ -60,6 +60,30 @@ Paired on the same 500 items:
 - **Against the 100-item sample:** the sample showed +9 points at top 10 (85% vs 76%). The full set gives +3.4.
   Samples are not results.
 
+### A second judge: Gemma 4 31B (open weights)
+
+The official judge is `gpt-4o-2024-08-06`, because published LongMemEval scores use it. To check that the comparison
+does not depend on it, all 2,462 judged answers were judged again by `google/gemma-4-31b-it`: upstream's prompts,
+reasoning off, 0 errors, about $0.10 against about $2.30 for gpt-4o.
+
+| Arm | gpt-4o judge | Gemma 4 31B judge |
+| --- | ---: | ---: |
+| oracle | 93.6% | 92.6% |
+| **scone@10** | **80.6%** | **79.0%** |
+| llamaindex@10 | 77.2% | 74.8% |
+| **scone@5** | **76.2%** | **74.2%** |
+| llamaindex@5 | 72.0% | 71.0% |
+
+Paired under the Gemma judge: scone@10 vs llamaindex@10 is 40–19 (p = 0.009), and scone@5 vs llamaindex@5 is 39–23
+(p = 0.056).
+
+- **Agreement:** the judges agree on 2,414 of 2,462 verdicts (98.1%).
+- **Disagreements:** 44 of the 48 are answers gpt-4o accepted and Gemma refused. Gemma is the stricter judge, and that
+  lowers every arm alike.
+- **The comparison holds under either judge.** The top-10 gap is wider under Gemma (+4.2 points vs +3.4). The top-5
+  gap narrows to p = 0.056.
+- **Practice from here:** Gemma judges experiments, and gpt-4o judges only results reported beside published scores.
+
 ## Retrieval: all evidence sessions within the top k
 
 These are the 470 items that have evidence (the 30 abstention items are excluded).
