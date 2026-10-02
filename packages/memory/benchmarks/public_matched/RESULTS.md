@@ -98,6 +98,28 @@ On comparison questions the hop trails plain Scone (6–23, p = 0.002) and is le
 The retrieval gain carries through to answers. The next step is to keep the hop off comparison-shaped questions,
 chosen on the development half.
 
+### The hop gated off comparison questions (`retrieval.second_hop.should_hop`)
+
+- **The gate:** the hop is skipped when the question contains *or*, *both*, *either*, *neither* or *same*.
+- **How it was chosen:** from five word rules, on the development half's retrieval. It skipped the hop for 85% of
+  comparison questions and kept all@5 at 71.6% (always hopping: 71.3%).
+- **Scoring:** on the test half, each question took the hop answer when the gate allowed the hop and the plain Scone
+  answer otherwise, so no new answers were needed. The hop ran on 2,950 of 3,676 questions.
+
+| Test half (3,676) | Scone | Always hop | **Gated hop** | LlamaIndex |
+| --- | ---: | ---: | ---: | ---: |
+| EM / F1 | 46.8% / 57.4% | 49.4% / 60.6% | **49.8% / 61.0%** | 46.2% / 56.7% |
+| bridge EM | 41.9% | 45.7% | **45.6%** | 41.6% |
+| comparison EM | 67.6% | 65.1% | **67.6%** | 66.0% |
+| all@5 / all@10 | 64.8% / 76.4% | 69.8% / 83.2% | **70.3% / 83.3%** | 64.2% / 75.9% |
+
+Paired on exact match (gated hop wins vs the other side's wins):
+
+| Against | All questions | Comparison questions |
+| --- | --- | --- |
+| Scone | 173–64 (p = 9e-13) | 2–2 |
+| LlamaIndex | 242–112 (p = 4e-12) | 27–16 |
+
 **Cost:** the complete answer runs cost about $3.20 in provider charges (about 919 prompt tokens per answer).
 
 **Not yet measured:** systems other than LlamaIndex.
