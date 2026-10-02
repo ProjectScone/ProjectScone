@@ -56,6 +56,7 @@ from ..memory.engine import MemoryEngine, Profile, check_space, normalise_term
 from ..core.errors import SconeError
 from ..core.models import Added, Episode, Fact, RecallResult
 from ..entities.context import MAX_NAME, MAX_NAMES, MAX_QUESTION, ContextLimits, graph_connections, graph_context
+from ..entities.mentions import is_mention
 from ..entities.report import render_markdown, report_record
 from ..entities.schema import MAX_PREDICATES, schema_record, schema_text
 from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
@@ -285,7 +286,7 @@ async def pending_episodes(engine: MemoryEngine, space: str, limit: int) -> list
     """
     check_space(space)
     facts = await engine.documents.list_facts(space, include_closed=True)
-    distilled = {f.source_episode_id for f in facts if f.source_episode_id is not None}
+    distilled = {f.source_episode_id for f in facts if f.source_episode_id is not None and not is_mention(f)}
     recent = await engine.documents.recent_episodes(space, limit + len(distilled))
     return [e for e in recent if e.episode_id not in distilled][:limit]
 

@@ -16,6 +16,7 @@ from ..core.timeutil import parse_rfc3339
 from ..core.errors import InvalidInput
 from ..core.models import Episode, Fact, Status
 from ..core.ports import DocumentStore, SourcePage
+from ..entities.mentions import is_mention
 from ..core.validation import (KINDS, STATUSES, check_space, normalise_metadata, normalise_term, normalise_time)
 from .profile_buckets import BucketBounds as BucketBounds, BucketRules as BucketRules, ProfileBuckets, bucketed
 
@@ -180,7 +181,7 @@ async def _one_revision(engine: "MemoryEngine", space: str, limit: int, kept: Pr
 
     active = [fact for fact in read.facts
               if fact.status == "active" and not fact.excluded and fact.holds_at(now) and kept.keeps(fact)
-              and not is_decision(fact)]
+              and not is_decision(fact) and not is_mention(fact)]
     # Newest first, and only as many as restatements will be counted for:
     # each count is a read of its own.
     active.sort(key=lambda fact: (fact.valid_from, fact.fact_id), reverse=True)
@@ -229,7 +230,8 @@ async def pending_distillation(documents: DocumentStore, space: str) -> int:
     counts = await documents.counts(space)
     if counts.episodes == 0:
         return 0
-    referenced = {f.source_episode_id for f in await documents.list_facts(space, include_closed=True)}
+    referenced = {f.source_episode_id for f in await documents.list_facts(space, include_closed=True)
+                  if not is_mention(f)}
     return sum(1 for e in await documents.recent_episodes(space, counts.episodes) if e.episode_id not in referenced)
 
 
