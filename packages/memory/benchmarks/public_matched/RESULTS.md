@@ -64,11 +64,43 @@ Index build: LlamaIndex took 2,356 s over 66,745 nodes. Scone ingested from the 
   about an entity named in the first and shares little with the question. This is where multi-hop retrieval
   (HippoRAG 2's personalized PageRank; iterative retrieval) reports its gains, and where Scone has nothing today.
 
-## Not yet measured
+## Answers on the complete dev sets (2 October 2026)
 
-- **Answer accuracy (exact match and F1).** The answer stage is ready and smoke-tested. It needs a reader for about
-  36,000 answers: hosted Gemma 4 31B waits on the API spending cap, and local Gemma 4 E4B would take about a day.
-- **Other competitors.** Systems other than LlamaIndex have not been run in this harness.
+**Setup:** each system's top five documents went to the same reader, `google/gemma-4-31b-it` through OpenRouter,
+with reasoning off and up to 64 output tokens. The documents were numbered, in rank order, within an 8,000-byte
+budget. Answers were scored with the official normalization (`testing/public_qa.answer_score`, checked against the
+official HotpotQA evaluator). Every question was answered, and four answers that hit the output cap count as
+incorrect.
+
+| Dataset | Scone EM / F1 | LlamaIndex EM / F1 | Scone only / LlamaIndex only (EM) | Sign test |
+| --- | --- | --- | --- | --- |
+| SQuAD (10,570) | **78.1% / 86.5%** | 77.5% / 86.2% | 317 / 256 | p = 0.012 |
+| HotpotQA (7,405) | **46.7% / 57.4%** | 46.2% / 56.9% | 236 / 202 | p = 0.11 |
+
+### With the second hop, on the held-out half of HotpotQA
+
+The answers to `scone_hop@5` came from the engine-hop rankings (`enginehop.py`) through the same reader.
+
+| Test half (3,676) | Scone | **Scone + hop** | LlamaIndex |
+| --- | --- | --- | --- |
+| all, EM / F1 | 46.8% / 57.4% | **49.4% / 60.6%** | 46.2% / 56.7% |
+| bridge (2,973), EM / F1 | 41.9% / 53.0% | **45.7% / 57.5%** | 41.6% / 52.6% |
+| comparison (703), EM / F1 | **67.6% / 76.1%** | 65.1% / 73.5% | 66.0% / 74.4% |
+
+Paired on exact match (hop wins vs the other side's wins):
+
+| Against | All questions | Bridge questions |
+| --- | --- | --- |
+| Scone | 181–86 (p = 6e-9) | 175–63 (p = 2e-13) |
+| LlamaIndex | 234–118 (p = 6e-10) | 217–95 (p = 4e-12) |
+
+On comparison questions the hop trails plain Scone (6–23, p = 0.002) and is level with LlamaIndex (17–23, p = 0.43).
+The retrieval gain carries through to answers. The next step is to keep the hop off comparison-shaped questions,
+chosen on the development half.
+
+**Cost:** the complete answer runs cost about $3.20 in provider charges (about 919 prompt tokens per answer).
+
+**Not yet measured:** systems other than LlamaIndex.
 
 ## Experiment: a second hop without a model ([`twohop.py`](twohop.py)) — not adopted
 
