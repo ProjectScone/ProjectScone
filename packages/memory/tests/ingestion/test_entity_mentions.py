@@ -161,6 +161,21 @@ async def test_a_recognized_name_shaped_like_a_value_is_still_an_entity():
         await memory.close()
 
 
+async def test_two_names_of_one_kind_hold_side_by_side():
+    """Naming Globex is no change of mind about Acme: neither mention
+    closes the other, from one record or from two of the same source."""
+    memory = await engine()
+    try:
+        recognizer = FixedRecognizer({"Acme": "ORG", "Globex": "ORG", "Initech": "ORG"})
+        await memory.remember("s", "Acme and Globex merged.", source="news.md", created_at=WHEN)
+        await memory.remember("s", "Initech followed.", source="news.md", created_at="2024-04-01T00:00:00Z")
+        await MentionRecorder(memory, recognizer).record_pending("s")
+        assert await memory.facts("s", status="closed") == []
+        assert sorted(fact.object for fact in await memory.facts("s")) == ["Acme", "Globex", "Initech"]
+    finally:
+        await memory.close()
+
+
 async def test_a_record_without_a_source_is_named_by_its_episode():
     memory = await engine()
     try:
