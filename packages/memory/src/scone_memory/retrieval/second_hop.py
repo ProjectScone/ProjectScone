@@ -33,6 +33,7 @@ under the same scope, filters and limits as the first.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Optional
@@ -42,6 +43,20 @@ from ..core.validation import MAX_QUERY
 from .fusion import PER_EPISODE_CAP
 
 KEEP = 3
+
+#: Words that mark a question comparing two named things ("Which is older, X or Y?", "Are both A and B ..."). Both
+#: are named in the question, so the first search finds both, and a hop seeded with one of them only crowds them.
+COMPARISON_WORDS = re.compile(r'\b(or|both|either|neither|same)\b', re.IGNORECASE)
+
+
+def should_hop(question: str) -> bool:
+    """Whether a second search is worth running: not for a question that compares things it names.
+
+    Chosen on the development half of HotpotQA from five rules over the question's words alone (the hop then ran on
+    78.5% of questions and 15.4% of comparison questions). On the held-out half it kept the hop's gain and removed
+    its loss: exact match 46.8% to 49.8% overall (vs 49.4% hopping always), comparison questions 67.6% unchanged (vs
+    65.1%). A rule of words, not of meaning: it errs toward not hopping, which costs only the gain it forgoes."""
+    return COMPARISON_WORDS.search(question) is None
 
 
 @dataclass(frozen=True)
@@ -86,14 +101,15 @@ def merge(first: Sequence[RecallItem], hop: Sequence[RecallItem], *, keep: int, 
 
 
 async def recall_with_hop(recall: Callable[[str], Awaitable[RecallResult]], query: str, *, limit: int,
-                          keep: int = KEEP) -> tuple[RecallResult, Optional[HopTrace]]:
+                          keep: int = KEEP, gate: bool = True) -> tuple[RecallResult, Optional[HopTrace]]:
     """The first recall, extended by a second seeded with its leading passage; the trace is None when no second
-    search ran (nothing found, or the question leaves no room for a seed within ``MAX_QUERY``)."""
+    search ran (nothing found, the question leaves no room for a seed within ``MAX_QUERY``, or ``gate`` is on and
+    ``should_hop`` says the question compares things it names)."""
     if keep < 1:
         raise ValueError('keep must be at least 1')
     first = await recall(query)
     room = MAX_QUERY - len(query) - 1
-    if not first.items or room <= 0:
+    if not first.items or room <= 0 or (gate and not should_hop(query)):
         return first, None
     seed = first.items[0]
     hop = await recall(query + '\n' + seed.text[:room])
