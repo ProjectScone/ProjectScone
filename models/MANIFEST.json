@@ -122,7 +122,58 @@
         "file": "model.safetensors",
         "bytes": 855304818,
         "sha256": "6d6c5dcd259b71a49a51916e5fd1dc248563ce08b41a713eb00dd296dfd8f5f4",
-        "chunks": []
+        "chunks": [
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-000",
+            "bytes": 94371840,
+            "sha256": "55a8e7f1ad96729b6a54921e38083222a1e8273718f25be4eda43d4c562f613f"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-001",
+            "bytes": 94371840,
+            "sha256": "614344caf2eb906c68b1717efed721e9e7c29eb63c94ce1b1898baab54c2658e"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-002",
+            "bytes": 94371840,
+            "sha256": "21eeaa00130512f59aebc9b2b9b953b2e63ebe8644a9c0e6040259ad35ed9be5"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-003",
+            "bytes": 94371840,
+            "sha256": "0e11cabb68a60155f7a036962dab6820e08e0cc91491891191c1151b25cc2e7d"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-004",
+            "bytes": 94371840,
+            "sha256": "43f09b7001e5180ac30ba8ae822f20741b69fab15b9b19c18c62f3d207a01530"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-005",
+            "bytes": 94371840,
+            "sha256": "a28514e8147cdfffa8d7592dee2f9a4e8791e2488e384a0416237a53365459b4"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-006",
+            "bytes": 94371840,
+            "sha256": "e9003f00806b768da61a73b7eba7b8525725eff20e081d70ffe5c8de7d30100d"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-007",
+            "bytes": 94371840,
+            "sha256": "21abf66da2f07156152937b7b3b4233b2f650ed86a3b6920c561a30f384417d7"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-008",
+            "bytes": 94371840,
+            "sha256": "c4697fd1f224dc5f68f2c3d591235cf59247535539cf0495117e8d568e76e710"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-009",
+            "bytes": 5958258,
+            "sha256": "9f07a86facc7c95b2a3a9dc1fae2faa6776334b2788d18b5554b98d2755bc3db"
+          }
+        ]
       }
     }
   }
