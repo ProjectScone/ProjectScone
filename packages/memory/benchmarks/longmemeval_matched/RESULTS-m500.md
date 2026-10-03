@@ -84,6 +84,24 @@ Paired under the Gemma judge: scone@10 vs llamaindex@10 is 40–19 (p = 0.009), 
   gap narrows to p = 0.056.
 - **Practice from here:** Gemma judges experiments, and gpt-4o judges only results reported beside published scores.
 
+### An in-process reranker ([`rerank_check.py`](rerank_check.py))
+
+Scone ran every item again with a local ONNX cross-encoder reranking the top 32 candidates. No reranking server was
+used. The rerank timeout was set to its maximum (10 s), and every recall's rerank trace was kept, so a silent fallback
+to the fused order is counted, not mistaken for no effect.
+
+| 470 answerable items | No reranker | MiniLM-L6 | bge-reranker-base |
+| --- | ---: | ---: | ---: |
+| reranks applied | — | 469 (1 failed) | 468 (2 failed) |
+| all evidence in top 5 | 75.5% | 78.3% (28–15, p = 0.066) | **79.6%** (30–11, p = 0.004) |
+| all evidence in top 10 | 84.7% | 86.6% (13–4, p = 0.049) | **86.8%** (14–4, p = 0.031) |
+| recall latency p50 / p95 | ~15 ms | 1.1 s / 1.6 s | 6.1 s / 8.3 s |
+
+- **A reranker is not required.** Every comparison against LlamaIndex above was won without one.
+- **It is an option for applications that can run one in-process.** It adds 2 to 4 points of evidence coverage, at
+  1–6 seconds of CPU per search.
+- **Not measured:** whether the coverage gain changes answer accuracy.
+
 ## Retrieval: all evidence sessions within the top k
 
 These are the 470 items that have evidence (the 30 abstention items are excluded).
