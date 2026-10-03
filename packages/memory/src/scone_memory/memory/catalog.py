@@ -176,7 +176,8 @@ async def _one_revision(engine: "MemoryEngine", space: str, limit: int, kept: Pr
     documents = engine.documents
     now = engine.clock()
     began = await documents.revision(space)
-    read = await read_ledger(engine, space, max_facts=MAX_PROFILE_FACTS)
+    # A profile never shows a mention, so none are read for it.
+    read = await read_ledger(engine, space, max_facts=MAX_PROFILE_FACTS, max_mentions=0)
     from ..entities.merges import is_decision
 
     active = [fact for fact in read.facts

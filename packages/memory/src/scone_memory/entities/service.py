@@ -73,6 +73,11 @@ MAX_BUILDS = 8
 WORKERS = 2
 
 
+
+def _limits_hold(ledger: LedgerRead) -> bool:
+    """Whether a held read was taken under the budgets in force now."""
+    return ledger.limit == reading.MAX_FACTS and ledger.mention_limit == reading.MAX_MENTION_FACTS
+
 class EntityServiceClosed(SconeError):
     """The engine is closing or closed; no projection is built or kept."""
 
@@ -310,7 +315,7 @@ class EntityService:
             held.views.move_to_end(key)
         projection, counted = found
         return projection, {"facts_read": len(held.ledger.facts), "facts_counted": counted,
-                            "facts_limit": held.ledger.limit,
+                            "facts_limit": held.ledger.limit, "mentions_limit": held.ledger.mention_limit,
                             "reasons": list(held.ledger.reasons), "read_mode": held.ledger.read_mode}
 
     async def _ledger(self, space: str, timed: bool = False) -> _Held:
@@ -328,7 +333,7 @@ class EntityService:
             # two moves the stamp, never slips under the new revision unseen.
             stamp = await cast(LedgerStamp, self._engine.documents).ledger_stamp(space) if callable(stamper) else None
             if (previous is not None and stamp is not None and previous.stamp == stamp
-                    and previous.ledger.limit == reading.MAX_FACTS and previous.ledger.consistent):
+                    and _limits_hold(previous.ledger) and previous.ledger.consistent):
                 kept = self._restamped(previous, revision)
                 self._keep(space, kept)
                 return kept
@@ -360,7 +365,7 @@ class EntityService:
 
     def _current(self, space: str, revision: int) -> _Held | None:
         held = self._held.get(space)
-        if held is None or held.ledger.revision != revision or held.ledger.limit != reading.MAX_FACTS:
+        if held is None or held.ledger.revision != revision or not _limits_hold(held.ledger):
             return None
         self._held.move_to_end(space)
         return held
