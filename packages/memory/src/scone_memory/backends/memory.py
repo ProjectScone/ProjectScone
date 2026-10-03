@@ -14,7 +14,7 @@ from collections import defaultdict
 from operator import mul
 from itertools import count
 from bisect import bisect_left, bisect_right, insort
-from typing import Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -568,6 +568,9 @@ class InMemoryVectorIndex:
         #: Each held point's vector norm, taken when it was written, so a
         #: search pays one dot product per point rather than two norms more.
         self._norms: dict[int, float] = {}
+        #: Each space's vectors as one numpy matrix with the row of each chunk,
+        #: built at the first fast search after a write and dropped by every write.
+        self._matrices: dict[str, tuple[Any, dict[int, int]]] = {}
         self.dim: Optional[int] = None
         self._writer: tuple[str, str] | None = None
         #: Writes that have taken the record and not yet returned, by writer.
@@ -654,6 +657,7 @@ class InMemoryVectorIndex:
         for point in points:
             self._points[point.chunk_id] = point
             self._norms[point.chunk_id] = _norm(point.vector)
+        self._matrices.clear()
 
     async def search(
         self,
@@ -668,18 +672,16 @@ class InMemoryVectorIndex:
         validate_vector(vector, self.dim)
         query_norm = _norm(vector)
         norms = self._norms
+        candidates = [point for point in self._points.values()
+                      if point.space == space
+                      and not (as_of and not is_before_or_at(point.created_at, as_of))
+                      and not (tags and not set(tags) <= set(point.tags))
+                      and not (where and any(point.metadata.get(k) != v for k, v in where.items()))
+                      and not (conditions is not None and not conditions.matches(point.metadata))]
+        if query_norm != 0 and limit > 0 and len(candidates) > max(EXACT_ALL_BELOW, limit + SHORTLIST_SPARE):
+            candidates = self._shortlist(space, candidates, vector, query_norm, limit)
         scored = []
-        for point in self._points.values():
-            if point.space != space:
-                continue
-            if as_of and not is_before_or_at(point.created_at, as_of):
-                continue
-            if tags and not set(tags) <= set(point.tags):
-                continue
-            if where and any(point.metadata.get(k) != v for k, v in where.items()):
-                continue
-            if conditions is not None and not conditions.matches(point.metadata):
-                continue
+        for point in candidates:
             norm = norms[point.chunk_id]
             # sum over map(mul) adds the same products in the same order as a
             # generator, so the score is the plain formula's to the last bit;
@@ -688,6 +690,52 @@ class InMemoryVectorIndex:
                            else sum(map(mul, vector, point.vector)) / (query_norm * norm)))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         return scored[:limit]
+
+    def _shortlist(self, space: str, candidates: list[VectorPoint], vector: Sequence[float], query_norm: float,
+                   limit: int) -> list[VectorPoint]:
+        """The candidates that can be in the exact top ``limit``, found without the exact formula.
+
+        A fast score (numpy's matrix product, or math.sumprod) differs from the
+        exact one only in its last bits: for a cosine in [-1, 1] by far less
+        than ``SHORTLIST_MARGIN``. So every candidate whose fast score is
+        within that margin of the ``limit + SHORTLIST_SPARE``-th best is kept,
+        and the exact formula then orders them. A candidate of the exact top
+        ``limit`` always survives, ties included, so the result is the full
+        scan's to the last bit. Without numpy or math.sumprod (Python 3.10,
+        3.11) nothing is cut and the full scan runs."""
+        approx = self._fast_scores(space, candidates, vector, query_norm)
+        if approx is None:
+            return candidates
+        keep = min(len(candidates), limit + SHORTLIST_SPARE)
+        cutoff = sorted(approx, reverse=True)[keep - 1] - SHORTLIST_MARGIN
+        return [point for point, fast in zip(candidates, approx) if fast >= cutoff]
+
+    def _fast_scores(self, space: str, candidates: list[VectorPoint], vector: Sequence[float],
+                     query_norm: float) -> Optional[list[float]]:
+        norms = self._norms
+        if _numpy is not None:
+            matrix, rows = self._matrix(space)
+            picked = matrix[[rows[point.chunk_id] for point in candidates]]
+            dots = picked @ _numpy.asarray(vector, dtype=_numpy.float64)
+            norm_row = _numpy.asarray([norms[point.chunk_id] for point in candidates], dtype=_numpy.float64)
+            with _numpy.errstate(divide="ignore", invalid="ignore"):
+                scores = _numpy.where(norm_row == 0, 0.0, dots / (norm_row * query_norm))
+            return [float(x) for x in scores]
+        sumprod = getattr(math, "sumprod", None)
+        if sumprod is None:
+            return None
+        return [0.0 if norms[point.chunk_id] == 0 else sumprod(vector, point.vector) / (norms[point.chunk_id] * query_norm)
+                for point in candidates]
+
+    def _matrix(self, space: str) -> tuple[Any, dict[int, int]]:
+        """The space's vectors as one float64 matrix and each chunk's row, built once per write."""
+        cached = self._matrices.get(space)
+        if cached is None:
+            points = [point for point in self._points.values() if point.space == space]
+            matrix = _numpy.asarray([point.vector for point in points], dtype=_numpy.float64)
+            cached = (matrix, {point.chunk_id: row for row, point in enumerate(points)})
+            self._matrices[space] = cached
+        return cached
 
     async def vectors_of(self, space: str, chunk_ids: Sequence[int]) -> dict[int, list[float]]:
         """The stored vectors of these chunks in the space; a chunk without one is absent."""
@@ -698,10 +746,27 @@ class InMemoryVectorIndex:
         for chunk_id in chunk_ids:
             self._points.pop(chunk_id, None)
             self._norms.pop(chunk_id, None)
+        self._matrices.clear()
 
     async def delete_space(self, space: str) -> None:
         self._points = {chunk_id: p for chunk_id, p in self._points.items() if p.space != space}
         self._norms = {chunk_id: self._norms[chunk_id] for chunk_id in self._points}
+        self._matrices.clear()
+
+
+#: A search over fewer candidates than this scores every one exactly; above it,
+#: a fast pass first drops those that cannot reach the top (``_shortlist``).
+EXACT_ALL_BELOW = 1024
+#: How many places past ``limit`` the fast pass keeps before its margin.
+SHORTLIST_SPARE = 256
+#: How far below the cut a fast score may sit and still be scored exactly. The
+#: fast scores of cosines differ from the exact ones by around 1e-13 at most.
+SHORTLIST_MARGIN = 1e-9
+
+try:  # numpy makes the fast pass one matrix product; without it math.sumprod, or no fast pass.
+    import numpy as _numpy
+except ImportError:  # pragma: no cover - numpy ships with most extras but is not required
+    _numpy = None  # type: ignore[assignment]
 
 
 def _norm(vector: Sequence[float]) -> float:

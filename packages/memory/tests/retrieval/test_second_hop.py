@@ -6,7 +6,7 @@ import pytest
 
 from scone_memory.core.models import RecallItem, RecallResult
 from scone_memory.core.validation import MAX_QUERY
-from scone_memory.retrieval.second_hop import merge, recall_with_hop
+from scone_memory.retrieval.second_hop import merge, recall_with_hop, should_hop
 
 
 def _item(chunk_id: int, episode_id: int, text: str = '') -> RecallItem:
@@ -64,3 +64,25 @@ def test_no_second_search_without_a_first_result_or_room_for_a_seed() -> None:
     assert trace is None and calls == 1
     with pytest.raises(ValueError):
         asyncio.run(recall_with_hop(recall, 'q', limit=5, keep=0))
+
+
+def test_the_gate_skips_questions_that_compare_things_they_name() -> None:
+    assert should_hop('Where was the director of Inception born?')
+    assert not should_hop('Which is older, the Eiffel Tower or Big Ben?')
+    assert not should_hop('Are both Lyon and Lille in France?')
+    assert not should_hop('Did they play for the same team?')
+    assert should_hop('Who founded the company that makes Origin?')  # 'or' only as a whole word
+
+
+def test_a_gated_comparison_question_runs_one_search_unless_the_gate_is_off() -> None:
+    calls = 0
+
+    async def recall(query: str) -> RecallResult:
+        nonlocal calls
+        calls += 1
+        return RecallResult(items=[_item(calls, calls)])
+
+    result, trace = asyncio.run(recall_with_hop(recall, 'Is Lyon or Lille larger?', limit=5))
+    assert trace is None and calls == 1 and [i.chunk_id for i in result.items] == [1]
+    _, trace = asyncio.run(recall_with_hop(recall, 'Is Lyon or Lille larger?', limit=5, gate=False))
+    assert trace is not None and calls == 3
