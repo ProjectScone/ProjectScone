@@ -27,6 +27,7 @@ from ..core.errors import InvalidInput, SconeError
 from ..providers.llm import ChatModel, StructuredChatModel
 from ..core.models import Episode, Fact
 from ..core.timeutil import parse_rfc3339
+from ..entities.mentions import is_mention
 
 EXTRACTION_PROMPT = """\
 You turn a piece of someone's memory into durable facts.
@@ -454,7 +455,10 @@ class Distiller:
         documents = self.engine.documents
         counts = await documents.counts(space)
         episodes = await documents.recent_episodes(space, max(counts.episodes, 1))
-        referenced = {f.source_episode_id for f in await documents.list_facts(space, include_closed=True)}
+        # A recognizer's mention cites the record it was read from without
+        # reading it into claims, so it does not take the record off the queue.
+        referenced = {f.source_episode_id for f in await documents.list_facts(space, include_closed=True)
+                      if not is_mention(f)}
         # A memory past its forget_after is as good as forgotten: no model reads it.
         moment = parse_rfc3339(self.engine.clock())
         fresh = [

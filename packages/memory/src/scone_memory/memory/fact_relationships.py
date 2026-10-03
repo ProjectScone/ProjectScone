@@ -14,6 +14,7 @@ from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Fact, FactLink
 from ..core.ports import DocumentStore, NewFactLink
 from ..core.validation import check_space, entity_key
 from ..entities.merges import SAME_ENTITY
+from ..entities.mentions import is_mention_predicate
 
 
 class PlaceFact(Protocol):
@@ -75,6 +76,10 @@ async def assert_fact(
         # Only a person's recorded decision merges two entities; a claim
         # that two names are one is stated under a predicate of its own.
         raise InvalidInput(f"{SAME_ENTITY!r} is reserved for entity merges; record one with merge_entities")
+    if is_mention_predicate(entity_key(predicate)):
+        # A mention's kind is read as the recognizer's; a claim stated under
+        # its predicate would pass a person's or a model's guess off as one.
+        raise InvalidInput(f"{entity_key(predicate)!r} is reserved for the entity recognizer's mentions")
     premises = [int(f) for f in derived_from]
     if premises:
         if origin == "stated":

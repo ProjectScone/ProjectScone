@@ -2802,6 +2802,9 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
         else:
             print(f"read {report.episodes} episode(s): {report.proposed} proposed, {report.accepted} accepted, "
                   f"{report.closed} closed, {report.skipped} restated, {report.parked} parked"
+                  + (f"; {report.recognizer} read {report.mentions_read} record(s): {report.mentions_added} "
+                     f"mention(s) recorded, {report.mentions_restated} restated, {report.mentions_cut} past the "
+                     f"per-record cap" if report.recognizer else "")
                   + (f"; error: {report.error}" if report.error else ""), file=out)
         return 0 if report.error is None else 1
 

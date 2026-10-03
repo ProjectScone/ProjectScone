@@ -23,4 +23,9 @@ MANY_VALUED: frozenset[str] = frozenset({
     "defines", "imports", "calls", "inherits", "mixes_in", "uses_type", "notes", "flags", "cites",
     "depends_on", "develops_with", "references", "imports_when_called", "imports_for_types",
     "runs_with", "requires_env", "connects_to",
+    # A named-entity recognizer's mentions (entities/mentions.py): a record
+    # names many things at once, and naming Lisbon is no change of mind
+    # about Acme.
+    "scone:mentions", "scone:mentions person", "scone:mentions organisation", "scone:mentions place",
+    "scone:mentions product", "scone:mentions event", "scone:mentions nationality",
 })

@@ -14,6 +14,14 @@ imports is a **module** (``typing``, ``github.com/gorilla/mux``). A module
 a manifest also depends on is the package it comes from, so ``module``
 beside ``product`` resolves to ``product`` rather than a conflict. Every
 one of these names the facts it was read from, like any hint.
+
+A named-entity recognizer's mention is a hint too (``mentions``): the
+kind its label gave, carried on the mention's predicate. It counts as
+one more hint and nothing more, so a recognizer that calls Acme a product
+beside a claim that someone works at Acme gives a conflict, never a
+quiet override. **nationality** exists for it: a nationality, religious
+or political group (OntoNotes' NORP) is a thing the graph should hold,
+and none of the kinds before it fit.
 """
 
 from __future__ import annotations
@@ -22,11 +30,13 @@ from functools import lru_cache
 from typing import Iterable, Literal
 
 from .classify import is_declaration_name
+from .mentions import mention_kind
 
 EntityKind = Literal["person", "organisation", "place", "project", "product", "event", "concept",
-                     "file", "declaration", "module"]
+                     "file", "declaration", "module", "nationality"]
 KindStatus = Literal["decided", "inferred", "unknown", "conflict"]
-KIND_HINTS_VERSION = "kinds/2"
+#: kinds/3: a recognizer's mention predicates hint the kind of their object.
+KIND_HINTS_VERSION = "kinds/3"
 #: A file's last segment carries one of these when no code reader knows it.
 _TEXT_SUFFIXES = frozenset((".md", ".markdown", ".rst", ".txt", ".json", ".toml", ".yaml", ".yml", ".sql",
                             ".cfg", ".ini", ".xml", ".csv"))
@@ -50,8 +60,9 @@ _AS_OBJECT: dict[str, EntityKind] = {
 
 
 def hint(predicate: str, role: Literal["subject", "object"]) -> EntityKind | None:
-    table = _AS_SUBJECT if role == "subject" else _AS_OBJECT
-    return table.get(predicate.replace(" ", "_"))
+    if role == "subject":
+        return _AS_SUBJECT.get(predicate.replace(" ", "_"))
+    return _AS_OBJECT.get(predicate.replace(" ", "_")) or mention_kind(predicate)
 
 
 @lru_cache(maxsize=4096)

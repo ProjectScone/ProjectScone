@@ -90,6 +90,12 @@
     SCONE_DISTILL_BATCH                episodes per pass per space (default 20)
     SCONE_DISTILL_ACCEPT_AT            confidence at or above which extractions enter the ledger
     SCONE_DERIVE       1 | 0          run the derivation pass after extraction (default 0; needs the chat model)
+    SCONE_ENTITY_RECOGNIZER spacy     the consolidation worker reads each record for named entities and
+                                       records them as `scone:mentions <kind>` claims the entity graph shows
+                                       (default off; needs no chat model; pip install 'scone-memory[entities]')
+    SCONE_ENTITY_MODEL                 the spaCy pipeline (default en_core_web_trf, most accurate, needs
+                                       PyTorch; en_core_web_lg is about four times faster and less accurate);
+                                       install it with python -m spacy download <model>
     SCONE_URL_IMPORT   1 | 0          let POST /v1/documents/from-url and `scone import-url` fetch a page (default 0)
     SCONE_URL_IMPORT_PRIVATE 1 | 0    also fetch hosts on private, loopback or link-local addresses (default 0)
                                        directly; unset = every extraction is proposed for review
@@ -144,6 +150,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Optional, cast
 
 if TYPE_CHECKING:
+    from ..ingestion.entity_mentions import EntityRecognizer, MentionRecorder
     from ..providers.aws_auth import AwsSigV4Auth
     from ..providers.llm import OpenAICompatibleTextModel
 
@@ -234,6 +241,11 @@ class Settings:
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
     derive: bool = False
+    #: SCONE_ENTITY_RECOGNIZER: "spacy" reads every record for named
+    #: entities in the consolidation worker; None leaves them unread.
+    entity_recognizer: Optional[str] = None
+    #: SCONE_ENTITY_MODEL: the pipeline the recognizer loads.
+    entity_model: str = "en_core_web_trf"
     #: Whether POST /v1/documents/from-url and `scone import-url` may fetch a page; off by default,
     #: because a server that fetches whatever URL it is told to fetches its own network.
     url_import: bool = False
@@ -416,6 +428,10 @@ class Settings:
             raise InvalidInput('SCONE_CHAT_FIRST_TEXT_TIMEOUT must be positive finite seconds')
         if type(self.chat_start_retries) is not int or not 0 <= self.chat_start_retries <= 1:
             raise InvalidInput('SCONE_CHAT_START_RETRIES must be 0 or 1')
+        if self.entity_recognizer not in (None, "spacy"):
+            raise InvalidInput(f"SCONE_ENTITY_RECOGNIZER must be spacy or unset, got {self.entity_recognizer!r}")
+        if not isinstance(self.entity_model, str) or not self.entity_model.strip():
+            raise InvalidInput("SCONE_ENTITY_MODEL must name a spaCy pipeline")
         if (isinstance(self.conversations_recall_timeout, bool)
                 or not isinstance(self.conversations_recall_timeout, (int, float))
                 or not math.isfinite(self.conversations_recall_timeout)
@@ -603,6 +619,8 @@ class Settings:
             distill_interval_s=float(env.get("SCONE_DISTILL_INTERVAL_S", "30")),
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
             derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
+            entity_recognizer=(env.get("SCONE_ENTITY_RECOGNIZER") or "").strip().lower() or None,
+            entity_model=(env.get("SCONE_ENTITY_MODEL") or "").strip() or "en_core_web_trf",
             url_import=parse_flag("SCONE_URL_IMPORT", env.get("SCONE_URL_IMPORT")),
             url_import_private=parse_flag("SCONE_URL_IMPORT_PRIVATE", env.get("SCONE_URL_IMPORT_PRIVATE")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
@@ -1184,11 +1202,32 @@ def configured_text_model() -> "OpenAICompatibleTextModel":
     )
 
 
+def build_recognizer(settings: Settings) -> "EntityRecognizer | None":
+    """The configured entity recognizer, loaded now, or None when none is
+    configured. A missing spaCy or model is refused here, by name, so a
+    server never starts believing it recognizes entities when it cannot."""
+    if settings.entity_recognizer is None:
+        return None
+    from ..ingestion.entity_mentions import SpacyRecognizer
+
+    return SpacyRecognizer(settings.entity_model)
+
+
+def build_recorder(engine: MemoryEngine, settings: Settings) -> "MentionRecorder | None":
+    recognizer = build_recognizer(settings)
+    if recognizer is None:
+        return None
+    from ..ingestion.entity_mentions import MentionRecorder
+
+    return MentionRecorder(engine, recognizer)
+
+
 def build_worker(engine: MemoryEngine, settings: Settings, spaces):
     """A ConsolidationWorker over the configured spaces, or None when there
-    is neither a model to distil with nor a retention policy to apply."""
+    is no model to distil with, no recognizer and no retention policy."""
     chat = build_chat(settings)
-    if chat is None and not settings.retention:
+    recorder = build_recorder(engine, settings)
+    if chat is None and recorder is None and not settings.retention:
         return None
     from ..ingestion.worker import ConsolidationWorker
 
@@ -1205,7 +1244,8 @@ def build_worker(engine: MemoryEngine, settings: Settings, spaces):
 
         deriver = Deriver(engine, chat)
     return ConsolidationWorker(engine, distiller, sorted(set(spaces)), interval_s=settings.distill_interval_s,
-                               batch=settings.distill_batch, retention=settings.retention, deriver=deriver)
+                               batch=settings.distill_batch, retention=settings.retention, deriver=deriver,
+                               recorder=recorder)
 
 
 def _chunk_tokens(tokens: Optional[str], overlap: Optional[str]) -> tuple[Optional[int], int]:

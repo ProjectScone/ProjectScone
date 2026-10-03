@@ -8,6 +8,11 @@ fails; either way it appends a ``distill`` event with what happened
 the metrics see consolidation as evidence rather than as a log line.
 Nothing here decides truth: the distiller proposes and a person
 approves, unless the deployer set accept_at.
+
+With an entity recognizer configured, the pass also reads pending records
+for the names they mention (``entity_mentions``). It needs no chat model,
+and it runs here rather than at ingest because a good recognizer costs
+milliseconds a sentence, which every write would otherwise wait for.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from .derive import Deriver
 from .distill import DistillError, Distiller
+from .entity_mentions import MentionRecorder, MentionTotals
 from ..memory.engine import MemoryEngine
 from ..core.errors import SconeError
 from ..memory.scheduled_forget import MAX_PASS, NO_INVENTORY, can_sweep
@@ -61,10 +67,24 @@ class PassReport:
     derived_proposed: int = 0
     derived_restated: int = 0
     derived_rejected: int = 0
+    #: The entity-recognition pass, when the worker has a recorder: which
+    #: recognizer read, records read, mention facts written and restated,
+    #: and every bound that bit -- pairs past the per-record cap, records
+    #: read only in part, mentions quoted by their own words -- with the
+    #: mentions and records left out by reason, and records that failed.
+    recognizer: Optional[str] = None
+    mentions_read: int = 0
+    mentions_added: int = 0
+    mentions_restated: int = 0
+    mentions_cut: int = 0
+    mentions_text_cut: int = 0
+    mentions_narrowed: int = 0
+    mentions_left_out: dict[str, int] = field(default_factory=dict)
+    mention_errors: dict[str, str] = field(default_factory=dict)
     error: Optional[str] = None
     latency_ms: float = 0.0
 
-    def as_payload(self) -> dict:
+    def as_payload(self) -> dict[str, object]:
         return {k: v for k, v in self.__dict__.items() if k != "space"}
 
 
@@ -79,15 +99,18 @@ class ConsolidationWorker:
         clock: Callable[[], float] = time.perf_counter,
         retention: Optional[Mapping[str, float]] = None,
         deriver: Optional["Deriver"] = None,
+        recorder: Optional[MentionRecorder] = None,
     ) -> None:
         """``distiller`` None means no model: the worker then only applies
         ``retention`` (episode kind -> days kept), which needs no model.
-        ``deriver`` runs the derivation pass after extraction and retention."""
-        if distiller is None and deriver is None and not retention:
-            raise ValueError("a worker needs a distiller, a deriver, a retention policy, or some of them")
+        ``deriver`` runs the derivation pass after extraction and retention.
+        ``recorder`` reads records for entity mentions after extraction."""
+        if distiller is None and deriver is None and recorder is None and not retention:
+            raise ValueError("a worker needs a distiller, a deriver, a recorder, a retention policy, or some of them")
         self.engine = engine
         self.distiller = distiller
         self.deriver = deriver
+        self.recorder = recorder
         self.retention = dict(retention or {})
         self.spaces = list(spaces)
         self.interval_s = interval_s
@@ -95,7 +118,7 @@ class ConsolidationWorker:
         self.clock = clock
         self.passes = 0
         self.last: dict[str, PassReport] = {}
-        self._task: Optional[asyncio.Task] = None
+        self._task: Optional[asyncio.Task[None]] = None
         #: Where each space's next sweep walks from: None is the newest episode.
         self._sweep_before: dict[str, Optional[int]] = {}
         self._stop = asyncio.Event()
@@ -167,6 +190,7 @@ class ConsolidationWorker:
                     report.proposed += 1
                 else:
                     report.accepted += 1
+        recognize_error = await self._recognize(space, report)
         if self.retention and report.error is None:
             try:
                 report.expired = len((await self.engine.expire(space, self.retention, limit=self.batch)).forgotten)
@@ -181,14 +205,38 @@ class ConsolidationWorker:
                 report.error = f"{type(e).__name__}: {e}"
             except Exception as e:  # noqa: BLE001 - same rule as extraction: record, never die
                 report.error = type(e).__name__
-        if sweep_error is not None and report.error is None:
-            # Said last, so a failed sweep stops neither retention nor derivation.
-            report.error = sweep_error
+        for late in (sweep_error, recognize_error):
+            if late is not None and report.error is None:
+                # Said last, so a failed sweep or recognition pass stops
+                # neither retention nor derivation.
+                report.error = late
         report.latency_ms = round((self.clock() - started) * 1000, 3)
         self.last[space] = report
         self.passes += 1
         await self.engine._emit(space, "distill", report.as_payload())
         return report
+
+    async def _recognize(self, space: str, report: PassReport) -> Optional[str]:
+        """The entity-recognition pass; returns its error, if any. A record
+        that fails is reported by id and the rest are still read; a
+        recognizer that fails fails the pass, like a model that cannot be
+        reached."""
+        if self.recorder is None:
+            return None
+        report.recognizer = self.recorder.recognizer.name
+        try:
+            totals = MentionTotals.of(await self.recorder.record_pending(space, limit=self.batch))
+        except SconeError as e:
+            return f"{type(e).__name__}: {e}"
+        except Exception as e:  # noqa: BLE001 - a worker must not die on a recognizer fault
+            return type(e).__name__
+        report.mentions_read, report.mentions_added = totals.read, totals.added
+        report.mentions_restated, report.mentions_cut = totals.restated, totals.cut
+        report.mentions_text_cut, report.mentions_narrowed = totals.text_cut, totals.narrowed
+        report.mentions_left_out, report.mention_errors = totals.left_out, totals.errors
+        if totals.errors:
+            return f"MentionError: {len(totals.errors)} record(s) failed entity recognition"
+        return None
 
     async def _sweep(self, space: str, report: PassReport) -> Optional[str]:
         """Forget what is due, first in the pass and whatever consolidation

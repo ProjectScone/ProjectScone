@@ -234,6 +234,7 @@ def test_the_projection_digest_of_a_fixed_ledger_does_not_drift():
                   valid_from="2024-02-01T00:00:00Z"),
              Fact(fact_id=3, space="alpha", subject="alice chen", predicate="joined_on", object="May 2021",
                   valid_from="2024-01-01T00:00:00Z", status="closed", valid_until="2025-01-01T00:00:00Z")]
-    # kinds/2 (code entities kinded by their shape) changed the digest on purpose.
+    # kinds/2 (code entities kinded by their shape) changed the digest on
+    # purpose, and so did objects/2 with kinds/3 (a recognizer's mentions).
     assert project_entities("alpha", facts, revision=1).digest == \
-        "f5548d5261767c5db5cd2a1b493e9e1d26ce9751e2b9a7d3702a1632ea6ea9f1"
+        "9e9130578c3ae1fa4ed17731e4280bed2b086fe1521180c05bfcdb9f3df9a337"
