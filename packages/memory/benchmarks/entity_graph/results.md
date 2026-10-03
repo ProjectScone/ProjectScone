@@ -62,11 +62,11 @@ unmeasured, and its threshold fails.
 | Path false positives | 0 | at most 0 |
 | Fragmentation | 1.2 | at most 1.2 |
 | Alias B-cubed F1 | 0.935 | at least 0.9 |
-| View bytes (knowledge, report, context) | 9,366, 5,791, 684 | recorded |
+| View bytes (knowledge, report, context) | 9,391, 5,816, 684 | recorded |
 | Build time per 10,000 facts | about 0.5 s | recorded |
 
-Artefact: `ee90d8c091c147e92f682d9658983b09a1760b05234c87dcc628d3cf0f1ba35c`. The scores
-match the first recording (`44ceae91…`). The hash has moved six times
+Artefact: `0395d97afd6032e87c6d39442a7660b87a070539d322f0367640e3437c5db687`. The scores
+match the first recording (`44ceae91…`). The hash has moved seven times
 since, and no score has changed on any of them: when the
 missing-evidence and out-of-view counts joined the report
 (`daceac58…`); when the knowledge view began saying when things held
@@ -150,6 +150,15 @@ those are the whole difference, and removing the three keys and writing
 back `kinds/1` and the old digest gives 5,721 bytes, the previous
 recording. #57's directory names change no label here, since no member
 of this fixture is a path, and no community, score or count moved.
+
+The next move adds **25 bytes to the knowledge view and 25 to the
+report**, and nothing to the context packet. It is one field,
+`"mentions_limit": 50000`, in the coverage of each: the entity graph
+now reads a named-entity recognizer's mentions under a budget of their
+own, and the coverage says what that budget was. This fixture holds no
+mentions, so no entity, relation, score or count moved, and the 25
+bytes are exactly `, "mentions_limit": 50000`. The previous artefact
+was `ee90d8c0…`.
 
 ## What the numbers say
 
