@@ -40,6 +40,17 @@ fact cites them yet), plus, for records that named nothing, this
 instance's memory -- as the distiller does, a fresh recorder reads those
 once more and writes nothing new.
 
+**Failures are retried, then parked.** A record counts as read only once
+every mention planned for it is in the ledger. One whose writes stop
+partway stays pending although some mention already cites it, and is
+read again; so is one the recognizer could not read. A batch the
+recognizer refuses is read again one text at a time, so one bad record
+cannot hold back the rest. After ``MAX_ATTEMPTS`` failures a record is
+parked: skipped, and counted as parked on every pass, so the queue moves
+on and nothing is silent. Failures are kept in memory, as the
+distiller's are: a record whose writes stopped partway before a restart
+is not known to be incomplete after it.
+
 The recognizer runs in the background consolidation worker, not at
 ingest: the best model takes about 9 ms a sentence on a CPU, which a
 document of a few hundred sentences would add to every write.
@@ -193,6 +204,9 @@ class MentionPlan:
     #: Mentions whose span did not hold their text and whose text is not
     #: in the record either, so nothing could quote them.
     unplaced: int = 0
+    #: Mentions whose sentence and own words were both longer than
+    #: ``MAX_QUOTE_CHARS``, so no bounded quote could ground them.
+    too_long: int = 0
     #: Mentions quoted by their own words because their sentence was
     #: longer than ``MAX_QUOTE_CHARS``.
     narrowed: int = 0
@@ -217,7 +231,7 @@ def plan_mentions(text: str, mentions: Iterable[Mention], *, limit: int = MAX_ME
     planned: list[Planned] = []
     seen: set[tuple[str, Optional[str]]] = set()
     over: set[tuple[str, Optional[str]]] = set()
-    values = repeated = unplaced = narrowed = 0
+    values = repeated = unplaced = narrowed = too_long = 0
     for mention in sorted(mentions, key=lambda item: (item.start, item.end)):
         name = " ".join(mention.text.split())
         if mention.label in VALUE_LABELS:
@@ -239,11 +253,14 @@ def plan_mentions(text: str, mentions: Iterable[Mention], *, limit: int = MAX_ME
                 unplaced += 1
                 continue
             quote = mention.text.strip()
+            if len(quote) > quote_limit:
+                too_long += 1
+                continue
             narrowed += int(placed)
         seen.add(pair)
         planned.append(Planned(name, mention.kind, quote))
     return MentionPlan(tuple(planned), values=values, repeated=repeated, cut=len(over), unplaced=unplaced,
-                       narrowed=narrowed)
+                       narrowed=narrowed, too_long=too_long)
 
 
 @dataclass
@@ -257,11 +274,13 @@ class MentionOutcome:
     repeated: int = 0
     cut: int = 0
     unplaced: int = 0
+    too_long: int = 0
     narrowed: int = 0
     #: Characters of the record past ``MAX_TEXT_CHARS``, not read.
     text_cut: int = 0
     #: Why the record was not read at all, when it was not: ``code`` for
-    #: a source file, whose names the code readers already record.
+    #: a source file, whose names the code readers already record, or
+    #: ``parked`` for one that failed ``MAX_ATTEMPTS`` times.
     skipped: Optional[str] = None
     error: Optional[str] = None
 
@@ -310,12 +329,16 @@ class MentionRecorder:
 
     async def record_pending(self, space: str, limit: int = 20) -> list[MentionOutcome]:
         """Read up to ``limit`` pending records, oldest first, in one call
-        to the recognizer. A record that fails is reported on its outcome
-        and counted against it; a failure of the recognizer itself raises."""
+        to the recognizer, and report every parked record as skipped. A
+        record that fails is reported on its outcome and counted against
+        it; it never stops the others."""
         check_space(space)
-        waiting = [episode for episode in await self._pending(space)
+        pending = await self._pending(space)
+        parked = [MentionOutcome(episode.episode_id, skipped="parked") for episode in pending
+                  if self._failures.get((space, episode.episode_id), 0) >= self.max_attempts]
+        waiting = [episode for episode in pending
                    if self._failures.get((space, episode.episode_id), 0) < self.max_attempts]
-        return await self._record(space, waiting[:max(limit, 0)])
+        return [*parked, *await self._record(space, waiting[:max(limit, 0)])]
 
     async def _pending(self, space: str) -> list[Episode]:
         documents = self.engine.documents
@@ -326,8 +349,11 @@ class MentionRecorder:
         cited = {fact.source_episode_id for fact in await documents.list_facts(space, include_closed=True)
                  if is_mention(fact)}
         moment = parse_rfc3339(self.engine.clock())
+        # A record some mention cites is read, unless its writes stopped
+        # partway: then a failure is held against it and it is read again.
         fresh = [episode for episode in episodes
-                 if episode.content.strip() and episode.episode_id not in cited
+                 if episode.content.strip()
+                 and (episode.episode_id not in cited or (space, episode.episode_id) in self._failures)
                  and (space, episode.episode_id) not in self._done
                  and not forget_after.is_due(episode.metadata, moment)]
         return sorted(fresh, key=lambda episode: (parse_rfc3339(episode.created_at), episode.episode_id))
@@ -344,27 +370,51 @@ class MentionRecorder:
         if readable:
             await self.engine._living(space)
             texts = [episode.content[:self.max_chars] for episode in readable]
-            found = await asyncio.to_thread(self.recognizer.recognize, texts)
-            if len(found) != len(texts):
-                raise InvalidInput(f"recognizer {self.recognizer.name} returned {len(found)} results "
-                                   f"for {len(texts)} texts")
+            found = await self._recognized(texts)
             for episode, text, mentions in zip(readable, texts, found):
                 outcome = outcomes[episode.episode_id]
                 outcome.text_cut = len(episode.content) - len(text)
                 try:
+                    if isinstance(mentions, Exception):
+                        raise mentions
                     await self._write(space, episode, plan_mentions(text, mentions, limit=self.max_mentions), outcome)
-                except SconeError as error:
-                    key = (space, episode.episode_id)
-                    self._failures[key] = self._failures.get(key, 0) + 1
-                    outcome.error = f"{type(error).__name__}: {error}"
+                except Exception as error:  # noqa: BLE001 - one record's fault is that record's, counted
+                    self._fail(space, episode.episode_id, outcome, error)
                     continue
                 self._failures.pop((space, episode.episode_id), None)
                 self._done.add((space, episode.episode_id))
         return [outcomes[episode.episode_id] for episode in episodes]
 
+    def _fail(self, space: str, episode_id: int, outcome: MentionOutcome, error: Exception) -> None:
+        key = (space, episode_id)
+        self._failures[key] = self._failures.get(key, 0) + 1
+        detail = str(error) if isinstance(error, SconeError) else ""
+        outcome.error = f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+
+    async def _recognized(self, texts: Sequence[str]) -> list[list[Mention] | Exception]:
+        """The recognizer's mentions for each text, or the error it raised
+        on that text. A batch it refuses, or answers with the wrong count,
+        is read again a text at a time, so one bad record fails alone."""
+        try:
+            found = await asyncio.to_thread(self.recognizer.recognize, texts)
+            if len(found) == len(texts):
+                return list(found)
+        except Exception:  # noqa: BLE001 - retried below, one text at a time
+            pass
+        alone: list[list[Mention] | Exception] = []
+        for text in texts:
+            try:
+                single = await asyncio.to_thread(self.recognizer.recognize, [text])
+                if len(single) != 1:
+                    raise InvalidInput(f"recognizer {self.recognizer.name} returned {len(single)} results for 1 text")
+                alone.append(single[0])
+            except Exception as error:  # noqa: BLE001 - this text's failure, counted against its record
+                alone.append(error)
+        return alone
+
     async def _write(self, space: str, episode: Episode, plan: MentionPlan, outcome: MentionOutcome) -> None:
         outcome.values, outcome.repeated, outcome.cut = plan.values, plan.repeated, plan.cut
-        outcome.unplaced, outcome.narrowed = plan.unplaced, plan.narrowed
+        outcome.unplaced, outcome.narrowed, outcome.too_long = plan.unplaced, plan.narrowed, plan.too_long
         subject = record_name(episode)
         held: dict[str, set[int]] = {}
         for item in plan.planned:
@@ -418,6 +468,6 @@ class MentionTotals:
                 totals.cut += outcome.cut
                 totals.text_cut += outcome.text_cut > 0
                 totals.narrowed += outcome.narrowed
-                for reason in ("values", "repeated", "unplaced"):
+                for reason in ("values", "repeated", "unplaced", "too_long"):
                     totals._leave_out(reason, getattr(outcome, reason))
         return totals

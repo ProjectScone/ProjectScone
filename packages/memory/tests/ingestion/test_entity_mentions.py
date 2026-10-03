@@ -109,7 +109,7 @@ def test_the_quote_is_the_sentence_and_narrows_when_it_is_too_long():
     text = "First one. Then Acme Robotics hired Bob! Last."
     start = text.index("Acme")
     assert quote_for(text, start, start + 13) == "Then Acme Robotics hired Bob!"
-    plan = plan_mentions(text, [Mention(start, start + 13, "Acme Robotics", "ORG", "organisation")], quote_limit=10)
+    plan = plan_mentions(text, [Mention(start, start + 13, "Acme Robotics", "ORG", "organisation")], quote_limit=20)
     assert plan.planned[0].quote == "Acme Robotics" and plan.narrowed == 1
 
 
@@ -420,5 +420,115 @@ async def test_a_real_pipeline_records_typed_mentions():
         projection, _ = await load_projection(memory, "s", mode="current")
         kinds = {item.key: item.kind for item in projection.entities}
         assert kinds.get("berlin") == "place"
+    finally:
+        await memory.close()
+
+
+# -- failures are retried, isolated and parked ------------------------------------
+
+
+def test_a_name_too_long_to_quote_is_counted_not_planned():
+    text = "Then Acme Robotics hired Bob!"
+    start = text.index("Acme")
+    plan = plan_mentions(text, [Mention(start, start + 13, "Acme Robotics", "ORG", "organisation")], quote_limit=5)
+    assert plan.planned == () and plan.too_long == 1 and plan.narrowed == 0
+
+
+def fail_writes(memory: MemoryEngine, monkeypatch, *, on: str, times: int) -> list[int]:
+    """Make the ledger refuse writing the mention named ``on``, ``times`` times."""
+    real = memory._assert_placed
+    refused = [0]
+
+    async def flaky(space, subject, predicate, obj, **options):
+        if obj == on and refused[0] < times:
+            refused[0] += 1
+            raise InvalidInput("the store refused this write")
+        return await real(space, subject, predicate, obj, **options)
+
+    monkeypatch.setattr(memory, "_assert_placed", flaky)
+    return refused
+
+
+async def test_a_record_whose_writes_stop_partway_is_completed_on_the_next_pass(monkeypatch):
+    memory = await engine()
+    try:
+        await memory.remember("s", NOTE, source="notes/meeting.md", created_at=WHEN)
+        recorder = MentionRecorder(memory, FixedRecognizer(LABELS))
+        fail_writes(memory, monkeypatch, on="Lisbon", times=1)
+        [first] = await recorder.record_pending("s")
+        assert first.error is not None and first.added == 2, "two written before the refusal"
+        [second] = await recorder.record_pending("s")
+        assert second.error is None and (second.added, second.restated) == (3, 2)
+        assert len([fact for fact in await memory.facts("s") if is_mention(fact)]) == 5
+        assert await recorder.record_pending("s") == []
+    finally:
+        await memory.close()
+
+
+async def test_a_record_that_always_fails_is_parked_after_its_attempts_and_counted(monkeypatch):
+    memory = await engine()
+    try:
+        await memory.remember("s", NOTE, source="notes/meeting.md", created_at=WHEN)
+        recognizer = FixedRecognizer(LABELS)
+        recorder = MentionRecorder(memory, recognizer, max_attempts=2)
+        refused = fail_writes(memory, monkeypatch, on="Lisbon", times=99)
+        worker = ConsolidationWorker(memory, None, ["s"], recorder=recorder)
+        reports = [await worker.run_once("s") for _ in range(4)]
+        assert [len(report.mention_errors) for report in reports] == [1, 1, 0, 0]
+        assert reports[2].mentions_left_out == {"skipped_parked": 1} == reports[3].mentions_left_out
+        assert refused[0] == 2 and recognizer.calls == 2, "a parked record is not read again"
+        assert recorder.parked("s") == [1]
+    finally:
+        await memory.close()
+
+
+class Poisoned(FixedRecognizer):
+    """Raises on any batch holding a poisoned text, and on that text alone;
+    ``transient`` raises on the first call only, whatever it holds."""
+
+    def __init__(self, labels: dict[str, str], *, transient: bool = False) -> None:
+        super().__init__(labels)
+        self.transient = transient
+
+    def recognize(self, texts: Sequence[str]) -> list[list[Mention]]:
+        if self.transient and self.calls == 0:
+            self.calls += 1
+            raise RuntimeError("the model was busy")
+        if not self.transient and any("poison" in text for text in texts):
+            self.calls += 1
+            raise RuntimeError("the model cannot read this")
+        return super().recognize(texts)
+
+
+async def test_a_text_the_recognizer_cannot_read_fails_alone_and_is_parked():
+    memory = await engine()
+    try:
+        await memory.remember("s", "Acme hired Bob.", source="a.md", created_at="2024-01-01T00:00:00Z")
+        await memory.remember("s", "poison Globex", source="b.md", created_at="2024-01-02T00:00:00Z")
+        await memory.remember("s", "Initech hired Bob.", source="c.md", created_at="2024-01-03T00:00:00Z")
+        labels = {"Acme": "ORG", "Globex": "ORG", "Initech": "ORG"}
+        recorder = MentionRecorder(memory, Poisoned(labels))
+        worker = ConsolidationWorker(memory, None, ["s"], recorder=recorder)
+        first = await worker.run_once("s")
+        assert first.mentions_added == 2 and list(first.mention_errors) == ["2"]
+        assert sorted(fact.object for fact in await memory.facts("s")) == ["Acme", "Initech"]
+        await memory.remember("s", "Umbrella hired Bob.", source="d.md", created_at="2024-01-04T00:00:00Z")
+        labels["Umbrella"] = "ORG"
+        reports = [await worker.run_once("s") for _ in range(3)]
+        assert reports[0].mentions_added == 1, "a newer record is not held back"
+        assert [len(report.mention_errors) for report in reports] == [1, 1, 0]
+        assert reports[2].mentions_left_out == {"skipped_parked": 1}
+    finally:
+        await memory.close()
+
+
+async def test_a_recognizer_that_fails_once_succeeds_on_the_retry():
+    memory = await engine()
+    try:
+        await memory.remember("s", "Acme hired Bob.", source="a.md", created_at=WHEN)
+        await memory.remember("s", "Globex hired Bob.", source="b.md", created_at=WHEN)
+        recorder = MentionRecorder(memory, Poisoned({"Acme": "ORG", "Globex": "ORG"}, transient=True))
+        outcomes = await recorder.record_pending("s")
+        assert [(outcome.error, outcome.added) for outcome in outcomes] == [(None, 1), (None, 1)]
     finally:
         await memory.close()
