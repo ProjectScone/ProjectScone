@@ -28,7 +28,7 @@ Nothing here calls a model.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Literal, Optional, cast
 
 from ..core.errors import InvalidInput
@@ -79,7 +79,7 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
                           route: Optional[str] = None, max_item_chars: int = DEFAULT_ITEM_CHARS,
                           synthesis: Optional["ChatModel"] = None,
                           synthesis_limits: Optional["SynthesisLimits"] = None,
-                          synthesis_mode: Optional[str] = None) -> Answered:
+                          synthesis_mode: Optional[str] = None, hop: bool = False) -> Answered:
     """Answer a question with whichever machinery suits it, and say which.
 
     ``max_item_chars`` bounds each passage shown in an ordinary answer's
@@ -91,7 +91,11 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
     cited sentences about them. Without a model it is refused.
     ``synthesis_mode`` -- ``evidence`` (the default), ``refine``,
     ``accumulate`` or ``facts`` -- is how the synthesis reads its passages,
-    and is refused on any other route."""
+    and is refused on any other route.
+
+    ``hop`` lets the recall route search a second time, seeded with its
+    leading passage, for answers one step away (``second_hop``); a question
+    comparing things it names is searched once. Other routes ignore it."""
     check_space(space)
     if not isinstance(max_item_chars, int) or isinstance(max_item_chars, bool) or max_item_chars < 0:
         raise InvalidInput(f"max_item_chars must be a whole number of characters (0 for whole passages), not {max_item_chars!r}")
@@ -114,7 +118,7 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
     when = now or engine.clock()
     if route is not None:
         return await _by(engine, space, question, route, when, limit,
-                         why=f"the {route} route was asked for", max_item_chars=max_item_chars)
+                         why=f"the {route} route was asked for", max_item_chars=max_item_chars, hop=hop)
     computed, unread = await _temporal(engine, space, question, when, limit)
     if computed is not None:
         return computed
@@ -126,11 +130,12 @@ async def answer_question(engine: "MemoryEngine", space: str, question: str, *,
     # as being about dates, and a caller who cannot tell them apart cannot
     # tell a gap in the ledger from a gap in the rule.
     return await _recall(engine, space, question, limit,
-                         why=unread or "nothing it could compute and nothing the graph knows by name", max_item_chars=max_item_chars)
+                         why=unread or "nothing it could compute and nothing the graph knows by name",
+                         max_item_chars=max_item_chars, hop=hop)
 
 
 async def _by(engine: "MemoryEngine", space: str, question: str, route: str, when: str,
-              limit: int, why: str, max_item_chars: int = DEFAULT_ITEM_CHARS) -> Answered:
+              limit: int, why: str, max_item_chars: int = DEFAULT_ITEM_CHARS, hop: bool = False) -> Answered:
     """One named route, whatever the rule would have chosen."""
     if route == "temporal":
         found, _ = await _temporal(engine, space, question, when, limit, insist=True)
@@ -138,7 +143,7 @@ async def _by(engine: "MemoryEngine", space: str, question: str, route: str, whe
     if route == "graph":
         found = await _graph(engine, space, question, when, limit, insist=True)
         return found if found is not None else Answered(question, "graph", why, "", {})
-    return await _recall(engine, space, question, limit, why=why, max_item_chars=max_item_chars)
+    return await _recall(engine, space, question, limit, why=why, max_item_chars=max_item_chars, hop=hop)
 
 
 async def _temporal(engine: "MemoryEngine", space: str, question: str, when: str, limit: int,
@@ -210,9 +215,17 @@ async def _synthesize(engine: "MemoryEngine", space: str, question: str, model: 
 
 
 async def _recall(engine: "MemoryEngine", space: str, question: str, limit: int, why: str,
-                  max_item_chars: int = DEFAULT_ITEM_CHARS) -> Answered:
-    """The ordinary search, which is the answer when nothing else is."""
-    found = await engine.recall(space, question, limit=limit)
+                  max_item_chars: int = DEFAULT_ITEM_CHARS, hop: bool = False) -> Answered:
+    """The ordinary search, which is the answer when nothing else is; with ``hop``, searched again from its lead."""
+    hop_record: Optional[dict[str, object]] = None
+    if hop:
+        from .second_hop import recall_with_hop
+
+        found, trace = await recall_with_hop(lambda query: engine.recall(space, query, limit=limit), question,
+                                             limit=limit)
+        hop_record = {"ran": trace is not None, **(asdict(trace) if trace is not None else {})}
+    else:
+        found = await engine.recall(space, question, limit=limit)
     lines: list[str] = []
     cut, omitted = 0, 0
     for item in found.items:
@@ -227,5 +240,6 @@ async def _recall(engine: "MemoryEngine", space: str, question: str, limit: int,
                      "the items in detail hold them whole")
     return Answered(question, "recall", why, "\n".join(lines) or "nothing found",
                     {"items": [item.model_dump() for item in found.items],
-                     "facts": [fact.model_dump() for fact in found.facts]},
+                     "facts": [fact.model_dump() for fact in found.facts],
+                     **({"hop": hop_record} if hop_record is not None else {})},
                     {"per_item_chars": max_item_chars, "items_cut": cut, "chars_omitted": omitted})

@@ -526,6 +526,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--now", help="the moment to answer from (RFC 3339); defaults to now")
     p.add_argument("--whole", action="store_true",
                    help="show each passage whole instead of its first 200 characters")
+    p.add_argument("--hop", action="store_true",
+                   help="let the recall route search again from its leading passage, for answers one step away")
 
     p = sub.add_parser("attribute", help="say which stored chunk each sentence of an answer came from, without a model")
     p.add_argument("--answer", required=True, help="the answer's text")
@@ -2529,7 +2531,8 @@ async def run(args: argparse.Namespace, engine: MemoryEngine, stdin, out, settin
                 return 2
         routed = await answer_question(engine, space, args.question, now=args.now, limit=args.limit,
                                        route=args.route, max_item_chars=0 if args.whole else DEFAULT_ITEM_CHARS,
-                                       synthesis=synthesis, synthesis_mode=args.synthesis_mode)
+                                       synthesis=synthesis, synthesis_mode=args.synthesis_mode,
+                                       hop=getattr(args, "hop", False))
         if getattr(args, "json", False):
             print(_ledger_json(routed.record(space)), file=out)
             return 0
