@@ -43,7 +43,43 @@
         "file": "model.safetensors",
         "bytes": 598436708,
         "sha256": "e72c8f7087dbfbdbfb9d75077f7b7b05b01b459730f735b468cbde71d66090e6",
-        "chunks": []
+        "chunks": [
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-000",
+            "bytes": 94371840,
+            "sha256": "51e08719b2a739f27ac3be0aa8f9f93342712476d152d3f1fa93f54c99cb1d02"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-001",
+            "bytes": 94371840,
+            "sha256": "36c20914d5f13952639fb785a73abd715d7d5f8e5d47cda0ad39aa64485ab0da"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-002",
+            "bytes": 94371840,
+            "sha256": "3fc7a0d26240ed1668d3ebe36dd2ab24d39185f2e2c136a8ccd7d47c91923e82"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-003",
+            "bytes": 94371840,
+            "sha256": "e9ad14f17a483da8c968facc422f545dbbb2a2d3d52a4ae3854c9ff5b0c6fb61"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-004",
+            "bytes": 94371840,
+            "sha256": "1c08841552576a7ee6ae0058aed2ddf506dc5affe49bf67baf8d1eb0fd9190d3"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-005",
+            "bytes": 94371840,
+            "sha256": "36e315b6cf20cb7a7acc309a2256af121d26c29a087b127ca34bc59edc29671b"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-006",
+            "bytes": 32205668,
+            "sha256": "425e5c89e657506d4aa3b002ee30e575ae11e1589d0a77f0c0417a6d0370e4c8"
+          }
+        ]
       },
       "files": [
         "README.md",
