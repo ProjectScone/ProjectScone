@@ -1,0 +1,538 @@
+"""Matched-reader LongMemEval: every arm hands its sessions to the same reader,
+and the same judge scores every answer with LongMemEval's own prompts.
+
+Stages, each resumable from its own JSONL file in the run directory:
+  rank    Scone and LlamaIndex rank each item's sessions with one shared embedder
+  answer  each arm's sessions -> the official reader prompt -> the reader model
+  judge   each answer -> the official judge prompt -> the judge model
+  report  accuracy per arm and question type, Wilson intervals, paired counts
+
+Arms: ``full`` (every session: the full-context baseline), ``oracle`` (only the
+evidence sessions: the upper bound), ``scone@k`` and ``llamaindex@k`` (the top
+k distinct sessions each system ranks). A failed request is kept and scored
+as incorrect; nothing is dropped.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import math
+import os
+import time
+from collections import defaultdict
+from collections.abc import Awaitable, Callable, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+import httpx
+
+if TYPE_CHECKING:
+    from scone_memory.bench.comparative import CachedEmbedder
+    from scone_memory.bench.runner import BenchItem
+    from scone_memory.core.ports import Embedder
+    from scone_memory.embedders.local import LocalEmbedder
+    from scone_memory.embedders.remote import RemoteEmbedder
+
+from .prompts import Session, Turn, UPSTREAM_COMMIT, is_abstention, judge_prompt, judged_correct, reader_prompt
+
+OPENROUTER = 'https://openrouter.ai/api/v1/chat/completions'
+READER_MODEL = 'google/gemma-4-31b-it'
+JUDGE_MODEL = 'openai/gpt-4o-2024-08-06'  # the model upstream's judge names
+RETRIES = 3
+
+
+class Item:
+    """One question. From a JSONL dataset it keeps only where its line starts and reads the history when asked:
+    LongMemEval-M's 500 histories are about 15 GB as Python objects, too much to hold through a run."""
+
+    def __init__(self, raw: dict[str, object], *, source: tuple[Path, int] | None = None) -> None:
+        self.question_id = str(raw['question_id'])
+        self.question_type = str(raw['question_type'])
+        self.question = str(raw['question'])
+        self.answer = str(raw['answer'])
+        self.question_date = str(raw['question_date'])
+        self.evidence = [str(s) for s in cast(list[str], raw.get('answer_session_ids', []))]
+        self._source = source
+        self._raw = None if source is not None else raw
+
+    @property
+    def raw(self) -> dict[str, object]:
+        if self._raw is not None:
+            return self._raw
+        assert self._source is not None
+        path, offset = self._source
+        with path.open('rb') as handle:
+            handle.seek(offset)
+            return cast(dict[str, object], json.loads(handle.readline()))
+
+    @property
+    def sessions(self) -> dict[str, Session]:
+        raw = self.raw
+        ids = cast(list[str], raw['haystack_session_ids'])
+        dates = cast(list[str], raw['haystack_dates'])
+        bodies = cast(list[list[dict[str, str]]], raw['haystack_sessions'])
+        return {sid: Session(sid, date, tuple(Turn(t['role'], t['content']) for t in body))
+                for sid, date, body in zip(ids, dates, bodies, strict=True)}
+
+
+def _bench_item(raw: dict[str, object], *, with_sessions: bool) -> BenchItem:
+    """``scone_memory.bench.runner.load_items``'s conversion of one item. Without
+    sessions it is only good for sampling, which reads ids and types."""
+    from scone_memory.bench.runner import BenchItem, iso_date
+
+    bodies = cast(list[list[dict[str, str]]], raw['haystack_sessions']) if with_sessions else []
+    return BenchItem(
+        question_id=str(raw['question_id']), question_type=str(raw['question_type']),
+        question=str(raw['question']), question_date=str(raw['question_date']),
+        sessions=tuple(tuple(f"{t.get('role', 'user')}: {t.get('content', '')}" for t in body) for body in bodies),
+        session_ids=tuple(str(x) for x in cast(list[str], raw['haystack_session_ids'])) if with_sessions else (),
+        session_dates=tuple(iso_date(str(d)) for d in cast(list[str], raw['haystack_dates'])) if with_sessions else (),
+        answer_session_ids=tuple(str(x) for x in cast(list[str], raw.get('answer_session_ids', []))),
+    )
+
+
+def load(dataset: Path, sample: int, seed: int) -> list[Item]:
+    """The sampled items. A JSON array is parsed whole (LongMemEval-S); a JSONL file with one item per line
+    (LongMemEval-M, converted once by ``to_jsonl``) is scanned a line at a time and each chosen item keeps only
+    its line's offset, so no history stays in memory."""
+    from scone_memory.bench.runner import stratified_sample
+
+    if dataset.suffix == '.jsonl':
+        stubs, found = [], {}
+        with dataset.open('rb') as handle:
+            while True:
+                offset = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                if not line.strip():
+                    continue
+                raw = cast(dict[str, object], json.loads(line))
+                stubs.append(_bench_item(raw, with_sessions=False))
+                found[stubs[-1].question_id] = Item(raw, source=(dataset, offset))
+        chosen = stubs if sample <= 0 else stratified_sample(stubs, sample, seed)
+        return [found[b.question_id] for b in chosen]
+    raw_items = cast(list[dict[str, object]], json.loads(dataset.read_text(encoding='utf-8')))
+    stubs = [_bench_item(r, with_sessions=False) for r in raw_items]
+    chosen = stubs if sample <= 0 else stratified_sample(stubs, sample, seed)
+    by_id = {str(r['question_id']): r for r in raw_items}
+    del raw_items
+    return [Item(by_id[b.question_id]) for b in chosen]
+
+
+def to_jsonl(source: Path, target: Path) -> int:
+    """Rewrites a JSON-array dataset one item per line, in the same order; returns the items written."""
+    items = cast(list[dict[str, object]], json.loads(source.read_text(encoding='utf-8')))
+    partial = target.with_suffix('.jsonl.part')
+    with partial.open('w', encoding='utf-8') as handle:
+        for item in items:
+            handle.write(json.dumps(item, ensure_ascii=False) + '\n')
+    partial.rename(target)
+    return len(items)
+
+
+def read_jsonl(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+
+
+def append(path: Path, row: dict[str, object]) -> None:
+    with path.open('a', encoding='utf-8') as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + '\n')
+
+
+# ---------------------------------------------------------------- rank
+
+HOSTED_EMBEDDINGS = 'https://openrouter.ai/api/v1'
+
+
+def _local(embed_model: str) -> LocalEmbedder:
+    from scone_memory.embedders.local import LocalEmbedder
+
+    return LocalEmbedder(embed_model)
+
+
+def _hosted(embed_model: str, key: str) -> RemoteEmbedder:
+    from scone_memory.embedders.remote import RemoteEmbedder
+
+    # OpenRouter serves the BAAI models under lowercase 'baai/'; no prefixes, as the local model uses none.
+    return RemoteEmbedder(HOSTED_EMBEDDINGS, 'baai/' + embed_model, key, dim=_local(embed_model).dim, timeout=120)
+
+
+def _embedder(embed_model: str, embed_cache: Path | None,
+              hosted_key: str | None = None) -> tuple[Embedder, CachedEmbedder | None]:
+    from scone_memory.bench.comparative import CachedEmbedder, OneThreadCache, bench_embedder
+    from .prefill import HostedTwin
+    from .vector_store import Float32Cache
+
+    if hosted_key is not None:
+        if embed_cache is None:
+            raise SystemExit('--embed-hosted needs --embed-cache: the hosted copy fills it before ranking')
+        local = _local(embed_model)
+        model: Embedder = cast('Embedder', HostedTwin(local, _hosted(embed_model, hosted_key)))
+    else:
+        model = bench_embedder(embed_model)
+    if embed_cache is None:
+        return model, None
+    # Never evicts: an evicting cache would re-embed and misreport the cost. float32 halves the file (vector_store.py).
+    path = str(embed_cache)
+    cached = CachedEmbedder(model, OneThreadCache(lambda: Float32Cache(path)))
+    return cast('Embedder', cached), cached
+
+
+def parse_variant(spec: str) -> tuple[str, dict[str, str]]:
+    """``name:KEY=VALUE;KEY=VALUE`` -> the arm's system name and the environment it adds."""
+    name, _, settings = spec.partition(':')
+    if not name.isidentifier() or name in ('scone', 'llamaindex', 'full', 'oracle'):
+        raise ValueError(f'variant name {name!r} must be a new identifier')
+    env = dict(pair.split('=', 1) for pair in settings.split(';') if pair.strip())
+    if not env or any(not key.startswith('SCONE_') for key in env):
+        raise ValueError(f'variant {name!r} must set at least one SCONE_ setting and nothing else')
+    return name, env
+
+
+async def rank_variant(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path | None,
+                       name: str, env: dict[str, str], hosted_key: str | None = None) -> None:
+    """Scone's ranking under extra engine settings, as arm ``name@k``, in its own file."""
+    from scone_memory.bench.comparative import distinct_sessions
+    from scone_memory.bench.runner import run as run_bench
+    from scone_memory.retrieval.fusion import PER_EPISODE_CAP
+    from scone_memory.runtime.config import Settings
+
+    out = run_dir / f'rankings-{name}.jsonl'
+    done = {str(r['question_id']) for r in read_jsonl(out)}
+    wanted = [i for i in items if i.question_id not in done]
+    if not wanted:
+        return
+    embedder, cached = _embedder(embed_model, embed_cache, hosted_key)
+    settings = Settings.from_env({**os.environ, 'SCONE_EMBEDDER': 'local', 'SCONE_EMBED_MODEL': embed_model, **env})
+
+    async def make() -> object:
+        return await engine_at(settings, embedder, now)
+
+    for item in wanted:
+        bench_item = _bench_item(item.raw, with_sessions=True)
+        now = question_clock(bench_item.question_date)
+        started = time.perf_counter()
+        report = await run_bench(make, [bench_item], ks=(depth,), limit=depth * PER_EPISODE_CAP)  # type: ignore[arg-type]
+        result = report.results[0]
+        if result.error:
+            raise SystemExit(f'variant {name} failed to rank {item.question_id}: {result.error}')
+        append(out, {'question_id': item.question_id, 'embedder': embed_model, 'env': env, 'engine_now': now,
+                     name: list(distinct_sessions(result.retrieved_sessions, depth)),
+                     'ms': (time.perf_counter() - started) * 1000, 'recall_ms': result.recall_ms,
+                     })
+        print(f'ranked {name} {item.question_id}' + (f' cache {cached.record()}' if cached else ''), flush=True)
+
+
+async def prefill(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path,
+                  hosted_key: str) -> None:
+    """Dry-runs the ranking of every unranked item to learn its texts, then fills the cache from the hosted copy."""
+    import shutil
+
+    from .prefill import Recorder, clip_to_window, fill
+    from .vector_store import Float32Cache
+
+    done = {str(r['question_id']) for r in read_jsonl(run_dir / 'rankings.jsonl')}
+    todo = [i for i in items if i.question_id not in done]
+    if not todo:
+        return
+    local = _local(embed_model)
+    remote = _hosted(embed_model, hosted_key)
+    cache = Float32Cache(embed_cache)
+    for start in range(0, len(todo), 10):  # ten items at a time keeps the recorded texts bounded
+        group = todo[start:start + 10]
+        recorder = Recorder(local)
+        dry_dir = run_dir / '.prefill-dry'
+        shutil.rmtree(dry_dir, ignore_errors=True)
+        dry_dir.mkdir()
+        await rank(group, dry_dir, depth, embed_model, None, dry=cast('Embedder', recorder))
+        shutil.rmtree(dry_dir)
+        started = time.perf_counter()
+        def clip(text: str) -> str:
+            return clip_to_window(local, text)
+        sent, shortened = await fill(cache, remote, local.id, local.dim, sorted(recorder.documents), clip=clip)
+        query_sent, query_shortened = await fill(cache, remote, local.id + ':query-cache', local.dim,
+                                                 sorted(recorder.queries), clip=clip)
+        sent, shortened = sent + query_sent, shortened + query_shortened
+        print(f'prefilled items {start + 1}-{start + len(group)}: {len(recorder.documents)} documents, '
+              f'{len(recorder.queries)} queries, {sent} embedded ({shortened} only shortened further than the local '
+              f'window, their vectors differ from local) in {time.perf_counter() - started:.0f}s', flush=True)
+
+
+def question_clock(question_date: str) -> str:
+    """The engine's "now" for an item: the date LongMemEval asks the question on.
+
+    The engine favours newer memory by a recency term measured from its clock. At the wall clock, sessions dated
+    2023 are years old and the term shrinks to about 1e-15, near the rounding of a fused score, so exact ties
+    were broken by rounding that moved with the time of day: one of 100 LongMemEval-M items ranked differently
+    at 00:48 and 16:30 over the same vectors. At the question's own date (the reader's "Current Date") the term
+    is what it is in use, and a rerun ranks the same."""
+    from scone_memory.bench.runner import iso_date
+
+    stamp = iso_date(question_date)
+    if not stamp:
+        raise ValueError(f'unreadable question date {question_date!r}')
+    return stamp
+
+
+async def engine_at(settings: object, embedder: Embedder, now: str) -> object:
+    from scone_memory.runtime.config import Settings, build_in_process_engine
+
+    engine = await build_in_process_engine(cast(Settings, settings), embedder)
+    engine.clock = lambda: now
+    return engine
+
+
+def load_rankings(run_dir: Path) -> dict[str, dict[str, object]]:
+    """The base rankings with every variant's list merged in under its name."""
+    rankings = {str(r['question_id']): dict(r) for r in read_jsonl(run_dir / 'rankings.jsonl')}
+    for path in sorted(run_dir.glob('rankings-*.jsonl')):
+        name = path.stem.removeprefix('rankings-')
+        for row in read_jsonl(path):
+            rankings.setdefault(str(row['question_id']), {})[name] = row[name]
+    return rankings
+
+
+async def rank(items: Sequence[Item], run_dir: Path, depth: int, embed_model: str, embed_cache: Path | None,
+               hosted_key: str | None = None, dry: Embedder | None = None) -> None:
+    from scone_memory.bench.comparative import distinct_sessions, llamaindex_session_ranking
+    from scone_memory.bench.runner import run as run_bench
+    from scone_memory.retrieval.fusion import PER_EPISODE_CAP
+    from scone_memory.runtime.config import Settings
+
+    out = run_dir / 'rankings.jsonl'
+    done = {str(r['question_id']) for r in read_jsonl(out)}
+    wanted = {item.question_id for item in items if item.question_id not in done}
+    if not wanted:
+        return
+    embedder, cached = (dry, None) if dry is not None else _embedder(embed_model, embed_cache, hosted_key)
+    settings = Settings.from_env({**os.environ, 'SCONE_EMBEDDER': 'local', 'SCONE_EMBED_MODEL': embed_model})
+
+    async def make() -> object:
+        return await engine_at(settings, embedder, now)
+
+    for bench_item in (_bench_item(i.raw, with_sessions=True) for i in items if i.question_id in wanted):
+        now = question_clock(bench_item.question_date)
+        started = time.perf_counter()
+        report = await run_bench(make, [bench_item], ks=(depth,), limit=depth * PER_EPISODE_CAP)  # type: ignore[arg-type]
+        scone_ms = (time.perf_counter() - started) * 1000
+        result = report.results[0]
+        if result.error:
+            raise SystemExit(f'scone failed to rank {bench_item.question_id}: {result.error}')
+        started = time.perf_counter()
+        llama = await llamaindex_session_ranking(bench_item, embedder, k=depth, hybrid=True)
+        llama_ms = (time.perf_counter() - started) * 1000
+        append(out, {'question_id': bench_item.question_id, 'embedder': embed_model, 'engine_now': now,
+                     'scone': list(distinct_sessions(result.retrieved_sessions, depth)), 'scone_ms': scone_ms,
+                     'scone_recall_ms': result.recall_ms, 'llamaindex': llama, 'llamaindex_ms': llama_ms})
+        print(f'ranked {bench_item.question_id}' + (f' cache {cached.record()}' if cached else ''), flush=True)
+
+
+# ---------------------------------------------------------------- answer / judge
+
+async def chat(client: httpx.AsyncClient, key: str, model: str, prompt: str, max_tokens: int) -> dict[str, object]:
+    payload: dict[str, object] = {'model': model, 'messages': [{'role': 'user', 'content': prompt}],
+                                  'temperature': 0, 'max_tokens': max_tokens, 'stream': False}
+    if model == READER_MODEL or model.startswith('google/gemma'):
+        # Reasoning off: a Gemma judge given 10 tokens would otherwise spend them thinking and return nothing.
+        payload['reasoning'] = {'effort': 'none'}
+    error = ''
+    started = time.perf_counter()
+    for attempt in range(RETRIES):
+        try:
+            response = await client.post(OPENROUTER, json=payload, headers={'Authorization': 'Bearer ' + key}, timeout=180)
+            response.raise_for_status()
+            body = response.json()
+            choice = body['choices'][0]
+            text = (choice['message'].get('content') or '').strip()
+            complete = choice.get('finish_reason') == 'stop' and bool(text)
+            return {'completed': complete, 'text': text, 'error': None if complete else 'incomplete_generation',
+                    'usage': body.get('usage'), 'ms': (time.perf_counter() - started) * 1000, 'attempts': attempt + 1}
+        except (httpx.HTTPError, KeyError, ValueError) as caught:
+            error = type(caught).__name__ + (f'_{caught.response.status_code}' if isinstance(caught, httpx.HTTPStatusError) else '')
+            await asyncio.sleep(2 ** attempt)
+    return {'completed': False, 'text': '', 'error': error, 'usage': None,
+            'ms': (time.perf_counter() - started) * 1000, 'attempts': RETRIES}
+
+
+def latest(rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    """The last row per (arm, question): a retried request appends, and the retry is the answer that counts."""
+    return list({(str(r['arm']), str(r['question_id'])): r for r in rows}.values())
+
+
+def settled_answers(rows: Sequence[dict[str, object]]) -> set[tuple[str, str]]:
+    """Answers a resume must not ask again: completed ones, and ones the reader itself cut off
+    (``incomplete_generation`` recurs at temperature 0). A refused or failed request (an HTTP status, a
+    timeout, a spent key) says nothing about the reader and is asked again."""
+    return {(str(r['arm']), str(r['question_id'])) for r in latest(rows)
+            if r['completed'] or r['error'] == 'incomplete_generation'}
+
+
+def arm_sessions(item: Item, arm: str, rankings: dict[str, dict[str, object]]) -> list[Session]:
+    sessions = item.sessions  # read once: from a JSONL dataset each read parses the item's line
+    if arm == 'full':
+        return list(sessions.values())
+    if arm == 'oracle':
+        return [sessions[s] for s in item.evidence if s in sessions]
+    system, _, k = arm.partition('@')
+    ranked = cast(list[str], rankings[item.question_id][system])
+    return [sessions[s] for s in ranked[:int(k)]]
+
+
+async def gather_bounded(jobs: Sequence[Callable[[], Awaitable[None]]], concurrency: int) -> None:
+    gate = asyncio.Semaphore(concurrency)
+
+    async def bounded(job: Callable[[], Awaitable[None]]) -> None:
+        async with gate:
+            await job()
+    await asyncio.gather(*(bounded(job) for job in jobs))
+
+
+async def answer(items: Sequence[Item], arms: Sequence[str], run_dir: Path, key: str, cot: bool, concurrency: int) -> None:
+    out = run_dir / 'answers.jsonl'
+    done = settled_answers(read_jsonl(out))
+    rankings = load_rankings(run_dir)
+    async with httpx.AsyncClient() as client:
+        def job(item: Item, arm: str) -> Callable[[], Awaitable[None]]:
+            async def go() -> None:
+                sessions = arm_sessions(item, arm, rankings)
+                prompt = reader_prompt(sessions, item.question_date, item.question, cot=cot)
+                result = await chat(client, key, READER_MODEL, prompt, 800 if cot else 500)
+                append(out, {'arm': arm, 'question_id': item.question_id, 'sessions': [s.session_id for s in sessions],
+                             'prompt_chars': len(prompt), **result})
+            return go
+        await gather_bounded([job(i, a) for a in arms for i in items if (a, i.question_id) not in done], concurrency)
+
+
+def judge_suffix(judge_model: str) -> str:
+    """'' for the official judge, so its files keep their names; otherwise the model, made safe for a file name."""
+    return '' if judge_model == JUDGE_MODEL else '-' + judge_model.replace('/', '_').replace(':', '_')
+
+
+async def judge(items: Sequence[Item], run_dir: Path, key: str, concurrency: int,
+                judge_model: str = JUDGE_MODEL) -> None:
+    out = run_dir / f'judgments{judge_suffix(judge_model)}.jsonl'
+    done = {(str(r['arm']), str(r['question_id'])) for r in latest(read_jsonl(out)) if not r['judge_error']}
+    by_id = {item.question_id: item for item in items}
+    answers = [a for a in latest(read_jsonl(run_dir / 'answers.jsonl'))
+               if a['completed'] and str(a['question_id']) in by_id and (str(a['arm']), str(a['question_id'])) not in done]
+    async with httpx.AsyncClient() as client:
+        def job(row: dict[str, object]) -> Callable[[], Awaitable[None]]:
+            async def go() -> None:
+                item = by_id[str(row['question_id'])]
+                prompt = judge_prompt(item.question_type, item.question_id, item.question, item.answer, str(row['text']))
+                result = await chat(client, key, judge_model, prompt, 10)
+                append(out, {'arm': row['arm'], 'question_id': item.question_id, 'verdict': result['text'],
+                             'correct': bool(result['completed']) and judged_correct(str(result['text'])),
+                             'judge_error': result['error']})
+            return go
+        await gather_bounded([job(a) for a in answers], concurrency)
+
+
+# ---------------------------------------------------------------- report
+
+def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    if n == 0:
+        return (0.0, 0.0)
+    p = successes / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return (centre - half, centre + half)
+
+
+def report(items: Sequence[Item], arms: Sequence[str], run_dir: Path,
+           judge_model: str = JUDGE_MODEL) -> dict[str, object]:
+    answers = {(str(r['arm']), str(r['question_id'])): r for r in read_jsonl(run_dir / 'answers.jsonl')}
+    verdicts = {(str(r['arm']), str(r['question_id'])): r
+                for r in read_jsonl(run_dir / f'judgments{judge_suffix(judge_model)}.jsonl')}
+    rankings = load_rankings(run_dir)
+
+    def correct(arm: str, qid: str) -> bool:
+        row = verdicts.get((arm, qid))
+        return bool(row and row['correct'] and not row['judge_error'])
+
+    out: dict[str, object] = {'items': len(items), 'upstream_commit': UPSTREAM_COMMIT,
+                              'reader': READER_MODEL, 'judge': judge_model, 'arms': {}}
+    for arm in arms:
+        hits = [correct(arm, i.question_id) for i in items]
+        missing = sum((arm, i.question_id) not in answers for i in items)
+        failed = sum(1 for i in items if (arm, i.question_id) in answers and not answers[(arm, i.question_id)]['completed'])
+        unjudged = sum(1 for i in items if (arm, i.question_id) in answers
+                       and answers[(arm, i.question_id)]['completed'] and (arm, i.question_id) not in verdicts)
+        by_type: dict[str, list[bool]] = defaultdict(list)
+        for item, hit in zip(items, hits, strict=True):
+            by_type['abstention' if is_abstention(item.question_id) else item.question_type].append(hit)
+        tokens = [int(cast(dict[str, int], a['usage'])['prompt_tokens']) for a in answers.values()
+                  if a['arm'] == arm and a.get('usage')]
+        low, high = wilson(sum(hits), len(hits))
+        evidence_all = None
+        if '@' in arm:
+            system, _, k = arm.partition('@')
+            scored = [i for i in items if i.evidence and not is_abstention(i.question_id) and i.question_id in rankings]
+            evidence_all = (sum(set(i.evidence) <= set(cast(list[str], rankings[i.question_id][system])[:int(k)]) for i in scored)
+                            / len(scored)) if scored else None
+        cast(dict[str, object], out['arms'])[arm] = {
+            'accuracy': sum(hits) / len(hits), 'ci95': [low, high], 'correct': sum(hits),
+            'missing_answers': missing, 'failed_generations': failed, 'unjudged': unjudged,
+            'by_type': {t: {'n': len(v), 'accuracy': sum(v) / len(v)} for t, v in sorted(by_type.items())},
+            'prompt_tokens_median': sorted(tokens)[len(tokens) // 2] if tokens else None,
+            'all_evidence_in_context': evidence_all,
+        }
+    return out
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('stage', choices=['prefill', 'rank', 'answer', 'judge', 'report', 'all'])
+    parser.add_argument('--dataset', type=Path, required=True)
+    parser.add_argument('--run-dir', type=Path, required=True)
+    parser.add_argument('--sample', type=int, default=100, help='stratified sample size; 0 for every item')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--depth', type=int, default=10, help='sessions each system ranks')
+    parser.add_argument('--arms', default='full,oracle,scone@5,llamaindex@5')
+    parser.add_argument('--embed-model', default='bge-base-en-v1.5')
+    parser.add_argument('--embed-hosted', action='store_true',
+                        help="embed with OpenRouter's copy of the model (fills --embed-cache first; 'all' prefills)")
+    parser.add_argument('--embed-cache', type=Path, help='SQLite file reusing vectors across items and runs')
+    parser.add_argument('--variant', action='append', default=[], metavar='NAME:SCONE_KEY=VALUE;...',
+                        help='also rank with Scone under these settings, as arm NAME@k (repeatable)')
+    parser.add_argument('--cot', action='store_true', help="upstream's step-by-step reader prompt")
+    parser.add_argument('--judge-model', default=JUDGE_MODEL,
+                        help='a second judge, written to judgments-<model>.jsonl; the official one keeps judgments.jsonl')
+    parser.add_argument('--concurrency', type=int, default=8)
+    args = parser.parse_args()
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    items = load(args.dataset, args.sample, args.seed)
+    arms = [a.strip() for a in args.arms.split(',') if a.strip()]
+    key = os.environ.get('OPENROUTER_API_KEY') or os.environ.get('SCONE_CHAT_API_KEY') or ''
+    if args.stage == 'prefill':
+        if not (args.embed_hosted and args.embed_cache and key):
+            raise SystemExit('prefill needs --embed-hosted, --embed-cache and an API key')
+        asyncio.run(prefill(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, key))
+        return
+    if (args.stage in ('answer', 'judge', 'all') or args.embed_hosted) and not key:
+        raise SystemExit('set OPENROUTER_API_KEY or SCONE_CHAT_API_KEY')
+    if args.stage in ('rank', 'all') and any('@' in a for a in arms):
+        hosted = key if args.embed_hosted else None
+        if any(a.split('@')[0] in ('scone', 'llamaindex') for a in arms):
+            if hosted and args.stage == 'all':
+                asyncio.run(prefill(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, hosted))
+            asyncio.run(rank(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, hosted))
+        for name, env in map(parse_variant, args.variant):
+            asyncio.run(rank_variant(items, args.run_dir, args.depth, args.embed_model, args.embed_cache, name, env,
+                                     hosted))
+    if args.stage in ('answer', 'all'):
+        asyncio.run(answer(items, arms, args.run_dir, key, args.cot, args.concurrency))
+    if args.stage in ('judge', 'all'):
+        asyncio.run(judge(items, args.run_dir, key, args.concurrency, args.judge_model))
+    result = report(items, arms, args.run_dir, args.judge_model)
+    (args.run_dir / f'report{judge_suffix(args.judge_model)}.json').write_text(json.dumps(result, indent=1),
+                                                                              encoding='utf-8')
+    print(json.dumps(result, indent=1))
+
+
+if __name__ == '__main__':
+    main()
