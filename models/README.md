@@ -42,6 +42,27 @@ it ships.
 - **Multimodal pipeline:** BGE-VL-large embeds and retrieves; `llama-nemotron-rerank-vl-1b-v2` reorders the top 20 to 50.
 - **Text only:** Granite is the small, fast cross-encoder.
 
+## Hardware
+
+These were measured on 2026-10-03 on an Apple M3 Max (14 cores), CPU only and 8 threads unless noted. Each run reranks
+one query against 20 passages of about 110 words, after a warm-up.
+
+| Model | Precision | Peak memory | 20 passages |
+| --- | --- | ---: | ---: |
+| Granite reranker r2 | float32 | 1.4 GB | 0.44 s |
+| BGE-VL-large (embed query and passages) | float32 | 3.0 GB | 0.20 s |
+| BGE-VL-large | bfloat16 | 0.8 GB | 1.1 s |
+| NVIDIA rerank-vl-1b-v2 | float32 | 10.7 GB | 2.3 s |
+| NVIDIA rerank-vl-1b-v2 | bfloat16 (its default) | 3.3 GB | 23.5 s |
+| NVIDIA rerank-vl-1b-v2, Apple GPU (MPS) | default | — | 0.74 s |
+
+- **On a CPU, load NVIDIA and BGE-VL in float32.** Pass `model_kwargs={"torch_dtype": torch.float32}`. Their configs
+  default to bfloat16, which most CPUs run 5 to 10 times slower.
+- **Text-only on a modest CPU:** 4 cores and 4 GB free run Granite well.
+- **NVIDIA:** plan for 12 GB of free RAM on CPU, or use a GPU. With CUDA, its card recommends bfloat16 and
+  flash-attention.
+- **An x86 office machine** has no MPS. Expect the CPU rows, scaled by core count and speed.
+
 ## Use, fully offline
 
 ```bash
