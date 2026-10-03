@@ -219,10 +219,15 @@ async def _recall(engine: "MemoryEngine", space: str, question: str, limit: int,
     """The ordinary search, which is the answer when nothing else is; with ``hop``, searched again from its lead."""
     hop_record: Optional[dict[str, object]] = None
     if hop:
-        from .second_hop import recall_with_hop
+        from .second_hop import engine_pool_reranker, recall_with_hop
 
-        found, trace = await recall_with_hop(lambda query: engine.recall(space, query, limit=limit), question,
-                                             limit=limit)
+        # With a reranker configured it orders the first search's and the hop's passages together, once, so each
+        # search skips its own rerank and gathers a wider pool for it.
+        pool_reranker = engine_pool_reranker(engine)
+        width = limit if pool_reranker is None else max(limit, 10)
+        found, trace = await recall_with_hop(
+            lambda query: engine.recall(space, query, limit=width, rerank=pool_reranker is None), question,
+            limit=limit, rerank_pool=pool_reranker)
         hop_record = {"ran": trace is not None, **(asdict(trace) if trace is not None else {})}
     else:
         found = await engine.recall(space, question, limit=limit)

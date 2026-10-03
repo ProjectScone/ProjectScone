@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 
 import pytest
 
@@ -86,3 +87,57 @@ def test_a_gated_comparison_question_runs_one_search_unless_the_gate_is_off() ->
     assert trace is None and calls == 1 and [i.chunk_id for i in result.items] == [1]
     _, trace = asyncio.run(recall_with_hop(recall, 'Is Lyon or Lille larger?', limit=5, gate=False))
     assert trace is not None and calls == 3
+
+
+def test_a_pool_reranker_orders_first_and_hop_passages_together_within_the_cap() -> None:
+    from scone_memory.core.models import RerankTrace
+
+    trace = RerankTrace(status='applied', ordering='rerank', candidates_considered=4, candidates_sent=4,
+                        candidates_omitted=0, payload_bytes=10, duration_ms=1.0)
+    calls: list[str] = []
+
+    async def recall(query: str) -> RecallResult:
+        calls.append(query)
+        if len(calls) == 1:
+            return RecallResult(items=[_item(1, 10, 'Inception was directed by Christopher Nolan.'), _item(2, 10),
+                                       _item(3, 10)])
+        return RecallResult(items=[_item(4, 40, 'Nolan was born in London.'), _item(1, 10)])
+
+    async def reverse(query: str, pool: Sequence[RecallItem]) -> tuple[list[RecallItem], RerankTrace]:
+        return list(reversed(pool)), trace
+
+    result, hop = asyncio.run(recall_with_hop(recall, 'Where was the director of Inception born?', limit=5,
+                                              rerank_pool=reverse))
+    # pool is 1,2,3 then 4 (1 deduplicated); reversed: 4,3,2,1; episode 10 capped at two passages
+    assert [i.chunk_id for i in result.items] == [4, 3, 2]
+    assert result.rerank == trace and hop is not None and hop.added == 1
+
+
+def test_a_failed_pool_rerank_keeps_the_merge_and_a_skipped_hop_still_reranks_the_first_search() -> None:
+    async def recall(query: str) -> RecallResult:
+        return RecallResult(items=[_item(1, 10), _item(2, 20)] if '\n' not in query else [_item(3, 30)])
+
+    async def failing(query: str, pool: Sequence[RecallItem]) -> None:
+        return None
+
+    merged, _ = asyncio.run(recall_with_hop(recall, 'Who wrote it?', limit=5, rerank_pool=failing))
+    plain, _ = asyncio.run(recall_with_hop(recall, 'Who wrote it?', limit=5))
+    assert [i.chunk_id for i in merged.items] == [i.chunk_id for i in plain.items]
+
+    from scone_memory.core.models import RerankTrace
+    trace = RerankTrace(status='applied', ordering='rerank', candidates_considered=2, candidates_sent=2,
+                        candidates_omitted=0, payload_bytes=10, duration_ms=1.0)
+
+    async def reverse(query: str, pool: Sequence[RecallItem]) -> tuple[list[RecallItem], RerankTrace]:
+        return list(reversed(pool)), trace
+
+    compared, hop = asyncio.run(recall_with_hop(recall, 'Is A or B older?', limit=5, rerank_pool=reverse))
+    assert hop is None and [i.chunk_id for i in compared.items] == [2, 1] and compared.rerank == trace
+
+
+def test_no_engine_reranker_means_no_pool_reranker() -> None:
+    from types import SimpleNamespace
+
+    from scone_memory.retrieval.second_hop import engine_pool_reranker
+
+    assert engine_pool_reranker(SimpleNamespace(reranker=None)) is None  # type: ignore[arg-type]
