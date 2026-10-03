@@ -23,6 +23,7 @@ from .run import load, read_jsonl, score
 MODELS = {
     'minilm': ('ms-marco-MiniLM-L-6-v2', 'Xenova/ms-marco-MiniLM-L-6-v2'),
     'bge': ('bge-reranker-base', 'BAAI/bge-reranker-base'),
+    'bge-int8': ('bge-reranker-base-int8', 'BAAI/bge-reranker-base'),  # onnx/model_quantized.onnx, 279 MB
 }
 
 
@@ -57,25 +58,30 @@ async def scored(reranker: Any, query: str, ids: list[str], text: dict[str, str]
 
 
 async def run(data_dir: Path, run_dir: Path, models_dir: Path, model: str, half: str, threads: int,
-              mode: str = 'plain') -> None:
+              mode: str = 'plain', pool_kind: str = 'full', cut: int = 1500) -> None:
     from scone_memory.providers.offline_reranker import OfflineCrossEncoderReranker
 
     docs, questions = load('hotpotqa', data_dir)
     text = {d.id: d.text for d in docs}
     twohop = {r['id']: r for r in read_jsonl(run_dir / 'rankings-hotpotqa-twohop.jsonl')}
-    entity = {r['id']: r for r in read_jsonl(run_dir / f'rankings-hotpotqa-entityhop-s2n3-{half}.jsonl')}
-    out = run_dir / f"rankings-hotpotqa-poolrerank-{model}-{half}{'' if mode == 'plain' else '-' + mode}.jsonl"
+    entity = ({r['id']: r for r in read_jsonl(run_dir / f'rankings-hotpotqa-entityhop-s2n3-{half}.jsonl')}
+              if pool_kind == 'full' else {})
+    tag = '' if (pool_kind, cut) == ('full', 1500) else f'-{pool_kind}-c{cut}'
+    out = run_dir / f"rankings-hotpotqa-poolrerank-{model}-{half}{'' if mode == 'plain' else '-' + mode}{tag}.jsonl"
     done = {r['id'] for r in read_jsonl(out)}
-    todo = [q for q in questions if (is_test(q.id) == (half == 'test')) and q.id in entity and q.id not in done]
+    todo = [q for q in questions if (is_test(q.id) == (half == 'test')) and (pool_kind != 'full' or q.id in entity)
+            and q.id not in done]
     folder, name = MODELS[model]
     reranker = OfflineCrossEncoderReranker(models_dir / folder, model_name=name, threads=threads, batch_size=32)
     print(f'{len(todo)} {half} questions, {model}, {threads} threads', flush=True)
     with out.open('a', encoding='utf-8') as handle:
         for number, question in enumerate(todo, 1):
             row = twohop[question.id]
-            candidates_ids = pool(row['first'], row['hops'][0], [s['best'] for s in entity[question.id]['searched']])
+            candidates_ids = pool(row['first'], row['hops'][0],
+                                  [s['best'] for s in entity[question.id]['searched']] if pool_kind == 'full' else [])
             started = time.perf_counter()
-            by, cut_used = await scored(reranker, question.question, candidates_ids, text, (1500, 1000, 600))
+            by, cut_used = await scored(reranker, question.question, candidates_ids, text,
+                                        tuple(c for c in (cut, 1000, 600, 400, 300) if c <= cut))
             ranked = [candidates_ids[i] for i in sorted(range(len(candidates_ids)), key=lambda i: -by[i + 1])]
             extra: dict[str, Any] = {}
             if mode == 'bridge':
@@ -136,11 +142,15 @@ def main() -> None:
     parser.add_argument('--half', choices=['dev', 'test'], default='dev')
     parser.add_argument('--threads', type=int, default=8)
     parser.add_argument('--mode', choices=['plain', 'bridge'], default='plain')
+    parser.add_argument('--pool', choices=['full', 'first-hop'], default='full',
+                        help='full: first 10, text hop 10 and entity searches; first-hop: first 10 and text hop 10')
+    parser.add_argument('--cut', type=int, default=1500, help='characters of each paragraph the reranker reads')
     args = parser.parse_args()
     if args.stage == 'run':
         if args.models_dir is None:
             raise SystemExit('run needs --models-dir')
-        asyncio.run(run(args.data_dir, args.run_dir, args.models_dir, args.model, args.half, args.threads, args.mode))
+        asyncio.run(run(args.data_dir, args.run_dir, args.models_dir, args.model, args.half, args.threads, args.mode,
+                        args.pool, args.cut))
     print(json.dumps(report(args.data_dir, args.run_dir, args.half), indent=1))
 
 
