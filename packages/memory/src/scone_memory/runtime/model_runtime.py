@@ -22,7 +22,7 @@ from ..realtime.catalog import PersonaCatalog
 from ..realtime.persona import ModelChoice, Persona, VoiceChoice
 from ..realtime.providers import BoundPersona, ProviderRegistry
 from ..realtime.text import TextConversation
-from .config import Settings
+from .config import Settings, build_recorder
 from .conversation_tools import ConversationTools
 from .model_connections import ModelConnection, ModelConnectionStore, api_key
 
@@ -228,6 +228,9 @@ class SelfHostedModelWorker:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._lock = asyncio.Lock()
+        # Loaded once: a recognizer needs no model connection, and loading
+        # a pipeline per refresh would cost seconds for nothing.
+        self.recorder = build_recorder(engine, settings)
         self.refresh(initial=True)
 
     def refresh(self, *, initial=False) -> None:
@@ -235,12 +238,13 @@ class SelfHostedModelWorker:
         if not initial and selected == self._selected:
             return
         current = None
-        if selected is not None or self.retention:
+        if selected is not None or self.retention or self.recorder is not None:
             chat = _SelfHostedChat(selected, self.settings.chat_think) if selected is not None else None
             distiller = Distiller(self.engine, chat, accept_at=self.settings.distill_accept_at) if chat else None
             deriver = Deriver(self.engine, chat) if chat and self.settings.derive else None
             current = ConsolidationWorker(self.engine, distiller, self.spaces, self.settings.distill_interval_s,
-                                          self.batch, retention=self.retention, deriver=deriver)
+                                          self.batch, retention=self.retention, deriver=deriver,
+                                          recorder=self.recorder)
         self._current, self._selected = current, selected
 
     @property
@@ -256,7 +260,7 @@ class SelfHostedModelWorker:
             self.refresh()
             current = self._current
             if current is None:
-                raise InvalidInput('No extraction model or retention policy is configured')
+                raise InvalidInput('No extraction model, entity recognizer or retention policy is configured')
             result = await current.run_once(space)
             self.last[space] = result
             self.passes += 1

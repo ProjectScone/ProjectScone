@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from ..core.graph_read import GraphFactReader
 from ..ingestion.structure import parse_structure
 from .context import name_index
+from .mentions import is_mention
 from .read import load_projection
 
 if TYPE_CHECKING:
@@ -92,13 +93,18 @@ async def _once(engine: "MemoryEngine", space: str, episode_id: int, *, max_chun
 
     documents = engine.documents
     if isinstance(documents, GraphFactReader):
-        rows = [fact for fact in await documents.facts_for_graph(space, episode_id, max_claims + 1)
-                if fact.space == space and fact.source_episode_id == episode_id]
+        read_rows = [fact for fact in await documents.facts_for_graph(space, episode_id, max_claims + 1)
+                     if fact.space == space and fact.source_episode_id == episode_id]
+        # A recognizer's mention is not a claim the source makes; the names
+        # it found are shown with the source's other mentions below. The
+        # read is bounded before they are left out, so a full read still
+        # says claims may be missing.
+        rows = [fact for fact in read_rows if not is_mention(fact)]
+        if len(read_rows) > max_claims:
+            reasons.append("claim_limit")
     else:
         rows = []
         reasons.append("claims_unavailable")
-    if len(rows) > max_claims:
-        reasons.append("claim_limit")
     rows = rows[:max_claims]
     projection, read = await load_projection(engine, space, mode="all")
     found_reasons = read.get("reasons")

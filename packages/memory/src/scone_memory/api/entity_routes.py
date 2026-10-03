@@ -40,6 +40,7 @@ from ..entities.overview import (DEFAULT_COMMUNITIES, DEFAULT_FACTS_EACH, MAX_BY
                                   MAX_COMMUNITIES, MAX_FACTS_EACH, graph_overview)
 from ..entities.match import DEFAULT_ROWS, MAX_BYTES as MATCH_BYTES, MAX_ROWS, MIN_BYTES, MAX_WHERE, MatchQueryError, graph_match
 from ..entities.export import ExportFormat, export_graph
+from ..entities.kinds import EntityKind
 from ..entities.project import EntityProjection, Relation
 from ..entities.query import Resolution, neighbourhood, paths_between, resolve
 from ..entities.read import load_projection, read_record
@@ -142,6 +143,7 @@ class Filters(BaseModel):
 
 class ListFilters(Filters):
     q: Optional[str]
+    kind: Optional[str] = None
 
 
 class ImpliedOut(BaseModel):
@@ -844,12 +846,15 @@ def mount_entity_routes(app: FastAPI, engine: MemoryEngine, space_for: Callable[
     @app.get("/v1/entities", response_model=EntityList)
     async def get_entities(
         status: StatusMode = "current", as_of: Optional[str] = None, q: Optional[str] = Query(default=None, max_length=200),
-        limit: int = Query(default=100, ge=1, le=1000), space: str = Depends(space_for),
+        limit: int = Query(default=100, ge=1, le=1000), kind: Optional[EntityKind] = None,
+        space: str = Depends(space_for),
     ) -> dict[str, object]:
-        """Entities ranked by the claims they take part in, optionally filtered by name."""
+        """Entities ranked by the claims they take part in, optionally filtered
+        by name and by kind (an entity whose kind hints conflict has none)."""
         when = _moment(engine, as_of)
         projection, coverage = await load_projection(engine, space, mode=status, as_of=when)
-        return entity_listing(projection, mode=status, as_of=when, limit=limit, query=q, coverage=coverage)
+        return entity_listing(projection, mode=status, as_of=when, limit=limit, query=q, coverage=coverage,
+                              kind=kind)
 
     @app.get("/v1/entities/{entity_id}", response_model=None)
     async def get_entity(

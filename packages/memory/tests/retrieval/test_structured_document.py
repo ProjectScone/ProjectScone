@@ -280,3 +280,75 @@ async def test_local_structure_does_not_spend_two_slots_on_child_and_parent() ->
     result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
                                   mode='local_structure', limit=2)
     assert [p.text for p in result.evidence] == ['## Child\nCats purr.\n', '# Other\nDogs bark.']
+
+
+async def test_local_hybrid_selects_relevant_paragraph_without_section_padding() -> None:
+    snapshot = book('# Animals\nDogs bark.\n\nCats need taurine.\n\nBirds fly.')
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings())
+    decisions = UnusedDecisions()
+    result = await index.retrieve('taurine', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_hybrid', limit=1)
+    assert result.evidence[0].text.strip() == 'Cats need taurine.'
+    assert result.route is result.fetch is None
+    assert result.fetch_decision_ms == 0
+
+
+async def test_local_hybrid_lexical_lane_recovers_evidence_outside_vector_shortlist() -> None:
+    snapshot = book(''.join(f'# Section {i}\nOrdinary background {i}.\n' for i in range(40))
+                    + '# Appendix\nZirconium stabilizes the sensor.')
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings())
+    decisions = UnusedDecisions()
+    result = await index.retrieve('zirconium sensor', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_hybrid', limit=5)
+    assert not any('Zirconium' in p.text for p in result.baseline)
+    assert any(p.text.strip() == 'Zirconium stabilizes the sensor.' for p in result.evidence)
+
+
+async def test_local_hybrid_recovers_long_paragraph_once_with_exact_source_offsets() -> None:
+    paragraph = 'Cats need fresh water and balanced food. ' * 24
+    snapshot = book('# Cats\n' + paragraph + '\n\nDogs bark.\n')
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings(), chunk_size=120)
+    decisions = UnusedDecisions()
+    result = await index.retrieve('cats water', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_hybrid', limit=5)
+    assert sum(paragraph in p.text for p in result.evidence) == 1
+    raw = snapshot.content.encode()
+    assert all(raw[p.start:p.end].decode() == p.text for p in result.evidence)
+    assert all(a.end <= b.start or b.end <= a.start
+               for i, a in enumerate(result.evidence) for b in result.evidence[i + 1:])
+
+
+@pytest.mark.parametrize('budget', [1, 17, 300])
+async def test_local_hybrid_preserves_utf8_bounds_for_oversized_paragraphs(budget: int) -> None:
+    snapshot = book('# Cats\n' + 'Cats café 🐈. ' * 100)
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings(), chunk_size=120)
+    decisions = UnusedDecisions()
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_hybrid', limit=2, max_bytes=budget)
+    assert result.evidence
+    assert sum(len(p.text.encode()) for p in result.evidence) <= budget
+    assert len(result.evidence) <= 2
+    assert all(snapshot.content.encode()[p.start:p.end].decode() == p.text for p in result.evidence)
+
+
+async def test_local_hybrid_keeps_heading_only_evidence() -> None:
+    snapshot = book('# Cats purr\n# Dogs bark\n')
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings())
+    decisions = UnusedDecisions()
+    result = await index.retrieve('cats', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_hybrid', limit=1)
+    assert result.evidence[0].text == '# Cats purr\n'
+
+
+@pytest.mark.parametrize('content', [
+    '# Cats\n' + 'Cats need taurine. ' * 50 + '\n\nDogs bark.',
+    '# Cats purr\n# Dogs\nDogs bark.',
+])
+async def test_local_hybrid_does_not_replace_unprojectable_relevant_hit_with_unrelated_paragraph(content: str) -> None:
+    snapshot = book(content)
+    index = await StructuredDocumentIndex.build(snapshot, Embeddings(), chunk_size=120)
+    decisions = UnusedDecisions()
+    result = await index.retrieve('cats taurine', snapshot, SectionRouter(decisions), decisions,
+                                  mode='local_hybrid', limit=1, max_bytes=100)
+    assert 'Cats' in result.evidence[0].text
+    assert 'Dogs' not in result.evidence[0].text

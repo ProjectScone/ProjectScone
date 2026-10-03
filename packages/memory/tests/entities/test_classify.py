@@ -135,5 +135,5 @@ def test_references_are_flagged(key: str, flag: str | None) -> None:
 
 
 def test_the_rules_are_versioned_and_pure() -> None:
-    assert CLASSIFIER_VERSION == "objects/1"
+    assert CLASSIFIER_VERSION == "objects/2"
     assert classify_object("Acme", "works_at", PLAIN) == classify_object("Acme", "works_at", PLAIN)

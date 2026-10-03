@@ -171,3 +171,28 @@ reranking only; it does not measure generated-answer quality or chat latency.
 The [completed development results](../local_structure/RESULTS.md) show lower
 retrieval latency and higher evidence recall, with lower evidence F1 than
 vector-guided routing. The mode remains opt-in.
+
+### Local paragraph ranking
+
+Use `mode='local_hybrid'` to return evidence already ranked by local vector and
+keyword signals, without a hosted reranker. The top vector hits project onto
+complete paragraphs, code blocks, or tables. Their strongest vector scores
+define one ranking; the native paragraph BM25 index supplies another. Equal-weight
+reciprocal rank fusion combines them. Paragraphs replace whole-section expansion
+to avoid including unrelated neighboring paragraphs.
+
+Heading-only vector hits remain candidates. A paragraph too large for the
+remaining budget falls back to its strongest intersecting vector hit, or a bounded
+source prefix if only the lexical lane found it. Later overlapping spans are
+skipped. Query embeddings still use the caller's configured embedder; no routing,
+fetch-selection, or reranking model is used. The router/chooser arguments are
+unused. The paragraph lexical index is prepared at construction for every mode.
+This policy is opt-in; the default is unchanged. See the
+[development protocol](../local_structure/HYBRID_PROTOCOL.md) for evaluation limits.
+The [completed local-only results](../local_structure/HYBRID_RESULTS.md) compare
+this mode with flat vectors and section expansion without reranking.
+The [standalone Jev comparison](../local_structure/COMPACT_RESULTS.md) shows that
+reranking paragraph candidates improves evidence F1 over reranked section
+expansion, with lower recall and similar hosted latency. For that policy, retrieve
+up to 32 hybrid candidates and pass them to the existing evidence reranker before
+packing the final five items.

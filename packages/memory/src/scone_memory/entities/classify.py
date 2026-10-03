@@ -13,17 +13,19 @@ The rules, in order:
 2. a key that an identity decision names;
 3. quoted text, or prose (long, or holding a sentence break);
 4. a third-person or indefinite pronoun;
-5. a date, quantity, identifier or yes/no shape, which names a thing only
+5. the object of a recognizer's mention (``mentions``): the recognizer
+   read it as a name, and only it writes those predicates;
+6. a date, quantity, identifier or yes/no shape, which names a thing only
    when a subject carries the same key and the text holds no cased letters
    (a unit, version or path never joins by folding, in either direction);
-6. any key that a subject carries;
-7. a predicate whose object is a value (role, colour, price, status, ...);
-8. a leading determiner: a title-cased rest is a name ("the Web Summit"),
+7. any key that a subject carries;
+8. a predicate whose object is a value (role, colour, price, status, ...);
+9. a leading determiner: a title-cased rest is a name ("the Web Summit"),
    anything else a description ("the Acme lab");
-9. a name shape (a capital letter, or a short name in a script without case);
-10. a predicate whose object is a thing (works_at, lives_in, reports_to, ...);
-11. a lowercase phrase that two or more subjects share, as a concept;
-12. anything else, as a value.
+10. a name shape (a capital letter, or a short name in a script without case);
+11. a predicate whose object is a thing (works_at, lives_in, reports_to, ...);
+12. a lowercase phrase that two or more subjects share, as a concept;
+13. anything else, as a value.
 """
 
 from __future__ import annotations
@@ -33,8 +35,10 @@ import re
 from typing import Literal, Mapping
 
 from ..core.validation import entity_key
+from .mentions import is_mention_predicate
 
-CLASSIFIER_VERSION = "objects/1"
+#: objects/2: a recognizer's mention names a thing (rule 5).
+CLASSIFIER_VERSION = "objects/2"
 
 ObjectClass = Literal["entity", "literal"]
 LiteralKind = Literal["date", "quantity", "identifier", "text", "value", "pronoun"]
@@ -42,7 +46,7 @@ ClassBasis = Literal[
     "decision", "identity_decision", "quoted_text", "prose", "pronoun", "date_shape", "quantity_shape",
     "identifier_shape", "value_shape", "subject_anchor", "literal_predicate", "determiner_name", "description",
     "name_shape", "uncased_name", "entity_predicate", "shared_object", "common_value",
-    "code_symbol",
+    "code_symbol", "recognized_name",
 ]
 
 
@@ -328,6 +332,10 @@ def classify_object(text: str, predicate_key: str, context: ClassificationContex
         return ObjectClassification("literal", "text", "prose")
     if key in _PRONOUNS:
         return ObjectClassification("literal", "pronoun", "pronoun")
+    if is_mention_predicate(predicate_key):
+        # Before the shapes: a recognizer that read `3M` or `7-Eleven` as
+        # an organisation has already said it is a name, not a quantity.
+        return ObjectClassification("entity", None, "recognized_name")
     shape = literal_shape(stripped)
     if shape is not None:
         if key in context.anchors and is_case_safe(stripped):

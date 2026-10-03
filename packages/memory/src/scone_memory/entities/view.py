@@ -272,9 +272,14 @@ def knowledge_view(projection: EntityProjection, *, mode: StatusMode, as_of: str
 
 
 def entity_listing(projection: EntityProjection, *, mode: StatusMode, as_of: str, limit: int, query: str | None,
-                   coverage: Mapping[str, object]) -> dict[str, object]:
+                   coverage: Mapping[str, object], kind: str | None = None) -> dict[str, object]:
+    """``kind`` keeps the entities whose kind is that one, as inferred:
+    an entity whose hints conflict has no kind and is never shown under
+    either side of the conflict."""
     counted = _Counted(projection, mode, as_of)
     matching = counted.entities
+    if kind is not None:
+        matching = [entity for entity in matching if entity.kind == kind]
     if query:
         needle = query.casefold()
         matching = [entity for entity in matching
@@ -284,7 +289,7 @@ def entity_listing(projection: EntityProjection, *, mode: StatusMode, as_of: str
         reasons.append("entity_limit")
     return {
         "schema_version": VIEW_SCHEMA_VERSION, "space": projection.space, "projection": projection_meta(projection),
-        "filters": {"status": mode, "as_of": as_of, "q": query},
+        "filters": {"status": mode, "as_of": as_of, "q": query, "kind": kind},
         "entities": [entity_record(entity, counted.score[entity.entity_id]) for entity in matching[:limit]],
         "coverage": {**{key: value for key, value in coverage.items() if key != "reasons"},
                      "entities_total": len(matching), "entities_shown": min(len(matching), limit),
