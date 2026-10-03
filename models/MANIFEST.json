@@ -11,7 +11,188 @@
         "file": "model.safetensors",
         "bytes": 3356597232,
         "sha256": "141aed478eb006b7cd3113f71bb5b2965b3fd1e8b1651f1ef635f2eac7d2c669",
-        "chunks": []
+        "chunks": [
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-000",
+            "bytes": 94371840,
+            "sha256": "53bc14d4a02c7181ae1fd5ca197bd83626c66c960d5be10d027846ed6fdb04ae"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-001",
+            "bytes": 94371840,
+            "sha256": "74978cc0f16a1244d3575d905e54eff20b3ebd012966a216d3e21532ab03cca6"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-002",
+            "bytes": 94371840,
+            "sha256": "45fde6c2f88f43e6a22a7a58d587ab87121b3ceef593bec9740ddbc843692020"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-003",
+            "bytes": 94371840,
+            "sha256": "b934639744002d82ccccdc21ef4d9c19db24fe5aec798a3a46cd2c146ad5cb74"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-004",
+            "bytes": 94371840,
+            "sha256": "1dbfabc4b8b39a586c5b541f866932ead5b3547bddae485343e8f6c003525375"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-005",
+            "bytes": 94371840,
+            "sha256": "d32acae937eeca84ad284db5ed007b69266a71f40b350d167997f09692305fe3"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-006",
+            "bytes": 94371840,
+            "sha256": "ad44cf72e5ddb00b9e3f22664da90bf86b278c6a3fdb98f4c394e019d925870b"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-007",
+            "bytes": 94371840,
+            "sha256": "51a3e4690f71fcac9567d8abaf34f485174b173dbe7ededd8acec6fcc668692a"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-008",
+            "bytes": 94371840,
+            "sha256": "d2f462ae5614568addbb42c38753f1372b087b5a8ae2adef5b6070d9d4edbcfc"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-009",
+            "bytes": 94371840,
+            "sha256": "0b8140e2f5af36cb5eaca8585aee483c3cbdaf5afe7fe02c6469f697d29872ce"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-010",
+            "bytes": 94371840,
+            "sha256": "927bad41418231171bbed5107fd6a16ae19ffd1a2f99e92c646e08c1e49c8f55"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-011",
+            "bytes": 94371840,
+            "sha256": "69adf260bfd9d1bfb2fae23edf63fcfef1454ce4388435590a160a2b3512937d"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-012",
+            "bytes": 94371840,
+            "sha256": "ebe57cc863d013416505043acf33a89b0be611469349b0ee79f74d299f003b3d"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-013",
+            "bytes": 94371840,
+            "sha256": "719d636a406a52f856c8431df111e8fb3642fa813e06853e5cadaa9438617bad"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-014",
+            "bytes": 94371840,
+            "sha256": "2be111fab383eecd6c823ddd7a7602958cd99b6ec34cfcd8c9172bb414cd19e8"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-015",
+            "bytes": 94371840,
+            "sha256": "93679a4b8cc75cd7cb104c1e6b6500bc1f471a830ea8c5c2c7884823f3c8c004"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-016",
+            "bytes": 94371840,
+            "sha256": "ee0a620ea15c6eb248749d32a947a7a1b8f0a4bc20570e739aba4bbdfce7a8a0"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-017",
+            "bytes": 94371840,
+            "sha256": "b33be3f2b76a9ae2fe9586fa5603d12a94e30a7b200675206e07c446a2e9b88a"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-018",
+            "bytes": 94371840,
+            "sha256": "b1a8b1d946d8218b650617661b7a959c9871352f1a173b8cacb0f4e0bff35fd6"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-019",
+            "bytes": 94371840,
+            "sha256": "d8dcb25d4080440da1d33deecf6494b38eb04c1c4e377a37cdebfbdbdef2d750"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-020",
+            "bytes": 94371840,
+            "sha256": "b01fae80ae09d87ff284df0ec800f9b367b82bb2dd3c654df01abf7541d38032"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-021",
+            "bytes": 94371840,
+            "sha256": "bcb9146720073792848d7b8dbd315bf1dc634f475285a789529836d35ab5ba77"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-022",
+            "bytes": 94371840,
+            "sha256": "4f6949e07f7659e80cad29432abb0db244f8d8998b7fada327ffae8284963799"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-023",
+            "bytes": 94371840,
+            "sha256": "108479a013b48b44324cb63fb5b69a73db40b711b5cd950c84ab73aafd4f0781"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-024",
+            "bytes": 94371840,
+            "sha256": "9b44cba4ee0efca28d47325d7ccf5e3560575e420b8c3c267079ada013816359"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-025",
+            "bytes": 94371840,
+            "sha256": "fc51ee21ee250c9786bff4bd7140617d39fc3c2b04b25087674789931d090187"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-026",
+            "bytes": 94371840,
+            "sha256": "0ae4251cc81e0bc25409c223145db7d1046822ba2a3793cc34a7bdc0ad742508"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-027",
+            "bytes": 94371840,
+            "sha256": "bcd85953ec4c2e0e13ff0472be0f064a2c55ae3e64c6d3053be90cb29b4bdca8"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-028",
+            "bytes": 94371840,
+            "sha256": "ac955d0dcdb0d870761a2c986e4cee645e16abdcc3e521cf7a1a0c3ef846b578"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-029",
+            "bytes": 94371840,
+            "sha256": "b1f285f2af244da45f3208736403df3b3e71d503e86fdcd44c8317d553e8e824"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-030",
+            "bytes": 94371840,
+            "sha256": "91d49fede205d6b3c58052511f5d4397ef9f5f42ff8f4d895c59c9357452cf7b"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-031",
+            "bytes": 94371840,
+            "sha256": "87333c0cabfe3b9827aa2b4f8ef21557a687db5a815941253547a17dabf456d5"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-032",
+            "bytes": 94371840,
+            "sha256": "ae5de5961bab37f2ea2b10744792e69b528c042346bd7df14f05f8d7f5c97923"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-033",
+            "bytes": 94371840,
+            "sha256": "722fd1af496ab0a87b6ec267debae0313978bd689c691f4338f29c15e62bf00a"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-034",
+            "bytes": 94371840,
+            "sha256": "c5086fc61ccc99da066e80b8b5730904ee9aea2b072d73edc4806400ebfba389"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-035",
+            "bytes": 53582832,
+            "sha256": "e476a4b19771a12def57ce24bb35d052cdea319cba7be12fdff081c56536015f"
+          }
+        ]
       },
       "files": [
         "CONTRIBUTING.md",
