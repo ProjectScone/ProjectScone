@@ -1,18 +1,22 @@
-# Reranker models (the `models` branch)
+# Reranker models
 
-This branch holds model weights only. It shares no history with `main`, so cloning or building Scone never downloads
-them. Fetch it when you want the models:
+Reranker and multimodal retrieval weights, committed with the code so that `git clone` or `git pull` is enough to
+get them. No Hugging Face access, Git LFS or download script is needed. They add about 5 GB to a clone.
 
 ```bash
-git fetch origin models
-git worktree add ../scone-models models    # or: git checkout models
-cd ../scone-models
-python3 models/combine.py                  # rejoin every weight file and verify it
-python3 models/combine.py --check          # verify only, change nothing
+git pull                              # or: git clone https://github.com/ProjectScone/ProjectScone.git
+python3 models/combine.py             # rejoin every weight file and verify it
+python3 models/combine.py --check     # verify only, change nothing
 ```
 
-To get only this branch without the rest of the project:
-`git clone --single-branch --branch models https://github.com/ProjectScone/ProjectScone.git scone-models` (about 5 GB).
+To clone the code without the weights:
+
+```bash
+git clone --filter=blob:none --sparse https://github.com/ProjectScone/ProjectScone.git
+cd ProjectScone && git sparse-checkout set .github deploy packages scripts terraform tests
+```
+
+CI checks out the code directories the same way, so it never downloads `models/`.
 
 GitHub refuses files over 100 MB, so each weight file is committed as 90 MiB chunks under `models/<name>/parts/`.
 `combine.py` needs only the Python standard library. It joins the chunks into `models/<name>/model.safetensors` and
