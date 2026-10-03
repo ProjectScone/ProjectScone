@@ -1,0 +1,361 @@
+{
+  "chunk_bytes": 94371840,
+  "models": {
+    "llama-nemotron-rerank-vl-1b-v2": {
+      "source": "https://huggingface.co/nvidia/llama-nemotron-rerank-vl-1b-v2",
+      "revision": "b8a9987b05b75db5ad949c825cbcbf6eb7c48b5a",
+      "license": "NVIDIA Open Model License + Llama 3.2 Community License",
+      "kind": "multimodal reranker (text, image, image+text)",
+      "description": "NVIDIA Eagle VLM: SigLIP 2 vision + Llama 3.2 1B, ~1.7B params",
+      "weights": {
+        "file": "model.safetensors",
+        "bytes": 3356597232,
+        "sha256": "141aed478eb006b7cd3113f71bb5b2965b3fd1e8b1651f1ef635f2eac7d2c669",
+        "chunks": [
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-000",
+            "bytes": 94371840,
+            "sha256": "53bc14d4a02c7181ae1fd5ca197bd83626c66c960d5be10d027846ed6fdb04ae"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-001",
+            "bytes": 94371840,
+            "sha256": "74978cc0f16a1244d3575d905e54eff20b3ebd012966a216d3e21532ab03cca6"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-002",
+            "bytes": 94371840,
+            "sha256": "45fde6c2f88f43e6a22a7a58d587ab87121b3ceef593bec9740ddbc843692020"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-003",
+            "bytes": 94371840,
+            "sha256": "b934639744002d82ccccdc21ef4d9c19db24fe5aec798a3a46cd2c146ad5cb74"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-004",
+            "bytes": 94371840,
+            "sha256": "1dbfabc4b8b39a586c5b541f866932ead5b3547bddae485343e8f6c003525375"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-005",
+            "bytes": 94371840,
+            "sha256": "d32acae937eeca84ad284db5ed007b69266a71f40b350d167997f09692305fe3"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-006",
+            "bytes": 94371840,
+            "sha256": "ad44cf72e5ddb00b9e3f22664da90bf86b278c6a3fdb98f4c394e019d925870b"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-007",
+            "bytes": 94371840,
+            "sha256": "51a3e4690f71fcac9567d8abaf34f485174b173dbe7ededd8acec6fcc668692a"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-008",
+            "bytes": 94371840,
+            "sha256": "d2f462ae5614568addbb42c38753f1372b087b5a8ae2adef5b6070d9d4edbcfc"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-009",
+            "bytes": 94371840,
+            "sha256": "0b8140e2f5af36cb5eaca8585aee483c3cbdaf5afe7fe02c6469f697d29872ce"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-010",
+            "bytes": 94371840,
+            "sha256": "927bad41418231171bbed5107fd6a16ae19ffd1a2f99e92c646e08c1e49c8f55"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-011",
+            "bytes": 94371840,
+            "sha256": "69adf260bfd9d1bfb2fae23edf63fcfef1454ce4388435590a160a2b3512937d"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-012",
+            "bytes": 94371840,
+            "sha256": "ebe57cc863d013416505043acf33a89b0be611469349b0ee79f74d299f003b3d"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-013",
+            "bytes": 94371840,
+            "sha256": "719d636a406a52f856c8431df111e8fb3642fa813e06853e5cadaa9438617bad"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-014",
+            "bytes": 94371840,
+            "sha256": "2be111fab383eecd6c823ddd7a7602958cd99b6ec34cfcd8c9172bb414cd19e8"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-015",
+            "bytes": 94371840,
+            "sha256": "93679a4b8cc75cd7cb104c1e6b6500bc1f471a830ea8c5c2c7884823f3c8c004"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-016",
+            "bytes": 94371840,
+            "sha256": "ee0a620ea15c6eb248749d32a947a7a1b8f0a4bc20570e739aba4bbdfce7a8a0"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-017",
+            "bytes": 94371840,
+            "sha256": "b33be3f2b76a9ae2fe9586fa5603d12a94e30a7b200675206e07c446a2e9b88a"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-018",
+            "bytes": 94371840,
+            "sha256": "b1a8b1d946d8218b650617661b7a959c9871352f1a173b8cacb0f4e0bff35fd6"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-019",
+            "bytes": 94371840,
+            "sha256": "d8dcb25d4080440da1d33deecf6494b38eb04c1c4e377a37cdebfbdbdef2d750"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-020",
+            "bytes": 94371840,
+            "sha256": "b01fae80ae09d87ff284df0ec800f9b367b82bb2dd3c654df01abf7541d38032"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-021",
+            "bytes": 94371840,
+            "sha256": "bcb9146720073792848d7b8dbd315bf1dc634f475285a789529836d35ab5ba77"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-022",
+            "bytes": 94371840,
+            "sha256": "4f6949e07f7659e80cad29432abb0db244f8d8998b7fada327ffae8284963799"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-023",
+            "bytes": 94371840,
+            "sha256": "108479a013b48b44324cb63fb5b69a73db40b711b5cd950c84ab73aafd4f0781"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-024",
+            "bytes": 94371840,
+            "sha256": "9b44cba4ee0efca28d47325d7ccf5e3560575e420b8c3c267079ada013816359"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-025",
+            "bytes": 94371840,
+            "sha256": "fc51ee21ee250c9786bff4bd7140617d39fc3c2b04b25087674789931d090187"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-026",
+            "bytes": 94371840,
+            "sha256": "0ae4251cc81e0bc25409c223145db7d1046822ba2a3793cc34a7bdc0ad742508"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-027",
+            "bytes": 94371840,
+            "sha256": "bcd85953ec4c2e0e13ff0472be0f064a2c55ae3e64c6d3053be90cb29b4bdca8"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-028",
+            "bytes": 94371840,
+            "sha256": "ac955d0dcdb0d870761a2c986e4cee645e16abdcc3e521cf7a1a0c3ef846b578"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-029",
+            "bytes": 94371840,
+            "sha256": "b1f285f2af244da45f3208736403df3b3e71d503e86fdcd44c8317d553e8e824"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-030",
+            "bytes": 94371840,
+            "sha256": "91d49fede205d6b3c58052511f5d4397ef9f5f42ff8f4d895c59c9357452cf7b"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-031",
+            "bytes": 94371840,
+            "sha256": "87333c0cabfe3b9827aa2b4f8ef21557a687db5a815941253547a17dabf456d5"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-032",
+            "bytes": 94371840,
+            "sha256": "ae5de5961bab37f2ea2b10744792e69b528c042346bd7df14f05f8d7f5c97923"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-033",
+            "bytes": 94371840,
+            "sha256": "722fd1af496ab0a87b6ec267debae0313978bd689c691f4338f29c15e62bf00a"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-034",
+            "bytes": 94371840,
+            "sha256": "c5086fc61ccc99da066e80b8b5730904ee9aea2b072d73edc4806400ebfba389"
+          },
+          {
+            "path": "models/llama-nemotron-rerank-vl-1b-v2/parts/model.safetensors.part-035",
+            "bytes": 53582832,
+            "sha256": "e476a4b19771a12def57ce24bb35d052cdea319cba7be12fdff081c56536015f"
+          }
+        ]
+      },
+      "files": [
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+        "__init__.py",
+        "chat_template.jinja",
+        "config.json",
+        "config_sentence_transformers.json",
+        "configuration_llama_nemotron_vl.py",
+        "modeling_llama_nemotron_vl.py",
+        "modules.json",
+        "processing_llama_nemotron_vl.py",
+        "processor_config.json",
+        "sentence_bert_config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ]
+    },
+    "granite-embedding-reranker-english-r2": {
+      "source": "https://huggingface.co/ibm-granite/granite-embedding-reranker-english-r2",
+      "revision": "d09d3d6971b689bf9c23839e45a470874d46e13a",
+      "license": "apache-2.0",
+      "kind": "cross-encoder (text)",
+      "description": "IBM Granite ModernBERT cross-encoder, 149M params, English",
+      "weights": {
+        "file": "model.safetensors",
+        "bytes": 598436708,
+        "sha256": "e72c8f7087dbfbdbfb9d75077f7b7b05b01b459730f735b468cbde71d66090e6",
+        "chunks": [
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-000",
+            "bytes": 94371840,
+            "sha256": "51e08719b2a739f27ac3be0aa8f9f93342712476d152d3f1fa93f54c99cb1d02"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-001",
+            "bytes": 94371840,
+            "sha256": "36c20914d5f13952639fb785a73abd715d7d5f8e5d47cda0ad39aa64485ab0da"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-002",
+            "bytes": 94371840,
+            "sha256": "3fc7a0d26240ed1668d3ebe36dd2ab24d39185f2e2c136a8ccd7d47c91923e82"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-003",
+            "bytes": 94371840,
+            "sha256": "e9ad14f17a483da8c968facc422f545dbbb2a2d3d52a4ae3854c9ff5b0c6fb61"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-004",
+            "bytes": 94371840,
+            "sha256": "1c08841552576a7ee6ae0058aed2ddf506dc5affe49bf67baf8d1eb0fd9190d3"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-005",
+            "bytes": 94371840,
+            "sha256": "36e315b6cf20cb7a7acc309a2256af121d26c29a087b127ca34bc59edc29671b"
+          },
+          {
+            "path": "models/granite-embedding-reranker-english-r2/parts/model.safetensors.part-006",
+            "bytes": 32205668,
+            "sha256": "425e5c89e657506d4aa3b002ee30e575ae11e1589d0a77f0c0417a6d0370e4c8"
+          }
+        ]
+      },
+      "files": [
+        "README.md",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ]
+    },
+    "BGE-VL-large": {
+      "source": "https://huggingface.co/BAAI/BGE-VL-large",
+      "revision": "40fb48217f521df22a2a5bf15edd52ed1146ef05",
+      "license": "mit",
+      "kind": "multimodal embedder (retriever, not a reranker)",
+      "description": "BAAI BGE-VL on CLIP ViT-L/14; embeds text, images and composed image+text queries",
+      "files": [
+        "LICENSE",
+        "README.md",
+        "assets/cir_candi_1.png",
+        "assets/cir_candi_2.png",
+        "assets/cir_query.png",
+        "assets/res-ft-mmeb.png",
+        "assets/res-scaling.png",
+        "assets/res-zs-cir.png",
+        "assets/res-zs-mmeb.png",
+        "bge_vl_clip_transformer.py",
+        "config.json",
+        "config_sentence_transformers.json",
+        "merges.txt",
+        "modeling_MMRet_CLIP.py",
+        "modules.json",
+        "preprocessor_config.json",
+        "sentence_bert_config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json"
+      ],
+      "weights": {
+        "file": "model.safetensors",
+        "bytes": 855304818,
+        "sha256": "6d6c5dcd259b71a49a51916e5fd1dc248563ce08b41a713eb00dd296dfd8f5f4",
+        "chunks": [
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-000",
+            "bytes": 94371840,
+            "sha256": "55a8e7f1ad96729b6a54921e38083222a1e8273718f25be4eda43d4c562f613f"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-001",
+            "bytes": 94371840,
+            "sha256": "614344caf2eb906c68b1717efed721e9e7c29eb63c94ce1b1898baab54c2658e"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-002",
+            "bytes": 94371840,
+            "sha256": "21eeaa00130512f59aebc9b2b9b953b2e63ebe8644a9c0e6040259ad35ed9be5"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-003",
+            "bytes": 94371840,
+            "sha256": "0e11cabb68a60155f7a036962dab6820e08e0cc91491891191c1151b25cc2e7d"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-004",
+            "bytes": 94371840,
+            "sha256": "43f09b7001e5180ac30ba8ae822f20741b69fab15b9b19c18c62f3d207a01530"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-005",
+            "bytes": 94371840,
+            "sha256": "a28514e8147cdfffa8d7592dee2f9a4e8791e2488e384a0416237a53365459b4"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-006",
+            "bytes": 94371840,
+            "sha256": "e9003f00806b768da61a73b7eba7b8525725eff20e081d70ffe5c8de7d30100d"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-007",
+            "bytes": 94371840,
+            "sha256": "21abf66da2f07156152937b7b3b4233b2f650ed86a3b6920c561a30f384417d7"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-008",
+            "bytes": 94371840,
+            "sha256": "c4697fd1f224dc5f68f2c3d591235cf59247535539cf0495117e8d568e76e710"
+          },
+          {
+            "path": "models/BGE-VL-large/parts/model.safetensors.part-009",
+            "bytes": 5958258,
+            "sha256": "9f07a86facc7c95b2a3a9dc1fae2faa6776334b2788d18b5554b98d2755bc3db"
+          }
+        ]
+      }
+    }
+  }
+}
