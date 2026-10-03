@@ -22,6 +22,12 @@ async def seed(engine, subject, obj, *, team='blue', space='alpha', kind='file',
 
 
 def box(engine, **kwargs):
+    # Every test here but the two about the deadline is about something
+    # else -- a byte budget, a scope, an argument -- so the deadline is
+    # the longest one allowed and cannot be what decides them. CI's
+    # lancedb lane exceeded the 2 s default and answered 'timeout' where
+    # the test asked about 'output_bytes'.
+    kwargs.setdefault('timeout_s', 30)
     return ScopedMemoryTools(engine, 'alpha', scope=RecallScope.validated(where={'team':'blue'},
         kind='file', source_prefix='manuals/', since='2024-01-01T00:00:00Z', until='2025-12-31T00:00:00Z'),
         exclude_session_id='current', **kwargs)

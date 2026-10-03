@@ -1,0 +1,321 @@
+{
+ "schema_version": 1,
+ "name": "feedback-replay-v1",
+ "description": "Authored subjects for replaying recorded feedback into ranking. Each subject has one passage that answers it, one near miss on the same subject, two ways of asking it that feedback is recorded from, and a paraphrase that is only ever evaluated. Sixteen subjects come in sibling pairs that share wording (two rate tiers, two storage quotas, two clinics...), so a passage judged useful for one is a close candidate for the other; eight stand alone. Halves alternate, so every sibling pair has one subject in each half; the halves were declared before any measurement, and the replay runs twice, judging each half once. Measures the mechanism on a small corpus, not a real-world rate.",
+ "passages": [
+  "The cafe tier allows 17 requests per minute before throttling starts.",
+  "Cafe plan calls are billed by the minute of compute used.",
+  "The team tier allows 42 requests per minute before throttling starts.",
+  "Team plan calls are billed by the minute of compute used.",
+  "Acme Robotics has a storage quota of 512 MB per workspace.",
+  "Acme Robotics moved its workspace archive to cold storage in March.",
+  "Globex has a storage quota of 2 GB per workspace.",
+  "Globex moved its workspace archive to cold storage in April.",
+  "The Northgate clinic takes walk-in patients from 8am to noon on weekdays.",
+  "The Northgate clinic parking lot closes at noon on weekends.",
+  "The Riverside clinic takes walk-in patients from 1pm to 6pm on weekdays.",
+  "The Riverside clinic parking lot closes at 6pm on weekends.",
+  "Alice Chen started at Acme Robotics in May 2021 as a controls engineer.",
+  "Alice Chen gave a talk on motor controls in May 2023.",
+  "Carol Diaz started at Globex in August 2019 on the platform team.",
+  "Carol Diaz gave a talk on platform migrations in August 2022.",
+  "The ledger database is backed up every six hours to the vault bucket.",
+  "The ledger database was migrated to a larger instance last week.",
+  "The inventory database is backed up every night to the vault bucket.",
+  "The inventory database was migrated to a larger instance last month.",
+  "Priya Nair is on call for the payments service this week.",
+  "The payments service dashboard shows weekly error budgets.",
+  "Tomas Berg is on call for the search service this week.",
+  "The search service dashboard shows weekly error budgets.",
+  "The roses in the east bed need watering twice a week in summer.",
+  "The roses in the east bed were pruned back in February.",
+  "The tomatoes in the greenhouse need watering every morning in summer.",
+  "The tomatoes in the greenhouse were planted in late April.",
+  "The team flight to Lisbon departs at 07:40 from gate B12.",
+  "The Lisbon offsite hotel is a short walk from the river.",
+  "The team train to Porto departs at 09:15 from platform 4.",
+  "The Porto offsite hotel is a short walk from the station.",
+  "The guest wifi password for the office is printed on the kitchen fridge.",
+  "The office kitchen fridge is cleared out every Friday.",
+  "Staff parking permits are renewed each January at the front desk.",
+  "The front desk closes early on the last Friday of each month.",
+  "The third floor printer jams unless the paper tray is fanned first.",
+  "The third floor meeting room has a new projector.",
+  "The espresso machine descaling is due on the first Monday of each month.",
+  "The espresso beans are ordered from a roaster in Braga.",
+  "Expense reports over 500 euros need a director's approval.",
+  "Expense reports are paid out on the 25th of each month.",
+  "Laptops must have disk encryption turned on before joining the VPN.",
+  "The VPN client is updated automatically every quarter.",
+  "Unused holiday days carry over until the end of March.",
+  "Holiday requests should be filed two weeks in advance.",
+  "The fire drill assembly point is the car park behind building C.",
+  "Building C has its fire extinguishers inspected in June."
+ ],
+ "subjects": [
+  {
+   "id": "cafe-tier",
+   "half": "a",
+   "siblings": "rate-tiers",
+   "gold": "The cafe tier allows 17 requests per minute before throttling starts.",
+   "asked": [
+    "How many requests per minute does the cafe tier allow?",
+    "cafe tier requests per minute limit"
+   ],
+   "paraphrase": "What is the throttling threshold for calls on the cafe plan?"
+  },
+  {
+   "id": "team-tier",
+   "half": "b",
+   "siblings": "rate-tiers",
+   "gold": "The team tier allows 42 requests per minute before throttling starts.",
+   "asked": [
+    "How many requests per minute does the team tier allow?",
+    "team tier requests per minute limit"
+   ],
+   "paraphrase": "What is the throttling threshold for calls on the team plan?"
+  },
+  {
+   "id": "acme-quota",
+   "half": "a",
+   "siblings": "storage-quotas",
+   "gold": "Acme Robotics has a storage quota of 512 MB per workspace.",
+   "asked": [
+    "What is the storage quota at Acme Robotics?",
+    "Acme Robotics storage quota per workspace"
+   ],
+   "paraphrase": "How much disk space does each Acme Robotics workspace get?"
+  },
+  {
+   "id": "globex-quota",
+   "half": "b",
+   "siblings": "storage-quotas",
+   "gold": "Globex has a storage quota of 2 GB per workspace.",
+   "asked": [
+    "What is the storage quota at Globex?",
+    "Globex storage quota per workspace"
+   ],
+   "paraphrase": "How much disk space does each Globex workspace get?"
+  },
+  {
+   "id": "northgate-hours",
+   "half": "a",
+   "siblings": "clinic-hours",
+   "gold": "The Northgate clinic takes walk-in patients from 8am to noon on weekdays.",
+   "asked": [
+    "When are walk-in hours at the Northgate clinic?",
+    "Northgate clinic walk-in hours"
+   ],
+   "paraphrase": "What time can I show up at Northgate without an appointment?"
+  },
+  {
+   "id": "riverside-hours",
+   "half": "b",
+   "siblings": "clinic-hours",
+   "gold": "The Riverside clinic takes walk-in patients from 1pm to 6pm on weekdays.",
+   "asked": [
+    "When are walk-in hours at the Riverside clinic?",
+    "Riverside clinic walk-in hours"
+   ],
+   "paraphrase": "What time can I show up at Riverside without an appointment?"
+  },
+  {
+   "id": "alice-start",
+   "half": "a",
+   "siblings": "start-dates",
+   "gold": "Alice Chen started at Acme Robotics in May 2021 as a controls engineer.",
+   "asked": [
+    "When did Alice Chen start at Acme Robotics?",
+    "Alice Chen start date"
+   ],
+   "paraphrase": "Since when has Alice Chen been employed there?"
+  },
+  {
+   "id": "carol-start",
+   "half": "b",
+   "siblings": "start-dates",
+   "gold": "Carol Diaz started at Globex in August 2019 on the platform team.",
+   "asked": [
+    "When did Carol Diaz start at Globex?",
+    "Carol Diaz start date"
+   ],
+   "paraphrase": "Since when has Carol Diaz been employed there?"
+  },
+  {
+   "id": "ledger-backup",
+   "half": "a",
+   "siblings": "backups",
+   "gold": "The ledger database is backed up every six hours to the vault bucket.",
+   "asked": [
+    "How often is the ledger database backed up?",
+    "ledger database backup schedule"
+   ],
+   "paraphrase": "What is the snapshot interval for ledger data?"
+  },
+  {
+   "id": "inventory-backup",
+   "half": "b",
+   "siblings": "backups",
+   "gold": "The inventory database is backed up every night to the vault bucket.",
+   "asked": [
+    "How often is the inventory database backed up?",
+    "inventory database backup schedule"
+   ],
+   "paraphrase": "What is the snapshot interval for inventory data?"
+  },
+  {
+   "id": "payments-oncall",
+   "half": "a",
+   "siblings": "on-call",
+   "gold": "Priya Nair is on call for the payments service this week.",
+   "asked": [
+    "Who is on call for the payments service?",
+    "payments service on-call engineer"
+   ],
+   "paraphrase": "Which engineer carries the pager for payments right now?"
+  },
+  {
+   "id": "search-oncall",
+   "half": "b",
+   "siblings": "on-call",
+   "gold": "Tomas Berg is on call for the search service this week.",
+   "asked": [
+    "Who is on call for the search service?",
+    "search service on-call engineer"
+   ],
+   "paraphrase": "Which engineer carries the pager for search right now?"
+  },
+  {
+   "id": "roses-watering",
+   "half": "a",
+   "siblings": "watering",
+   "gold": "The roses in the east bed need watering twice a week in summer.",
+   "asked": [
+    "How often do the roses need watering?",
+    "watering schedule for the roses"
+   ],
+   "paraphrase": "In hot months, how frequently should the east bed roses get water?"
+  },
+  {
+   "id": "tomatoes-watering",
+   "half": "b",
+   "siblings": "watering",
+   "gold": "The tomatoes in the greenhouse need watering every morning in summer.",
+   "asked": [
+    "How often do the tomatoes need watering?",
+    "watering schedule for the tomatoes"
+   ],
+   "paraphrase": "In hot months, how frequently should the greenhouse tomatoes get water?"
+  },
+  {
+   "id": "lisbon-trip",
+   "half": "a",
+   "siblings": "departures",
+   "gold": "The team flight to Lisbon departs at 07:40 from gate B12.",
+   "asked": [
+    "When does the flight to Lisbon leave?",
+    "Lisbon flight departure time"
+   ],
+   "paraphrase": "What time is our plane to Lisbon?"
+  },
+  {
+   "id": "porto-trip",
+   "half": "b",
+   "siblings": "departures",
+   "gold": "The team train to Porto departs at 09:15 from platform 4.",
+   "asked": [
+    "When does the train to Porto leave?",
+    "Porto train departure time"
+   ],
+   "paraphrase": "What time is our rail trip to Porto?"
+  },
+  {
+   "id": "guest-wifi",
+   "half": "a",
+   "siblings": null,
+   "gold": "The guest wifi password for the office is printed on the kitchen fridge.",
+   "asked": [
+    "Where is the guest wifi password?",
+    "office guest wifi password"
+   ],
+   "paraphrase": "How do office visitors get onto the wifi?"
+  },
+  {
+   "id": "parking-permits",
+   "half": "b",
+   "siblings": null,
+   "gold": "Staff parking permits are renewed each January at the front desk.",
+   "asked": [
+    "When are staff parking permits renewed?",
+    "parking permit renewal"
+   ],
+   "paraphrase": "Where and when do I get my yearly parking pass?"
+  },
+  {
+   "id": "printer-jams",
+   "half": "a",
+   "siblings": null,
+   "gold": "The third floor printer jams unless the paper tray is fanned first.",
+   "asked": [
+    "Why does the third floor printer keep jamming?",
+    "third floor printer jams"
+   ],
+   "paraphrase": "Any trick for the upstairs printer paper problem?"
+  },
+  {
+   "id": "espresso-descaling",
+   "half": "b",
+   "siblings": null,
+   "gold": "The espresso machine descaling is due on the first Monday of each month.",
+   "asked": [
+    "When is the espresso machine descaled?",
+    "espresso machine descaling schedule"
+   ],
+   "paraphrase": "How often does the coffee machine get cleaned of limescale?"
+  },
+  {
+   "id": "expense-approval",
+   "half": "a",
+   "siblings": null,
+   "gold": "Expense reports over 500 euros need a director's approval.",
+   "asked": [
+    "Which expense reports need director approval?",
+    "expense approval threshold"
+   ],
+   "paraphrase": "Who has to sign off on a large expense claim?"
+  },
+  {
+   "id": "vpn-encryption",
+   "half": "b",
+   "siblings": null,
+   "gold": "Laptops must have disk encryption turned on before joining the VPN.",
+   "asked": [
+    "What must laptops have before joining the VPN?",
+    "VPN laptop requirements"
+   ],
+   "paraphrase": "Is encryption required on my laptop for remote access?"
+  },
+  {
+   "id": "holiday-carryover",
+   "half": "a",
+   "siblings": null,
+   "gold": "Unused holiday days carry over until the end of March.",
+   "asked": [
+    "Do unused holiday days carry over?",
+    "holiday carry over rule"
+   ],
+   "paraphrase": "Can I keep unused vacation days into next year?"
+  },
+  {
+   "id": "fire-assembly",
+   "half": "b",
+   "siblings": null,
+   "gold": "The fire drill assembly point is the car park behind building C.",
+   "asked": [
+    "Where is the fire drill assembly point?",
+    "fire drill meeting point"
+   ],
+   "paraphrase": "Where do we gather during a fire alarm?"
+  }
+ ]
+}

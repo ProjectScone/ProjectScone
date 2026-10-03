@@ -45,7 +45,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: object reaches the subject. ``defines`` is deliberately absent: a file
 #: containing a symbol is not a file depending on it, and following
 #: containment would make every symbol's blast radius its own file.
-DEPENDS_ON = ("calls", "imports", "inherits", "mixes_in")
+#: A manifest's ``depends_on`` and ``develops_with`` are dependency edges
+#: like an import: a change to the package reaches the project that
+#: declares it, and a test dependency breaking breaks the tests. An MCP
+#: server rests on its executable, the variables it needs and the origin
+#: it reaches the same way.
+DEPENDS_ON = ("calls", "imports", "imports_when_called", "imports_for_types", "inherits", "mixes_in", "depends_on",
+              "develops_with", "references", "runs_with", "requires_env", "connects_to")
 #: Hops the walk may take. Past this it is the whole component, not a
 #: blast radius.
 MAX_HOPS = 8
@@ -322,7 +328,7 @@ async def affected(engine: "MemoryEngine", space: str, name: str, *, max_hops: i
     # still not enough when the real reason is that no file here imports
     # any other: then the answer would have been empty for every file,
     # and that is a fact about the graph rather than about the target.
-    joined = any(one.predicate == "imports" and "/" in str(labels_of(projection, one.object_id))
+    joined = any(one.predicate in DEPENDS_ON and "/" in str(labels_of(projection, one.object_id))
                  for one in projection.relations)
     said = f"read as {mode} at {moment.isoformat()}"
     if limit_hit:

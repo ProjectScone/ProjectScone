@@ -20,6 +20,7 @@ import ast
 import io
 import posixpath
 import tokenize
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -44,14 +45,27 @@ ASSETS = frozenset("css scss sass less styl png jpg jpeg gif svg webp avif ico b
 
 import builtins
 import re
+from typing import TYPE_CHECKING
 
-from .code import Language, MAX_LINES, _line_starts, declarations
+from .code import BRACE_SUFFIXES, Language, MAX_LINES, PYTHON_SUFFIXES, _line_starts, declarations
+
+if TYPE_CHECKING:
+    from ..core.models import Fact
 
 #: Claims from one file, past which a generated file is not worth reading.
 MAX_CLAIMS = 20_000
+#: The ledger's bound on a quote (memory/fact_placement); a longer line
+#: is quoted by its first MAX_QUOTE_CHARS characters.
+MAX_QUOTE_CHARS = 2_000
 #: What a claim can say. Each is a predicate in the ledger like any other.
 DEFINES = "defines"
 IMPORTS = "imports"
+#: An import that runs only when the function holding it is called, and
+#: one that never runs (`if TYPE_CHECKING:`). A file that loads needs the
+#: modules its `imports` name; it does not need these to load, so a loop
+#: closed by one is a loop the code already works around.
+IMPORTS_WHEN_CALLED = "imports_when_called"
+IMPORTS_FOR_TYPES = "imports_for_types"
 CALLS = "calls"
 #: What a class is built on. A hierarchy is how people navigate a
 #: codebase and no call edge says anything about it.
@@ -64,6 +78,8 @@ INHERITS = "inherits"
 #: these -- calling them inheritance described a relation the language
 #: does not have.
 MIXES_IN = "mixes_in"
+#: The types a declaration's signature or annotations name: what it takes, returns or holds.
+USES_TYPE = "uses_type"
 #: Why the code is the way it is, in the words of whoever wrote it.
 NOTES = "notes"
 #: What is known to be wrong with it. A different question from why it
@@ -72,6 +88,10 @@ FLAGS = "flags"
 #: A decision record or standard the code says it follows. Unlike a note,
 #: this names something the graph can reach from more than one place.
 CITES = "cites"
+#: What a document points at: a file the walk read, linked from the page.
+#: Read by `doc_graph`; the predicate lives here with the rest so one
+#: table says what a file can claim.
+REFERENCES = "references"
 
 #: A comment that says why. The tag is kept out of the claim's object,
 #: which is the sentence a person wrote.
@@ -116,10 +136,39 @@ _SPECIFIERS = frozenset("public private protected internal virtual override seal
 #: down, so it can be read; what a name in the body refers to is not, so
 #: it is not guessed at. Nothing here claims a call for these languages.
 _FROM = re.compile(r"""\bfrom\s+["']([^"']+)["']""")
+#: The start of an ECMAScript import or re-export statement, and one that
+#: brings in types alone (`import type {...} from`, `export type {...} from`),
+#: which the compiler erases: it never runs, however many lines it spans.
+_ES_STATEMENT = re.compile(r"^\s*(?:import|export)\b")
+_ES_TYPE_ONLY = re.compile(r"^\s*(?:import|export)\s+type\s")
 _BARE = re.compile(r"""^\s*import\s+["']([^"']+)["']""")
 _REQUIRE = re.compile(r"""\brequire\s*\(\s*["']([^"']+)["']""")
 _QUOTED = re.compile(r"""^\s*(?:_\s+|\w+\s+)?["']([^"']+)["']\s*$""")
-_USE = re.compile(r"^\s*(?:pub\s+)?use\s+([A-Za-z_][\w:]*)")
+#: The brace languages that do not quote what they import, by suffix, and
+#: how each writes it. The name is claimed as the language spells it --
+#: `com.acme.Store`, `std::fs`, `App\\Models\\User`, `stdio.h` -- and a
+#: path (a quoted `#include`, `@import("x.zig")`, a Dart file without a
+#: scheme, a PHP `require`) is a file, resolved like a relative import.
+#: A grouped import (`use a::{b, c::{d, self}}`, `import a.b.{C, D}`)
+#: names every path in the group.
+_FAMILY = {"rs": "rust", "php": "php", "java": "jvm", "kt": "jvm", "kts": "jvm", "scala": "jvm",
+           "cs": "csharp", "swift": "swift", "zig": "zig", "dart": "dart",
+           "c": "c", "h": "c", "cc": "c", "cpp": "c", "cxx": "c", "hpp": "c", "hh": "c", "m": "c", "mm": "c"}
+_RUST_USE = re.compile(r"(?:^|(?<=;))\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+?)\s*;")
+_PHP_USE = re.compile(r"(?:^|(?<=;))\s*use\s+(?:(?:function|const)\s+)?([^;]+?)\s*;")
+_PHP_REQUIRE = re.compile(r"""^\s*(?:require|include)(?:_once)?\s*\(?\s*(__DIR__\s*\.\s*)?["']([^"']+)["']""")
+_JVM_IMPORT = re.compile(r"(?:^|(?<=;))\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*(?:\.\{[^}]*\})?(?:\.\*)?"
+                         r"(?:\s+as\s+\w+)?)\s*(?:;|$)")
+_JVM_PACKAGE = re.compile(r"^\s*package\s+([A-Za-z_][\w.]*)")
+_USING = re.compile(r"^\s*(?:global\s+)?using\s+(?:static\s+)?(?:[A-Za-z_]\w*\s*=\s*)?([A-Za-z_][\w.]*)(?:\s*<[^;]*>)?\s*;")
+_SWIFT_IMPORT = re.compile(r"^\s*(?:@testable\s+)?import\s+(?:(?:class|struct|enum|protocol|typealias|func|var|let)\s+)?"
+                           r"([A-Za-z_][\w.]*)\s*$")
+_INCLUDE = re.compile(r'^\s*#\s*(?:include|import)\s*(?:"([^"]+)"|<([^>]+)>)')
+_ZIG_IMPORT = re.compile(r'@import\(\s*"([^"]+)"\s*\)')
+_DART_IMPORT = re.compile(r"""^\s*(?:import|export|part)\s+["']([^"']+)["']""")
+#: Extensions that name a source file outright: an import written with
+#: one already says which file it means.
+_SOURCE = frozenset(suffix.lstrip(".") for suffix in (*PYTHON_SUFFIXES, *BRACE_SUFFIXES))
 #: Where a language writes its imports in a block rather than a line.
 _OPENS = re.compile(r"^\s*import\s*\($")
 
@@ -133,6 +182,11 @@ def _cited(text: str) -> list[str]:
     reason to put a citation in a graph -- stops working.
     """
     return [f"{tag.upper()}-{int(number)}" for tag, number in _CITED.findall(text)]
+
+
+def cited(text: str) -> list[str]:
+    """The decision records a line names, for readers outside this module."""
+    return _cited(text)
 
 
 def masked(content: str, *, prose: bool = True) -> str:
@@ -185,10 +239,22 @@ def masked(content: str, *, prose: bool = True) -> str:
             continue
         else:
             if here in "\"'`":
-                quote = here
+                # A lone `'` with no partner on its line is a Rust lifetime
+                # (`&'static str`), not a string that runs to the next `'`.
+                line_end = content.find("\n", at + 1)
+                if here != "'" or content.find("'", at + 1, len(content) if line_end < 0 else line_end) >= 0:
+                    quote = here
             out.append(here)
         at += 1
     return "".join(out)
+
+
+def _comments_blanked(content: str, both: str) -> str:
+    """The source with its comments blanked and its strings kept: what a
+    quoted path is read from, so `/* note */ #include "x.h"` is the
+    include it is and `// was @import("old.zig")` is nothing."""
+    kept = masked(content, prose=True)
+    return "".join(" " if both[i] == " " and kept[i] == content[i] != " " else content[i] for i in range(len(content)))
 
 
 def _holder(declared: tuple, path: str, line: int) -> str:
@@ -353,13 +419,20 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     if not content or content.count("\n") > MAX_LINES:
         return ()
     if language == "braces":
-        line_read = _brace_claims(content, path, resolve)
+        # What the imports bound, for the grammar binder: a bare call nothing
+        # in the file binds is a call to the import's declaration.
+        bindings: list[tuple[str, str, str]] = []
+        line_read = _brace_claims(content, path, resolve, bindings)
         # A syntax tree settles what a line cannot. It is an optional
         # extra, so this changes nothing at all where it is not
         # installed.
+        from .code_grammar import grammar_claims
         from .code_syntax import syntax_claims
 
-        parsed = syntax_claims(content, path)
+        # TypeScript and JavaScript through their own grammar; the other
+        # brace languages through the grammar pack, when it is installed.
+        parsed = syntax_claims(content, path, resolve) or grammar_claims(
+            content, path, {(within, name): target for within, name, target in bindings})
         if not parsed:
             return line_read
         # Where the grammar speaks, it **decides**, and only about what it
@@ -374,6 +447,12 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
         decided = {claim.predicate for claim in parsed}
         kept = [claim for claim in line_read if claim.predicate not in decided]
         return (*kept, *parsed)
+    if language is not None and language.startswith("tree:"):
+        # Ruby, Lua, shell, Perl, fish: read from the grammar that already
+        # cuts them, claiming what the tree settles and nothing more.
+        from .code_tree_graph import tree_claims
+
+        return tree_claims(content, path, grammar=language[len("tree:"):])
     if language != "python":
         return ()
     try:
@@ -384,6 +463,8 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     lines = content.split("\n")
     found: list[CodeClaim] = []
     named: dict[str, str] = {}
+    #: The qualified names of the classes this file declares.
+    classes: set[str] = set()
     imported: dict[str, tuple[str, Optional[str]]] = {}
 
     def at(line: int) -> tuple[str, int, int]:
@@ -401,7 +482,7 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
     # What the file holds, and what holds what: a class defines its
     # methods, and the file defines the class, so the graph has the
     # nesting people read.
-    def walk(node: ast.AST, owner: str, inside: Optional[str]) -> None:
+    def walk(node: ast.AST, owner: str, inside: Optional[str], deferred: Optional[str] = None) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 name = f"{inside}.{child.name}" if inside else child.name
@@ -409,14 +490,25 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                 named[name] = whole
                 say(owner, DEFINES, whole, child.lineno)
                 if isinstance(child, ast.ClassDef):
+                    classes.add(name)
                     for base in child.bases:
                         target = _base(base, path, named, imported)
                         if target:
                             say(whole, INHERITS, target, child.lineno)
-                walk(child, whole, name)
+                # A class body runs when the module loads; a function body
+                # runs when the function is called, so an import in it does.
+                walk(child, whole, name, deferred if isinstance(child, ast.ClassDef) else (deferred or "called"))
+            elif isinstance(child, ast.If) and _type_checking(child.test):
+                # `if TYPE_CHECKING:` never runs; what it imports is for the
+                # checker, and it is claimed as that. Its `else:` runs
+                # whenever the module does (the backport idiom puts the
+                # real import there), so it keeps the timing it is in.
+                walk(ast.Module(body=child.body, type_ignores=[]), owner, inside, "types")
+                walk(ast.Module(body=child.orelse, type_ignores=[]), owner, inside, deferred)
             elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                predicate = {None: IMPORTS, "called": IMPORTS_WHEN_CALLED, "types": IMPORTS_FOR_TYPES}[deferred]
                 for module in _imported(child, path, resolve):
-                    say(path, IMPORTS, module, child.lineno)
+                    say(path, predicate, module, child.lineno)
                 # One entry per alias, keeping the name it had in its
                 # module. Pairing every alias with every module of a
                 # multi-name import made `import json, csv` claim both
@@ -445,12 +537,19 @@ def code_claims(content: str, path: str, *, language: Optional[Language],
                         if where:
                             imported[alias.asname or alias.name] = (where, None)
             else:
-                walk(child, owner, inside)
+                walk(child, owner, inside, deferred)
 
     walk(tree, path, None)
-    _calls(tree, path, named, imported, say, _unbound)
+    _calls(tree, path, named, imported, say, _unbound, frozenset(classes))
+    _type_references(tree, path, named, imported, say)
     _meaning(content, path, "python", say)
     return tuple(found)
+
+
+def _type_checking(test: ast.AST) -> bool:
+    """Whether an `if` guards on TYPE_CHECKING (bare or qualified)."""
+    return ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
+            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"))
 
 
 def _base(node: ast.AST, path: str, named: dict[str, str],
@@ -542,11 +641,11 @@ def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[st
     one named by the tree when somebody knows it and by arithmetic on the
     importing file's path when nobody does."""
     if isinstance(node, ast.Import):
-        return [alias.name for alias in node.names]
+        return [_published(resolve, alias.name, "python") or alias.name for alias in node.names]
     if not isinstance(node, ast.ImportFrom):
         return []
     if not node.level:
-        return [node.module] if node.module else []
+        return [_published(resolve, node.module, "python") or node.module] if node.module else []
     # "from .code import x" names the module in module; "from . import
     # code" names it in the aliases. Either way what is imported is a
     # module.
@@ -561,7 +660,7 @@ def _imported(node: ast.AST, path: str, resolve: Optional["Resolve"]) -> list[st
 
 def _calls(tree: ast.AST, path: str, named: dict[str, str],
            imported: dict[str, tuple[str, Optional[str]]], say,
-           unbound: Optional[list[tuple[str, str]]] = None) -> None:
+           unbound: Optional[list[tuple[str, str]]] = None, classes: frozenset[str] = frozenset()) -> None:
     """Calls between things this file can see, and no others.
 
     A bare name is a call to this file's own declaration when it has one,
@@ -575,12 +674,14 @@ def _calls(tree: ast.AST, path: str, named: dict[str, str],
     this package could not place, 37.2% had a head the file had itself
     imported, while 59.8% were methods on values of unstated type. This
     reaches the first group and cannot reach the second."""
-    for holder, inside in _holders(tree, None):
-        whole = f"{path}:{_qualified(holder, inside)}"
-        for call in ast.walk(holder):
-            if not isinstance(call, ast.Call):
-                continue
-            target = _target(call.func, inside, named, imported)
+    holders = list(_callers(tree, None, None))
+    bound = {qualified: _bound(holder) for holder, qualified, _ in holders}
+    for holder, qualified, inside in holders:
+        # Named as `defines` names it, and holding only the calls in its own body: a call inside a
+        # function written within it is that function's call, not this one's.
+        whole = f"{path}:{qualified}"
+        for call in _own_calls(holder):
+            target = _target(call.func, inside, named, imported, classes, scope=qualified, bound=bound)
             if target is None:
                 # Collected here rather than walked again elsewhere: a
                 # second copy of the name table is the one that drifts
@@ -598,6 +699,132 @@ def _calls(tree: ast.AST, path: str, named: dict[str, str],
                 say(whole, CALLS, target, call.lineno)
 
 
+#: Annotations longer than this are not parsed as forward references.
+_MAX_QUOTED = 256
+
+
+def _type_references(tree: ast.AST, path: str, named: dict[str, str],
+                     imported: dict[str, tuple[str, Optional[str]]], say) -> None:
+    """The types each function's parameters, return and annotated locals name, and each
+    class's annotated attributes, once per declaration and type.
+
+    Only types this graph can place: a class this file declares, a name imported out of a
+    project module, or a name in a project module imported whole. The standard library is
+    left out as noise, and so is a local function named in an annotation."""
+    classes = {qualified for node, qualified, _ in _declared(tree, None, None) if isinstance(node, ast.ClassDef)}
+    project = {module: first for module, first in imported.values()}
+
+    def resolve(node: ast.AST, inside: Optional[str]) -> Optional[str]:
+        if isinstance(node, ast.Name):
+            # A name in a class body means that class's own member first, as Python reads it there.
+            scoped = f"{inside}.{node.id}" if inside else None
+            if scoped is not None and scoped in classes:
+                return named[scoped]
+            if node.id in classes:
+                return named[node.id]
+            came = imported.get(node.id)
+            if came is not None and came[1] is not None and not _standard(came[0]):
+                return _joined(came[0], came[1])
+            return None
+        if isinstance(node, ast.Attribute):
+            spelt = _spelling(node)
+            if spelt is None:
+                return None
+            if spelt in classes:
+                return named[spelt]
+            head = spelt.split(".")[0]
+            came = imported.get(head)
+            if came is not None and came[1] is None and not _standard(came[0]):
+                return _joined(came[0], spelt.split(".", 1)[1])
+        return None
+
+    def names(annotation: Optional[ast.AST], inside: Optional[str] = None) -> list[str]:
+        """The types in an annotation's type positions only. A dotted name is one type, not
+        each of its heads; ``Literal``'s members and ``Annotated``'s metadata are values, and
+        so is anything a call is given."""
+        found: list[str] = []
+        stack = [annotation] if annotation is not None else []
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) <= _MAX_QUOTED:
+                try:
+                    stack.append(ast.parse(node.value, mode="eval").body)
+                except SyntaxError:
+                    continue
+            elif isinstance(node, (ast.Name, ast.Attribute)):
+                target = resolve(node, inside)
+                if target is not None:
+                    found.append(target)
+            elif isinstance(node, ast.Subscript):
+                stack.append(node.value)
+                last = (_spelling(node.value) or "").rpartition(".")[2]
+                if last == "Literal":
+                    continue
+                members = list(node.slice.elts) if isinstance(node.slice, ast.Tuple) else [node.slice]
+                stack.extend(members[:1] if last == "Annotated" else members)
+            elif isinstance(node, (ast.Tuple, ast.List)):
+                stack.extend(node.elts)
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+                stack.extend((node.left, node.right))
+        return found
+
+    def signature(function: ast.FunctionDef | ast.AsyncFunctionDef, inside: Optional[str]) -> list[tuple[str, int]]:
+        arguments = function.args
+        every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                 *([arguments.vararg] if arguments.vararg else []), *([arguments.kwarg] if arguments.kwarg else [])]
+        found = [(target, function.lineno) for argument in every for target in names(argument.annotation, inside)]
+        found += [(target, function.lineno) for target in names(function.returns, inside)]
+        for node in _own_body(function):
+            if isinstance(node, ast.AnnAssign):
+                found += [(target, node.lineno) for target in names(node.annotation, inside)]
+        return found
+
+    said: set[tuple[str, str]] = set()
+
+    def record(subject: str, found: list[tuple[str, int]]) -> None:
+        for target, line in found:
+            if target != subject and (subject, target) not in said:
+                said.add((subject, target))
+                say(subject, USES_TYPE, target, line)
+
+    for node, qualified, holder_class in _declared(tree, None, None):
+        if isinstance(node, ast.ClassDef):
+            record(f"{path}:{qualified}", [(target, child.lineno) for child in node.body
+                                            if isinstance(child, ast.AnnAssign)
+                                            for target in names(child.annotation, qualified)])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            record(f"{path}:{qualified}", signature(node, holder_class))
+
+
+def _declared(node: ast.AST, inside: Optional[str], holder_class: Optional[str]):
+    """Every function and class, qualified exactly as ``defines`` names it, with the class
+    that most closely holds it."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            qualified = f"{inside}.{child.name}" if inside else child.name
+            yield child, qualified, holder_class
+            yield from _declared(child, qualified, qualified if isinstance(child, ast.ClassDef) else holder_class)
+        else:
+            yield from _declared(child, inside, holder_class)
+
+
+def _own_body(function: ast.AST):
+    """A function's statements, not those of the functions and classes written inside it."""
+    stack = list(ast.iter_child_nodes(function))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _standard(module: str) -> bool:
+    import sys
+
+    return module.split(".")[0] in sys.stdlib_module_names or module == "__future__"
+
+
 def _spelling(func: ast.AST) -> Optional[str]:
     """How a call was written, for one the graph could not bind.
 
@@ -613,26 +840,71 @@ def _spelling(func: ast.AST) -> Optional[str]:
     return None
 
 
-def _holders(node: ast.AST, inside: Optional[str]):
-    """Every function in the file, with the class it is written in."""
+def _callers(node: ast.AST, parent: Optional[str], inside: Optional[str]):
+    """Every function in the file, qualified as ``defines`` qualifies it, with the class it
+    is most closely written in."""
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield child, inside
-            yield from _holders(child, inside)
+            qualified = f"{parent}.{child.name}" if parent else child.name
+            yield child, qualified, inside
+            yield from _callers(child, qualified, inside)
         elif isinstance(child, ast.ClassDef):
-            within = f"{inside}.{child.name}" if inside else child.name
-            yield from _holders(child, within)
+            qualified = f"{parent}.{child.name}" if parent else child.name
+            yield from _callers(child, qualified, qualified)
         else:
-            yield from _holders(child, inside)
+            yield from _callers(child, parent, inside)
 
 
-def _qualified(holder: ast.AST, inside: Optional[str]) -> str:
-    name = getattr(holder, "name", "")
-    return f"{inside}.{name}" if inside else name
+def _evaluated(function: ast.FunctionDef | ast.AsyncFunctionDef):
+    """Every node a call to the function evaluates in its own frame, each with whether it
+    sits in the body of a class written there.
+
+    Its body, but not its own decorators, defaults or annotations: those ran when the
+    statement defining it did. So of a function or class written inside it, only what that
+    statement evaluates belongs here -- decorators, default values, bases and a class's own
+    body -- and never the inner function's body."""
+    stack: list[tuple[ast.AST, bool]] = [(statement, False) for statement in function.body]
+    while stack:
+        node, in_class = stack.pop()
+        yield node, in_class
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defaults = [*node.args.defaults, *(one for one in node.args.kw_defaults if one is not None)]
+            stack.extend((one, in_class) for one in (*node.decorator_list, *defaults))
+        elif isinstance(node, ast.ClassDef):
+            stack.extend((one, in_class) for one in (*node.decorator_list, *node.bases, *node.keywords))
+            stack.extend((statement, True) for statement in node.body)
+        else:
+            stack.extend((child, in_class) for child in ast.iter_child_nodes(node))
+
+
+def _own_calls(function: ast.FunctionDef | ast.AsyncFunctionDef):
+    """The calls a function makes itself, not those of the functions written inside it."""
+    return (node for node, _ in _evaluated(function) if isinstance(node, ast.Call))
+
+
+def _bound(function: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[frozenset[str], frozenset[str]]:
+    """The names a function binds for itself: its parameters and what it assigns, then what it
+    imports. The functions and classes it defines are not needed here, since those are looked
+    up as declarations first. A name bound in a class body written inside it is that class's."""
+    arguments = function.args
+    names = {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                                 *([arguments.vararg] if arguments.vararg else []),
+                                 *([arguments.kwarg] if arguments.kwarg else []))}
+    brought: set[str] = set()
+    for node, in_class in _evaluated(function):
+        if in_class:
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            brought.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+    return frozenset(names), frozenset(brought)
 
 
 def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
-            imported: Optional[dict[str, tuple[str, Optional[str]]]] = None) -> Optional[str]:
+            imported: Optional[dict[str, tuple[str, Optional[str]]]] = None,
+            classes: frozenset[str] = frozenset(), scope: Optional[str] = None,
+            bound: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {}) -> Optional[str]:
     """What a call refers to, or nothing.
 
     The import table says which of two things a local name is, and the
@@ -644,50 +916,120 @@ def _target(func: ast.AST, inside: Optional[str], named: dict[str, str],
     declaration ``z`` in ``x``, and binding it would name something that
     need not exist -- the false-edge shape that cost the brace call graph
     its life.
+
+    A call through a class this file declares, ``Shelf.keep()`` or
+    ``Shelf.Label.print()``, is the method its whole spelling names, when
+    everything before the last name is a class declared here; ``cls`` in a
+    class is that class, as ``self`` is. An imported class is not followed
+    the same way: a file cannot tell an imported class from an imported
+    object, so ``from x import Y`` then ``Y.m()`` stays unbound, and so does
+    a call through a class declared here under a name also imported here.
+
+    A name an enclosing function binds for itself -- a parameter, an assignment -- is that
+    value and not a declaration of the same name further out, so it stays unbound; a name it
+    imports is what the import names.
+    ``self`` and ``cls`` are the class only in the method that takes them, and in functions
+    written inside that method that do not take their own.
     """
     if isinstance(func, ast.Name):
-        here = named.get(func.id)
+        brought = False
+        if scope:
+            # From the innermost enclosing function outwards. A class body is not a scope the
+            # functions inside it can see, as Python reads names.
+            parts = scope.split(".")
+            for end in range(len(parts), 0, -1):
+                prefix = ".".join(parts[:end])
+                if prefix in classes:
+                    continue
+                enclosed = named.get(f"{prefix}.{func.id}")
+                if enclosed is not None:
+                    return enclosed
+                assigned, imports = bound.get(prefix, (frozenset(), frozenset()))
+                if func.id in assigned:
+                    return None
+                if func.id in imports:
+                    brought = True
+                    break
+        here = None if brought else named.get(func.id)
         if here is not None:
             return here
         came = imported.get(func.id) if imported else None
         # `Store as Shelf` is Store: named where it was declared, which is
         # the rule `_base` already follows for an inherited name.
         return _joined(came[0], came[1]) if came is not None and came[1] is not None else None
+    if isinstance(func, ast.Attribute):
+        spelt = _spelling(func)
+        holder = spelt.rpartition(".")[0] if spelt is not None else ""
+        # A class also imported here, as a fallback beside `try: from x import Shelf`, may not be the one that runs.
+        if holder in classes and spelt in named and holder.split(".")[0] not in (imported or {}):
+            return named[spelt]
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-        if func.value.id == "self":
-            within = inside.split(".")[0] if inside else None
-            return named.get(f"{within}.{func.attr}") if within else None
+        if func.value.id in ("self", "cls"):
+            taker = _binder(func.value.id, scope, bound)
+            method = taker is not None and inside is not None and taker.rpartition(".")[0] == inside
+            return named.get(f"{inside}.{func.attr}") if method else None
         came = imported.get(func.value.id) if imported else None
         return _joined(came[0], func.attr) if came is not None and came[1] is None else None
     return None
 
 
+def _binder(name: str, scope: Optional[str],
+            bound: Mapping[str, tuple[frozenset[str], frozenset[str]]]) -> Optional[str]:
+    """The innermost function, from ``scope`` outwards, that binds ``name`` for itself. Only
+    functions have bindings here, so a class on the way is passed over."""
+    parts = scope.split(".") if scope else []
+    for end in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:end])
+        if name in bound.get(prefix, (frozenset(), frozenset()))[0]:
+            return prefix
+    return None
+
+
 async def record_claims(engine, space: str, *, episode_id: int, content: str, path: str,
                         when: str, resolve: Optional["Resolve"] = None,
-                        _recorded: Optional[list[CodeClaim]] = None) -> int:
+                        _recorded: Optional[list[CodeClaim]] = None,
+                        _facts: Optional[list["Fact"]] = None) -> int:
     """Record what a file says about itself, and say how many claims that
     was. One place decides how these are written — quoted from the line,
     cited to the episode, extracted rather than stated — so the engine and
     the command line cannot come to differ about it."""
     from .code import code_language
+    from .doc_graph import doc_claims, is_document
     from .manifests import is_manifest, manifest_claims
+    from .schema_claims import is_schema, schema_claims
 
     said = 0
-    # A manifest says what the project depends on; a source file says what
-    # it defines, imports and calls. Both are read the same way from here.
-    claims = (manifest_claims(content, path) if is_manifest(path)
-              else code_claims(content, path, language=code_language(path), resolve=resolve))
+    # A manifest says what the project depends on; a schema says what
+    # tables there are and what rests on what; a source file says what it
+    # defines, imports and calls; a document says what it references and
+    # cites. All are read the same way from here.
+    if is_manifest(path):
+        claims = manifest_claims(content, path)
+    elif is_schema(path):
+        claims = schema_claims(content, path)
+    elif is_document(path):
+        # The import resolver also follows a document's links when it can
+        # (`file_resolver`); a resolver that cannot leaves them unresolved.
+        claims = doc_claims(content, path, resolve=resolve if hasattr(resolve, "links") else None)
+    else:
+        claims = code_claims(content, path, language=code_language(path), resolve=resolve)
     for claim in claims:
         if _recorded is not None:
             _recorded.append(claim)
-        await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,
-                                 valid_from=when, source_episode_id=episode_id,
-                                 quote=claim.quote, origin="extracted")
+        # A quote is the line the claim was read from; the ledger holds a
+        # quote of at most MAX_QUOTE_CHARS, so a generated line is quoted
+        # by its start, which is still the line's own text in the episode.
+        fact = await engine.assert_fact(space, claim.subject, claim.predicate, claim.object,
+                                        valid_from=when, source_episode_id=episode_id,
+                                        quote=claim.quote[:MAX_QUOTE_CHARS], origin="extracted")
+        if _facts is not None:
+            _facts.append(fact)
         said += 1
     return said
 
 
-def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tuple[CodeClaim, ...]:
+def _brace_claims(content: str, path: str, resolve: Optional["Resolve"],
+                  _bindings: Optional[list[tuple[str, str, str]]] = None) -> tuple[CodeClaim, ...]:
     """What a brace-language file declares and imports, and nothing else.
 
     Declarations come from the same scanner that cuts these files into
@@ -725,7 +1067,8 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
     # What a class is built on, read from the header line. These languages
     # write it where it can be read; what a name in the body refers to is
     # not written down, and is still not guessed at.
-    code = masked(content, prose=False).split("\n")
+    both = masked(content, prose=False)
+    code = both.split("\n")
     if path.endswith(".go"):
         # Go's types, which the brace declaration pattern cannot see.
         for number, line in enumerate(code, start=1):
@@ -797,7 +1140,15 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
                     relation = INHERITS
                 say(subject, relation, held.get(written, written), number)
 
+    family = _FAMILY.get(posixpath.splitext(path)[1].lstrip(".").lower())
+    if family is not None:
+        _unquoted_imports(_comments_blanked(content, both).split("\n"), code, path, family, resolve, say, _bindings)
+        _meaning(content, path, "braces", say)
+        return tuple(found)
     inside = False
+    # Whether the statement a line continues began `import type` or
+    # `export type`: a wrapped one names its module some lines later.
+    types_only = False
     for number, line in enumerate(lines, start=1):
         if _OPENS.match(line):
             inside = True
@@ -810,19 +1161,338 @@ def _brace_claims(content: str, path: str, resolve: Optional["Resolve"]) -> tupl
             if named:
                 say(path, IMPORTS, named.group(1), number)
             continue
+        if _ES_STATEMENT.match(line):
+            types_only = bool(_ES_TYPE_ONLY.match(line))
         for pattern in (_FROM, _BARE, _REQUIRE):
             match = pattern.search(line)
             if match:
                 where = _named(match.group(1), path, resolve)
                 if where:
-                    say(path, IMPORTS, where, number)
+                    say(path, IMPORTS_FOR_TYPES if pattern is _FROM and types_only else IMPORTS, where, number)
+                types_only = False
                 break
-        else:
-            used = _USE.match(line)
-            if used:
-                say(path, IMPORTS, used.group(1).split("::")[0], number)
     _meaning(content, path, "braces", say)
     return tuple(found)
+
+
+#: What a wrapped grouped import begins with, per family, so its lines
+#: can be joined before they are read.
+_STARTS = {"rust": re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?use\s"), "php": re.compile(r"^\s*use\s"),
+           "jvm": re.compile(r"^\s*import\s")}
+#: Lines a wrapped statement may run to before it is read as written.
+MAX_STATEMENT_LINES = 64
+#: A name an unquoted import may claim: letters, digits, dots, colons and
+#: backslashes. Anything else on the line was not an import.
+_IMPORT_NAME = re.compile(r"^[A-Za-z_#][\w.:\\#]*$")
+_PHP_OPENER = re.compile(r"^\s*namespace\b")
+#: A Rust module opened inline: its `use` lines bind in it, and nowhere else.
+_RUST_MOD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*\{")
+
+
+def _unquoted_imports(raw: list[str], clean: list[str], path: str, family: str, resolve: Optional["Resolve"],
+                      say: Callable[[str, str, str, int], None],
+                      bindings: Optional[list[tuple[str, str, str]]] = None) -> None:
+    """The imports of a brace language that writes them without quotes,
+    one claim per name the statement means. Whether a line is an import
+    is decided on the source with its comments and strings blanked, so a
+    commented-out or quoted `use` is not one; the name is taken from the
+    blanked line too, except a quoted path, which the blanking hides and
+    ``raw`` -- the source with only its comments blanked -- still holds.
+    A package is named as the language spells
+    it; a path is resolved like a relative import, and a module path
+    inside the project (`crate::a::b`, `com.acme.Store`) is resolved to
+    its file when whoever walked the tree can confirm one, and named as
+    written otherwise. A PHP `use` inside a class is a trait, not an
+    import, and is left alone. ``bindings`` collects what each resolved
+    import binds in this file -- the module it sits in (a Rust `use`
+    inside `mod tests` binds there and nowhere else; "" for the file's
+    top), the local name (an alias when given) and the declaration
+    `file:Qualified` it stands for -- for the grammar binder to bind bare
+    calls with; a Rust import of a module itself, and any import that
+    stayed a name, binds nothing."""
+    root = _source_root(clean, path, family)
+    base = _rust_base(path) if family == "rust" else None
+    openers: list[str] = []
+    for number, shape, text in _statements(raw, clean, family):
+        inside_class = any(opener not in ("namespace", "mod") and not opener.startswith("mod:") for opener in openers)
+        module = _RUST_MOD.match(shape) if family == "rust" else None
+        for opened in range(shape.count("{") - shape.count("}")):
+            openers.append("namespace" if _PHP_OPENER.match(shape) else f"mod:{module.group(1)}" if module and opened == 0
+                           else "other")
+        for _ in range(shape.count("}") - shape.count("{")):
+            if openers:
+                openers.pop()
+        if not _imports_of(shape, family):
+            continue
+        if family == "php" and inside_class and _PHP_USE.search(shape):
+            continue
+        aliases: dict[str, str] = {}
+        for target, is_path in _imports_of(text, family, aliases):
+            item: list[str] = []
+            if is_path:
+                where = _named(target, path, resolve)
+            elif family == "rust" and target.split("::")[0] in ("crate", "self", "super"):
+                where, item = _module_file(target.split("::"), path, root, resolve, "::", base)
+            elif family == "rust":
+                where, item = _published_item(resolve, target, "rust")
+                where = where or target
+            elif family == "jvm" and root is not None:
+                where, item = _module_file(target.split("."), path, root, resolve, ".", None)
+            else:
+                where = target
+            if where:
+                say(path, IMPORTS, where, number)
+            if bindings is not None and where and where != target and not is_path:
+                # The import reached a file: what it names there is the item
+                # left over -- for a JVM import qualified by the class the
+                # file holds (`import static lib.Text.trim` is `Text.trim`,
+                # `import lib.Store` is `Store`), for Rust the module's item.
+                parts = target.split("." if family == "jvm" else "::")
+                named = list(item)
+                if family == "jvm":
+                    named = [parts[len(parts) - len(item) - 1], *item]
+                if named:
+                    within = ".".join(opener[4:] for opener in openers if opener.startswith("mod:"))
+                    bindings.append((within, aliases.get(target, named[-1]), f"{where}:{'.'.join(named)}"))
+
+
+def _statements(raw: list[str], clean: list[str], family: str):
+    """Each line as the blanked source shows it (the shape) and as it is
+    read (the text): the blanked line for a family that writes names, the
+    raw line for one that quotes paths. A grouped import that wraps lines
+    is joined until its braces close, up to a bound, and read as one."""
+    quoted = family in ("c", "zig", "dart", "php")
+    starts = _STARTS.get(family)
+    number = 0
+    while number < len(clean):
+        shape, text = clean[number], (raw[number] if quoted else clean[number])
+        first = number + 1
+        if starts is not None and starts.match(shape) and shape.count("{") > shape.count("}"):
+            last = number
+            while (shape.count("{") > shape.count("}") and last + 1 < len(clean)
+                   and last - number + 1 < MAX_STATEMENT_LINES):
+                last += 1
+                shape += " " + clean[last]
+                text += " " + (raw[last] if quoted else clean[last])
+            number = last
+        number += 1
+        yield first, shape, text
+
+
+def _imports_of(line: str, family: str, aliases: Optional[dict[str, str]] = None) -> list[tuple[str, bool]]:
+    """What one statement imports under its family's spelling: each name
+    with whether it is a path (a file to resolve) or a name to keep; the
+    aliases the statement gives (`use a::b as c`) noted when asked."""
+    if family == "rust":
+        return [(name, False) for group in _RUST_USE.findall(line) for name in _spread(group, "::", aliases)]
+    if family == "php":
+        groups = _PHP_USE.findall(line)
+        if groups:
+            return [(name, False) for group in groups for name in _spread(group, "\\", aliases)]
+        wanted = _PHP_REQUIRE.match(line)
+        if not wanted:
+            return []
+        # `__DIR__ . '/x.php'` is beside this file, however the slash is written.
+        return _pathed("./" + wanted.group(2).lstrip("/") if wanted.group(1) else wanted.group(2))
+    if family == "jvm":
+        return [(name, False) for group in _JVM_IMPORT.findall(line) for name in _spread(group, ".", aliases)]
+    if family == "csharp":
+        used = _USING.match(line)
+        return [(used.group(1), False)] if used else []
+    if family == "swift":
+        used = _SWIFT_IMPORT.match(line)
+        return [(used.group(1), False)] if used else []
+    if family == "c":
+        used = _INCLUDE.match(line)
+        if not used:
+            return []
+        return _pathed(used.group(1)) if used.group(1) else [(used.group(2), False)]
+    if family == "zig":
+        found: list[tuple[str, bool]] = []
+        for name in _ZIG_IMPORT.findall(line):
+            found.extend(_pathed(name) if name.endswith(".zig") else [(name, False)])
+        return found
+    if family == "dart":
+        used = _DART_IMPORT.match(line)
+        if not used:
+            return []
+        name = used.group(1)
+        return [(name, False)] if ":" in name else _pathed(name)
+    return []
+
+
+def _pathed(target: str) -> list[tuple[str, bool]]:
+    where = _as_path(target)
+    return [] if where is None else [(where, True)]
+
+
+def _as_path(target: str) -> Optional[str]:
+    """A file written relative to the importing file, spelt so the resolver
+    reads it as relative: `lib/x.h` becomes `./lib/x.h`; `../x.h` already
+    is. An absolute path (`/opt/x.h`, `C:\\x.h`) is nobody's file here."""
+    target = target.replace("\\", "/")
+    if target.startswith("/") or re.match(r"^[A-Za-z]:/", target):
+        return None
+    if target.startswith("./") or target.startswith("../"):
+        return target
+    return "./" + target
+
+
+def _spread(text: str, sep: str, aliases: Optional[dict[str, str]] = None) -> list[str]:
+    """Every path a grouped import names: `a::{b, c::{d, self}}` is
+    `a::b`, `a::c::d` and `a::c`; `a::*` is `a`; a flat list `a, b` is
+    each; an alias (`as x`, `=> x`) is not the name. A group that does
+    not close is read as written; what is not a name is dropped."""
+    text = text.strip()
+    opened = text.find("{")
+    if opened < 0:
+        return [name for name in (_plain_path(part, sep, aliases) for part in text.split(",")) if name]
+    depth, closed = 0, -1
+    for index, char in enumerate(text):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                closed = index
+                break
+    if closed < 0:
+        name = _plain_path(text, sep, aliases)
+        return [name] if name else []
+    head = text[:opened].rstrip()
+    if head.endswith(sep):
+        head = head[:-len(sep)]
+    parts, depth, start = [], 0, opened + 1
+    for index in range(opened + 1, closed):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(text[start:index])
+            start = index + 1
+    parts.append(text[start:closed])
+    names: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if part == "self":
+            if head:
+                names.append(head)
+        else:
+            names.extend(_spread(f"{head}{sep}{part}" if head else part, sep, aliases))
+    return names
+
+
+def _plain_path(text: str, sep: str, aliases: Optional[dict[str, str]] = None) -> str:
+    """One path as written, less its alias, a trailing glob (`::*`, `.*`,
+    Scala's `._`) or `self`; empty when it is not a name. The alias, the
+    name the file uses for it, is noted in ``aliases`` when asked."""
+    head, *alias = re.split(r"\s+as\s+|\s*=>\s*", text.strip(), maxsplit=1)
+    text = head.strip()
+    for tail in (f"{sep}*", f"{sep}_", f"{sep}self"):
+        if text.endswith(tail):
+            text = text[:-len(tail)]
+    text = text.replace(" ", "")
+    if not _IMPORT_NAME.match(text):
+        return ""
+    if aliases is not None and alias and re.match(r"^[A-Za-z_]\w*$", alias[0].strip()):
+        aliases[text] = alias[0].strip()
+    return text
+
+
+def _source_root(lines: list[str], path: str, family: str) -> Optional[int]:
+    """How many directories above the importing file its module tree is
+    rooted, as the resolver counts them (1 is the file's own directory):
+    for Rust the nearest `src` directory, for a JVM language the directory
+    the file's `package` line puts it under. None when the file does not say."""
+    directory = posixpath.dirname(path)
+    if family == "rust":
+        parts = directory.split("/") if directory else []
+        for depth in range(len(parts), 0, -1):
+            if parts[depth - 1] == "src":
+                return len(parts) - depth + 1
+        return 1
+    if family == "jvm":
+        for line in lines[:64]:
+            declared = _JVM_PACKAGE.match(line)
+            if declared:
+                return len(declared.group(1).split(".")) + 1
+    return None
+
+
+class _RustBase:
+    """Where a Rust file's own modules and its siblings live: `mod.rs`,
+    `lib.rs`, `main.rs` and a crate root under `bin/`, `tests/`, `benches/`
+    or `examples/` own their directory, so `self::x` is beside them and
+    `super::x` a directory up; any other file `foo.rs` keeps its own
+    modules under `foo/` and its siblings beside itself."""
+
+    def __init__(self, path: str) -> None:
+        stem = posixpath.splitext(posixpath.basename(path))[0]
+        parent = posixpath.basename(posixpath.dirname(path))
+        # A crate root owns its directory too: `src/bin/tool.rs`, `tests/x.rs`.
+        owns = stem in ("mod", "lib", "main") or parent in ("bin", "tests", "benches", "examples")
+        self.self_level, self.self_prefix = 1, ([] if owns else [stem])
+        self.super_level = 2 if owns else 1
+
+
+def _rust_base(path: str) -> _RustBase:
+    return _RustBase(path)
+
+
+def _module_file(parts: list[str], path: str, root: Optional[int], resolve: Optional["Resolve"],
+                 sep: str, base: Optional[_RustBase]) -> tuple[str, list[str]]:
+    """A module path resolved to the file that holds it, the longest prefix
+    that is a file, with what was left over -- the item the import names in
+    that file (`crate::a::b::Thing` is `src/a/b.rs` and `Thing`) -- or the
+    path as written and nothing left when nobody walked the tree or
+    nothing is there."""
+    written = sep.join(parts)
+    if resolve is None or root is None:
+        return written, []
+    level, rest, prefix = root, parts, []
+    if base is not None:
+        head = parts[0]
+        if head == "self":
+            level, rest, prefix = base.self_level, parts[1:], list(base.self_prefix)
+        elif head == "super":
+            level, rest = base.super_level, parts[1:]
+            while rest and rest[0] == "super":
+                level, rest = level + 1, rest[1:]
+        elif head == "crate":
+            rest = parts[1:]
+    if not rest:
+        # `use super::*;` names the module itself, which may be this file's
+        # own inline `mod tests`: nothing to claim.
+        return "", []
+    for length in range(len(rest), 0, -1):
+        found = resolve(path, level, ".".join([*prefix, *rest[:length]]))
+        if found:
+            return found, rest[length:]
+    return written, []
+
+
+def _published_item(resolve: Optional["Resolve"], module: str, language: str) -> tuple[Optional[str], list[str]]:
+    """The file a published package's module is and the item left over."""
+    found = getattr(resolve, "package_item", None)
+    if found is None:
+        return _published(resolve, module, language), []
+    where, rest = found(module, language)
+    return (where if isinstance(where, str) and where else None), list(rest)
+
+
+def _published(resolve: Optional["Resolve"], module: str, language: str) -> Optional[str]:
+    """The file a module of a package another repository in the space
+    publishes is, when whoever walked the tree knows the space's manifests
+    (`file_resolver` with what the space publishes); None otherwise."""
+    package = getattr(resolve, "package", None)
+    if package is None:
+        return None
+    found = package(module, language)
+    return found if isinstance(found, str) and found else None
 
 
 def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str]:
@@ -845,7 +1515,11 @@ def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str
     external packages and 0 files with a dependant.
     """
     if not module.startswith("."):
-        return module
+        # A package another repository in the space publishes is followed
+        # to its file; any other package names itself.
+        suffix = posixpath.splitext(path)[1].lstrip(".").lower()
+        language = "go" if suffix == "go" else "js" if suffix in FIRST else ""
+        return (_published(resolve, module, language) if language else None) or module
     if resolve is not None:
         return resolve(path, 1, module)
     # ``./store`` and ``../core/api`` are already paths; only the leading
@@ -860,7 +1534,7 @@ def _named(module: str, path: str, resolve: Optional["Resolve"]) -> Optional[str
     # Appending to either produced `page.css.tsx` and `personas.ts.ts`,
     # names no file can have.
     written = posixpath.splitext(stem)[1].lstrip(".").lower()
-    if written in ASSETS or written in FIRST:
+    if written in ASSETS or written in FIRST or written in _SOURCE:
         return stem
     # Everything else takes the **family's** first spelling, not the
     # importing file's own. `tsc --traceResolution` selects `store.ts`

@@ -19,6 +19,10 @@ came from; they do not establish that a generated answer is correct.
 
 See [named agents and model selection](docs/agent-models.md) for explicit per-agent
 LLM choices, scoped tool execution and workflow checkpoint identity.
+[Reviewed tool recipes](docs/reviewed-tool-recipes.md) let agents propose compositions of host capabilities for human version review and separate call approval.
+
+[Agent trap detection](docs/agent-trap-detection.md) can stop repeated read-only
+observations and expose the repetition graph for host-directed intervention.
 
 ## Install
 
@@ -101,17 +105,21 @@ storage ports, source validation and resource ownership.
 |---|---|
 | Choose stores and understand recovery | [Recall and storage](docs/retrieval-and-storage.md), [storage adapters](docs/storage-adapters.md), [S3 catalog](docs/s3-catalog.md) |
 | Ingest Office, structured data and text with restart checkpoints | [File ingestion and format coverage](docs/file-ingestion.md) |
+| Import WhatsApp, Telegram, Discord and Slack exports as conversations | [Chat exports](docs/chat-exports.md) |
 | Reconcile local files, changed revisions and managed deletions | [Incremental directory ingestion](docs/directory-sync.md) |
 | Resume interrupted source deletion across stores | [Source cleanup and recovery](docs/retirement-catalog.md) |
+| Schedule a memory to be forgotten at a time, withheld from recall from then | [Scheduled forgetting](docs/scheduled-forgetting.md) |
 | Ingest PDFs, scans and page provenance | [PDF ingestion](docs/pdf-ingestion.md), [PDF OCR](docs/pdf-ocr.md) |
-| Preserve images and search attributed context | [Attachments](docs/attachments.md), [image context and entities](docs/image-context.md) |
+| Preserve images and search attributed context | [Attachments](docs/attachments.md), [image context and entities](docs/image-context.md), [image embedding lane](docs/image-embedding-lane.md) |
 | Review duplicate documents without discarding originals | [Document duplicate review](docs/document-deduplication.md) |
 | Compose LlamaIndex, LangChain and reranking | [Framework integrations](docs/integrations.md) |
 | Give agents scoped search, trace and read tools | [Agent tools](docs/agent-tools.md), [tool-based conversations](docs/conversation-tools.md) |
-| Build text sessions and gather missing evidence | [Text conversations](docs/text-conversations.md), [adaptive retrieval](docs/adaptive-retrieval.md) |
+| Serve the engine to an MCP client, over stdio or HTTP | [MCP server](docs/mcp-server.md) |
+| Build text sessions and gather missing evidence | [Text conversations](docs/text-conversations.md), [adaptive retrieval](docs/adaptive-retrieval.md), [follow-up queries](docs/followup-queries.md) |
 | Constrain, review or quote an answer | [Answer review and output contracts](docs/answer-review.md) |
 | Add voice, personas and provider adapters | [Voice conversations](docs/voice-conversations.md) |
 | Expose authenticated sessions and retain their lifecycle | [Conversation service](docs/conversation-service.md) |
+| Give an OpenAI-compatible app memory by changing its base URL | [OpenAI-compatible chat](docs/openai-compatible-chat.md) |
 | Measure retrieval, generation and capacity | [QA experiments](benchmarks/README.md), [scaling validation](docs/scaling-validation.md) |
 
 The repository [.env.example](../../.env.example) lists supported configuration.

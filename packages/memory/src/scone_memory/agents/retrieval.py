@@ -1,7 +1,7 @@
 """Opt-in resumable retrieval with fixed authorization and retained-source checks.
 
 The caller supplies its engine, fixed scope, private journal path and key.
-Framework integrations are optional; no browser or model service is required.
+Retrieval uses Scone's native engine; no external agent framework is required.
 """
 from __future__ import annotations
 
@@ -10,9 +10,8 @@ import hashlib
 from typing import cast
 
 from ..memory.engine import MemoryEngine
+from ..retrieval.query_formulation import formulate_query
 from .workflow import JSONValue, StepContext, WorkflowRunner, WorkflowStep
-
-from ..integrations.composition import build_retrieval_workflow, retrieve_without_tracing
 
 
 def _records(value: JSONValue) -> list[dict[str, JSONValue]]:
@@ -32,7 +31,6 @@ def build_edge_retrieval_runner(
     before producing or replaying a cached citation packet.
     """
     fixed_where = dict(where)
-    workflow = build_retrieval_workflow(memory, space, where=fixed_where, limit=limit)
 
     async def verify(context: StepContext) -> bool:
         if context.space != space or context.scope != {'where': fixed_where}:
@@ -64,18 +62,17 @@ def build_edge_retrieval_runner(
         query = context.inputs.get('query')
         if not isinstance(query, str):
             raise ValueError('query required')
-        documents = await retrieve_without_tracing(workflow, query)
+        result = await memory.recall(space, formulate_query(query).text, where=fixed_where, limit=limit)
         evidence: list[JSONValue] = []
-        for document in documents:
-            episode_id = document.metadata.get('episode_id')
-            chunk_id = document.metadata.get('chunk_id')
+        for item in result.items:
+            episode_id, chunk_id = item.episode_id, item.chunk_id
             if type(episode_id) is not int or type(chunk_id) is not int:
                 raise ValueError('retained source IDs required')
             episode = await memory.documents.get_episode(space, episode_id)
             if episode is None:
                 raise ValueError('source unavailable')
             evidence.append({'episode_id': episode_id, 'chunk_id': chunk_id,
-                             'text': document.page_content, 'source': episode.source,
+                             'text': item.text, 'source': episode.source,
                              'content_hash': episode.content_hash,
                              'source_sha256': hashlib.sha256(episode.content.encode()).hexdigest()})
         return evidence

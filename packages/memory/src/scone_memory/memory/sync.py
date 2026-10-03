@@ -15,7 +15,7 @@ import threading
 from typing import Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
 from .engine import ImportSummary, MemoryEngine, Profile, Record
-from ..core.models import Added, Episode, Fact, RecallResult, Status
+from ..core.models import Added, Episode, Fact, ForgetDueReport, RecallResult, Status
 from ..core.ports import SourcePage
 from ..retrieval.overview import OverviewResult
 
@@ -172,6 +172,9 @@ class SyncMemoryEngine:
     def episodes(self, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
         return self._run(self._engine.episodes(space, where, limit))
 
+    def scopes(self, space: str) -> dict[str, dict[str, int]]:
+        return self._run(self._engine.scopes(space))
+
     def source_page(self, space: str, *, before: Optional[int] = None,
                     limit: int = 25, kind: Optional[str] = None,
                     conditions: Optional[Mapping[str, object]] = None) -> SourcePage:
@@ -180,6 +183,9 @@ class SyncMemoryEngine:
 
     def forget(self, space: str, episode_id: int) -> None:
         return self._run(self._engine.forget(space, episode_id))
+
+    def forget_due(self, space: str, now: Optional[str] = None, **kwargs) -> ForgetDueReport:
+        return self._run(self._engine.forget_due(space, now, **kwargs))
 
     def assert_fact(self, space: str, subject: str, predicate: str, object: str, **kwargs) -> Fact:
         return self._run(self._engine.assert_fact(space, subject, predicate, object, **kwargs))

@@ -46,12 +46,70 @@ box dimensions in physical points (including `/UserUnit` scaling), and clockwise
 page rotation. Page separators are two
 newlines and do not belong to either page's text span.
 
-The parser preserves horizontal text positioning using pypdf's layout mode.
-Page dimensions are not glyph or paragraph bounding boxes. This does not detect
-table cells, semantic reading order, headings or column relationships. Page crop
-boxes and complex transformations are not resolved into highlight rectangles.
-PDF text extraction can misorder or omit content; inspect the retained source
-when assessing evidence.
+The parser reads pypdf's layout mode, which places text on a character grid
+by its position on the page, and then reads that grid in reading order (next
+section). Page dimensions are not glyph or paragraph bounding boxes. This does
+not detect table cells or headings. Page crop boxes and complex transformations
+are not resolved into highlight rectangles. PDF text extraction can misorder or
+omit content; inspect the retained source when assessing evidence.
+
+## Reading order from the text layer
+
+A two-column page comes out of the text layer as a grid holding both columns
+side by side, so reading it row by row puts half a sentence from each column
+on every line, and a chunk cut anywhere in that text quotes two paragraphs at
+once. The parser therefore lays each page out before the text is stored, from
+the grid's own geometry and without a layout model:
+
+- Every run of characters on a row (runs are separated by four or more of
+  the grid's own ASCII spaces; any other space, the no-break space in a
+  table's `$62.0 billion` or a thin space in `1 000`, is text and stays in
+  its run; a currency sign after a space opens a run of its own, as a
+  statement sets the next column's `$` as close to a loss as words sit)
+  becomes a region whose box is its grid position. The same whitespace
+  partitioning that orders OCR words (`ocr.layout.order_columns`) finds the
+  gutters, with a gutter a few characters wide, and the page is written out
+  column by column: what spans the columns above them first, then each column
+  top to bottom, then what spans them below.
+- A cut is kept only where every column reads as prose: at least three rows,
+  fifteen characters wide at its widest, most rows a single run, and the
+  typical row at least half the widest. A table page fails those, stays as it
+  was extracted, and its receipt says `tabular_kept_whole`. A page with more
+  than `MAX_REGIONS_PER_PAGE` runs also stays as extracted, with `region_limit`.
+- A page kept as extracted still has its runs read by the label rules
+  ([pdf-ocr.md](pdf-ocr.md#label-the-pages-regions)); when they find a
+  table among them, the page carries its runs as labelled regions, each
+  citing its own bytes of the page's text, so the grid reaches the document
+  as [table cells](file-ingestion.md#pdf-table-evidence). A page of prose
+  carries none: its regions would cost about twenty kilobytes a page and
+  say nothing the text does not.
+- A page number on a line of its own is left out of the page's text on every
+  page. A line whose words recur at the top or bottom of three or more pages is
+  a running header or footer: it stays where it first appears (that may be the
+  page where it is the title) and is left out after. Every line left out is
+  recorded in the page's `running` tuple, so nothing extracted is lost.
+
+Each laid-out page carries a `reading_order` receipt with
+`strategy: grid-columns-v1`, the number of columns found (0 when none), and
+notes; a page that was cut, or kept whole with a table in it, also carries
+its regions, with `region_geometry: normalized_text_grid` to say that their
+boxes are estimated from grid positions rather than measured on a raster,
+`provider_index` (the run's grid order) and `reading_column` (zero on a page
+kept whole). The manifest is schema version 3, as with
+OCR reading order, and `pdf_provenance` returns the same receipts and regions,
+so a caller can see which column a chunk came from. The parser string ends in
+`+grid-columns-v1`.
+
+A single-column page comes out as it did before, apart from the running
+lines. To keep the text exactly as pypdf writes it, row by row across the
+page, pass `PypdfParser(layout='as_extracted')` to `ingest_pdf` or the
+document registry; such pages carry no receipt and the manifest stays at
+schema version 1.
+
+Measured on the thirteen PDFs under `reference/` (a two-column ICML paper,
+three narrative reports, five SEC filings full of financial tables, a slide
+deck and a table page): see the pull request that introduced the pass for the
+per-document counts of pages cut, pages kept whole, and lines left out.
 
 ## Coverage and failures
 
@@ -59,11 +117,35 @@ when assessing evidence.
   image is not silently converted into a successful empty document.
 - A mixed document retains page numbering and reports `empty_pages`. Its episode
   has `pdf_coverage=partial`; empty pages may be blank or may require OCR.
+- A page whose text layer is mostly characters no reader can use (private-use
+  code points, `(cid:N)` runs, replacement characters or control bytes, at least
+  8 of them and at least 30% of the page's visible characters) is reported in
+  `unreadable_pages` and in the episode's `pdf_unreadable_pages`, and the
+  coverage is `partial`. Its text is kept, never deleted; with OCR it is
+  recognized instead. A few icon glyphs beside prose do not make a page
+  unreadable, and whitespace is not counted either way.
+- A PDF's bookmarks give each page its section: the titles of the last
+  bookmark at each level that begins on or before the page, outermost first
+  (`page.section`, and `section: "Chapter 2 > Refunds"` on the page's segment
+  in a file import). The text is unchanged. At most 2,000 bookmarks and 8 levels
+  are read, each title cut to 256 characters; past those the outline is read to
+  its bound and `outline` says `capped`, one that cannot be read says
+  `unreadable`, and a PDF without bookmarks says nothing. A segment's section is
+  bounded to one metadata value by dropping its outermost titles (`… > `).
 - `pdf_coverage=text_layer` means every page yielded text. It does **not** certify
   that every visible word, figure or table was understood.
-- Encrypted PDFs, malformed files, absent parser dependencies and exceeded limits
-  raise `InvalidInput` before creating an episode. Password handling is not
-  implemented; provide a separately decrypted input when appropriate.
+- An encrypted PDF is opened with the empty password: an owner password alone
+  restricts what a reader may do (SEC filings from EDGAR are made this way)
+  and hides nothing. The parsed record's `encryption` says so (`opened_with:
+  empty_password`, which of the file's passwords `matched`) and names what the
+  owner `restricted` -- `print`, `modify`, `extract`, `annotate`, `fill_forms`,
+  `extract_for_accessibility`, `assemble`, `print_high_quality` -- so a caller
+  who must honour a restriction can check; a file import carries the same on
+  the document's metadata (`pdf_opened_with`, `pdf_password_matched`,
+  `pdf_restricted`). A file whose user password is not empty is refused, as
+  is one whose cipher needs the `cryptography` package when it is absent.
+- Malformed files, absent parser dependencies and exceeded limits raise
+  `InvalidInput` before creating an episode.
 - Parser failures do not indicate that the memory database is unavailable.
 
 The defaults are 25 MiB of PDF input, 100 pages, 2,000,000 extracted UTF-8 bytes
@@ -114,7 +196,7 @@ With the `api,pdf` extras installed, `scone-memory serve` exposes:
 All requests require bearer authentication. Ingestion requires a write/full key;
 page evidence and the returned relative `download_path` allow read keys in the
 same space. Forgotten sources stop resolving. The ingest response contains
-`added`, `original`, `manifest`, and `empty_pages`, matching the Python result.
+`added`, `original`, `manifest`, `empty_pages` and `unreadable_pages`, matching the Python result.
 Retrying identical bytes and parser output reuses the episode.
 
 `documents.pdf` in `/v1/capabilities` reflects parser dependency availability.

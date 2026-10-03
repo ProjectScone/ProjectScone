@@ -12,6 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
 
 from .models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 
@@ -185,9 +189,70 @@ class SourcePage:
     episodes: list[Episode]
     has_more: bool
     next_before: Optional[int]
+    #: Sources the walk passed over because their ``forget_after`` had come.
+    past_forget_after: int = 0
 
 
 @runtime_checkable
+@runtime_checkable
+class ContextIndex(Protocol):
+    """A document store that keeps, beside each chunk's text, the words the
+    chunk is under -- headings, title, source name, document terms -- and
+    searches them as a lane of their own. Optional: ``context_index(store)``
+    says whether a store has it, and the engine degrades honestly without."""
+
+    context_lane: bool
+
+    async def index_context(self, space: str, chunk_id: int, text: str) -> None: ...
+    async def search_context(self, space: str, query: str, limit: int, filter: "TextFilter") -> list[tuple[int, float]]: ...
+
+
+@runtime_checkable
+class PrefixSearch(Protocol):
+    """A document store whose text lane can search a term's family by prefix
+    (``bill*``) beside whole terms. Optional: ``prefix_search(store)`` says
+    whether a store has it, and a recall says whether prefixes applied.
+    With ``exact_forms``, a passage holding one of the query's own words in
+    a family has the family weighed at that word's idf, still counted once."""
+
+    prefix_terms: bool
+
+    async def search_terms(self, space: str, query: str, limit: int, filter: "TextFilter", *,
+                           prefixes: Sequence[str], exact_forms: bool = False) -> list[tuple[int, float]]: ...
+
+
+def prefix_search(store: object) -> Optional[PrefixSearch]:
+    """``store`` as a prefix search when its text lane takes prefixes, else None."""
+    return store if getattr(store, "prefix_terms", False) and isinstance(store, PrefixSearch) else None
+
+
+def context_index(store: object) -> Optional[ContextIndex]:
+    """``store`` as a context index when it keeps one, else None."""
+    return store if getattr(store, "context_lane", False) and isinstance(store, ContextIndex) else None
+
+
+@runtime_checkable
+class QuestionIndex(Protocol):
+    """A document store that keeps, beside each chunk's text, the questions a
+    model wrote that the chunk answers (ingestion.chunk_questions), apart
+    from the context index so neither lane's words rank in the other.
+    Optional: ``question_index(store)`` says whether a store has it."""
+
+    question_lane: bool
+
+    async def index_questions(self, space: str, chunk_id: int, questions: Sequence[str]) -> bool:
+        """Replace the chunk's questions; no questions removes them. False,
+        writing nothing, when the space holds no such chunk (it was forgotten)."""
+        ...
+
+    async def search_questions(self, space: str, query: str, limit: int, filter: "TextFilter") -> list[tuple[int, float]]: ...
+
+
+def question_index(store: object) -> Optional[QuestionIndex]:
+    """``store`` as a question index when it keeps one, else None."""
+    return store if getattr(store, "question_lane", False) and isinstance(store, QuestionIndex) else None
+
+
 class DocumentStore(Protocol):
     """Truth: episodes, their chunks, and facts. Also the lexical lane,
     because full-text search wants to live next to the text."""
@@ -328,7 +393,7 @@ class RecordsVectorWriter(Protocol):
     async def upsert_as(self, points: Sequence[VectorPoint], writer: str) -> None: ...
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
-                        writer: str) -> list[tuple[int, float]]:
+                        writer: str, conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         """Search only if the record vouches for ``writer``, checked in the same
         snapshot as the comparison; otherwise raise VectorsNotComparable."""
         ...
@@ -415,3 +480,22 @@ class Embedder(Protocol):
     dim: int
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
+
+
+@runtime_checkable
+class ImageEmbedder(Protocol):
+    """Images and text queries into one space, for the image lane.
+
+    ``embed_images`` takes an image's stored bytes (PNG, JPEG or WebP);
+    ``embed_texts`` takes queries. A cosine between an image's vector and
+    a query's means something only because one model made both, so the
+    image lane keeps these vectors in an index of their own, never beside
+    the text embedder's. Optional: an engine without one has no image lane
+    and says so when a recall asks for it."""
+
+    #: Names the model; vectors from different ids are never compared.
+    id: str
+    dim: int
+
+    async def embed_images(self, images: Sequence[bytes]) -> list[list[float]]: ...
+    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]: ...

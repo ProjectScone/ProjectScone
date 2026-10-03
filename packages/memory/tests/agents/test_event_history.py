@@ -311,3 +311,46 @@ async def test_malformed_dataclass_fields_fail_without_serializer_warnings(tmp_p
             )
     finally:
         store.close()
+
+
+async def test_maximum_trap_report_survives_encrypted_store(tmp_path, run_request):
+    from scone_memory.agents.traps import ObservationGraph
+
+    detector = ObservationGraph(2)
+    for index in range(15):
+        assert detector.observe(str(index).encode()) is None
+    graph = detector.observe(b'14')
+    event = replace((await events())[0], kind='trap_detected', trap_graph=graph)
+    path = tmp_path / 'trap-history.db'
+    store = AgentEventHistoryStore(path, key=b'k' * 32)
+    try:
+        store.append(run_request, step_id='find', selection_id='find', event=event)
+    finally:
+        store.close()
+    assert b'trap_detected' not in path.read_bytes()
+    with closing(AgentEventHistoryStore(path, key=b'k' * 32)) as reopened:
+        assert reopened.read(run_request).items[0].event == event
+
+
+@pytest.mark.parametrize('change', ['missing', 'wrong_kind', 'metadata', 'counts', 'barrier'])
+async def test_store_rejects_invalid_trap_reports(tmp_path, run_request, change):
+    from scone_memory.agents.traps import ObservationGraph
+
+    detector = ObservationGraph(2)
+    detector.observe(b'a')
+    graph = detector.observe(b'a')
+    event = replace((await events())[0], kind='trap_detected', trap_graph=graph)
+    if change == 'missing':
+        event = replace(event, trap_graph=None)
+    elif change == 'wrong_kind':
+        event = replace(event, kind='turn_failed')
+    elif change == 'metadata':
+        event = replace(event, tool_name='search_memory')
+    elif change == 'counts':
+        event = replace(event, trap_graph=replace(graph, edges=()))
+    else:
+        event = replace(event, trap_graph=replace(graph, nodes=(replace(graph.nodes[0], comparable=False),)))
+    with closing(AgentEventHistoryStore(tmp_path / 'trap-history.db', key=b'k' * 32)) as store:
+        with pytest.raises(WorkflowError, match='invalid_history_event'):
+            store.append(run_request, step_id='find', selection_id='find', event=event)
+        assert not store.read(run_request).available

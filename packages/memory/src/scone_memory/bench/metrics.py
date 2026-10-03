@@ -105,6 +105,18 @@ def hit_rate(pairs: Iterable[tuple[Sequence[str], set[str]]], k: int) -> float:
     return landed / len(items)
 
 
+def recall_at(retrieved: Sequence[str], relevant: set[str], k: int) -> float:
+    """The share of the relevant items found in the first ``k`` retrieved.
+    Zero when nothing was relevant to find, since there was nothing to
+    recall; ``k`` must be positive."""
+    if type(k) is not int or k < 1:
+        raise ValueError("k must be a positive integer")
+    if not relevant:
+        return 0.0
+    found = {item for item in retrieved[:k] if item in relevant}
+    return len(found) / len(relevant)
+
+
 def ndcg_at(retrieved: Sequence[str], relevant: set[str], k: int) -> float:
     """Discounted gain against the best possible ordering, in [0, 1].
 

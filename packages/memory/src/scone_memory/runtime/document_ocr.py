@@ -19,12 +19,25 @@ def build_document_ocr(settings: Settings) -> DocumentOcr | None:
     path = Path(settings.document_ocr_executable)
     if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
         raise ValueError('SCONE_DOCUMENT_OCR_EXECUTABLE must name an installed absolute executable')
+    def engine_for(language: str) -> TesseractOcr:
+        return TesseractOcr(executable=str(path), language=language, page_segmentation=settings.document_ocr_psm,
+                            orientation=settings.document_ocr_orientation)
     try:
-        engine = TesseractOcr(executable=str(path), language=settings.document_ocr_language,
-                              page_segmentation=settings.document_ocr_psm)
+        engine = engine_for(settings.document_ocr_language)
+        for language in settings.document_ocr_languages:
+            engine_for(language)
     except InvalidInput as error:
         raise ValueError(str(error)) from error
-    configured = DocumentOcr(engine, dpi=settings.document_ocr_dpi)
+    layout = None
+    if settings.document_layout_executable is not None:
+        from ..ocr.layout_json import JsonLayoutEngine
+
+        try:
+            layout = JsonLayoutEngine(settings.document_layout_executable)
+        except InvalidInput as error:
+            raise ValueError(f'SCONE_DOCUMENT_LAYOUT_EXECUTABLE: {error}') from error
+    configured = DocumentOcr(engine, dpi=settings.document_ocr_dpi, languages=settings.document_ocr_languages,
+                             engine_for=engine_for if settings.document_ocr_languages else None, layout=layout)
     if not configured.available():
         raise ValueError('document OCR requires the installed scone-memory[pdf-ocr] extra')
     return configured

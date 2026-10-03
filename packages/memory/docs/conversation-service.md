@@ -66,7 +66,13 @@ interruption; `{"type": "end"}` or closing the socket ends the input and the
 session (`ended`), a provider or format failure fails it, and `POST /stop` works
 while it runs. Both sides are captured to memory and read back through the
 transcript route. `GET /v1/conversations/capabilities` reports `"voice": true`
-and the catalog reports `voice_ready` on such a host.
+and the catalog reports `voice_ready` on such a host. With `SCONE_VOICE_KEYPAD`
+set to `append` or `collect` (default `off`, reported as `voice_keypad`), the
+client may also send `{"type": "keypad", "key": "5"}`, one of `0-9 * # A-D`, for a
+dial pad: the key reaches the session among the audio and is given to the user's
+turn under that mode ([Keys from the phone](voice-conversations.md#keys-from-the-phone-dtmf)).
+Off, or with any other field or value, the message is refused as an unsupported
+control and the session fails.
 
 On a composed host the pages carry no baked key even with a single configured
 key (the tab asks for one), `GET /v1/capabilities` reports
@@ -103,8 +109,54 @@ app = create_conversation_app(
     memory, space_keys, "conversation-sessions.db",
     lambda space, sid: TextConversation(memory, space, sid, model_factory),
     public_text_streaming=True,  # known-compatible native runtime; default is False
+    text_resumption=True,       # opt into native retained-history restoration
 )
 ```
+
+A conversation's history has a byte limit (`max_history_bytes`, 128000
+by default). By default a turn that would pass it is refused with
+"conversation history byte limit reached; start a new conversation",
+and a reply that would pass it fails the turn. `history_policy="window"`
+lets the conversation continue instead: whole oldest turns (a user
+message and its reply, together) leave the model's context until the
+next turn fits, the newest turn is always kept whole, and each turn's
+receipt carries `history` -- the policy, the limit, the bytes now held,
+and the ids of the turns that left. Nothing is lost: every turn was
+already captured as its own episode. A turn that has left the window
+is admitted to same-session recall from then on, so a question about
+it is answered from memory the way a question about another session
+would be; the memory-context receipt counts those under
+`same_session_items`. A single message that cannot fit on its own is
+still refused, explicitly. The tool-answer path's search still keeps
+the whole session out, and voice conversations keep the default; both
+are follow-ups, not silent gaps.
+
+`history_policy="summary"` keeps what the window would lose: the turns
+that leave the model's context are folded into a running summary by a
+model the caller gives as `summary_factory` (a `ChatModel`, one round
+per fold, asked for the new summary alone), and the summary rides in
+the system message under "Earlier in this conversation, summarised:".
+`max_summary_bytes` (2000 by default, 200 to 32000, at most half of
+`max_history_bytes`) is reserved for it: the system prompt and the
+turns are bounded by the history limit less that reserve (a system
+prompt that does not fit what is left is refused at construction), the
+summary by the reserve, and so the whole never passes the limit. The
+summary's bytes are counted as the history counts them, in the request
+the model is sent, heading included: a summary of quotation marks
+costs twice its length there. One fold may take `summary_timeout`
+seconds (20 by default, 0.1 to 600); the turn's own deadline runs on
+through it. Each turn's receipt carries `history.summary`:
+`status` (`none`, `summarised`, `too_long`, `empty`, `timed_out`, or
+`failed: <error type>`), the summary's bytes, reserve and timeout, and
+the ids of the turns it covers. A summary too long for its reserve, or
+empty, or one the model did not write in time or at all, keeps the
+summary before it and the receipt says so; the turns are gone from the
+context either way, as under the window, and were captured as episodes
+already. A fold belongs to its turn: a turn that fails after folding
+leaves the summary, and the record of what has left the window, as they
+were. The summary is context for the model, not
+a record: it is never captured as a turn, and a question about a folded
+turn is still answered from memory as under the window.
 
 ## Public-text stream (optional)
 
@@ -126,6 +178,8 @@ proxy buffering disabled. JSON `data` frames preserve literal text safely:
 | `text` | `{sequence, text, provisional: true}` | Public chunk, with matching SSE `id`; not a token or saved-reply receipt. |
 | `gap` | `{after, next_sequence}` | Earlier chunks left the bounded window. Do not synthesize the missing text. |
 | `terminal` | `{request_id, status, read_receipt: true}` | Fetch the existing turn receipt for final status and available saved text. |
+
+Text the window still holds goes out before any `terminal`: the last chunk and the receipt land microseconds apart, and a reader whose cursor is behind at that moment receives the rest, for as long as the window is held (the turn's window stays with its session). Only after the window is drained does the stream say what the turn became.
 | `end` | `{request_id, reason, read_receipt: true}` | Window unavailable, service shutting down, or session deleted; not proof of completion. |
 
 Reconnect with `after=<last-sequence>` or `Last-Event-ID`; both must agree if
@@ -141,8 +195,11 @@ Invalid observation is latched even if a custom runtime catches the callback
 error. Custom runtime side effects are not rolled back; configure capture so
 it does not persist unfinished replies as complete.
 Readers have no private chunk queue. A 10-second comment heartbeat keeps idle
-connections observable. Terminal/cancel/stop clears provisional text; reconnects
-after completion or restart yield receipt information, not reconstructed chunks.
+connections observable. A reader already listening when the turn ends is given
+every chunk that landed before the receipt (the last chunk and the receipt can
+be microseconds apart), and the text is dropped once the last such reader
+leaves; a reader who connects after completion, cancel, stop or a restart is
+given receipt information and no provisional text.
 Final text is read from the retained episode, so forgetting it cannot expose a
 stale streaming copy. Text already sent to clients cannot be revoked.
 
@@ -333,8 +390,10 @@ original create replay signature. Back up the journal before upgrading: older
 versions of Scone cannot open a newer schema. Runtime enforcement is separate
 from persistence and is supplied by the scoped factory described above.
 
-States are created, running, stopping, ended, failed and interrupted. Terminal
-sessions cannot restart. Reopening preserves recorded state; `running` does not
+States are created, running, stopping, ended, failed and interrupted. Ended,
+failed and interrupted text sessions can transition to running through an
+explicit `resume` command once all accepted turns have settled. Opening the
+journal preserves recorded state; `running` does not
 prove a provider task is still alive. Runtime ownership and crash reconciliation
 are not implemented by this journal. The text/voice mode field is metadata, not
 a claim that either runtime is configured. No transcripts or media are stored.
@@ -342,6 +401,37 @@ a claim that either runtime is configured. No transcripts or media are stored.
 Unrelated and unsupported-version databases are refused. Use one owned connection
 per serialized caller, not one connection shared across threads. Separate
 connections serialize writes through SQLite. Protect the selected path with
-appropriate filesystem permissions. Authenticated session APIs, model execution,
-the conversation UI, transport/reconnect handling and voice/video remain separate
-work; the existing memory server is not a conversation server.
+appropriate filesystem permissions. The journal itself does not authenticate
+requests, execute models or reconnect transports; those responsibilities belong
+to the conversation service and its runtimes.
+
+
+## Resume a saved text conversation
+
+The native launchers advertise `text_resumption: true` when a text runtime is
+configured. The webapp then offers **Resume conversation** for ended, failed or
+interrupted text sessions. A provider failure or server restart still settles
+in-flight turns accurately; resuming does not retry them.
+
+Send `POST /v1/conversations/{sid}/resume` with a new `request_id` and the current
+`expected_revision`. The response is the same session, now running with a higher
+revision. Retrying the same resume command returns the current session state
+without starting another runtime. Stale revisions, concurrent resumes, running
+sessions and voice sessions are refused. The original authenticated space,
+recall scope and persona are preserved. A missing or changed recorded persona
+requires a new conversation instead of silently replacing its configuration.
+Server-default sessions use the currently configured server-default model.
+
+Restoration invokes no model. It reads the latest 100 completed turn receipts
+and up to 200 recent retained session episodes, admitting only complete native
+user/assistant pairs corroborated by the journal. Forgotten, expired, failed,
+cancelled and incomplete turns do not become model history. Whole recent turns
+are restored within half the runtime history-byte budget, leaving room for the
+next message and answer. Older messages remain in the transcript; restored
+summaries and unbounded full-history prompts are not part of this feature.
+
+Custom service compositions opt in with `text_resumption=True` and must produce
+native `TextConversation` runtimes. Failure to restore leaves the saved lifecycle
+state unchanged. A deleted session cannot be recreated by a pending resume.
+Submitting an already-settled turn ID after resumption returns the durable
+receipt and never invokes the model again.

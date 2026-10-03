@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 #: The same vocabulary as the Rust product's schema CHECK, so an episode
 #: means the same thing on both sides (shared spec, section 1).
@@ -285,6 +285,42 @@ class ForgetReceipt(BaseModel):
     claims_kept_other_support: list[int] = Field(default_factory=list)
     claims_kept_not_in_ledger: list[int] = Field(default_factory=list)
     claims_already_excluded: list[int] = Field(default_factory=list)
+    #: What happens to the image lane's vector (``retrieval.image_lane``):
+    #: ``none`` when the episode carries no image from ``ingest_image``;
+    #: ``removed`` when this engine has the lane and deletes it; ``not_reached``
+    #: when it has not, so an image index it cannot see may keep the image's
+    #: vector until an engine with the lane opens on it or meets it in a recall.
+    image_vector: Literal["none", "removed", "not_reached"] = "none"
+
+
+class BulkForgetReport(BaseModel):
+    """One pass of forgetting what a filter selects, or its preview.
+
+    ``matched`` is every source the filter selected; ``episode_ids`` the ones
+    this pass takes, oldest first, at most the pass limit (``pass_limited``
+    says the limit bit); ``selection`` is the digest applying must present.
+    ``selection_complete`` false means the walk stopped before reading every
+    source. Impact totals count what the pass would take (preview) or took
+    (applied). ``remaining`` is what still matches after an applied pass."""
+
+    space: str
+    applied: bool
+    filter: dict[str, object] = Field(default_factory=dict)
+    with_claims: Literal["keep", "exclude"] = "keep"
+    matched: int = 0
+    selection_complete: bool = True
+    pass_limited: bool = False
+    episode_ids: list[int] = Field(default_factory=list)
+    selection: str = ""
+    chunks: int = 0
+    attachments_released: int = 0
+    facts_citing: int = 0
+    links_citing: int = 0
+    affirmations_citing: int = 0
+    forgotten: list[int] = Field(default_factory=list)
+    receipts: list["ForgetReceipt"] = Field(default_factory=list)
+    skipped: list[dict[str, object]] = Field(default_factory=list)
+    remaining: int = 0
 
 
 class ForgetStatus(BaseModel):
@@ -335,6 +371,84 @@ class ExpiryReport(BaseModel):
     dry_run: bool = False
 
 
+class ScheduledForget(BaseModel):
+    """One episode a sweep found due: when it was to be forgotten, why it was
+    taken, and what became of it -- ``forgotten`` with the forget's receipt,
+    ``would_forget`` in a dry run, or ``skipped`` with the reason when it was
+    already gone by the time its forget ran."""
+
+    episode_id: int
+    forget_after: str
+    reason: str
+    outcome: Literal["forgotten", "would_forget", "skipped"]
+    receipt: Optional[ForgetReceipt] = None
+
+
+class ForgetDueReport(BaseModel):
+    """One pass of forgetting what is due (``memory.scheduled_forget``).
+
+    ``due`` counts the episodes the walk found past their ``forget_after`` at
+    ``now``; ``items`` are the ones this pass took, most overdue first, and
+    ``limited`` says more were due than ``limit`` lets one pass take.
+    ``scan_complete`` false means the walk stopped at its bound before the
+    oldest episode, so ``due`` is not the whole space: pass
+    ``resume_before`` as ``before`` to walk on. ``unreadable`` names episodes
+    whose stored ``forget_after`` cannot be read as a time; they are neither
+    forgotten nor withheld."""
+
+    space: str
+    now: str
+    limit: int
+    dry_run: bool = False
+    with_claims: Literal["keep", "exclude"] = "keep"
+    scanned: int = 0
+    scan_complete: bool = True
+    resume_before: Optional[int] = None
+    due: int = 0
+    limited: bool = False
+    items: list[ScheduledForget] = Field(default_factory=list)
+    forgotten: list[int] = Field(default_factory=list)
+    remaining: int = 0
+    unreadable: list[int] = Field(default_factory=list)
+
+
+class ImageRebuildReport(BaseModel):
+    """One pass of re-embedding a space's stored images (``retrieval.image_lane.reembed_images``).
+
+    The walk reads at most ``limit`` file episodes, newest id first;
+    ``scan_complete`` false says it stopped at that bound, and
+    ``resume_before`` is where the next pass walks on. ``reembedded`` counts
+    the images given a new vector; ``forgotten`` names images forgotten while
+    they were re-embedded (no vector is kept), and ``failed`` those whose
+    bytes could not be read or embedded or whose vector was not taken, with
+    the first such ``error``. A failed image keeps whatever vector it had.
+
+    ``writer`` is what the image index holds once the pass ends: ``recorded``
+    when it records this image embedder as the writer of every vector (the
+    lane is on); ``rebuilding`` when it holds this embedder's rebuild marker
+    (the lane is refused until a pass completes with no space pending);
+    ``refused`` when it records another writer; ``tagged`` when the index
+    cannot record a writer, and the lane ignores vectors another model tagged.
+    The pass that completes the walk removes the space's vectors whose chunk
+    is gone (``orphans_removed``, None when the index cannot list what it
+    holds) and, under a marker, names in ``spaces_pending`` every space still
+    holding a vector this embedder did not tag."""
+
+    space: str
+    embedder: str
+    limit: int
+    scanned: int = 0
+    scan_complete: bool = True
+    resume_before: Optional[int] = None
+    reembedded: int = 0
+    forgotten: list[int] = Field(default_factory=list)
+    failed: list[int] = Field(default_factory=list)
+    error: Optional[str] = None
+    orphans_removed: Optional[int] = None
+    writer: Literal["recorded", "rebuilding", "refused", "tagged"] = "tagged"
+    spaces_pending: list[str] = Field(default_factory=list)
+
+
 class RecallItem(BaseModel):
     chunk_id: int
     episode_id: int
@@ -359,6 +473,8 @@ class RecallItem(BaseModel):
     #: reader who takes the first result; one who reads or quotes them all
     #: needs to be told, and a passage carries no date that says so.
     superseded: bool = False
+    #: What people said about this passage, when recall was asked for lessons; left out otherwise.
+    lessons: Optional[dict[str, object]] = None
     #: The chunk's own UTF-8 byte span of its episode, half-open, so a
     #: caller can quote the source exactly and cite where it stops.
     start: int = 0
@@ -371,6 +487,70 @@ class RecallItem(BaseModel):
     #: holds it ("Engine.forget"), when the source is code and one holds
     #: all of it.
     declaration: Optional[str] = None
+    #: When recall expanded a summary to the chunks it cites and this chunk
+    #: is one of them: the summary's episode and chunk, its level and index,
+    #: the document it summarizes, the mode, and the character spans of this
+    #: chunk's stored text its quotes sit at (offsets, so withholding has no
+    #: second copy of the text to miss).
+    #: Left out otherwise.
+    via_summary: Optional[dict[str, object]] = None
+    #: When a descent of the stored summary trees reached this chunk
+    #: (``summary_traverse``): the document, and the path of summaries kept
+    #: on the way down, top first, each with its level, index and score.
+    #: Left out otherwise.
+    via_tree: Optional[dict[str, object]] = None
+
+    @model_serializer(mode="wrap")
+    def omit_unasked_lessons(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # Recall not asked for lessons, for summaries expanded, or for a
+        # descent, answers exactly as it did before they existed.
+        value: dict[str, object] = handler(self)
+        if self.lessons is None:
+            value.pop("lessons", None)
+        if self.via_summary is None:
+            value.pop("via_summary", None)
+        if self.via_tree is None:
+            value.pop("via_tree", None)
+        return value
+
+
+class ListwiseCall(BaseModel):
+    """One model call of a listwise pass: which window it was shown and what came of it."""
+
+    #: The window's half-open positions in the candidates sent, 0-based,
+    #: as the list stood when this call was made.
+    start: int
+    end: int
+    passages: int
+    #: Passages shown cut to the byte bound in this call.
+    clipped: int
+    #: ranked: every passage placed. partial: some placed, the rest kept
+    #: their order after them. unparseable: none placed, the window kept
+    #: its order. failed / timeout: the pass ended here and fused order stands.
+    outcome: Literal["ranked", "partial", "unparseable", "failed", "timeout"]
+    ranked: int
+    #: Passages whose place in the window changed.
+    moved: int
+    duration_ms: float
+    reason: Optional[str] = None
+
+
+class ListwiseReceipt(BaseModel):
+    """What a listwise pass asked the model, and what it moved."""
+
+    window: int
+    step: int
+    passage_bytes: int
+    timeout: float
+    calls: list[ListwiseCall] = Field(default_factory=list)
+    #: Calls started, including one the deadline or a failure interrupted.
+    model_calls: int = 0
+    #: Candidates whose final place differs from the fused order; zero on a fallback.
+    moved: int = 0
+    #: Candidates longer than the byte bound, shown cut in every window they were in.
+    clipped: int = 0
+    #: Why fused order was kept, when it was; None when the model's order was applied.
+    fallback: Optional[str] = None
 
 
 class RerankTrace(BaseModel):
@@ -381,6 +561,11 @@ class RerankTrace(BaseModel):
     candidates_omitted: int
     payload_bytes: int
     duration_ms: float
+    #: The listwise pass's receipt, when the reranker was a listwise model. A
+    #: scorer's trace leaves the key out, so it answers exactly as it did before
+    #: listwise passes existed; the field, not a serializer, drops it, so the
+    #: published schema stays typed.
+    listwise: Optional[ListwiseReceipt] = Field(default=None, exclude_if=lambda receipt: receipt is None)
 
 
 class QueryEntity(BaseModel):
@@ -394,6 +579,67 @@ class QueryEntity(BaseModel):
     #: For a seed, the name the question used; for a neighbour, the
     #: predicate relating it to its seed.
     matched: str
+
+
+class Narrowing(BaseModel):
+    """What a narrowed recall did in each lane, and how far it looked.
+
+    A lane that narrows ``in_store`` applied the request to every row it
+    holds; one that is ``postfiltered`` returned its best ``window``
+    candidates and the request then removed the ones that did not fit.
+    ``window_exhausted`` is the bound biting: the filter removed some
+    candidates and a post-filtered lane's window was full when it did,
+    so a memory that fits may lie deeper than the recall looked. An
+    empty answer with this true is not "there is none".
+    """
+
+    conditions: bool
+    kind_or_source_or_dates: bool
+    text_lane: Literal["in_store", "postfiltered", "off"]
+    vector_lane: Literal["in_store", "postfiltered", "off"]
+    text_window: int
+    vector_window: int
+    text_returned: int
+    vector_returned: int
+    postfiltered_out: int
+    window_exhausted: bool
+    #: The image lane (``retrieval.image_lane``), ``off`` unless the recall ran
+    #: it. Its index answers for itself whether it narrows by conditions.
+    image_lane: Literal["in_store", "postfiltered", "off"] = "off"
+    image_window: int = 0
+    image_returned: int = 0
+
+
+class PhraseTrace(BaseModel):
+    """What required and excluded phrases did to one recall's passages."""
+
+    required: list[str] = Field(default_factory=list)
+    excluded: list[str] = Field(default_factory=list)
+    #: Fused candidates the phrases were checked against, before the limit.
+    checked: int = 0
+    dropped_required: int = 0
+    dropped_excluded: int = 0
+    #: True when fewer passages came back than the limit after phrases
+    #: dropped some: passages beyond the candidates checked were never read.
+    short: bool = False
+    why: str = ""
+
+
+class DiversityTrace(BaseModel):
+    """What diversity did to one recall's order."""
+
+    weight: float
+    #: Candidates the places were filled from, after any phrases.
+    candidates: int = 0
+    #: Candidates past the budget, left in relevance order after the rest.
+    not_diversified: int = 0
+    #: Where the likeness came from: "index" (stored vectors), "embedded"
+    #: (the candidates embedded once), or "unavailable" (neither; order kept).
+    vectors: str = "index"
+    #: Of the first ``limit`` candidates before the per-episode cap, how many
+    #: are not the ones relevance alone put there.
+    replaced: int = 0
+    why: str = ""
 
 
 class RecallResult(BaseModel):
@@ -417,10 +663,64 @@ class RecallResult(BaseModel):
     #: Lanes that failed and were left out, named so a caller can tell a
     #: thin answer from a broken one.
     degraded: list[str] = Field(default_factory=list)
+    #: Present when the recall narrowed by condition, kind, source or date:
+    #: which lane applied it where, how deep each looked, and whether a
+    #: post-filtered lane's window was full when the filter removed
+    #: candidates. None when nothing narrowed.
+    narrowing: Optional[Narrowing] = None
+    #: How the lanes were fused: ``rank`` (reciprocal rank, the default),
+    #: ``score`` (each lane's scores scaled to its own range, then added) or
+    #: ``distribution`` (each lane's scores placed by its mean and spread).
+    fusion: Literal["rank", "score", "distribution"] = "rank"
+    #: The lanes that answered, of those asked for ("vector", "text"). A lane
+    #: not asked for did not run; one that failed is in ``degraded`` instead.
+    #: Empty on a result recall did not build.
+    lanes: list[str] = Field(default_factory=list)
+    #: With ``require`` or ``exclude``: what the phrases dropped. None otherwise.
+    phrases: Optional[PhraseTrace] = None
+    #: With ``diversity``: how the order was changed. None otherwise.
+    diversity: Optional[DiversityTrace] = None
     #: With ``graph_boost``: the entities the entity lane searched for.
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0
     space_bytes: int = 0
+    #: What the caller's synonym list added to the text lane's query, when
+    #: a term matched: ``matched``, ``added``, ``offered``, ``capped``. None
+    #: when no list is configured or nothing in the query was on it.
+    expansion: Optional[dict[str, object]] = None
+    #: With stem prefixes on: the prefixes added to the text lane's query
+    #: (``added``), whether the store could take them (``applied``), and
+    #: whether exact forms were on (``exact_forms``: a passage holding the
+    #: query's own word weighs its family at that word's idf). That is the
+    #: setting, not an outcome: it takes effect only where ``applied`` is
+    #: true and a prefix was added.
+    prefixes: Optional[dict[str, object]] = None
+    #: With ``lessons``: what the lessons beside the items were read from, and whether the read was cut.
+    lessons_read: Optional[dict[str, object]] = None
+    #: With ``expand_summaries``: what was expanded, refused and cut
+    #: (``summary_expand.Expanded.record``). None otherwise.
+    expanded: Optional[dict[str, object]] = None
+    #: Passages left out because their memory is past its ``forget_after``,
+    #: swept or not: how many (of the candidates read to fill the answer),
+    #: which episodes, and the time they were judged at. None when nothing was.
+    past_forget_after: Optional[dict[str, object]] = None
+    #: With a feedback weight set: what recorded feedback added in fusion, what the read took,
+    #: and whether its bounds bit (see retrieval/feedback_prior.py). Left out otherwise.
+    feedback_prior: Optional[dict[str, object]] = None
+
+    @model_serializer(mode="wrap")
+    def omit_unasked_lessons_read(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # A recall that asked for neither answers exactly as it did before they existed.
+        value: dict[str, object] = handler(self)
+        if self.lessons_read is None:
+            value.pop("lessons_read", None)
+        if self.expanded is None:
+            value.pop("expanded", None)
+        if self.past_forget_after is None:
+            value.pop("past_forget_after", None)
+        if self.feedback_prior is None:
+            value.pop("feedback_prior", None)
+        return value
 
     @property
     def context_reduction(self) -> float:
@@ -441,10 +741,46 @@ class Added(BaseModel):
     episode_id: int
     deduplicated: bool = False
     chunks: int = 0
+    #: Of those chunks, how many took their vector from the embedding cache
+    #: rather than the embedder: the same text under the same embedder was
+    #: stored before. 0 without a cache.
+    embeddings_reused: int = 0
     outcome: Literal["accepted", "duplicate", "updated", "failed"] = "accepted"
     replaced: Optional[ForgetReceipt] = None
     #: Why nothing was stored, for a failed record. None for the rest.
     reason: Optional[str] = None
+    #: How a stored record was cut -- the way actually used, which is
+    #: ``code`` for a code source unless the record said otherwise -- and,
+    #: when it was cut at its structure, the chunker's own counts: what
+    #: landed on a boundary, what was split by size, whether a unit ran
+    #: over the target and whether the unit bound bit. A length cut measured
+    #: in tokens (``chunk_tokens``) carries its own counts here too, with
+    #: ``measure: "tokens"``: sentences cut inside because one alone was
+    #: over the target, cuts inside a word, chunks that overlap the one
+    #: before and chunks the count measured over. A semantic cut under a
+    #: ``semantic_merge_threshold`` (the record's own, or the engine's)
+    #: carries what its second pass did: ``merge_threshold``, ``groups``
+    #: (chunks the first pass made), ``merges``, and each join that did not
+    #: happen counted once, as ``stopped_by_similarity`` or
+    #: ``stopped_by_size`` (alike enough and too long together, or beside a
+    #: sentence the size bound cut: the bound bit), so the three sum to
+    #: ``groups - 1``. None on a receipt that stored nothing.
+    chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
+    structure: Optional[dict[str, object]] = None
+    #: With heading context on: how many chunks were embedded with a line
+    #: of context in front, how many bytes that added, and how many lines
+    #: were cut to the bound. None when the setting is off.
+    embedding_context: Optional[dict[str, object]] = None
+    #: When the stored episode is to be forgotten, as the store holds it
+    #: (``core.forget_after``); None when it is not scheduled. For a
+    #: duplicate this is the schedule of the episode already there, which
+    #: the write did not change.
+    forget_after: Optional[str] = None
+    #: The memory past its ``forget_after`` that held this record's identity
+    #: and was forgotten, through the ordinary forget, so this write could be
+    #: stored afresh: which episode, when it was due, why, and the forget's
+    #: receipt. None when the write forgot nothing.
+    forgot_overdue: Optional[ScheduledForget] = None
 
 
 class Status(BaseModel):

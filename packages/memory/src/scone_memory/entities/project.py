@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache
 import hashlib
 import json
@@ -23,10 +24,12 @@ from typing import Iterable, Literal, Sequence, cast
 from ..core.models import Fact
 from ..core.timeutil import format_rfc3339, parse_rfc3339
 from ..core.validation import entity_key
-from .classify import CLASSIFIER_VERSION, ClassificationContext, ObjectClassification, classify_object, reference_flag
+from .classify import (CLASSIFIER_VERSION, ClassificationContext, ObjectClassification, classify_object, is_code_name,
+                       reference_flag)
 from .ids import attribute_id, implied_id, key_id, relation_id
 from .meanings import MAX_IMPLIED, MAX_STEPS, MAX_WALKED, RelationMeanings
-from .kinds import KIND_HINTS_VERSION, EntityKind, KindStatus, hint, infer_kind
+from .kinds import KIND_HINTS_VERSION, EntityKind, KindStatus, code_kind, hint, infer_kind
+from .merges import EntityMerges, MergeOutcome, entity_merges, is_decision
 
 PROJECTION_VERSION = "scone.entities/1"
 _MAX_FORMS = 8
@@ -49,6 +52,10 @@ class Support:
     stated: int = 0
     extracted: int = 0
     inferred: int = 0
+    #: Active and not excluded: the facts that would answer a question now.
+    #: Status and exclusion are counted apart above, so this is the only
+    #: count that says whether anything behind the item is usable.
+    held: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +146,23 @@ class Attribute:
     support: Support
 
 
+@dataclass(frozen=True, slots=True)
+class Merge:
+    """A recorded decision that one name is the entity another names."""
+
+    fact_id: int
+    alias_key: str
+    alias_id: str
+    #: The key the decision named, and the entity that resolves to once
+    #: chains of merges are followed.
+    named_key: str
+    into_key: str
+    into_id: str
+    #: "applied", or why not: "cycle" when it would have looped back to its
+    #: alias, "same_name" when both names already share a key.
+    outcome: MergeOutcome
+
+
 @dataclass(frozen=True)
 class EntityProjection:
     space: str
@@ -167,6 +191,9 @@ class EntityProjection:
     #: answer built from a projection.
     vocabulary_source: str = "none"
     vocabulary_why: str = ""
+    #: The merge decisions in force for this view, applied or refused, in
+    #: the order they were recorded. Their facts are never relations.
+    merges: tuple[Merge, ...] = ()
 
     def components(self) -> list[frozenset[str]]:
         """Groups of entities connected by relations in either direction."""
@@ -200,28 +227,55 @@ def _grounding(fact: Fact) -> Grounding:
     return "quoted" if fact.quote else "unquoted"
 
 
+Origin = Literal["stated", "extracted", "inferred", "mixed"]
+Standing = Literal["active", "proposed", "excluded", "closed"]
+
+
+def backing_of(support: Support) -> tuple[Origin, Standing, Grounding]:
+    """What backs an item, as three words a drawing can show.
+
+    Origin is the one kind of fact behind it, or ``mixed``. Standing is the
+    best of its facts, in the order that matters to a reader: anything held
+    makes it ``active``; otherwise anything proposed makes it ``proposed``;
+    otherwise anything excluded makes it ``excluded``; otherwise it is
+    ``closed``. Grounding is its best evidence: a quote, then a source with
+    no quote, then no source. Best, not worst, because an edge is as
+    trustworthy as the strongest fact behind it -- and the counts stay on
+    the item for a reader who wants the rest."""
+    kinds = [name for name in ("stated", "extracted", "inferred") if getattr(support, name)]
+    origin: Origin = cast(Origin, kinds[0]) if len(kinds) == 1 else "mixed"
+    standing: Standing = ("active" if support.held else "proposed" if support.proposed
+                          else "excluded" if support.excluded else "closed")
+    grounding: Grounding = "quoted" if support.quoted else "unquoted" if support.unquoted else "unsourced"
+    return origin, standing, grounding
+
+
 def _support(facts: Iterable[Fact]) -> Support:
     counts: Counter[str] = Counter()
     for fact in facts:
         counts["facts"] += 1
         counts[fact.status] += 1
         counts["excluded"] += fact.excluded
+        counts["held"] += fact.status == "active" and not fact.excluded
         counts[_grounding(fact)] += 1
         counts[fact.origin] += 1
     return Support(**{name: counts[name] for name in Support.__slots__})
 
 
-def classification_context(claims: Iterable[tuple[str, str]]) -> ClassificationContext:
+def classification_context(claims: Iterable[tuple[str, str]],
+                           merges: EntityMerges | None = None) -> ClassificationContext:
     """What the classifier needs from a set of (subject, object) claims:
-    every subject's key anchors, and an object two or more subjects share
-    counts as shared. Every view classifies through this, so the same
-    claims come out the same everywhere."""
+    every subject's key anchors, an object two or more subjects share
+    counts as shared, and every name a merge decision applies to is an
+    entity. Every view classifies through this, so the same claims come out
+    the same everywhere."""
     anchors: set[str] = set()
     sharers: dict[str, set[str]] = defaultdict(set)
     for subject, obj in claims:
         anchors.add(entity_key(subject))
         sharers[entity_key(obj)].add(entity_key(subject))
     return ClassificationContext(anchors=frozenset(anchors),
+                                 identity_keys=frozenset() if merges is None else merges.keys(),
                                  shared_objects=frozenset(key for key, subjects in sharers.items() if len(subjects) > 1))
 
 
@@ -234,8 +288,38 @@ def quoted_form(key: str, quote: str | None) -> str | None:
     return found.group(0) if found else None
 
 
-def _label(forms: Counter[str], key: str) -> str:
-    return min(forms, key=lambda form: (-forms[form], not any(c.isupper() for c in form), form)) if forms else key
+def _label(forms: Counter[str], key: str, merged: bool = False) -> str:
+    """The spelling an entity is shown by: the most common one, casing
+    recovered where a quote kept it. A merged entity keeps the spelling of
+    the name it was merged into when that name was ever written; its
+    aliases only fill in otherwise. A code name (a path, or a path and a
+    declaration) is shown as the code declares it: the case of an
+    identifier is part of the name, and a declaration is called by its
+    lowercased key once per call it receives, so counting would rename
+    `DirectorySync._finish` to `directorysync._finish` on a busy graph."""
+    own = (Counter({form: count for form, count in forms.items() if entity_key(form) == key}) if merged
+           else forms) or forms
+    if not own:
+        return key
+    if is_code_name(key):
+        cased = [form for form in own if any(c.isupper() for c in form)]
+        if cased:
+            return min(cased, key=lambda form: (-own[form], form))
+    return min(own, key=lambda form: (-own[form], not any(c.isupper() for c in form), form))
+
+
+def _undigested_held(record: object) -> object:
+    """The digest's view of an item: its support without ``held``.
+
+    ``held`` counts facts that are active and not excluded, and every
+    fact's status and exclusion are already in the digest through its
+    role. So it adds nothing to what the digest identifies, and leaving it
+    out keeps every digest computed before it existed -- ids, cursors and
+    caches rest on those."""
+    support = record.get("support") if isinstance(record, dict) else None
+    if isinstance(record, dict) and isinstance(support, dict) and "held" in support:
+        record = {**record, "support": {key: value for key, value in support.items() if key != "held"}}
+    return record
 
 
 def _canonical(value: object) -> bytes:
@@ -246,13 +330,18 @@ def _canonical(value: object) -> bytes:
 def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
                      meanings: RelationMeanings | None = None,
                      vocabulary_source: str = "none",
-                     vocabulary_why: str = "") -> EntityProjection:
+                     vocabulary_why: str = "",
+                     merges_at: datetime | None = None) -> EntityProjection:
+    """``merges_at`` is the moment merge decisions are read at; None reads
+    those in force now."""
     rows = sorted(facts, key=lambda fact: fact.fact_id)
     for fact in rows:
         if fact.space != space:
             raise ValueError(f"fact {fact.fact_id} belongs to space {fact.space!r}, not {space!r}")
-    held = [fact for fact in rows if fact.status != "declined"]
-    context = classification_context((fact.subject, fact.object) for fact in held)
+    merges = entity_merges(rows, merges_at)
+    canonical = merges.canonical
+    held = [fact for fact in rows if fact.status != "declined" and not is_decision(fact)]
+    context = classification_context(((fact.subject, fact.object) for fact in held), merges)
 
     forms: dict[str, Counter[str]] = defaultdict(Counter)
     hints: dict[str, list[tuple[EntityKind, int]]] = defaultdict(list)
@@ -262,20 +351,20 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
     attribute_facts: dict[tuple[str, str, str], list[Fact]] = defaultdict(list)
     literal_kinds: dict[tuple[str, str, str], str | None] = {}
     for fact in held:
-        subject_key = entity_key(fact.subject)
+        subject_key = canonical(entity_key(fact.subject))
         subject_id = key_id(space, subject_key)
-        forms[subject_key][quoted_form(subject_key, fact.quote) or fact.subject.strip()] += 1
+        forms[subject_key][quoted_form(entity_key(fact.subject), fact.quote) or fact.subject.strip()] += 1
         roles_count[subject_key]["subject"] += 1
-        if (kind := hint(fact.predicate, "subject")) is not None:
+        if (kind := code_kind(fact.subject, fact.predicate, "subject") or hint(fact.predicate, "subject")) is not None:
             hints[subject_key].append((kind, fact.fact_id))
         classification = classify_object(fact.object, fact.predicate, context)
         object_id = None
         if classification.object_class == "entity":
-            object_key = entity_key(fact.object)
+            object_key = canonical(entity_key(fact.object))
             object_id = key_id(space, object_key)
             forms[object_key][fact.object.strip()] += 1
             roles_count[object_key]["object"] += 1
-            if (kind := hint(fact.predicate, "object")) is not None:
+            if (kind := code_kind(fact.object, fact.predicate, "object") or hint(fact.predicate, "object")) is not None:
                 hints[object_key].append((kind, fact.fact_id))
             relation_facts[(subject_id, fact.predicate, object_id)].append(fact)
         else:
@@ -288,12 +377,13 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
             None if fact.valid_until is None else _moment(fact.valid_until), fact.source_episode_id))
 
     entities = []
+    targets = frozenset(merges.into.values())
     for key in sorted(forms):
         kind, status, basis = infer_kind(hints[key])
         flag = reference_flag(key)
         ordered = sorted(forms[key].items(), key=lambda item: (-item[1], item[0]))[:_MAX_FORMS]
         entities.append(Entity(
-            key_id(space, key), key, _label(forms[key], key), tuple(SurfaceForm(text, count) for text, count in ordered),
+            key_id(space, key), key, _label(forms[key], key, key in targets), tuple(SurfaceForm(text, count) for text, count in ordered),
             kind, status, basis, () if flag is None else (flag,),
             roles_count[key]["subject"], roles_count[key]["object"]))
 
@@ -319,16 +409,20 @@ def project_entities(space: str, facts: Iterable[Fact], *, revision: int,
     relations.sort(key=lambda relation: relation.relation_id)
     attributes.sort(key=lambda attribute: attribute.attribute_id)
     implied, capped = _implied(space, relations, spans, meanings)
+    merged = tuple(Merge(item.fact_id, item.alias_key, key_id(space, item.alias_key), item.named_key, item.into_key,
+                         key_id(space, item.into_key), item.outcome) for item in merges.decisions)
     digest = hashlib.sha256(_canonical({
         "version": [PROJECTION_VERSION, CLASSIFIER_VERSION, KIND_HINTS_VERSION], "space": space,
-        "entities": [_plain(item) for item in entities], "relations": [_plain(item) for item in relations],
-        "attributes": [_plain(item) for item in attributes], "roles": [_plain(item) for item in roles],
+        "entities": [_plain(item) for item in entities], "relations": [_undigested_held(_plain(item)) for item in relations],
+        "attributes": [_undigested_held(_plain(item)) for item in attributes], "roles": [_plain(item) for item in roles],
         **({"meanings": meanings.record(), "implied": [_plain(item) for item in implied]}
            if meanings else {}),
+        **({"merges": [_plain(item) for item in merged]} if merged else {}),
     })).hexdigest()
     return EntityProjection(space, revision, tuple(entities), tuple(relations), tuple(attributes), tuple(roles),
                             digest, implied=tuple(implied), implied_capped=capped, meanings=meanings,
-                            vocabulary_source=vocabulary_source, vocabulary_why=vocabulary_why)
+                            vocabulary_source=vocabulary_source, vocabulary_why=vocabulary_why,
+                            merges=merged)
 
 
 def _implied(space: str, relations: list[Relation], spans: dict[str, tuple[tuple[str, str | None], ...]],

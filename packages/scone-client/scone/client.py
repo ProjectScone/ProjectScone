@@ -10,13 +10,17 @@ from __future__ import annotations
 import os
 import json as _json
 from types import TracebackType
-from typing import Iterator, Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Iterator, Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .conversations import ConversationClient
 
 import requests
 
 from ._response import DEFAULT_MAX_RESPONSE_BYTES, read_response
 from ._wire import Capabilities
 from .agents import AgentClient
+from .chat_imports import ChatImports
 from .document_jobs import DocumentJobs
 from .directory_sync import DirectorySyncRuns
 from .video_documents import VideoDocuments
@@ -112,6 +116,11 @@ class Scone:
         """Create a typed agent client, checking space without changing authority."""
         return AgentClient(self, expected_space=expected_space)
 
+    def conversations(self, *, expected_space: str) -> "ConversationClient":
+        """Sessions and turns of the conversation service, bound to one space."""
+        from .conversations import ConversationClient
+        return ConversationClient(self, expected_space=expected_space)
+
     def video_documents(self, *, expected_space: str) -> VideoDocuments:
         """Read verified video evidence and explicitly interpret retained frames."""
         return VideoDocuments(self, expected_space=expected_space)
@@ -119,6 +128,10 @@ class Scone:
     def document_jobs(self, *, expected_space: str) -> DocumentJobs:
         """Create a typed client for explicit durable document operations."""
         return DocumentJobs(self, expected_space=expected_space)
+
+    def chat_imports(self, *, expected_space: str) -> ChatImports:
+        """Create a typed client that imports chat exports as conversation memories."""
+        return ChatImports(self, expected_space=expected_space)
 
     def directory_sync(self, *, expected_space: str) -> DirectorySyncRuns:
         """Create a typed client for configured local collection scans."""

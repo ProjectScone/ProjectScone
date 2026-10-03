@@ -5,12 +5,13 @@ from dataclasses import dataclass
 import hashlib
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, ValidationError, model_serializer, model_validator
 
 from ..core.errors import InvalidInput
 from ..core.models import Added, Attachment
 from ..core.validation import check_space
-from .pdf import ParsedPdf, PdfLimits, PdfPage, PdfParser, PypdfParser, validate_pdf
+from .pdf import ParsedPdf, PdfEncryption, PdfLimits, PdfPage, PdfParser, PypdfParser, validate_pdf
+from .text_layer import unreadable
 
 if TYPE_CHECKING:
     from ..core.ports import EmbeddingCheckpoint
@@ -26,6 +27,15 @@ class PdfManifest(BaseModel):
     text_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     parser: str = Field(min_length=1, max_length=128)
     pages: tuple[PdfPage, ...] = Field(min_length=1, max_length=1000)
+    #: How an encrypted file was opened and what its owner restricted; absent for a file that was not encrypted.
+    encryption: PdfEncryption | None = None
+
+    @model_serializer(mode='wrap')
+    def omit_absent_encryption(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.encryption is None:
+            value.pop('encryption', None)
+        return value
 
     @model_validator(mode='after')
     def consistent_version(self) -> PdfManifest:
@@ -42,6 +52,8 @@ class PdfIngested:
     original: Attachment
     manifest: Attachment
     empty_pages: tuple[int, ...]
+    #: Pages whose extracted text no reader can use; kept, and the coverage says partial.
+    unreadable_pages: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -51,14 +63,22 @@ class PdfProvenance:
     parser: str
     pages: tuple[PdfPage, ...]
     empty_pages: tuple[int, ...]
+    #: How an encrypted file was opened and what its owner restricted; None for a file that was not encrypted.
+    encryption: PdfEncryption | None = None
 
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _coverage(pages: tuple[PdfPage, ...]) -> str:
-    if any(page.empty for page in pages):
+def unreadable_pages(parsed: ParsedPdf) -> tuple[int, ...]:
+    """The pages whose extracted text is mostly characters no reader can use."""
+    text = parsed.text.encode()
+    return tuple(page.number for page in parsed.pages if unreadable(text[page.start:page.end].decode('utf-8')))
+
+
+def _coverage(pages: tuple[PdfPage, ...], unreadable_pages: tuple[int, ...] = ()) -> str:
+    if unreadable_pages or any(page.empty for page in pages):
         return 'partial'
     methods = {page.extraction for page in pages}
     return 'mixed' if len(methods) > 1 else next(iter(methods))
@@ -66,7 +86,8 @@ def _coverage(pages: tuple[PdfPage, ...]) -> str:
 
 async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename: str | None = None,
                      limits: PdfLimits = PdfLimits(), parser: PdfParser | None = None,
-                     embedding_checkpoint: EmbeddingCheckpoint | None = None) -> PdfIngested:
+                     embedding_checkpoint: EmbeddingCheckpoint | None = None,
+                     chunking: str | None = None) -> PdfIngested:
     """Parse first, then store original, manifest and searchable derived episode.
 
     Uses existing attachment/write primitives; this is not an atomic ingest job.
@@ -82,9 +103,9 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
     validate_pdf(parsed, limits)
     has_ocr = any(page.extraction == 'ocr' for page in parsed.pages)
     has_order = any(page.reading_order is not None for page in parsed.pages)
-    manifest = PdfManifest(schema_version=3 if has_order else 2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()),
+    manifest = PdfManifest(schema_version=3 if has_order else 2 if has_ocr else 1, original_sha256=_sha(data), text_sha256=_sha(parsed.text.encode()), encryption=parsed.encryption,
         parser=parsed.parser, pages=parsed.pages)
-    encoded = manifest.model_dump_json(exclude=None if has_ocr else {
+    encoded = manifest.model_dump_json(exclude=None if has_ocr or has_order else {
         'pages': {'__all__': {'extraction', 'region_geometry', 'regions', 'ocr_engine'}}}).encode()
     if len(encoded) > memory.max_attachment_bytes:
         raise InvalidInput('PDF manifest exceeds its attachment byte limit')
@@ -98,13 +119,15 @@ async def ingest_pdf(memory: MemoryEngine, space: str, data: bytes, *, filename:
     if retained.media_type != 'application/json':
         raise InvalidInput('PDF manifest is already retained with an incompatible media type')
     empty = tuple(page.number for page in parsed.pages if page.empty)
+    garbled = unreadable_pages(parsed)
     added = await memory.remember(space, parsed.text, kind='file', source=f'attachment:{original.attachment_id}',
         dedup_key=identity, attachment_ids=(original.attachment_id, retained.attachment_id),
         embedding_checkpoint=embedding_checkpoint,
         metadata={'document_format': 'pdf', 'evidence_origin': 'extracted_text',
             'pdf_original': original.attachment_id, 'pdf_manifest': retained.attachment_id,
-            'pdf_coverage': _coverage(parsed.pages)})
-    return PdfIngested(added, original, retained, empty)
+            'pdf_coverage': _coverage(parsed.pages, garbled),
+            **({'pdf_unreadable_pages': ','.join(map(str, garbled))} if garbled else {})}, chunking=chunking)
+    return PdfIngested(added, original, retained, empty, garbled)
 
 
 async def pdf_provenance(memory: MemoryEngine, space: str, episode_id: int, *,
@@ -153,4 +176,4 @@ async def pdf_provenance(memory: MemoryEngine, space: str, episode_id: int, *,
         raise InvalidInput('PDF span splits a UTF-8 character') from error
     selected = tuple(page for page in manifest.pages if page.start < stop and page.end > start and not page.empty)
     return PdfProvenance(original, retained, manifest.parser, selected,
-        tuple(page.number for page in manifest.pages if page.empty))
+        tuple(page.number for page in manifest.pages if page.empty), manifest.encryption)

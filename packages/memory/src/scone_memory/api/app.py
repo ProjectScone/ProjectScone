@@ -18,28 +18,33 @@ import json
 
 import re
 
-from typing import TYPE_CHECKING, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, cast
 from collections.abc import Callable
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, StrictInt, Field
+from pydantic import BaseModel, ConfigDict, StrictFloat, StrictInt, Field
 
 from contextlib import asynccontextmanager
 
 from ..observability import metrics
-from ..core.validation import MAX_QUERY
+from ..core.validation import MAX_LIMIT, MAX_QUERY
 from ..retrieval.temporal import (DEFAULT_LIMIT as TEMPORAL_LIMIT, MAX_BYTES as TEMPORAL_BYTES,
                                   MAX_BYTES_LIMIT as TEMPORAL_BYTES_LIMIT, MAX_LIMIT as TEMPORAL_MAX_LIMIT,
                                   MIN_BYTES as TEMPORAL_MIN_BYTES, temporal_answer)
 from ..memory.engine import Record, MemoryEngine
+from ..memory.vector_identity import VectorWriterChanged
+from ..core.bearer_keys import Unauthorized, key_holder
 from ..core.errors import Gone, Conflict, InvalidInput, NotFound
 from ..retrieval.filters import read_conditions
+from ..retrieval.recall import LANES
 from ..retrieval.receipts import staged
+from ..retrieval.summary_expand import MAX_CHUNKS as SUMMARY_EXPANSION_MAX_CHUNKS
+from ..retrieval import summary_traverse
 from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
-from . import file_documents, pdf_documents
+from . import chat_imports, file_documents, pdf_documents
 from .responses import LedgerJSONResponse
 
 if TYPE_CHECKING:
@@ -48,6 +53,7 @@ if TYPE_CHECKING:
     from ..agents.catalog import AgentCatalog
     from ..agents.plan_store import AgentPlanStore
     from ..agents.run_service import AgentRunService
+    from ..agents.tool_recipe_store import ToolRecipeStore
 
 
 #: Types a browser may render in place. Everything else is handed back as
@@ -56,6 +62,13 @@ if TYPE_CHECKING:
 INLINE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+class AttributeBody(BaseModel):
+    """An answer, and the stored chunks it was composed from."""
+
+    answer: str = Field(min_length=1)
+    chunk_ids: list[int] = Field(min_length=1)
 
 
 class RetryBody(BaseModel):
@@ -110,12 +123,24 @@ class EpisodeBody(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     source: Optional[str] = None
     created_at: Optional[str] = None
+    #: How this record is cut; unset keeps the server's rule.
+    chunking: Optional[Literal["length", "code", "structure", "semantic", "unit"]] = None
+    #: The genre whose boundaries structure chunking cuts at; an unknown
+    #: name is refused by the engine, which owns the list.
+    chunking_profile: Optional[str] = Field(default=None, max_length=64)
+    #: The similarity at which this record's semantic chunks are joined
+    #: again; implies semantic chunking. A number, never a bool or text,
+    #: and the engine refuses one that is not a similarity.
+    semantic_merge_threshold: Optional[StrictFloat] = None
     #: Identity across writes; with replace, changed content under a known
     #: key is an update instead of a reported duplicate.
     dedup_key: Optional[str] = None
     replace: bool = False
     kind: str = "note"
     metadata: dict[str, str] = Field(default_factory=dict)
+    #: When this memory is to be forgotten: an RFC 3339 time, a date, or a
+    #: duration from the server's clock such as 30d. Refused when past.
+    forget_after: Optional[str] = Field(default=None, max_length=64)
 
 
 class SourceQuery(BaseModel):
@@ -147,14 +172,16 @@ class FactBody(BaseModel):
 #: decisions of review belong to review and full; every other write belongs
 #: to write and full. A key with no role recorded is full.
 _REVIEW_PATHS = ("/approve", "/decline", "/exclude", "/include", "/reconsider", "/reopen",
-                 "/v1/facts/decide")
+                 "/v1/facts/decide", "/v1/entities/merges", "/v1/entities/merges/close")
 
 
 def _is_decision(path: str) -> bool:
     parts = path.rstrip('/').split('/')
     tool_decision = (len(parts) == 7 and parts[1:3] == ['v1', 'agent-runs']
                      and parts[4] == 'approvals' and parts[6] == 'decision')
-    return tool_decision or path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
+    recipe_decision = (len(parts) == 5 and parts[1:3] == ['v1', 'tool-recipes']
+                       and parts[4] in ('decision', 'revoke'))
+    return recipe_decision or tool_decision or path.rstrip("/").endswith(_REVIEW_PATHS) or path.startswith("/v1/facts/decide")
 
 
 def _is_space_delete(method: str, path: str) -> bool:
@@ -203,6 +230,37 @@ class MergeBody(BaseModel):
     #: Repeat the space being merged. A whole space does not move by accident.
     confirm: Optional[str] = None
     preview: bool = False
+
+
+class ForgetMatchingBody(BaseModel):
+    """Unknown fields are refused: a filter field that is silently dropped
+    would widen what gets forgotten."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_prefix: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    conditions: Optional[dict[str, object]] = None
+    kind: Optional[str] = None
+    limit: int = 100
+    apply: bool = False
+    selection: Optional[str] = None
+    with_claims: Literal["keep", "exclude"] = "keep"
+
+
+class ForgetDueBody(BaseModel):
+    """Unknown fields are refused: a sweep told something it silently
+    ignores is a sweep that did not do what was asked."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Judge what is due at this time; earlier than the server's clock, never later.
+    now: Optional[str] = Field(default=None, max_length=64)
+    limit: int = 100
+    dry_run: bool = False
+    with_claims: Literal["keep", "exclude"] = "keep"
+    #: Walk on from a previous pass's ``resume_before``.
+    before: Optional[int] = None
 
 
 class BatchBody(BaseModel):
@@ -258,6 +316,7 @@ class FeedbackBody(BaseModel):
 from ..ingestion.document_video import DocumentVideo
 from ..ingestion.document_media import DocumentMedia
 from ..ingestion.document_ocr import DocumentOcr
+from ..ingestion.web import WebLimits
 from ..ingestion.import_service import DocumentImportService
 from ..ingestion.directory_service import DirectorySyncService
 from ._lifecycle import finish_host_cleanup
@@ -275,6 +334,7 @@ def create_app(
     agent_catalog: AgentCatalog | None = None,
     agent_plan_store: AgentPlanStore | None = None,
     agent_run_service: AgentRunService | None = None,
+    tool_recipe_store: ToolRecipeStore | None = None,
     document_ocr: DocumentOcr | None = None,
     document_import_service: DocumentImportService | None = None,
     directory_sync_service: DirectorySyncService | None = None,
@@ -283,6 +343,7 @@ def create_app(
     document_video: DocumentVideo | None = None,
     vision_factory: Callable[[], VisionModel | None] | None = None,
     synthesis_factory: Callable[[], ChatModel | None] | None = None,
+    url_import: WebLimits | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -368,17 +429,10 @@ def create_app(
     app.state.worker = worker
 
     def current_space_for(request: Request) -> str:
-        header = request.headers.get("authorization", "")
-        scheme, _, token = header.partition(" ")
-        if scheme.lower() != "bearer" or not token.strip():
-            raise Unauthorized("missing bearer key")
-        space = app.state.keys.get(token.strip())
-        if space is None:
-            raise Unauthorized("unknown key")
-        role = app.state.roles.get(token.strip(), "full")
-        if not permitted(role, request.method, request.url.path):
-            raise Forbidden(f"key role {role} cannot {_refused_verb(request.method, request.url.path)}")
-        return space
+        holder = key_holder(request.headers.get("authorization", ""), app.state.keys, app.state.roles)
+        if not permitted(holder.role, request.method, request.url.path):
+            raise Forbidden(f"key role {holder.role} cannot {_refused_verb(request.method, request.url.path)}")
+        return holder.space
 
     def assert_current_space(request: Request, space: str) -> None:
         if current_space_for(request) != space:
@@ -430,6 +484,11 @@ def create_app(
     async def _moved(_: Request, e: Conflict) -> JSONResponse:
         return JSONResponse({"error": str(e), "revision": e.revision}, status_code=409)
 
+    @app.exception_handler(VectorWriterChanged)
+    async def _writer_changed(_: Request, e: VectorWriterChanged) -> JSONResponse:
+        # Another writer moved the vectors while this request settled them: running it again is the answer.
+        return JSONResponse({"error": str(e), "code": "writer_changed"}, status_code=409)
+
     @app.exception_handler(Gone)
     async def _gone(_: Request, e: Gone) -> JSONResponse:
         return JSONResponse({"error": str(e), "forgotten_at": e.forgotten_at}, status_code=410)
@@ -457,27 +516,36 @@ def create_app(
             "recall.structural_context": True,
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
-            "recall.window": True, "recall.code_context": True,
+            "recall.window": True, "recall.sentence_window": True, "recall.compress": True, "recall.merge": True, "recall.code_context": True,
+            "recall.highlights": True, "recall.lanes": True, "recall.phrases": True, "recall.diversity": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
             "facts.reconsider": True, "facts.reopen": True,
             "events.read": True, "metrics.read": True, "scopes.read": True,
             "status.read": True, "episodes.attachments": True, "images.context": True, "images.search": True,
+            # Served always; an engine without the image lane, or a store that cannot list episodes, refuses.
+            "images.reembed": engine.image_vectors is not None and callable(getattr(engine.documents, "page_episodes", None)),
             "documents.pdf": pdf_documents.pdf_available(), "documents.pdf.provenance": True,
             "documents.files": True, "documents.provenance": True, "documents.ocr.tables": True,
+            "chats.imports": True,
             "integrity.read": True,
             "profile.read": True,
             "episodes.list": callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.read": True,
             "episodes.forget": supports_retirement(engine.documents),
+            # A write's schedule, recall withholding what is due, and the sweep route that forgets it.
+            "episodes.forget_after": supports_retirement(engine.documents)
+                                     and callable(getattr(engine.documents, "page_episodes", None)),
             "episodes.by_key": True,
             "jobs.read": all(callable(getattr(engine.documents, name, None)) for name in MemoryEngine.READS_JOBS),
             "filesystem.read": True, "filesystem.write": tree_policy.writable,
-            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.routed": True, "recall.parts": True,
+            "entities.read": True, "graph.knowledge": True, "graph.report": True, "graph.path": True, "graph.export": True, "graph.context": True, "graph.timeline": True, "graph.sources": True, "graph.schema": True, "graph.knowledge_walk": True, "graph.context_similar": True, "graph.knowledge_usage": True, "graph.export_usage": True, "graph.match": True, "graph.overview": True, "graph.changes": True, "entities.duplicates": True, "answers.temporal": True, "answers.attribution": True, "answers.routed": True, "recall.parts": True,
             "recall.withhold": True,
-            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "recall.graph_boost": True, "graph.knowledge_paging": True,
+            "consolidation.retry": worker is not None and getattr(worker, "distiller", None) is not None, "graph.health": True, "graph.cycles": True, "graph.stats": True, "graph.hubs": True, "recall.graph_boost": True, "recall.lessons": True, "recall.expand_summaries": True, "recall.tree": True, "graph.knowledge_paging": True,
             "graph.knowledge_seeds": True,
+            # The route is served; without a configured model it refuses.
+            "chat.openai_compatible": True,
         }
         if agent_catalog is not None and agent_plan_store is not None:
             features["agents.catalog"] = True
@@ -488,6 +556,8 @@ def create_app(
             features["agents.output_requirements"] = True
             features["agents.output_schema"] = output_schema_available()
             features["agents.handoffs.output_requirements"] = features["agents.output_schema"]
+        if tool_recipe_store is not None:
+            features["agents.tool_recipes.review"] = True
         if agent_run_service is not None:
             features["agents.runs"] = True
             features["agents.history"] = True
@@ -532,11 +602,21 @@ def create_app(
             return agent_run_service.approval_actor(token)
         mount_agent_approval_routes(app, agent_run_service, space_for, assert_current_space, approval_actor)
 
+    if tool_recipe_store is not None:
+        from .tool_recipes import mount_tool_recipe_routes
+        def recipe_actor(request: Request) -> str:
+            current_space_for(request)
+            token = request.headers.get('authorization', '').partition(' ')[2].strip()
+            return tool_recipe_store.review_actor(token)
+        mount_tool_recipe_routes(app, tool_recipe_store, space_for, assert_current_space, recipe_actor)
+
     from .image_context import mount_image_context_routes
     mount_image_context_routes(app, engine, space_for, ingest_slot)
     pdf_documents.mount_pdf_document_routes(app, engine, space_for, ingest_slot)
     file_documents.mount_file_document_routes(app, engine, space_for, ingest_slot, document_ocr,
-                                              assert_current_space=assert_current_space, document_media=document_media, document_video=document_video)
+                                              assert_current_space=assert_current_space, document_media=document_media, document_video=document_video,
+                                              url_import=url_import)
+    chat_imports.mount_chat_import_routes(app, engine, space_for, ingest_slot, assert_current_space=assert_current_space)
     if document_import_service is not None:
         from .document_jobs import mount_document_job_routes
         mount_document_job_routes(app, document_import_service, space_for, assert_current_space)
@@ -544,7 +624,10 @@ def create_app(
         from .directory_sync import mount_directory_sync_routes
         mount_directory_sync_routes(app, directory_sync_service, space_for, assert_current_space)
     from .entity_routes import mount_entity_routes
-    mount_entity_routes(app, engine, space_for)
+    mount_entity_routes(app, engine, space_for, actor_for, synthesis_factory=synthesis_factory)
+    from .openai_proxy import mount_openai_proxy_routes
+    mount_openai_proxy_routes(app, engine, space_for, synthesis_factory,
+                              assert_current_space=assert_current_space)
     from .filesystem_routes import mount_filesystem_routes
     mount_filesystem_routes(app, engine, space_for, tree_policy, Forbidden)
 
@@ -607,6 +690,10 @@ def create_app(
             attachment_ids=body.attachment_ids,
             dedup_key=body.dedup_key,
             replace=body.replace,
+            chunking=body.chunking,
+            chunking_profile=body.chunking_profile,
+            semantic_merge_threshold=body.semantic_merge_threshold,
+            forget_after=body.forget_after,
         )
         return added.model_dump()
 
@@ -631,7 +718,9 @@ def create_app(
                                    for outcome in ("accepted", "duplicate", "updated")},
                         "job": job_json(replayed), "replayed": True}
         records = [
-            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key)
+            Record(r.content, r.kind, r.source, tuple(r.tags), r.created_at, dict(r.metadata), dedup_key=r.dedup_key,
+                   chunking=r.chunking, chunking_profile=r.chunking_profile,
+                   semantic_merge_threshold=r.semantic_merge_threshold, forget_after=r.forget_after)
             for r in body.records
         ]
         async with ingest_slot(len(records)):
@@ -716,7 +805,9 @@ def create_app(
                               and not any(ord(c) < 32 or ord(c) == 127 for c in e.metadata['document_filename'])
                               else {}),
                            **status_of(e.episode_id)}
-                          for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before}
+                          for e in page.episodes], "has_more": page.has_more, "next_before": page.next_before,
+                # Sources past their forget_after, left out; the key appears only when some were.
+                **({"past_forget_after": page.past_forget_after} if page.past_forget_after else {})}
 
     @app.get("/v1/episodes/by-key")
     async def get_episode_by_key(dedup_key: str = Query(min_length=1, max_length=256),
@@ -727,6 +818,48 @@ def create_app(
     async def get_episode(episode_id: int, space: str = Depends(space_for)) -> dict:
         return episode_json(await engine.episode(space, episode_id))
 
+    @app.post("/v1/episodes/{episode_id}/summaries")
+    async def post_episode_summaries(episode_id: int, fan_in: int = Query(default=6, ge=2, le=24),
+                                     max_levels: int = Query(default=5, ge=1, le=5),
+                                     space: str = Depends(space_for)) -> JSONResponse:
+        """Write and store the episode's summary tree with the synthesis
+        model: notes the framework wrote, each saying what it summarizes,
+        every sentence resting on a quote from the level below."""
+        from ..retrieval.summary_tree import build_summary_tree
+
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            return JSONResponse({"error": "no synthesis model configured (SCONE_CHAT_URL and SCONE_CHAT_MODEL)"}, status_code=501)
+        tree = await build_summary_tree(engine, model, space, episode_id, fan_in=fan_in, max_levels=max_levels,
+                                        store=True, model_name=getattr(model, "model", type(model).__name__))
+        return JSONResponse(tree.record())
+
+    @app.post("/v1/chunk-questions")
+    async def post_chunk_questions(per_chunk: int = Query(default=3, ge=1, le=5),
+                                   max_chunks: int = Query(default=2000, ge=1, le=2000),
+                                   after_chunk: Optional[int] = Query(default=None, ge=0),
+                                   episode_id: Optional[list[int]] = Query(default=None),
+                                   space: str = Depends(space_for)) -> JSONResponse:
+        """Write the question lane with the synthesis model: questions each
+        chunk answers, kept only with a sentence quoted from the chunk, indexed
+        apart from its context. Refused while SCONE_QUESTION_LANE is off; a store
+        without the question index answers with a report that says so."""
+        model = synthesis_factory() if synthesis_factory is not None else None
+        if model is None:
+            return JSONResponse({"error": "no synthesis model configured to write questions with (SCONE_CHAT_URL and "
+                                          "SCONE_CHAT_MODEL)"}, status_code=501)
+        report = await engine.build_chunk_questions(space, model, per_chunk=per_chunk, max_chunks=max_chunks,
+                                                    after_chunk=after_chunk, episode_ids=episode_id,
+                                                    model_name=getattr(model, "model", type(model).__name__))
+        return JSONResponse(report.record())
+
+    @app.get("/v1/episodes/{episode_id}/summaries")
+    async def get_episode_summaries(episode_id: int, space: str = Depends(space_for)) -> dict:
+        """The summaries stored for the episode, top level first, each saying whether the document has changed since."""
+        from ..retrieval.summary_tree import stored_summaries
+
+        return {"episode_id": episode_id, "summaries": [s.record() for s in await stored_summaries(engine, space, episode_id)]}
+
     @app.get("/v1/episodes/{episode_id}/impact")
     async def episode_impact(episode_id: int, space: str = Depends(space_for)) -> dict:
         """What forgetting would take and leave; removes nothing."""
@@ -736,6 +869,26 @@ def create_app(
     async def episode_forget_status(episode_id: int, space: str = Depends(space_for)) -> dict:
         """Read removal progress, including interrupted cleanup, without writes."""
         return (await engine.forget_status(space, episode_id)).model_dump()
+
+    @app.post("/v1/episodes/forget-matching")
+    async def forget_matching_route(body: ForgetMatchingBody, space: str = Depends(space_for)) -> dict:
+        """Forget what a filter selects. Without ``apply`` this is a preview and
+        removes nothing; with it, the preview's ``selection`` digest is required
+        and a selection that changed since is refused."""
+        report = await engine.forget_matching(space, source_prefix=body.source_prefix, tags=body.tags,
+                                              conditions=body.conditions, kind=body.kind, limit=body.limit,
+                                              apply=body.apply, selection=body.selection, with_claims=body.with_claims)
+        return report.model_dump()
+
+    @app.post("/v1/episodes/forget-due")
+    async def forget_due_route(body: ForgetDueBody, space: str = Depends(space_for)) -> dict:
+        """Forget what each memory's own ``forget_after`` says is due, through
+        the ordinary forget: most overdue first, bounded per call. The report
+        names each episode, its scheduled time and its receipt, and says when
+        the limit or the walk bit (``limited``, ``scan_complete``)."""
+        report = await engine.forget_due(space, body.now, limit=body.limit, dry_run=body.dry_run,
+                                         with_claims=body.with_claims, before=body.before)
+        return report.model_dump()
 
     @app.delete("/v1/episodes/{episode_id}")
     async def delete_episode(episode_id: int, with_claims: Literal["keep", "exclude"] = "keep",
@@ -785,6 +938,8 @@ def create_app(
         route: Optional[str] = Query(default=None,
                                      description="Insist on temporal, graph, recall or synthesize instead of the rule."),
         whole: bool = Query(False, description="Show each passage whole instead of its first 200 characters."),
+        synthesis_mode: Optional[str] = Query(default=None,
+                                              description="With route=synthesize: evidence (default), refine, accumulate or facts."),
         space: str = Depends(space_for),
     ) -> dict:
         """One question answered by whichever machinery suits it, saying
@@ -794,13 +949,45 @@ def create_app(
         ordinary search. Naming a route overrides it, and the answer says
         the route was asked for. The synthesize route, which the rule never
         chooses, reads up to ``limit`` passages and has the server's model
-        write cited sentences; it is refused when the server has no model."""
+        write cited sentences; it is refused when the server has no model.
+        ``synthesis_mode`` chooses how it reads them: evidence, refine,
+        accumulate or facts, each keeping only sentences with a checked quote."""
         from ..retrieval.router import DEFAULT_ITEM_CHARS, answer_question
 
         synthesis = synthesis_factory() if route == "synthesize" and synthesis_factory is not None else None
         return (await answer_question(engine, space, q, now=now, limit=limit, route=route,
                                       max_item_chars=0 if whole else DEFAULT_ITEM_CHARS,
-                                      synthesis=synthesis)).record(space)
+                                      synthesis=synthesis, synthesis_mode=synthesis_mode)).record(space)
+
+    @app.get("/v1/recall/tree")
+    async def get_recall_tree(
+        q: str = Query(min_length=1, max_length=MAX_QUERY),
+        limit: int = Query(default=summary_traverse.DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+        branching: int = Query(default=summary_traverse.DEFAULT_BRANCHING, ge=1, le=summary_traverse.MAX_BRANCHING,
+                               description="Summaries kept at each step, across the documents."),
+        max_depth: int = Query(default=summary_traverse.MAX_DEPTH, ge=1, le=summary_traverse.MAX_DEPTH,
+                               description="Steps down the trees; nodes still unscored are counted."),
+        text: bool = Query(default=False, description="Score each step's candidates by BM25 too, fused by rank."),
+        episode_id: Optional[list[int]] = Query(default=None, description="The documents to descend; every document "
+                                                                          "with a stored tree when unset."),
+        kind: Optional[str] = None,
+        source_prefix: Optional[str] = None,
+        tags: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        space: str = Depends(space_for),
+    ) -> dict:
+        """The chunks a descent of the stored summary trees reaches: from each
+        document's top summaries, the best ``branching`` at every step, down
+        to chunks, each saying in ``via_tree`` the path of summaries that led
+        there. Scored by the vectors already stored, with no model; a summary
+        written from other content and a forgotten document's chunks are
+        never returned. The answer says what it refused, what the limit and
+        the depth cut, and how many embedding calls it made."""
+        traversal = await engine.tree_recall(space, q, limit=limit, branching=branching, max_depth=max_depth, text=text,
+                                             episode_ids=episode_id, kind=kind, source_prefix=source_prefix,
+                                             tags=[t for t in (tags or "").split(",") if t.strip()], since=since, until=until)
+        return traversal.record() | {"space": space}
 
     @app.get("/v1/recall/parts")
     async def get_recall_parts(
@@ -851,6 +1038,20 @@ def create_app(
         return parted.record() | {"space": space, "applied": applied,
                                   "rerank": rerank, "graph_boost": graph_boost}
 
+    @app.post("/v1/answers/attribute")
+    async def post_attribution(body: AttributeBody, space: str = Depends(space_for)) -> dict[str, object]:
+        """Which of the named chunks each sentence of the answer came from:
+        quoted (a shared run of words, with its span), overlapping (most of
+        its content words in one passage) or unattributed, with numbers the
+        passage does not hold named. Found without a model. Word overlap is
+        not support; the record states its unmeasured rules and never claims
+        accuracy. Chunk ids this space does not hold are named in
+        ``chunks_missing``, and ones it holds with blank text in ``chunks_empty``."""
+        from ..retrieval.attribution import attribute_to_chunks
+
+        made, missing, empty = await attribute_to_chunks(engine, space, body.answer, body.chunk_ids)
+        return {**made.record(), "chunks_missing": list(missing), "chunks_empty": list(empty)}
+
     @app.get("/v1/answers/temporal")
     async def get_temporal_answer(
         q: str = Query(min_length=1, max_length=MAX_QUERY),
@@ -886,6 +1087,8 @@ def create_app(
         evidence_graph: bool = False,
         graph_analysis: bool = False,
         candidate_limit: Optional[int] = Query(default=None, ge=1, le=1000),
+        fusion: Literal["rank", "score", "distribution"] = Query(default="rank", description="Fuse the lanes by rank (default), by each lane's scores scaled to its own range (score), or by each lane's mean and spread (distribution)."
+                                                  "each lane's scores scaled to its own range."),
         withhold_kinds: Optional[str] = Query(
             default=None, alias="withhold",
             description="Withhold matches of these kinds from the answer, comma separated "
@@ -895,11 +1098,36 @@ def create_app(
         window: int = Query(default=0, ge=0, le=MAX_WINDOW,
                             description="Widen every returned passage by this many bytes either "
                                         "side, read from the episode. 0 leaves them as indexed."),
+        window_unit: Literal["bytes", "sentences"] = Query(
+            default="bytes",
+            description="What window counts. With sentences, each passage grows to the whole "
+                        "sentences it touches and then this many more either side (at most 20); "
+                        "0 completes only the sentences it touches."),
+        merge: bool = Query(default=False,
+                            description="Join neighbouring chunks of one episode into the passage holding "
+                                        "them, and say which chunks went in and what share was retrieved."),
+        merge_min_share: Optional[float] = Query(default=None, ge=0, le=1,
+                                       description="Leave a merge as fragments when retrieved chunks "
+                                                   "cover less than this share of its bytes."),
+        compress: Optional[float] = Query(
+            default=None, ge=0, le=1,
+            description="Cut what a sentence window added back to at most this share of its "
+                        "sentences, those naming the most of the question; the sentences "
+                        "retrieved are never cut. Needs window_unit=sentences. Unmeasured."),
+        compress_scorer: Literal["terms", "embedding"] = Query(
+            default="terms",
+            description="How compress scores a sentence: the question's words it names, "
+                        "or its cosine to the question under this space's embedder."),
         code_context: bool = Query(default=False,
                                    description="Quote the declaration's signature and the file's "
                                                "imports beside a code passage, with their line "
                                                "numbers. Never spliced into the passage."),
         structural_context: bool = False,
+        highlight: bool = Query(default=False,
+                                description="Give, beside the items and in the same order, the "
+                                            "code-point spans of every word in each returned "
+                                            "passage that the lexical lane would match to the "
+                                            "question. Computed last, on the text as returned."),
         multi_hop: bool = False,
         max_hops: int = Query(default=3, ge=1, le=6),
         expansion_max_bytes: int = Query(default=16000, ge=512, le=256000,
@@ -907,20 +1135,60 @@ def create_app(
                                                       "code context included. `window` is not "
                                                       "bounded by it: its own size in bytes is "
                                                       "the budget the caller already set."),
+        require: list[str] = Query(default=[], description="A phrase every returned passage must hold, as whole "
+                                                            "words; repeat for more. Checked before the limit."),
+        exclude: list[str] = Query(default=[], description="A phrase no returned passage may hold; repeat for more."),
+        diversity: Optional[float] = Query(default=None, ge=0, le=1,
+                                           description="Fill the answer's places by relevance less likeness to "
+                                                       "passages already placed, weighted from 0 to 1, so "
+                                                       "near-copies do not take several. Unmeasured."),
+        lanes: Optional[str] = Query(default=None,
+                                     description="The lanes to run, comma separated: vector, text, or both "
+                                                 "(the default). A lane not named is not run; the answer's "
+                                                 "lanes names those that answered."),
         graph_boost: bool = Query(default=False, description="Add the entity lane: passages naming the question's "
                                                               "entities or their neighbours in the knowledge graph."),
+        infer: bool = Query(default=False, description="Read the question's own words for a scope -- a date, a kind "
+                                                        "of memory, tags, a place -- and search with it where no filter "
+                                                        "was set by hand; the answer says what was read and applied."),
+        lessons: bool = Query(default=False, description="Put beside each passage what people said about it in "
+                                                          "feedback. The order is not changed."),
+        expand_summaries: Optional[Literal["replace", "follow"]] = Query(
+            default=None,
+            description="Follow each stored summary among the passages with the chunks its citations rest on, or "
+                        "replace it with them: only those, never a forgotten document's, each saying which summary "
+                        "it came through. The answer can hold more than limit; expanded says what was added, "
+                        "refused and cut."),
+        expand_max_chunks: Optional[int] = Query(default=None, ge=1, le=SUMMARY_EXPANSION_MAX_CHUNKS,
+                                                 description="The most chunks expand_summaries adds (20 unless set)."),
         space: str = Depends(space_for),
     ) -> dict:
         tag_list = [t for t in (tags or "").split(",") if t.strip()]
+        inferred: dict[str, object] | None = None
+        if infer:
+            from datetime import datetime, timezone
+
+            from ..retrieval.hints import apply_scope, infer_scope
+
+            asked_scope = infer_scope(q, now=datetime.now(timezone.utc))
+            # Only a question that names a tag pays for the space's tag list.
+            known_tags = await engine.tags(space) if asked_scope.tags else None
+            searched = apply_scope(asked_scope, since=since, until=until, kind=kind, tags=tag_list, source_prefix=source_prefix,
+                                   known_tags=known_tags)
+            since, until, kind, source_prefix = searched.since, searched.until, searched.kind, searched.source_prefix
+            tag_list = list(searched.tags)
+            inferred = searched.record(asked_scope)
         policy: tuple[str, ...] = ()
+        names_read = None
         if withhold_kinds:
-            from ..retrieval.withhold import chosen_kinds
+            from ..retrieval.withhold import chosen_kinds, names_for
 
             # Checked before the search, not after it: a policy naming a
             # kind that does not exist is a mistake in the request, and
             # searching first spends the work -- and logs a recall event
             # -- for an answer nobody receives.
             policy = chosen_kinds(tuple(k.strip() for k in withhold_kinds.split(",") if k.strip()))
+            names_read = await names_for(engine, space, policy, as_of=as_of)
             # Withholding covers the items and the facts. The expansions
             # below build their own structures, which it does not reach,
             # so asking for both is refused rather than answered with a
@@ -945,29 +1213,81 @@ def create_app(
                     "withhold cannot be combined with code_context: code context quotes the "
                     "file again after withholding, which would hand back what was withheld; "
                     "ask for one or the other")
+        if merge_min_share is not None and not merge:
+            raise InvalidInput("merge_min_share is a floor under a merge; ask for merge with it")
+        if lessons and merge:
+            # A merged passage keeps its best-scored chunk's fields and drops its neighbours', so
+            # their lessons would vanish, or a judged-useless neighbour would ride under a good one.
+            raise InvalidInput("lessons cannot be combined with merge: a merged passage joins chunks judged "
+                               "separately, and one lesson cannot stand for them; ask for one or the other")
+        if expand_summaries is not None and (merge or window or window_unit == "sentences"):
+            # A merge reads the text between the fragments it joins and reports it under one chunk's
+            # fields, and a window rewrites a passage's text and start, so either would return a cited
+            # chunk holding text it does not rest on, with via_summary's spans indexing text not returned.
+            raise InvalidInput("expand_summaries cannot be combined with merge or a window: a merged or widened "
+                               "passage holds text the summary does not rest on, and the spans in via_summary "
+                               "would no longer index the text returned; ask for one or the other")
+        if merge and compress is not None:
+            # A merged passage is reported under its best chunk, so the
+            # other retrieved chunks inside it would not be pinned, and
+            # compression could cut the very text that was retrieved.
+            raise InvalidInput("merge cannot be combined with compress: a merged passage is reported under "
+                               "one chunk, so compress would not keep the others it holds; ask for one")
+        if compress is not None and window_unit != "sentences":
+            # Checked before the search. Without a window of sentences
+            # there is nothing compress may cut, and an answer returned
+            # unchanged would read as though it had been applied.
+            raise InvalidInput("compress cuts what a window of sentences added around a hit; "
+                               "ask for window_unit=sentences with it")
         result = await engine.recall(
             space, q, limit=limit, as_of=as_of, tags=tag_list, where=parse_where(where), history=history,
             kind=kind, source_prefix=source_prefix, since=since, until=until,
             conditions=read_conditions(conditions),
-            candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost,
+            candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
+            lessons=lessons, expand_summaries=expand_summaries, expand_max_chunks=expand_max_chunks,
+            lanes=[lane.strip() for lane in lanes.split(",") if lane.strip()] if lanes is not None else LANES,
+            require=require, exclude=exclude, diversity=diversity,
         )
         opened = None
-        if window:
+        retrieved = list(result.items)
+        if window or window_unit == "sentences":
             from ..retrieval.window import widen
 
             # Before withholding, so the bytes it opens are scanned like
             # any other. After it, a window would be an unscanned surface
             # holding exactly the text the policy was asked to remove.
-            opened = await widen(engine, space, result.items, before=window, after=window)
+            opened = await widen(engine, space, result.items, before=window, after=window, unit=window_unit)
             result = result.model_copy(update={
                 "items": list(opened.items),
                 "returned_bytes": sum(len(one.text.encode()) for one in opened.items)})
+        joined = None
+        if merge:
+            from ..retrieval.merging import merge_neighbours
+
+            # After any window and before withholding, so withholding scans
+            # the text a merge reads between the fragments it joins.
+            joined = await merge_neighbours(engine, space, result.items, min_share=merge_min_share or 0.0,
+                                            hits=retrieved)
+            result = result.model_copy(update={
+                "items": list(joined.items),
+                "returned_bytes": sum(len(one.text.encode()) for one in joined.items)})
+        cut = None
+        if compress is not None:
+            from ..retrieval.compress import compress as compress_passages
+
+            # After widening, which is what it cuts, and before
+            # withholding, so what withholding scans is what is returned.
+            cut = await compress_passages(result.items, q, hits=retrieved, keep=compress, scorer=compress_scorer,
+                                          embedder=engine.embedder)
+            result = result.model_copy(update={
+                "items": list(cut.items), "returned_bytes": cut.bytes_after})
         kept = None
         if policy:
             from ..retrieval.withhold import withhold
 
             kept = withhold(result.items, facts=list(result.facts) + list(result.history),
-                            kinds=policy)
+                            kinds=policy, names=names_read.names if names_read else None,
+                            names_capped=bool(names_read and names_read.capped))
             result = result.model_copy(update={
                 "items": list(kept.items),
                 "facts": list(kept.facts[:len(result.facts)]),
@@ -982,6 +1302,11 @@ def create_app(
             "top_similarity": result.top_similarity,
             "low_confidence": result.low_confidence,
             "degraded": result.degraded,
+            "fusion": result.fusion,
+            "narrowing": result.narrowing.model_dump() if result.narrowing is not None else None,
+            "lanes": result.lanes,
+            **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
+            **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),
@@ -992,6 +1317,7 @@ def create_app(
             # that nothing withheld is not a finding of nothing present.
             response["withheld"] = {"count": kept.withheld, "by_kind": dict(kept.by_kind),
                                     "kinds_applied": list(kept.kinds_applied),
+                                    "names_known": dict(kept.names_known), "names_skipped": kept.names_skipped,
                                     "unscanned": kept.unscanned,
                                     # Beside a count of zero unscanned,
                                     # what was scanned is the half that
@@ -999,8 +1325,23 @@ def create_app(
                                     "surfaces": list(kept.surfaces), "why": kept.why}
         if opened is not None:
             response["widened"] = staged(opened.record())
+        if result.lessons_read is not None:
+            response["lessons_read"] = result.lessons_read
+        if result.expanded is not None:
+            response["expanded"] = result.expanded
+        if result.past_forget_after is not None:
+            response["past_forget_after"] = result.past_forget_after
+        if result.feedback_prior is not None:
+            # A re-ranked answer carries what moved it, and where the prior's bounds bit.
+            response["feedback_prior"] = result.feedback_prior
+        if joined is not None:
+            response["merged"] = staged(joined.record())
+        if cut is not None:
+            response["compressed"] = cut.record()
         if result.rerank is not None:
             response["rerank"] = result.rerank.model_dump(mode="json")
+        if inferred is not None:
+            response["inferred"] = inferred
         if graph_boost:
             response["entities"] = [entity.model_dump(mode="json") for entity in result.entities]
         if evidence_graph or graph_analysis or structural_context or multi_hop:
@@ -1090,6 +1431,15 @@ def create_app(
             response["items"] = [item_json(one) for one in inside.items]
             response["returned_bytes"] = sum(len(one.text.encode()) for one in inside.items)
             response["code_context"] = staged(inside.record())
+        if highlight:
+            from ..retrieval.highlights import Shown, highlights
+
+            # After everything, code context included, because every stage
+            # before this one may rewrite or drop a passage's text, and a
+            # span is only true of the text it was measured on.
+            returned = cast(list[dict[str, Any]], response["items"])
+            response["highlights"] = [marks.model_dump() for marks in highlights(
+                [Shown(one["chunk_id"], one["text"]) for one in returned], q)]
         return response
 
     @app.get("/v1/facts")
@@ -1247,10 +1597,23 @@ def create_app(
         return {"closed": closed.fact_id, "reason": closed.closed_reason}
 
     @app.get("/v1/profile")
-    async def get_profile(limit: int = 10, space: str = Depends(space_for)) -> dict:
-        profile = await engine.profile(space, limit)
-        return {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
+    async def get_profile(limit: int = 10, buckets: Optional[str] = None, static_limit: Optional[int] = None,
+                          dynamic_limit: Optional[int] = None, static_max_bytes: Optional[int] = None,
+                          dynamic_max_bytes: Optional[int] = None, space: str = Depends(space_for)) -> dict:
+        """With ``buckets`` (static, dynamic or both), the claims also come
+        in static and dynamic buckets, each with its own bounds."""
+        from ..memory.profile_buckets import requested
+
+        bounds = requested(buckets, static_limit=static_limit, dynamic_limit=dynamic_limit,
+                           static_max_bytes=static_max_bytes, dynamic_max_bytes=dynamic_max_bytes)
+        profile = await engine.profile(space, limit, buckets=bounds)
+        body = {"static_facts": [fact_json(f) for f in profile.static_facts], "dynamic": profile.dynamic,
                 "recent": [asdict(r) for r in profile.recent], "coverage": profile.coverage}
+        if profile.buckets is not None:
+            body["buckets"] = {"static": [fact_json(f) for f in profile.buckets.static],
+                               "dynamic": [fact_json(f) for f in profile.buckets.dynamic],
+                               "coverage": profile.buckets.coverage}
+        return body
 
     @app.get("/v1/tags")
     async def get_tags(space: str = Depends(space_for)) -> dict:
@@ -1288,6 +1651,19 @@ def create_app(
     async def post_feedback(body: FeedbackBody, space: str = Depends(space_for)) -> dict:
         event = await engine.feedback(space, body.recall_event_id, body.chunk_id, body.useful, body.note)
         return {"recorded": event.event_id}
+
+    @app.get("/v1/lessons")
+    async def get_lessons(
+        window_days: int = Query(default=90, ge=1, le=3650), half_life_days: float = Query(default=30, gt=0, le=3650),
+        min_corroboration: int = Query(default=2, ge=1, le=100), max_events: int = Query(default=5000, ge=1, le=20000),
+        space: str = Depends(space_for),
+    ) -> dict:
+        """What people said about the space's passages over the last ``window_days``: per
+        passage, the latest judgement of each recall weighed by age, and stated as preferred,
+        tentative, contested or dead end, with whether the passage can still be read."""
+        found = await engine.lessons(space, window_days=window_days, half_life_days=half_life_days,
+                                     min_corroboration=min_corroboration, max_events=max_events)
+        return found.record()
 
     @app.get("/v1/metrics")
     async def get_metrics(
@@ -1348,16 +1724,12 @@ def create_app(
     return app
 
 
-class Unauthorized(Exception):
-    pass
-
-
 #: Ids one batch episode read may ask for. A review page asks for the
 #: sources of the rows on screen, not for the space.
 MAX_IDS = 100
 
 
-async def read_bounded(request: Request, limit: int) -> bytes:
+async def read_bounded(request: Request, limit: int, noun: str = "an attachment") -> bytes:
     """The request body, refused as soon as it passes ``limit``.
 
     Reading it whole and then measuring it lets the caller decide how much
@@ -1366,12 +1738,12 @@ async def read_bounded(request: Request, limit: int) -> bytes:
     """
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > limit:
-        raise InvalidInput(f"an attachment takes at most {limit} bytes, got {declared}")
+        raise InvalidInput(f"{noun} takes at most {limit} bytes, got {declared}")
     read, total = [], 0
     async for chunk in request.stream():
         total += len(chunk)
         if total > limit:
-            raise InvalidInput(f"an attachment takes at most {limit} bytes")
+            raise InvalidInput(f"{noun} takes at most {limit} bytes")
         read.append(chunk)
     return b"".join(read)
 
@@ -1422,6 +1794,10 @@ def item_json(item: RecallItem) -> dict:
     }
     if item.rerank_score is not None:
         result["rerank_score"] = item.rerank_score
+    if item.lessons is not None:
+        result["lessons"] = item.lessons
+    if item.via_summary is not None:
+        result["via_summary"] = item.via_summary
     return result
 
 

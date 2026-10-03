@@ -71,6 +71,8 @@ class Shared:
 
     def __init__(self, url: str, prefix: str, api_key: Optional[str], client, refresh: bool) -> None:
         self.client = _client(url, api_key, client)
+        #: The cluster as configured, or the injected client itself when it chose the cluster.
+        self.endpoint: object = url if client is None else id(client)
         self.prefix = prefix
         self.refresh = refresh
         self.users = 0
@@ -798,6 +800,11 @@ class ElasticsearchVectorIndex:
     @property
     def index(self) -> str:
         return self.shared.index("vectors")
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self.shared.endpoint, self.index)
 
     async def ensure(self, dim: int) -> None:
         if await self.client.indices.exists(index=self.index):

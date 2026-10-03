@@ -22,6 +22,10 @@ _HEADER = b'SCONE-SOURCES-1\n'
 _MAX_BYTES = 8_000_000
 
 
+#: Earlier episodes a path's claims may still cite; see SourceEntry.claimants.
+MAX_CLAIMANTS = 64
+
+
 class SourceRevision(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra='forbid', revalidate_instances='always')
     original_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
@@ -29,6 +33,11 @@ class SourceRevision(BaseModel):
     parser_revision: str = Field(min_length=1, max_length=128)
     generation: int = Field(default=0, ge=0, lt=2**63)
     episode_id: int | None = Field(default=None, gt=0)
+    #: When the revision is to be forgotten: the schedule of the run that
+    #: prepared it, which whichever run finishes it stores. It is how a
+    #: later run tells a revision whose time came from one forgotten by
+    #: hand, after the sweep has left only a tombstone.
+    forget_after: str | None = Field(default=None, max_length=64)
 
 
 class SourceEntry(BaseModel):
@@ -36,6 +45,13 @@ class SourceEntry(BaseModel):
     state: Literal['active', 'replace', 'retire', 'delete', 'absent', 'suppress', 'suppressed']
     current: SourceRevision | None = None
     pending: SourceRevision | None = None
+    #: Episodes of earlier revisions whose claims may still hold: a claim
+    #: a new revision restates is one fact, cited to the episode that
+    #: first made it, so closing what a later revision drops -- or all of
+    #: it when the file goes -- has to reach every one of them. An id is
+    #: dropped once nothing cites it. Bounded; past the bound the oldest
+    #: are kept and the newest dropped, and the receipt says unread.
+    claimants: tuple[int, ...] = Field(default=(), max_length=MAX_CLAIMANTS)
 
     @model_validator(mode='after')
     def transition_shape(self) -> Self:

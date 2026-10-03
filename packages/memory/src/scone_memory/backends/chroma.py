@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Mapping, Optional, Sequence
 
 from ..core.ports import VectorPoint
 from ..core.timeutil import epoch_seconds
+from .location import local_identity
 from .validation import validate_vector
 
 if TYPE_CHECKING:
@@ -51,8 +52,18 @@ class ChromaVectorIndex:
         else:
             self.client = chromadb.EphemeralClient()
         self.collection_name = collection
+        #: The store as configured, or the injected client itself. Chroma's
+        #: in-process clients share one store per path, and one in memory.
+        #: Chroma does not expand "~" (it makes a directory of that name), so neither does this.
+        self._endpoint: object = (id(client) if client is not None else url if url
+                                  else local_identity(path) if path else "ephemeral")
         self.collection: Collection | None = None
         self.dim: Optional[int] = None
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self._endpoint, self.collection_name)
 
     async def ensure(self, dim: int) -> None:
         def _ensure() -> Collection:

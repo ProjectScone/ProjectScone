@@ -312,3 +312,69 @@ async def test_header_name_inside_an_unrelated_word_does_not_count_as_present_co
         assert model.inputs[-1].startswith('Table context: ' + label + '\n\n')
     finally:
         await memory.close()
+
+
+async def test_overlapping_token_chunks_of_a_table_keep_their_context_through_recovery_and_rebuild():
+    """An overlap makes neighbouring spans share text; each is still a slice
+    of the source in order, and each gets the headers it lacks."""
+    memory, model = await open_memory(chunk_tokens=64, chunk_overlap_tokens=24)
+    try:
+        saved = await ingest_document(memory, 'alpha', long_cell_table(), filename='long.html')
+        assert saved.added.structure['overlapped'] > 0
+        chunks = await memory.documents.chunks_of('alpha', saved.added.episode_id)
+        assert any(after.start < before.end for before, after in zip(chunks, chunks[1:]))
+        original = list(model.inputs)
+        assert len(original) == len(chunks)
+        for chunk, embedded in zip(chunks, original):
+            assert embedded.endswith(chunk.text)
+            assert embedded == chunk.text if 'Regional revenue' in chunk.text else 'Regional revenue' in embedded
+        episode = await memory.episode('alpha', saved.added.episode_id)
+        await memory.documents.mark_inflight('alpha', episode.content_hash)
+        await memory.vectors.delete([chunk.chunk_id for chunk in chunks])
+        model.inputs.clear()
+        assert (await memory.recover()).completed == 1
+        assert model.inputs == original
+        model.inputs.clear()
+        assert (await memory.reembed_vectors()).chunks == len(chunks)
+        assert model.inputs == original
+    finally:
+        await memory.close()
+
+
+# Spans in order: each starts after the one before starts and ends after it
+# ends. Neighbours may overlap; a span out of order, repeated, or holding or
+# held by the one before is not a cut any chunker makes.
+UNORDERED = [[(6, 11), (0, 5)], [(0, 5), (0, 5)], [(0, 5), (0, 11)], [(3, 8), (0, 11)],
+             [(0, 11), (6, 11)], [(0, 11), (3, 8)]]
+
+
+@pytest.mark.parametrize('spans', UNORDERED)
+async def test_spans_out_of_order_are_refused_before_any_embedding(spans):
+    from scone_memory.ingestion.batch import embedding_inputs, validated_record
+    from scone_memory.ingestion.records import Record
+    memory, model = await open_memory()
+    try:
+        new = validated_record('alpha', Record('alpha gamma'), '2026-09-15T00:00:00+00:00')
+        texts = [new.content[start:end] for start, end in spans]
+        with pytest.raises(InvalidInput, match='source span'):
+            await embedding_inputs(memory._ingestion_runtime(), new, spans, texts)
+        assert await embedding_inputs(memory._ingestion_runtime(), new, [(0, 8), (6, 11)],
+                                      ['alpha ga', 'gamma']) == ['alpha ga', 'gamma']
+        assert model.inputs == []
+    finally:
+        await memory.close()
+
+
+@pytest.mark.parametrize('spans', UNORDERED)
+async def test_table_context_refuses_spans_out_of_order(spans):
+    from scone_memory.ingestion.table_context import context_inputs, retained_manifest
+    memory, _ = await open_memory()
+    try:
+        saved = await ingest_document(memory, 'alpha', long_cell_table(), filename='long.html')
+        episode = await memory.episode('alpha', saved.added.episode_id)
+        manifest = await retained_manifest(episode, blobs=memory.blobs, purpose='test')
+        with pytest.raises(InvalidInput, match='spans are invalid'):
+            context_inputs(manifest.parsed, spans)
+        assert len(context_inputs(manifest.parsed, [(0, 8), (6, 11)])) == 2
+    finally:
+        await memory.close()

@@ -39,7 +39,11 @@ GRAPH_ARGUMENTS = {
     "memory_graph_changes": {"since", "until", "limit", "max_bytes", "space"},
     "memory_entity_duplicates": {"limit", "min_score", "max_bytes", "space"},
     "memory_temporal_answer": {"question", "now", "limit", "max_bytes", "space"},
+    "memory_graph_cycles": {"limit", "max_bytes", "space"},
+    "memory_graph_stats": {"max_bytes", "space"},
+    "memory_graph_hubs": {"limit", "above", "max_bytes", "space"},
     "memory_graph_health": {"limit", "max_bytes", "space"},
+    "memory_graph_affected": {"name", "max_hops", "limit", "max_bytes", "space"},
 }
 TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
 
@@ -602,3 +606,38 @@ async def test_the_health_tool_counts_what_wants_attention(server):
     assert not error, text
     error, health = await call(server, "memory_graph_health")
     assert not error and "health: space default" in health and "unconnected" in health
+
+
+async def test_the_blast_radius_tool_lists_what_rests_on_a_symbol_and_refuses_an_unknown_name(server):
+    await store_and_distill(server, "main calls run.", "app.py:main", "calls", "lib.py:run")
+    await store_and_distill(server, "helper calls main.", "cli.py:helper", "calls", "app.py:main")
+    async def affected(**arguments):
+        result = await server.call_tool("memory_graph_affected", arguments)
+        return result.is_error, "\n".join(block.text for block in result.content)
+
+    error, text = await affected(name="lib.py:run")
+    lines = text.splitlines()
+    assert not error and any("app.py:main" in line and line.startswith("1:") for line in lines), text
+    assert any("cli.py:helper" in line and line.startswith("2:") for line in lines), "two hops, nearest first"
+    assert "by depth: 1 hop(s): 1, 2 hop(s): 1" in text
+    error, text = await affected(name="lib.py:run", max_hops=1)
+    assert not error and "cli.py:helper" not in text and "stopped at 1 hop(s)" in text
+    error, text = await affected(name="nowhere.py:thing")
+    assert error, "an unknown name is refused, not answered with nothing"
+    error, text = await affected(name="cli.py:helper")
+    assert not error and "nothing in this graph rests on" in text
+
+
+async def test_the_stats_and_hubs_tools_and_resources_count_the_graph(server):
+    await store_and_distill(server, "main calls run.", "app.py:main", "calls", "lib.py:run")
+    await store_and_distill(server, "helper calls main.", "cli.py:helper", "calls", "app.py:main")
+    error, counted = await call(server, "memory_graph_stats")
+    assert not error and "stats: space default" in counted and "facts by origin:" in counted
+    error, ranked = await call(server, "memory_graph_hubs", limit=1)
+    assert not error and "hubs: space default" in ranked and "1. " in ranked and "neighbours" in ranked
+    error, refused = await call(server, "memory_graph_hubs", above=10)
+    assert error and "percentile" in refused
+    stats_resource = await server.read_resource("scone://graph/stats")
+    assert "stats: space default" in "".join(part.content for part in stats_resource)
+    hubs_resource = await server.read_resource("scone://default/graph/hubs")
+    assert "hubs: space default" in "".join(part.content for part in hubs_resource)

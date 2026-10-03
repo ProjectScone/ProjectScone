@@ -45,6 +45,9 @@ _UNSPACED = (
     "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003134f"
 )
 _UNSPACED_CHAR = re.compile(f"[{_UNSPACED}]")
+#: A character of a script written without spaces between words, for any
+#: reader that must treat such text as the tokenizer does.
+UNSPACED_CHAR = _UNSPACED_CHAR
 _SEGMENT = re.compile(f"[{_UNSPACED}]+|[^{_UNSPACED}]+")
 
 STOPWORDS = frozenset(
@@ -126,8 +129,24 @@ def tokenize(text: str) -> list[str]:
     return tokens
 
 
+def fold_diacritics(token: str) -> str:
+    """``token`` without its combining marks ("facturación" to "facturacion"),
+    so a query typed without accents finds the word, as the SQLite store's
+    own tokenizer already does; the tokenizer itself is unchanged, so no
+    persisted token or vector identity moves."""
+    if token.isascii():
+        return token
+    decomposed = unicodedata.normalize("NFD", token)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 class Bm25:
-    """Okapi BM25 over a mutable set of documents keyed by int id."""
+    """Okapi BM25 over a mutable set of documents keyed by int id; terms are
+    kept with their diacritics folded, matching the SQLite text lane.
+
+    A document holding no query term and no member of a query family scores
+    nothing and is never returned, so each term keeps the documents that
+    hold it and a search scores only those."""
 
     def __init__(self, k1: float = 1.2, b: float = 0.75) -> None:
         self.k1 = k1
@@ -135,6 +154,8 @@ class Bm25:
         self._docs: dict[int, Counter[str]] = {}
         self._lengths: dict[int, int] = {}
         self._df: Counter[str] = Counter()
+        #: The documents holding each term; a term no document holds is not kept.
+        self._postings: dict[str, set[int]] = {}
 
     def __len__(self) -> int:
         return len(self._docs)
@@ -142,11 +163,13 @@ class Bm25:
     def add(self, doc_id: int, text: str) -> None:
         if doc_id in self._docs:
             self.remove(doc_id)
-        tokens = tokenize(text)
+        tokens = [fold_diacritics(token) for token in tokenize(text)]
         counts = Counter(tokens)
         self._docs[doc_id] = counts
         self._lengths[doc_id] = len(tokens)
         self._df.update(counts.keys())
+        for term in counts:
+            self._postings.setdefault(term, set()).add(doc_id)
 
     def remove(self, doc_id: int) -> None:
         counts = self._docs.pop(doc_id, None)
@@ -157,26 +180,78 @@ class Bm25:
             self._df[term] -= 1
             if self._df[term] <= 0:
                 del self._df[term]
+            holders = self._postings[term]
+            holders.discard(doc_id)
+            if not holders:
+                del self._postings[term]
 
     def search(
-        self, query: str, limit: int, allowed: Iterable[int] | None = None
+        self, query: str, limit: int, allowed: Iterable[int] | None = None, prefixes: Iterable[str] = (),
+        exact_forms: bool = False,
     ) -> list[tuple[int, float]]:
-        terms = tokenize(query)
-        if not terms or not self._docs:
+        """Documents by BM25 over the query's terms; a prefix counts every
+        vocabulary term that starts with it as one term, so a word's family
+        ("bill" for billing, billed, bills) is one signal, not several.
+
+        With ``exact_forms``, a document holding one of the query's own
+        words in a family has that family's count weighed at the idf of the
+        rarest such word it holds instead of the family's. The family is
+        still one saturating term: a document holding only "billing" scores
+        what "billing" alone would, one holding "billing" and "bills" scores
+        their joint count at "billing"'s idf (the family's count, not a
+        second term), and one holding only relatives scores as without it.
+        The credit is the gap between the two idfs times BM25's count part,
+        which reaches ``k1 + 1``: at most 2.2 times the gap, not the gap."""
+        terms = [fold_diacritics(token) for token in tokenize(query)]
+        folded = [fold_diacritics(prefix) for prefix in prefixes]
+        families = [(prefix, [term for term in self._df if term.startswith(prefix)]) for prefix in folded]
+        families = [(prefix, members) for prefix, members in families if members]
+        # A query word its own family covers is scored once, through the
+        # family: "billing" asked with the prefix "bill" is one signal, not
+        # the word and then the family it belongs to.
+        covered = {term for term in terms if any(term.startswith(prefix) for prefix, _ in families)}
+        terms = [term for term in terms if term not in covered]
+        # The query's own words in each family, rarest first: the most
+        # specific form a document holds is the first it has.
+        forms = {prefix: sorted((term for term in covered if term.startswith(prefix)), key=self._df.__getitem__)
+                 if exact_forms else [] for prefix, _ in families}
+        if (not terms and not families) or not self._docs:
             return []
         n = len(self._docs)
         avg_len = sum(self._lengths.values()) / n
-        candidates = self._docs.keys() if allowed is None else [d for d in allowed if d in self._docs]
+        # Each family's count in every document holding a member, read from
+        # the postings: whole numbers, so the same in any order of adding.
+        family_tf: list[tuple[str, dict[int, int]]] = []
+        # A family's document frequency is the documents holding any member,
+        # each once: one holding "billing" and "bills" is one document, as
+        # SQLite counts its rows, not two.
+        family_df: dict[str, int] = {}
+        matching: set[int] = set()
+        for prefix, members in families:
+            tfs: dict[int, int] = {}
+            for member in members:
+                for doc_id in self._postings[member]:
+                    tfs[doc_id] = tfs.get(doc_id, 0) + self._docs[doc_id][member]
+            family_tf.append((prefix, tfs))
+            family_df[prefix] = len(tfs)
+            matching.update(tfs)
+        for term in terms:
+            matching.update(self._postings.get(term, ()))
+        # Every other document scores zero. The order candidates are scored
+        # in is settled by the sort below, by score and then by id.
+        candidates = matching if allowed is None else [d for d in allowed if d in matching]
         scored: list[tuple[int, float]] = []
         for doc_id in candidates:
             counts = self._docs[doc_id]
             length = self._lengths[doc_id]
             score = 0.0
-            for term in terms:
-                tf = counts.get(term)
-                if not tf:
-                    continue
-                df = self._df[term]
+            weighed: list[tuple[int, int]] = [(counts[term], self._df[term]) for term in terms if counts.get(term)]
+            for prefix, tfs in family_tf:
+                tf = tfs.get(doc_id, 0)
+                if tf:
+                    held = next((form for form in forms[prefix] if counts.get(form)), None)
+                    weighed.append((tf, family_df[prefix] if held is None else self._df[held]))
+            for tf, df in weighed:
                 idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
                 denom = tf + self.k1 * (1 - self.b + self.b * length / avg_len)
                 score += idf * tf * (self.k1 + 1) / denom

@@ -13,6 +13,10 @@ from pathlib import Path
 import statistics
 import time
 from typing import Mapping, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
 
 from ..backends.memory import InMemoryDocumentStore, InMemoryVectorIndex
 from ..core.ports import TextFilter
@@ -30,8 +34,13 @@ class OrderedVectors(InMemoryVectorIndex):
 
     async def search(self, space: str, query: Sequence[float], limit: int,
                      as_of: str | None = None, tags: Sequence[str] = (),
-                     where: Mapping[str, str] | None = None) -> list[tuple[int, float]]:
+                     where: Mapping[str, str] | None = None,
+                     conditions: "Filter | None" = None) -> list[tuple[int, float]]:
+        # A fixture order, not a search: conditions are accepted for the
+        # signature and not applied, and the class says so.
         return [(chunk_id, .95 - rank / 100) for rank, chunk_id in enumerate(self.fixture_ids[:limit])]
+
+    narrows_conditions = False
 
 
 class NoTextLane(InMemoryDocumentStore):

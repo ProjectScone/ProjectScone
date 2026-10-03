@@ -35,7 +35,12 @@ from typing import Literal, Optional, Sequence
 
 from .chunker import DEFAULT_TARGET, MIN_CHUNK, Span, chunk_spans
 
-Language = Literal["python", "braces"]
+#: "python" and "braces" are the two families the line readers know;
+#: "tree:<grammar>" names a language read from its syntax tree by
+#: ``code_tree`` when the optional grammar pack is installed.
+Language = str
+PYTHON_LANGUAGE: Language = "python"
+BRACES_LANGUAGE: Language = "braces"
 
 #: Suffixes ``ast`` can parse, so their spans are exact.
 PYTHON_SUFFIXES = (".py", ".pyi")
@@ -118,7 +123,12 @@ def code_language(source: Optional[str]) -> Optional[Language]:
     suffix = name[dot:]
     if suffix in PYTHON_SUFFIXES:
         return "python"
-    return "braces" if suffix in BRACE_SUFFIXES else None
+    if suffix in BRACE_SUFFIXES:
+        return "braces"
+    from .code_tree import available, grammar_for
+
+    grammar = grammar_for(suffix)
+    return f"tree:{grammar}" if grammar is not None and available() else None
 
 
 def declarations(content: str, *, language: Optional[Language]) -> tuple[Declaration, ...]:
@@ -136,7 +146,13 @@ def declarations(content: str, *, language: Optional[Language]) -> tuple[Declara
 def _found(content: str, language: Language) -> tuple[Declaration, ...]:
     """The last few files' declarations, so that naming every chunk of one
     recall does not parse the same file over and over."""
-    return _python(content) if language == "python" else _braces(content)
+    if language == "python":
+        return _python(content)
+    if language.startswith("tree:"):
+        from .code_tree import tree_declarations
+
+        return tuple(tree_declarations(content, language[len("tree:"):]))
+    return _braces(content)
 
 
 def code_spans(content: str, target: int = DEFAULT_TARGET, *,
@@ -227,24 +243,17 @@ def _as_chars(content: str, start: int, end: int,
     return (start, end) if end <= len(content) else None
 
 
+#: One line ending: a carriage return with a newline after it is one ending,
+#: so that alternative is tried first.
+_LINE_ENDING = re.compile(r"\r\n|\r|\n")
+
+
 def _line_starts(content: str) -> list[int]:
     """Where every line begins. Line endings are counted as Python's own
     parser counts them: a lone carriage return ends a line, and so does a
     carriage return with a newline after it, which is one ending and not
     two. Offsets stay offsets into the source exactly as it arrived."""
-    starts = [0]
-    index, length = 0, len(content)
-    while index < length:
-        ch = content[index]
-        if ch == "\r":
-            index += 2 if index + 1 < length and content[index + 1] == "\n" else 1
-            starts.append(index)
-        elif ch == "\n":
-            index += 1
-            starts.append(index)
-        else:
-            index += 1
-    return starts
+    return [0, *map(re.Match.end, _LINE_ENDING.finditer(content))]
 
 
 def _lines(content: str, starts: list[int]) -> list[str]:
@@ -269,6 +278,13 @@ def _with_comments(content: str, starts: list[int], line: int) -> int:
     return line
 
 
+#: The nodes a definition can be inside. A definition is a statement, and a
+#: statement stands only in a body: a module's, another statement's, an
+#: exception handler's or a match case's. Expressions never hold one, and
+#: they are most of a tree, so the walk does not go into them.
+_HOLDS_STATEMENTS = (ast.stmt, ast.excepthandler, ast.match_case)
+
+
 def _python(content: str) -> tuple[Declaration, ...]:
     try:
         tree = ast.parse(content)
@@ -284,7 +300,8 @@ def _python(content: str) -> tuple[Declaration, ...]:
         node, prefix, in_class, depth = work.pop()
         for child in ast.iter_child_nodes(node):
             if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                work.append((child, prefix, in_class, depth))
+                if isinstance(child, _HOLDS_STATEMENTS):
+                    work.append((child, prefix, in_class, depth))
                 continue
             if depth >= MAX_DEPTH:
                 continue

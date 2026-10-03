@@ -13,11 +13,18 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from ..core.errors import InvalidInput
 from ..core.timeutil import parse_rfc3339
 
 RRF_K = 60
+#: The recency term's size at age zero, and the age at which it has
+#: halved. Small against a fused rank score so it breaks near-ties only;
+#: an engine can be built with its own (a memory of a life is not a
+#: memory of a build log), and zero turns it off.
 W_RECENCY = 0.005
 RECENCY_HALF_LIFE_DAYS = 30.0
+MAX_RECENCY_WEIGHT = 1.0
+MAX_RECENCY_HALF_LIFE_DAYS = 36_500.0
 PER_EPISODE_CAP = 2
 
 
@@ -37,9 +44,102 @@ def rrf(lanes: Sequence[Sequence[tuple[int, float]]], weights: Sequence[float] |
     return scores
 
 
-def recency_boost(created_at: str, now: str) -> float:
+def validate_recency(weight: float, half_life_days: float) -> None:
+    """A weight is zero or more, at most MAX_RECENCY_WEIGHT; a half-life is
+    a positive number of days, at most a century. Both finite."""
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or not 0 <= weight <= MAX_RECENCY_WEIGHT:
+        raise InvalidInput(f"recency_weight must be a finite number from 0 to {MAX_RECENCY_WEIGHT}")
+    if (isinstance(half_life_days, bool) or not isinstance(half_life_days, (int, float)) or not math.isfinite(half_life_days)
+            or not 0 < half_life_days <= MAX_RECENCY_HALF_LIFE_DAYS):
+        raise InvalidInput(f"recency_half_life_days must be finite and greater than zero, at most {MAX_RECENCY_HALF_LIFE_DAYS:g}")
+
+
+#: The ways recall can fuse its lanes: by rank alone; by each lane's
+#: scores scaled to that lane's own range; or by each lane's scores
+#: placed on the range its own mean and spread describe.
+FUSIONS: tuple[str, ...] = ("rank", "score", "distribution")
+#: How many standard deviations either side of a lane's mean count as
+#: its full range in distribution fusion.
+DISTRIBUTION_SPREAD = 3.0
+
+
+def relative_scores(lanes: Sequence[Sequence[tuple[int, float]]], weights: Sequence[float] | None = None) -> dict[int, float]:
+    """Relative-score fusion: each lane's scores scaled to 0..1 across that
+    lane's own candidates, then added with the lanes' weights.
+
+    A lane whose scores do not spread gives every candidate full credit. A
+    lane that reports no score (NaN, an index that ranks without a cosine)
+    contributes its order instead: first 1, last 0, evenly between. Scales
+    stay per lane, so a cosine and a BM25 score never meet unscaled."""
+    weights = weights or [1.0] * len(lanes)
+    scores: dict[int, float] = {}
+    for lane, weight in zip(lanes, weights):
+        if not lane:
+            continue
+        raw = [score for _, score in lane]
+        if any(math.isnan(score) for score in raw):
+            count = len(lane)
+            scaled = [1.0 if count == 1 else 1.0 - rank / (count - 1) for rank in range(count)]
+        else:
+            low, high = min(raw), max(raw)
+            scaled = [1.0 if high == low else (score - low) / (high - low) for score in raw]
+        for (chunk_id, _), value in zip(lane, scaled):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + weight * value
+    return scores
+
+
+def distribution_scores(lanes: Sequence[Sequence[tuple[int, float]]], weights: Sequence[float] | None = None) -> dict[int, float]:
+    """Distribution-based fusion: each lane's scores placed on the range its
+    own mean and spread describe -- mean minus DISTRIBUTION_SPREAD standard
+    deviations is 0, mean plus that is 1, anything outside clipped -- then
+    added with the lanes' weights.
+
+    Relative-score fusion scales a lane by its two extremes, so one outlier
+    at the top pushes every other candidate toward zero; this scales by the
+    shape of the lane -- a score is placed by how many deviations it sits
+    from the lane's mean -- so an outlier counts as an outlier, not as the
+    yardstick, and the candidates near the mean keep their credit. (Both
+    scalings are blind to a lane's units: a cosine at 0.80 and a BM25 score
+    at 20 are placed by their lane's shape either way.) What follows from
+    it: a lane's top candidate no longer gets full credit by being top --
+    the top of a two-candidate lane sits at two thirds -- so a lane that
+    returns few candidates speaks more quietly than one that returns many,
+    and the lanes' weights apply on top of that. A lane whose scores do not
+    spread gives every candidate full credit; a lane that reports no score
+    contributes its order, first 1, last 0, as relative fusion does."""
+    weights = weights or [1.0] * len(lanes)
+    scores: dict[int, float] = {}
+    for lane, weight in zip(lanes, weights):
+        if not lane:
+            continue
+        raw = [score for _, score in lane]
+        if any(math.isnan(score) for score in raw):
+            count = len(lane)
+            scaled = [1.0 if count == 1 else 1.0 - rank / (count - 1) for rank in range(count)]
+        else:
+            mean = sum(raw) / len(raw)
+            deviation = math.sqrt(sum((score - mean) ** 2 for score in raw) / len(raw))
+            if deviation == 0.0:
+                scaled = [1.0] * len(raw)
+            else:
+                low, high = mean - DISTRIBUTION_SPREAD * deviation, mean + DISTRIBUTION_SPREAD * deviation
+                scaled = [min(1.0, max(0.0, (score - low) / (high - low))) for score in raw]
+        for (chunk_id, _), value in zip(lane, scaled):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + weight * value
+    return scores
+
+
+def recency_boost(created_at: str, now: str, *, weight: float = W_RECENCY,
+                  half_life_days: float = RECENCY_HALF_LIFE_DAYS) -> float:
+    """How much newer memory is favoured: ``weight`` at age zero, halved
+    every ``half_life_days``. Zero weight favours nothing."""
+    if weight == 0:
+        return 0.0
     age_days = max(0.0, (parse_rfc3339(now) - parse_rfc3339(created_at)).total_seconds() / 86400)
-    return W_RECENCY * math.exp(-age_days / RECENCY_HALF_LIFE_DAYS)
+    # A half-life halves: at age half_life_days the term is weight / 2.
+    # (The constant this replaced was a 1/e time constant under the same
+    # name, which halved at 0.69 of the days it named.)
+    return weight * 2.0 ** (-age_days / half_life_days)
 
 
 def order(items: list[Fused]) -> list[Fused]:

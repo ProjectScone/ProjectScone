@@ -1,4 +1,4 @@
-"""An actual two-framework workflow runs and resumes with all sockets blocked."""
+"""Native retrieval runs and resumes with all sockets blocked."""
 import os
 import socket
 
@@ -9,9 +9,7 @@ from scone_memory.backends.sqlite import SqliteDocumentStore, SqliteVectorIndex
 
 
 @pytest.mark.parametrize('mutation',['delete','revision'])
-async def test_framework_run_resume_and_deletion_work_offline(tmp_path,monkeypatch,mutation):
-    pytest.importorskip("langchain_core")
-    pytest.importorskip("llama_index.core")
+async def test_native_run_resume_and_deletion_work_offline(tmp_path,monkeypatch,mutation):
     from scone_memory.agents.retrieval import build_edge_retrieval_runner
     def forbidden(*args,**kwargs):
         raise AssertionError('network must not be used')
@@ -51,8 +49,6 @@ async def test_framework_run_resume_and_deletion_work_offline(tmp_path,monkeypat
 
 
 async def test_package_runner_keeps_authorized_scope_outside_query_control(tmp_path):
-    pytest.importorskip("langchain_core")
-    pytest.importorskip("llama_index.core")
     from scone_memory import InMemoryDocumentStore, InMemoryVectorIndex
     from scone_memory.agents.retrieval import build_edge_retrieval_runner
 
@@ -73,4 +69,52 @@ async def test_package_runner_keeps_authorized_scope_outside_query_control(tmp_p
         finally:
             runner.close()
     finally:
+        await memory.close()
+
+
+async def test_native_runner_preserves_long_queries_limits_and_source_bytes(tmp_path):
+    from scone_memory.agents.retrieval import build_edge_retrieval_runner
+    from scone_memory.core.validation import MAX_QUERY
+
+    database = tmp_path / 'memory.db'
+    memory = await MemoryEngine(SqliteDocumentStore(database), SqliteVectorIndex(database), HashEmbedder()).open()
+    text = 'The café calibration guide is in the observatory wiki.'
+    try:
+        source = await memory.remember('team', text, source='docs/calibration', metadata={'project': 'edge'})
+        await memory.remember('team', 'The observatory also has a calibration checklist.', metadata={'project': 'edge'})
+        runner = build_edge_retrieval_runner(memory, tmp_path / 'workflow.db', key=os.urandom(32),
+                                             space='team', where={'project': 'edge'}, limit=1)
+        try:
+            result = await runner.run('long', space='team', scope={'where': {'project': 'edge'}},
+                inputs={'query': 'Unrelated background. ' * MAX_QUERY + '\nWhere is the café calibration guide?'})
+            assert len(result.results['evidence']) == 1
+            record = result.results['evidence'][0]
+            assert record['episode_id'] == source.episode_id
+            assert record['text'] == text
+            assert record['source'] == 'docs/calibration'
+        finally:
+            runner.close()
+    finally:
+        await memory.close()
+
+
+async def test_native_runner_replays_an_empty_snapshot(tmp_path):
+    from scone_memory.agents.retrieval import build_edge_retrieval_runner
+
+    database = tmp_path / 'memory.db'
+    memory = await MemoryEngine(SqliteDocumentStore(database), SqliteVectorIndex(database), HashEmbedder()).open()
+    runner = build_edge_retrieval_runner(memory, tmp_path / 'workflow.db', key=os.urandom(32),
+                                         space='team', where={'project': 'edge'})
+    try:
+        invocation = {'space': 'team', 'scope': {'where': {'project': 'edge'}}, 'inputs': {'query': 'calibration'}}
+        first = await runner.run('empty', **invocation)
+        assert first.results == {'retrieve': [], 'evidence': []}
+        await memory.remember('team', 'A new calibration guide.', metadata={'project': 'edge'})
+        replay = await runner.run('empty', **invocation)
+        assert replay.results == first.results
+        assert replay.reused_steps == ('retrieve', 'evidence')
+        fresh = await runner.run('fresh', **invocation)
+        assert len(fresh.results['evidence']) == 1
+    finally:
+        runner.close()
         await memory.close()

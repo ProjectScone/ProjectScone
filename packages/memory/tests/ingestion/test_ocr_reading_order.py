@@ -214,7 +214,8 @@ async def test_synchronous_ordering_cannot_return_success_after_document_deadlin
     async def inspect(*args):
         return empty
     async def recognize(*args):
-        return OcrResult(engine='fixture', width=600, height=800, regions=columns())
+        # What the parser's own recognizer returns: the page's result and the layout, none here.
+        return OcrResult(engine='fixture', width=600, height=800, regions=columns()), None
     monkeypatch.setattr(parser, 'inspect', inspect)
     monkeypatch.setattr(parser, '_recognize', recognize)
     assemble = pdf_ocr.assemble_ocr_pdf

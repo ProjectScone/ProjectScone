@@ -10,11 +10,14 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, TypedDict, cast
 
+from ..core import forget_after
 from ..core.affirmations import affirmation_store
+from ..core.timeutil import parse_rfc3339
 from ..core.errors import InvalidInput
 from ..core.models import Episode, Fact, Status
 from ..core.ports import DocumentStore, SourcePage
 from ..core.validation import (KINDS, STATUSES, check_space, normalise_metadata, normalise_term, normalise_time)
+from .profile_buckets import BucketBounds as BucketBounds, BucketRules as BucketRules, ProfileBuckets, bucketed
 
 if TYPE_CHECKING:
     from .engine import MemoryEngine
@@ -49,6 +52,9 @@ class Profile:
     #: read left out, the policy it kept to, and how often each shown
     #: claim was stated again.
     coverage: dict = field(default_factory=dict)
+    #: The claims in static and dynamic buckets, when a reader asked for
+    #: them; None otherwise (see ``memory.profile_buckets``).
+    buckets: Optional[ProfileBuckets] = None
 
 
 #: Facts read for one profile; past this the oldest are not read.
@@ -126,7 +132,8 @@ async def facts(
 
 
 async def profile(engine: "MemoryEngine", space: str, limit: int = 10, *,
-                  policy: Optional[ProfilePolicy] = None) -> Profile:
+                  policy: Optional[ProfilePolicy] = None, buckets: Optional[BucketBounds] = None,
+                  rules: Optional[BucketRules] = None) -> Profile:
     """Who the space is about, without being asked a question: the claims
     that hold, what the space says most often and most recently first,
     each with the evidence it rests on; then its recent activity.
@@ -139,25 +146,29 @@ async def profile(engine: "MemoryEngine", space: str, limit: int = 10, *,
     them would answer with a claim from before a write beside a count
     from after it. That answer was never true at any moment, so it is
     read again; a ledger that will not hold still is said rather than
-    passed off as a settled one."""
+    passed off as a settled one.
+
+    With ``buckets``, the same claims are also placed in static and
+    dynamic buckets by ``rules``, each bucket bounded on its own."""
     check_space(space)
     limit = max(1, min(limit, 50))
     kept = policy or ProfilePolicy()
     answer = None
     for _ in range(ATTEMPTS):
-        answer, settled = await _one_revision(engine, space, limit, kept)
+        answer, settled = await _one_revision(engine, space, limit, kept, buckets, rules or BucketRules())
         if settled:
             return answer
     said = cast(list[str], answer.coverage["reasons"]) if answer else []
     return Profile(static_facts=answer.static_facts if answer else [],
                    dynamic=answer.dynamic if answer else [],
                    recent=answer.recent if answer else [],
+                   buckets=answer.buckets if answer else None,
                    coverage={**(answer.coverage if answer else {}),
                              "reasons": [*said, "ledger_moved_during_read"]})
 
 
-async def _one_revision(engine: "MemoryEngine", space: str, limit: int,
-                        kept: ProfilePolicy) -> tuple[Profile, bool]:
+async def _one_revision(engine: "MemoryEngine", space: str, limit: int, kept: ProfilePolicy,
+                        buckets: Optional[BucketBounds], rules: BucketRules) -> tuple[Profile, bool]:
     """One profile, and whether the ledger held still while it was made."""
     from ..entities.read import read_ledger
 
@@ -165,21 +176,30 @@ async def _one_revision(engine: "MemoryEngine", space: str, limit: int,
     now = engine.clock()
     began = await documents.revision(space)
     read = await read_ledger(engine, space, max_facts=MAX_PROFILE_FACTS)
+    from ..entities.merges import is_decision
+
     active = [fact for fact in read.facts
-              if fact.status == "active" and not fact.excluded and fact.holds_at(now) and kept.keeps(fact)]
+              if fact.status == "active" and not fact.excluded and fact.holds_at(now) and kept.keeps(fact)
+              and not is_decision(fact)]
     # Newest first, and only as many as restatements will be counted for:
     # each count is a read of its own.
     active.sort(key=lambda fact: (fact.valid_from, fact.fact_id), reverse=True)
     said: dict[int, int] = {}
+    restated: dict[int, list[str]] = {}
     affirmations = affirmation_store(documents)
     for fact in active[:MAX_PROFILE_CANDIDATES]:
-        said[fact.fact_id] = len(await affirmations.affirmations(space, fact.fact_id)) if affirmations else 0
+        found = await affirmations.affirmations(space, fact.fact_id) if affirmations else []
+        said[fact.fact_id] = len(found)
+        restated[fact.fact_id] = [affirmation.valid_from for affirmation in found]
     # Newest first, then stably by how often each was stated again, so the
     # newer of two claims said as often still leads.
     ranked = sorted(active[:MAX_PROFILE_CANDIDATES],
                     key=lambda fact: (fact.valid_from, fact.fact_id), reverse=True)
     ranked.sort(key=lambda fact: -said[fact.fact_id])
     shown = ranked[:limit]
+    placed = None if buckets is None else bucketed(
+        ranked, read.facts, restated=restated, rules=rules, bounds=buckets, now=now,
+        many_valued=engine.many_valued, candidates_truncated=len(active) > MAX_PROFILE_CANDIDATES)
     recent = [RecentActivity(e.episode_id, e.content[:200], e.created_at)
               for e in await documents.recent_episodes(space, limit)]
     ended = await documents.revision(space)
@@ -191,6 +211,7 @@ async def _one_revision(engine: "MemoryEngine", space: str, limit: int,
             coverage={"facts_read": len(read.facts), "reasons": list(read.reasons), "policy": kept.record(),
                       "restatements": {str(fact.fact_id): said[fact.fact_id] for fact in shown},
                       "candidates": min(len(active), MAX_PROFILE_CANDIDATES), "revision": began},
+            buckets=placed,
         ),
         began == ended,
     )
@@ -222,7 +243,8 @@ async def cited_episode_ids(documents: DocumentStore, space: str) -> set[int]:
 async def source_page(documents: DocumentStore, space: str, *, before: Optional[int] = None,
                       limit: int = 25, kind: Optional[str] = None,
                       conditions: Mapping[str, object] | None = None,
-                      walk_page: int = SOURCE_WALK_PAGE, walk_reads: int = SOURCE_WALK_READS) -> SourcePage:
+                      walk_page: int = SOURCE_WALK_PAGE, walk_reads: int = SOURCE_WALK_READS,
+                      now: Optional[str] = None) -> SourcePage:
     """Browse retained sources by descending ID, not relevance or source date.
 
     Newer inserts are found by restarting the walk. Deleting the boundary
@@ -235,6 +257,9 @@ async def source_page(documents: DocumentStore, space: str, *, before: Optional[
     matches nothing would otherwise read a whole space to prove it, and
     reaching that bound is reported as more to come rather than as the
     end.
+
+    With ``now``, a source past its ``forget_after`` at that time is passed
+    over like one the conditions reject, and counted in ``past_forget_after``.
     """
     check_space(space)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
@@ -246,27 +271,39 @@ async def source_page(documents: DocumentStore, space: str, *, before: Optional[
     page = getattr(documents, "page_episodes", None)
     if not callable(page):
         raise InvalidInput("this document store does not implement source inventory")
+    judged_at = parse_rfc3339(now) if now is not None else None
+
+    def overdue(episode: Episode) -> bool:
+        return judged_at is not None and forget_after.is_due(episode.metadata, judged_at)
+
+    narrow = None
     if conditions is None:
         rows = await page(space, before, limit + 1, kind)
-        more = len(rows) > limit
-        return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
+        if not any(overdue(row) for row in rows):
+            more = len(rows) > limit
+            return SourcePage(rows[:limit], more, rows[limit-1].episode_id if more else None)
+        # An overdue row would leave the page short: walk and fill it instead.
+    else:
+        from ..retrieval.filters import parse_filter
 
-    from ..retrieval.filters import parse_filter
-
-    narrow = parse_filter(conditions)
+        narrow = parse_filter(conditions)
     kept: list[Episode] = []
-    cursor, reads, ended = before, 0, False
+    cursor, reads, ended, passed_over = before, 0, False, 0
     while len(kept) < limit and reads < walk_reads:
         batch = await page(space, cursor, walk_page, kind)
         reads += 1
         filled = False
         for episode in batch:
             cursor = episode.episode_id
-            if narrow.matches(episode.metadata):
-                kept.append(episode)
-                if len(kept) == limit:
-                    filled = True
-                    break
+            if narrow is not None and not narrow.matches(episode.metadata):
+                continue
+            if overdue(episode):
+                passed_over += 1
+                continue
+            kept.append(episode)
+            if len(kept) == limit:
+                filled = True
+                break
         if filled:
             # Stopped on a full page, not on the end of the store: the
             # rest of this batch has not been looked at yet.
@@ -276,22 +313,26 @@ async def source_page(documents: DocumentStore, space: str, *, before: Optional[
             # the space rather than the end of what was read.
             ended = True
             break
-    return SourcePage(kept, not ended, None if ended else cursor)
+    return SourcePage(kept, not ended, None if ended else cursor, passed_over)
 
 
-async def episodes(documents: DocumentStore, space: str, where: Mapping[str, str], limit: Optional[int] = None) -> list[Episode]:
+async def episodes(documents: DocumentStore, space: str, where: Mapping[str, str], limit: Optional[int] = None,
+                   *, now: Optional[str] = None) -> list[Episode]:
     """The episodes whose metadata matches every ``where`` pair, oldest
     first by (created_at, episode_id); with ``limit``, the newest N of
     them in that same order. This is a walk over the space's episodes,
-    fine for a session's turns, not a query language."""
+    fine for a session's turns, not a query language. With ``now``, an
+    episode past its ``forget_after`` is left out before the limit."""
     check_space(space)
     clean = normalise_metadata(where)
     if not clean:
         raise InvalidInput("episodes() needs at least one where pair")
     counts = await documents.counts(space)
+    moment = parse_rfc3339(now) if now is not None else None
     found = [
         e for e in await documents.recent_episodes(space, max(counts.episodes, 1))
         if all(e.metadata.get(k) == v for k, v in clean.items())
+        and (moment is None or not forget_after.is_due(e.metadata, moment))
     ]
     found.sort(key=lambda e: (e.created_at, e.episode_id))
     return found[-limit:] if limit else found

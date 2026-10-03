@@ -16,9 +16,13 @@ from .agent_usage import ModelTokenUsage, ToolTokenUsage
 from .agent_results import AgentResult, HandoffHop, HandoffResult, HumanOutput, ModelOutput, TaskResult
 from .agent_evidence import EvidencePacket
 from .agents import AgentClient, PlanPage, RunPage
+from .conversations import (ConversationCapabilities, ConversationClient, ConversationConflict, EventPage, Persona,
+                            PersonaRef, ReplyDelta, ReplyEnded, ReplyGap, ReplyStream, ReplyTerminal, Session,
+                            SessionEvent, SessionPage, TranscriptEpisode, TranscriptPage, TurnPage, TurnReceipt)
 from .agent_models import (AgentChoice, ToolChoice, HandoffAgent, HandoffPlan, HumanInput, ModelChoice, ModelTask,
                            RunPolicy, RunRequest, RunStatus, SavedPlan, TaskPlan)
 from .client import DEFAULT_BASE_URL, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT, Scone
+from .chat_imports import ChatImportReceipt, ChatImports
 from .document_jobs import DocumentJobs, DocumentPage
 from .directory_sync import DirectorySyncRuns
 from .directory_models import (SyncCollection, SyncSpec, SyncRecord, SyncStatus, SyncPage,
@@ -30,6 +34,7 @@ from .video_models import VideoCatalogue, VideoFrame, VideoRegion, VideoInterpre
 from .errors import SconeError
 from .models import Added, Fact, Memory, Profile, Recall, Status, Tag
 
+from .agent_traps import TrapGraph, TrapNode, TrapEdge
 from .agent_events import ProgressEvent, ProgressGap, CollectionEvent
 from .agent_answer import AnswerStream, Ended, Gap, Terminal, TextDelta, Withdrawn
 from .agent_history import HistoryEntry, HistoryPage, HistoryStream
@@ -41,6 +46,10 @@ __all__ = [
     "VideoDocuments", "VideoCatalogue", "VideoFrame", "VideoRegion", "VideoInterpretation",
     "Capabilities",
     "AgentClient",
+    "ConversationClient", "ConversationCapabilities", "ConversationConflict", "Session", "SessionPage", "SessionEvent",
+    "EventPage", "TurnReceipt", "TurnPage", "TranscriptPage", "TranscriptEpisode", "Persona", "PersonaRef",
+    "ReplyStream", "ReplyDelta", "ReplyGap", "ReplyTerminal", "ReplyEnded",
+    "TrapGraph", "TrapNode", "TrapEdge",
     "ProgressEvent", "ProgressGap", "CollectionEvent", "HistoryEntry", "HistoryPage", "HistoryStream",
     "AnswerStream", "TextDelta", "Withdrawn", "Gap", "Terminal", "Ended",
     "InputRecord", "ApprovalCall", "ToolApprovalRecord", "ToolApprovalActivation", "AgentToolContinuation",
@@ -49,7 +58,7 @@ __all__ = [
     "AgentResult", "HandoffHop", "HandoffResult", "HumanOutput", "ModelOutput", "TaskResult", "EvidencePacket",
     "DirectorySyncRuns", "SyncCollection", "SyncSpec", "SyncRecord", "SyncStatus", "SyncPage",
     "SyncSourceOutcome", "SyncScanIssue", "SyncOutcome", "SyncOutcomePage",
-    "DocumentJobs", "DocumentPage", "DocumentFormat", "DocumentFormats", "DocumentAttachment", "DocumentRequest", "DocumentResult",
+    "ChatImports", "ChatImportReceipt", "DocumentJobs", "DocumentPage", "DocumentFormat", "DocumentFormats", "DocumentAttachment", "DocumentRequest", "DocumentResult",
     "DocumentSpec", "DocumentStatus", "DocumentStored", "ParserLimits", "PdfOcr",
     "PlanPage", "RunPage", "AgentChoice", "ToolChoice", "HandoffAgent", "HandoffPlan", "HumanInput",
     "ModelChoice", "ModelTask", "RunPolicy", "RunRequest", "RunStatus", "SavedPlan", "TaskPlan",

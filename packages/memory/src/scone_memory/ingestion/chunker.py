@@ -7,6 +7,11 @@ product; ``byte_spans`` converts. Cuts prefer paragraph breaks, then
 sentence ends, then whitespace, and only fall back to a hard cut inside
 a word when a single token is longer than the target. Short episodes
 are one chunk; a chunk is never empty.
+
+Scripts written without spaces end a sentence at a full-width stop with
+nothing after it, and pause at a full-width comma or enumeration mark.
+Those are sentence ends and pauses here too, so Chinese and Japanese
+prose is not cut at the byte target inside a word.
 """
 
 from __future__ import annotations
@@ -54,9 +59,25 @@ def byte_spans(content: str, spans: list[Span]) -> list[Span]:
     that ``content.encode()[start:end].decode()`` equals the chunk text."""
     if content.isascii():
         return spans
-    offsets = [0]
-    for ch in content:
-        offsets.append(offsets[-1] + len(ch.encode()))
+    size = len(content)
+    points = sorted({point for span in spans for point in (span.start, span.end)} | {size})
+    if points[0] < 0 or points[-1] > size:
+        # Not offsets into this text: index a table of every character, so
+        # a negative offset counts from the end and one past it is refused,
+        # as they always were.
+        table = [0]
+        for ch in content:
+            table.append(table[-1] + len(ch.encode()))
+        return [Span(table[s.start], table[s.end]) for s in spans]
+    # Only where a span starts or ends is a byte offset needed: encode the
+    # stretch up to each such point once, running on to the end so that a
+    # character UTF-8 cannot hold is refused wherever it stands.
+    offsets: dict[int, int] = {}
+    at = previous = 0
+    for point in points:
+        at += len(content[previous:point].encode())
+        offsets[point] = at
+        previous = point
     return [Span(offsets[s.start], offsets[s.end]) for s in spans]
 
 
@@ -86,8 +107,15 @@ def _best_cut(text: str, start: int, limit: int) -> int:
     for marker in (". ", "! ", "? ", ".\t", ".\n", "!\n", "?\n",
                    ".\r\n", "!\r\n", "?\r\n"):
         idx = window.rfind(marker)
+        while idx >= 0 and marker.startswith('.') and _name_initial(text, floor + idx):
+            idx = window.rfind(marker, 0, idx)
         if idx > best:
             best = idx + len(marker)
+    # A full-width stop needs nothing after it; a closing quote or bracket
+    # straight after it stays with its sentence.
+    stop = _last_full_width(window, _FULL_STOPS)
+    if stop > best:
+        best = stop
     if best != -1:
         return floor + best
     # A lone newline still beats arbitrary whitespace: in a list or a
@@ -100,9 +128,43 @@ def _best_cut(text: str, start: int, limit: int) -> int:
         if window[i].isspace():
             idx = i
             break
+    pause = _last_full_width(window, _FULL_PAUSES)
+    if pause > idx + 1:
+        return floor + pause
     if idx != -1:
         return floor + idx + 1
     return limit
+
+
+def _name_initial(text: str, period: int) -> bool:
+    """Do not prefer a capital initial before another capitalized name as a cut."""
+    if (period < 1 or not text[period - 1].isalpha() or not text[period - 1].isupper()
+            or (period > 1 and text[period - 2].isalpha())):
+        return False
+    after = period + 1
+    while after < len(text) and text[after].isspace():
+        after += 1
+    return after < len(text) and text[after].isalpha() and text[after].isupper()
+
+
+#: Sentence ends in scripts written without spaces.
+_FULL_STOPS = "。！？"
+#: Pauses in them: a full-width comma, enumeration mark, semicolon or colon.
+_FULL_PAUSES = "，、；："
+#: Closing quotes and brackets that belong to the sentence before them.
+_FULL_CLOSERS = "」』）】〕》\"'"
+
+
+def _last_full_width(window: str, marks: str) -> int:
+    """The position just after the last of ``marks`` in ``window`` and any closers
+    straight after it, or -1 when there is none."""
+    for index in range(len(window) - 1, -1, -1):
+        if window[index] in marks:
+            end = index + 1
+            while end < len(window) and window[end] in _FULL_CLOSERS:
+                end += 1
+            return end
+    return -1
 
 
 def _merge_tail(spans: list[Span], text: str) -> list[Span]:

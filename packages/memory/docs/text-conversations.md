@@ -82,6 +82,33 @@ the conversation. A submitted user message can remain after a cancelled/failed
 reply. An uncertain store acknowledgment must not be automatically retried.
 Cooperative cleanup can exceed a deadline; it is not hard process termination.
 
+## Turn latency
+
+Every completed turn, text or voice, records one `conversation_turn`
+event in the evidence log (the log recall's timings go to): the session
+and turn ids, the mode, and `latency_ms` measured from the moment the
+question was heard -- a transcript settled, or a text turn arrived --
+with the process clock: `context` (memory prepared for the turn),
+`first_token` (the first public text of the answer), `first_audio` (the
+first audio sent to the listener; voice only) and `total` (the reply
+recorded). A moment that did not come is absent, never zero: a text
+turn has no first audio, and a text turn nobody streams has no first
+token. A turn that failed records no event at all: the timing is noted
+once the reply stands in memory, outside the turn's own deadline, so
+these figures are over completed turns and say nothing about failures
+(the `remember` events with an `error` field do). Recording the timing
+never undoes the turn: a log that refuses it, or takes more than two
+seconds, is warned about and the turn stands; a turn being cancelled is
+not noted. With no event log attached nothing is recorded.
+
+`GET /v1/metrics` reads the events back as `conversation.<mode>.turns`
+and `conversation.<mode>.latency_ms.<moment>.p50` / `.p95` (nearest
+rank), each with its `n` and the definition above; they are operational
+timings on the machine that served the turns and say nothing about
+answer quality. The leading voice framework reports these figures per
+turn as it goes; here they are evidence in the log, so the same figure
+can be read a week later over the window it came from.
+
 ## Memory preparation
 
 `TextConversation` and `MemoryContext` accept `where`, `kind`,
@@ -108,6 +135,18 @@ carry no `query_formulation`. The same excerpting applies to
 `integrations.chat.recall_context` and the LangChain and LlamaIndex retrievers;
 direct `recall`, HTTP, MCP and CLI calls still refuse over-long queries.
 
+`MemoryContext(..., reading_order="ends")` and
+`TextConversation(..., reading_order="ends")` render the chosen passages with
+the best at both ends of the block and the weakest in the middle (rank 1
+first, rank 2 last, rank 3 second, inward), for a model that attends least to
+the middle of a long context; the receipt's `reading_order` names the
+arrangement, and `scone_memory.retrieval.reading_order.ranked(references,
+"ends")` restores the ranked order from the references, which follow the
+block. Passages are still chosen in rank order under the byte budget; only
+their order in the block changes. Off by
+default (`"ranked"`): the benefit is the literature's ("lost in the middle"),
+not yet measured on this engine.
+
 `MemoryContext(..., neighbor_chunks=1)` and
 `TextConversation(..., neighbor_chunks=1)` optionally read one stored chunk on
 each side of a ranked passage. The radius accepts 0..4 and defaults to 0.
@@ -121,6 +160,23 @@ A window failure preserves ordinary ranked evidence; stale or invalid added
 evidence is discarded. This option does not expand adaptive selections or
 recent-history overviews. Tool conversations use their bounded `read_memory`
 operation instead. Added context is not proof of relevance or answer accuracy.
+
+`TextConversation(..., standing_profile=ProfilePolicy())` puts the space's
+profile claims in front of every turn, whatever recall found, bounded by
+`profile_limit` and `max_profile_bytes`; the receipt names the claim ids
+(`profile_fact_ids`), the bytes, and what the bound left out. With
+`profile_buckets=BucketBounds(include="static" | "dynamic" | "both")` the
+block instead carries the chosen buckets (`schema_version` 2, keys `static`
+and/or `dynamic`), placed by the engine's `profile_bucket_rules` and bounded
+per bucket by the `BucketBounds` counts and bytes (see
+[static and dynamic buckets](retrieval-and-storage.md#static-and-dynamic-buckets));
+each claim carries the `rule` that placed it. The receipt's
+`profile_buckets` gives, per bucket, the ids shown, each id's rule, and
+`shown`, `omitted`, `bytes` and `cut`; `profile_truncated` is true when
+either bucket was cut. `profile_buckets` needs `standing_profile` and is
+refused beside a non-default `profile_limit` or `max_profile_bytes`, which
+bound only the unbucketed block. Off by default: without `profile_buckets`
+the block is as it was.
 
 Ranked queries with recalled claims can expand bounded relationships inside the
 same scope. With `structured_paths=True` (the default), complete ordered paths

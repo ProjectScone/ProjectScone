@@ -36,10 +36,36 @@ for item in recall.items:
             print(page.number, region.text, region.box, region.start, region.end)
 ```
 
+## Pages scanned the wrong way up
+
+A page scanned upside down or on its side is read as noise: measured on a
+rendered page turned 180 degrees, Tesseract returned "aun Ul 8dJJO INOqUeY".
+Page segmentation mode 1 turns a sideways page but not an upside-down one.
+`TesseractOcr(orientation=True)` (`SCONE_DOCUMENT_OCR_ORIENTATION=1` for the
+hosted document OCR) runs Tesseract's orientation detection (`--psm 0`, which
+needs the `osd` language data) before reading a page. When the detection is
+at least `min_orientation_confidence` sure (2.0 by default) that the page is
+turned a quarter, half or three quarters, the page is turned in a bounded
+child process, read, and every box is given back in the page as it was given,
+so regions still match the page's own geometry. The engine name says what
+happened: `:rotated90`, `:rotated180` or `:rotated270`; `:osd-upright`;
+`:osd-unsure` when a turn was detected below the confidence; `:osd-unknown`
+when the detection could not judge, as on a page with too few characters.
+Without the `osd` data installed the detection always fails, so a failed
+detection checks the installed languages once and, when `osd` is missing,
+refuses the page with that reason instead of reading every page as one it
+could not judge. A language list too long to fit the engine name with the
+orientation suffix (96 characters) is refused when the engine is built.
+Each checked page costs one more Tesseract run. With the setting on, the
+hosted OCR identity used by document jobs and directory sync ends
+`:orientation`, so documents extracted before are extracted again.
+
 ## Coverage and geometry
 
 The default `missing_text` mode preserves native text and only recognizes pages
-without extractable text. A page with a short text layer over a scan is therefore
+without extractable text, or whose text layer is unreadable: mostly private-use
+code points, `(cid:N)` runs, replacement characters or control bytes, the way a
+font without a usable Unicode map extracts. A page with a short text layer over a scan is therefore
 not automatically recognized. Choose `all_pages` explicitly to replace all native
 text with OCR; this mode reads page metadata without extracting discarded text.
 The default text-only `PypdfParser` still requires an existing text layer.
@@ -135,14 +161,130 @@ new run id; extraction/indexing retries preserve the chosen order and source
 mapping. Page OCR checkpoints retain the original recognizer observations,
 then deterministically rebuild the ordered text on resume.
 
+## Label the page's regions
+
+Every recognized page's regions, and every text-layer page laid out in
+reading order or kept whole with a table in it, carry a `label` saying
+what the region is, from one
+vocabulary: `title`, `heading`, `paragraph`, `list`, `table`, `figure`,
+`caption`, `header`, `footer`, `page_number`, `footnote`, `formula`,
+`code`, `sidebar`, `reference`. The page's `labels` receipt (and the
+segment's `layout_labels` metadata) says where they came from.
+
+Without a layout engine the labels are inferred (`labels-v1`) from what
+geometry and text can tell, and the receipt names the rules that fired:
+a page number by its shape in the page's top or bottom strip; a running
+`header` or `footer` by a line recurring at the edge of three pages or
+more, every page but the first it appears on; a `table` by the aligned
+grid the table inference finds; a `list` by lines opening with a bullet,
+a number or a letter and its mark, two or more of them; a `footnote` by
+its mark at the bottom of the page; a `title` on the first page, in its
+top third, by a line 1.4 times the page's median line height (or, on a
+text layer's grid, which has no sizes, by its isolation); a `heading` by
+1.25 times the median height or, when short and unpunctuated, by the
+space above and below it. Everything else is a `paragraph`. A figure, a
+formula, a caption or a sidebar is only an engine's to say. A page past
+the line bound is left unlabelled and says so.
+
+With a layout engine, each region takes the label of the engine box it
+lies in most (`engine-boxes-v1`); a region outside every box is
+unlabelled and counted. The seam is `ocr.types.LayoutEngine`: `analyse(
+image) -> LayoutResult` of labelled, normalized boxes. The host runs one
+as an executable that reads a PNG on standard input and answers in JSON
+lines -- the page's size, then one region per line with `label`, a
+pixel `box`, and optional `score` and `order` -- configured by
+`SCONE_DOCUMENT_LAYOUT_EXECUTABLE`. Labels may be this vocabulary's or
+PP-Structure's and deepdoc's words (`doc_title`, `paragraph_title`,
+`text`, `figure caption`, `vision_footnote`, `equation`, …); a label
+with no name here is dropped and counted. A size that does not match the
+page, a box off the page or a line that is not JSON refuses the page.
+The engine runs under the page's deadline; its answer is kept in the
+page's OCR checkpoint and in the checkpoint binding, so pages recognized
+without an engine are not reused with one. `ocr_choices` says `layout:
+engine` or `layout: inferred`.
+
 ## Inspect possible tables without repeating OCR
 
-The original `aligned-rows-v1` strategy groups retained OCR rectangles into
+The `aligned-rows-v2` strategy groups retained OCR rectangles into
 candidate cells and checks for common column gaps across at least three
-consecutive rows. It returns `geometry_inferred` results; it does not identify
-semantic headers, merged or multi-line cells, or missing values. Aligned prose
-can resemble a table, and irregular tables can remain unassigned. This is an
-inspection feature, not table-aware indexing or an accuracy benchmark.
+consecutive rows. A currency sign on its own, set apart from the number
+to its right as a statement sets them, is that number's cell, and the
+gutter before the cell runs to the number. A row of fewer cells beside
+the full rows -- a title across the table, a "Total" beside two numbers
+-- is read as cells that span the grid's columns, each over the
+contiguous columns its own width covers (`column_span`: a column inside
+the cell or the cell inside it, or the two overlapping by half of the
+narrower and a tenth of the wider), judged against the full rows'
+column extents; nothing narrower is widened, and a row that fits no
+column stays unassigned. The rows of fewer cells just above the first
+full row are the grid's own too -- a title across it, a caption over
+its value columns ("Three Months Ended March 31," with the years below,
+placed loosely: a caption centred over two columns falls short of half
+of the last, so a tenth of its own width claims one), the years over a
+blank label column -- placed the nearest first, each just above the one
+below, up to four (`MAX_HEADER_ROWS`); a run of two rows too short to
+be a grid is read that way as well, so a row of years displaced by the
+three-column row beneath it heads that grid. A lone cell from the first
+column closed by a colon is a section's heading ("Basic net loss per
+share:") when it is short and opens with a capital or a digit, and the
+chain runs through it to the years above; a sentence's tail on a line
+of its own ("were as follows:") is not. A header's cells run over the
+columns in order, so a cell of such a row that reaches no band -- a
+column's name set beside a narrow column of digits ("Useful Life -
+Years" over single digits) -- claims the one unclaimed band between
+its neighbours' claims, the row's ends counting as claims; a lone cell
+over no band, or one with two bands to choose from, is not placed. Prose is kept out by its
+shape: a sentence above the grid (a citation like `[28]` closing it
+counts) is not its title, nor is a wrapped word over a later column
+(a lone cell over one column short of the first); at the grid's foot a
+row opening with
+a footnote's mark or holding a line of prose (a sentence, six words or
+forty characters) is its note or the prose below it, not its last row,
+while a total, a subtotal across its numbers or a wrapped word is; three rows of
+fewer cells in a row are prose beside the grid, which ends before them;
+and two columns of lines about as wide as each other are prose side by
+side, not a table of two columns (a notation list's first column is
+narrow and ragged); a list aligns as a grid of two as well, and is not
+one: a column of one bullet glyph on every row beside its items, or a
+column of enumerators with their closing punctuation (`1.`, `(a)`,
+`(ii)`, `2.1.`, `32.1*`), or of dashes or asterisks, beside lines of
+prose, is a list, while enumerators, dashes (none) or asterisks (a
+note) beside short labels, or plain numbers, are a table's first
+column. All stay unassigned, and a bulleted or enumerated list is then
+labelled `list` by the label rules, which read the same marks. The layout's `notes` say `header_rows_limit`
+when the rows above a grid were read up to `MAX_HEADER_ROWS` and a row
+above them was not. It returns `geometry_inferred` results; it does not identify
+semantic headers, multi-line cells or missing values. Aligned prose can
+resemble a table, and irregular tables can remain unassigned. A layout
+stored under `aligned-rows-v1` is one read before spans were.
+
+A page's candidates also reach the document: the segment of a
+recognized page, or of a text-layer page whose runs the rules read as
+a table (laid out in columns or kept whole), carries them as
+`table_cells` the way the DOCX and HTML readers give
+theirs (`DocumentTableCell` with row, column, `column_span`, and a byte
+span of the segment's text holding exactly the cell's words), located
+`page:N/table:T/cell:R,C`, and validated the same way. Only the regions
+labelled `table` are read for cells; a page whose labels name no table
+carries none, whatever a grid over its lines would propose. The cells
+come in the order the page's text reads them, each keeping its row and
+column, so a table a recognizer read column by column cites its columns
+in turn; a table whose cells do not sit together in the page's text is
+left out rather than cited wrongly, and the segment's `tables` and
+`tables_unreadable` metadata count both. A cell's text is the page's
+bytes, spaces and all, so a statement's `$` stands apart from its number
+as on the page (the table query reads `$        2,903` as it reads
+`$2,903`). A table's header is read from its shape: the first row
+filling every column, or every column but the first (a statement's
+years over its blank label column), is the header when none of its
+cells is a value -- a number, a loss in parentheses, a percentage or a
+dash, while a bare year is a label -- and a column below it is mostly
+values; its cells say `is_header`, every cell below carries a
+`column` reference to the header over it, and the segment says
+`header_basis: pdf_first_row` and counts `tables_headed`, so the table
+query names the columns. A table of words alone gets no header, as
+nothing tells one from a first row. No row span or empty cell is
+invented.
 
 ```python
 from scone_memory.ocr import infer_tables

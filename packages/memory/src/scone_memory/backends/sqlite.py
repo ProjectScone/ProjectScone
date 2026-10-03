@@ -16,9 +16,14 @@ import sqlite3
 import time
 from array import array
 from collections.abc import Iterator
+from operator import mul
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import AsyncIterator, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
 
 from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_links
 from ..core.errors import SconeError
@@ -26,8 +31,10 @@ from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
 from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
 from ..core.vector_writers import VectorsNotComparable, after_write, vouches
+from .location import local_identity
 from .validation import validate_vector
 from .sqlite_fact_search import initialize_fact_search, search_fact_rows
+from .sqlite_lexical import exact_form_rank, index_lexical_chunk, initialize_lexical, lexical_match, synchronize_lexical
 from ..core.space_deletion import (
     SpaceDeletion, decode_deletion, encode_deletion, deletion_key, deletion_page,
 )
@@ -55,6 +62,20 @@ CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
     INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text); END;
 CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.id, old.text); END;
+CREATE TABLE IF NOT EXISTS chunk_context (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    text TEXT NOT NULL);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_context_fts USING fts5(text, content='chunk_context', content_rowid='chunk_id');
+CREATE TRIGGER IF NOT EXISTS chunk_context_ai AFTER INSERT ON chunk_context BEGIN
+    INSERT INTO chunk_context_fts(rowid, text) VALUES (new.chunk_id, new.text); END;
+CREATE TRIGGER IF NOT EXISTS chunk_context_ad AFTER DELETE ON chunk_context BEGIN
+    INSERT INTO chunk_context_fts(chunk_context_fts, rowid, text) VALUES ('delete', old.chunk_id, old.text); END;
+CREATE TABLE IF NOT EXISTS chunk_questions (chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE, text TEXT NOT NULL);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_questions_fts USING fts5(text, content='chunk_questions', content_rowid='chunk_id');
+CREATE TRIGGER IF NOT EXISTS chunk_questions_ai AFTER INSERT ON chunk_questions BEGIN
+    INSERT INTO chunk_questions_fts(rowid, text) VALUES (new.chunk_id, new.text); END;
+CREATE TRIGGER IF NOT EXISTS chunk_questions_ad AFTER DELETE ON chunk_questions BEGIN
+    INSERT INTO chunk_questions_fts(chunk_questions_fts, rowid, text) VALUES ('delete', old.chunk_id, old.text); END;
 CREATE TABLE IF NOT EXISTS facts (
     id INTEGER PRIMARY KEY, space TEXT NOT NULL,
     subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL,
@@ -172,6 +193,7 @@ CREATE TRIGGER fact_writes_delete AFTER DELETE ON facts BEGIN
   ON CONFLICT(space) DO UPDATE SET writes = writes + 1; END;
 COMMIT;""")
     initialize_fact_search(conn)
+    initialize_lexical(conn)
     keep_affirmation_links(conn)
     return conn
 
@@ -384,6 +406,9 @@ class SqliteDocumentStore:
         self.path = path
         self.conn = connect(path)
         self._holding = False
+        #: Per space, chunks the lexical index had not reached after the last text search.
+        self._lexical_behind: dict[str, int] = {}
+        self._exact_forms_cut: dict[str, int] = {}
 
     async def close(self) -> None:
         self.conn.close()
@@ -429,6 +454,8 @@ class SqliteDocumentStore:
             r["id"] for r in self.conn.execute("SELECT id FROM chunks WHERE episode_id = ? AND space = ?", (episode_id, space))
         ]
         with self.conn:
+            # chunk_context and chunk_questions go with their chunk by cascade,
+            # and the cascade fires each index's delete trigger (proven by mutation).
             self.conn.execute("DELETE FROM chunks WHERE episode_id = ? AND space = ?", (episode_id, space))
             self.conn.execute("DELETE FROM episodes WHERE id = ? AND space = ?", (episode_id, space))
         return removed
@@ -450,6 +477,7 @@ class SqliteDocumentStore:
                     (next_id, n.episode_id, n.space, n.ordinal, n.start, n.end, n.text, n.created_at),
                 )
                 out.append(Chunk(chunk_id=next_id, **n.__dict__))
+                index_lexical_chunk(self.conn, next_id, n.space, n.text)
                 next_id += 1
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_chunk_id', ?)", (str(next_id),))
             self.conn.execute("COMMIT")
@@ -497,21 +525,109 @@ class SqliteDocumentStore:
     #: This store applies a metadata filter itself, so the lanes
     #: do not have to be widened to compensate for it.
     narrows_metadata = True
+    #: This store keeps a context index beside chunk text (see ContextIndex).
+    context_lane = True
+    #: This store keeps the questions each chunk answers (see QuestionIndex).
+    question_lane = True
+    #: This store can search a term's family by prefix (see PrefixSearch).
+    prefix_terms = True
 
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
-        terms = tokenize(query)
-        if not terms:
+        return await self.search_terms(space, query, limit, filter, prefixes=())
+
+    def lexical_backlog(self, space: str) -> int:
+        """Chunks of ``space`` written but not yet in the lexical index after
+        the last text search: what the text lane could not see then."""
+        return self._lexical_behind.get(space, 0)
+
+    async def sync_text_index(self, space: str) -> tuple[int, int]:
+        """Advance a migrated/external-write index one bounded batch.
+
+        Return (indexed, remaining). Hosts can finish explicit preparation
+        before accepting queries without using a user's search as warmup.
+        """
+        indexed, remaining = synchronize_lexical(self.conn, space)
+        self._lexical_behind[space] = remaining
+        return indexed, remaining
+
+    def exact_forms_cut(self, space: str) -> int:
+        """Query words the last family search of ``space`` left at their
+        family's weight because more than ``MAX_EXACT_FORMS`` would have moved."""
+        return self._exact_forms_cut.get(space, 0)
+
+    async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
+                           prefixes: Sequence[str], exact_forms: bool = False) -> list[tuple[int, float]]:
+        # The lane ranks our own tokens (see sqlite_lexical), so it agrees
+        # with the in-memory lane on every script and every accent.
+        self._exact_forms_cut[space] = 0
+        match = lexical_match(query, prefixes)
+        if match is None:
             return []
-        match = " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
+        _, behind = synchronize_lexical(self.conn, space)
+        self._lexical_behind[space] = behind
+        tables, rank, joins, parameters, cut = (exact_form_rank(self.conn, query, prefixes) if exact_forms
+                                                else ("", "bm25(chunk_lexical_fts)", "", [], 0))
+        self._exact_forms_cut[space] = cut
+        # CROSS JOIN keeps the space's chunks inside the index scan. Left to
+        # itself, with the exact-form tables SQLite started from the chunks and
+        # matched the expression again for each one, expanding every prefix
+        # per row: a minute for one query on 45,000 chunks.
         sql = (
-            "SELECT c.id AS id, bm25(chunks_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
-            " FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
+            f"{tables}SELECT c.id AS id, {rank} AS rank, e.tags AS tags, e.metadata AS metadata"
+            " FROM chunk_lexical_fts JOIN chunk_lexical cl ON cl.chunk_id = chunk_lexical_fts.rowid"
+            " CROSS JOIN chunks c ON c.id = cl.chunk_id"
             " JOIN episodes e ON e.id = c.episode_id"
-            " WHERE chunks_fts MATCH ? AND c.space = ?"
+            f"{joins}"
+            " WHERE chunk_lexical_fts MATCH ? AND c.space = ?"
         )
-        params: list[object] = [match, space]
+        return self._ranked(sql, [*parameters, match, space], filter, limit)
+
+    async def index_context(self, space: str, chunk_id: int, text: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM chunk_context WHERE chunk_id = ?", (chunk_id,))
+            self.conn.execute("INSERT INTO chunk_context(chunk_id, text) VALUES (?, ?)", (chunk_id, text))
+
+    async def search_context(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        match = _match(query)
+        if match is None:
+            return []
+        sql = (
+            "SELECT c.id AS id, bm25(chunk_context_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
+            " FROM chunk_context_fts JOIN chunk_context cc ON cc.chunk_id = chunk_context_fts.rowid"
+            " JOIN chunks c ON c.id = cc.chunk_id"
+            " JOIN episodes e ON e.id = c.episode_id"
+            " WHERE chunk_context_fts MATCH ? AND c.space = ?"
+        )
+        return self._ranked(sql, [match, space], filter, limit)
+
+    async def index_questions(self, space: str, chunk_id: int, questions: Sequence[str]) -> bool:
+        with self.conn:
+            # Checked in the same transaction as the write: a chunk forgotten
+            # while the model was answering takes no question.
+            if self.conn.execute("SELECT 1 FROM chunks WHERE id = ? AND space = ?", (chunk_id, space)).fetchone() is None:
+                return False
+            self.conn.execute("DELETE FROM chunk_questions WHERE chunk_id = ?", (chunk_id,))
+            if questions:
+                self.conn.execute("INSERT INTO chunk_questions(chunk_id, text) VALUES (?, ?)", (chunk_id, "\n".join(questions)))
+        return True
+
+    async def search_questions(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        match = _match(query)
+        if match is None:
+            return []
+        sql = (
+            "SELECT c.id AS id, bm25(chunk_questions_fts) AS rank, e.tags AS tags, e.metadata AS metadata"
+            " FROM chunk_questions_fts JOIN chunk_questions cq ON cq.chunk_id = chunk_questions_fts.rowid"
+            " JOIN chunks c ON c.id = cq.chunk_id"
+            " JOIN episodes e ON e.id = c.episode_id"
+            " WHERE chunk_questions_fts MATCH ? AND c.space = ?"
+        )
+        return self._ranked(sql, [match, space], filter, limit)
+
+    def _ranked(self, sql: str, params: list[object], filter: TextFilter, limit: int) -> list[tuple[int, float]]:
+        """``sql`` narrowed by every scope condition, ordered by rank, settled after LIMIT."""
         if filter.as_of:
             sql += " AND c.created_at <= ?"
             params.append(filter.as_of)
@@ -968,6 +1084,10 @@ class SqliteDocumentStore:
 
 class SqliteVectorIndex:
     name = "sqlite"
+    #: Metadata conditions are evaluated here, against the row's own
+    #: metadata, so a condition reaches every stored vector rather than
+    #: the best few a post-filter then thins.
+    narrows_conditions = True
 
     def __init__(self, path: str | Path = "~/.scone-memory/memory.db") -> None:
         self.path = path
@@ -979,6 +1099,13 @@ class SqliteVectorIndex:
 
     async def close(self) -> None:
         self.conn.close()
+
+    @property
+    def location(self) -> tuple[object, ...] | None:
+        """Where the rows live: the database file, or None for an in-memory database, which no other handle reaches."""
+        if ":memory:" in str(self.path):
+            return None
+        return (local_identity(Path(self.path).expanduser()),)
 
     async def ensure(self, dim: int) -> None:
         if self.dim is not None and self.dim != dim:
@@ -1013,13 +1140,14 @@ class SqliteVectorIndex:
         as_of: Optional[str] = None,
         tags: tuple[str, ...] = (),
         where: Mapping[str, str] | None = None,
+        conditions: "Filter | None" = None,
     ) -> list[tuple[int, float]]:
         validate_vector(vector, self.dim)
-        return self._scored(space, vector, limit, as_of, tags, where)
+        return self._scored(space, vector, limit, as_of, tags, where, conditions)
 
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
-                        writer: str) -> list[tuple[int, float]]:
+                        writer: str, conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         """Search only if the record vouches for ``writer``, in one read snapshot.
 
         WAL gives a read transaction one consistent view, so a write that
@@ -1034,34 +1162,56 @@ class SqliteVectorIndex:
             if not vouches(record, writer, self._holds_vectors()):
                 raise VectorsNotComparable(
                     f"stored vectors are recorded as {record[0] if record else 'unrecorded'}, not {writer}")
-            return self._scored(space, vector, limit, as_of, tags, where)
+            return self._scored(space, vector, limit, as_of, tags, where, conditions)
         finally:
             self.conn.commit()
 
     def _scored(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str],
-                tags: tuple[str, ...], where: Mapping[str, str] | None) -> list[tuple[int, float]]:
+                tags: tuple[str, ...], where: Mapping[str, str] | None,
+                conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         sql = "SELECT chunk_id, tags, metadata, vector FROM vectors WHERE space = ?"
         params: list[object] = [space]
         if as_of:
             sql += " AND created_at <= ?"
             params.append(as_of)
-        query = array("f", vector)
-        qnorm = math.sqrt(sum(x * x for x in query))
+        # Single precision, as the vectors are kept, taken out as floats once
+        # rather than boxed again for every row. sum over map(mul) adds the
+        # same products in the same order as a generator would, so every
+        # score is the same to the last bit.
+        query = array("f", vector).tolist()
+        qnorm = math.sqrt(sum(map(mul, query, query)))
         scored: list[tuple[int, float]] = []
         for row in self.conn.execute(sql, params):
             if tags and not set(tags) <= set(json.loads(row["tags"])):
                 continue
-            if where:
+            if where or conditions is not None:
                 meta = json.loads(row["metadata"])
-                if any(meta.get(k) != v for k, v in where.items()):
+                if where and any(meta.get(k) != v for k, v in where.items()):
                     continue
-            stored = array("f")
-            stored.frombytes(row["vector"])
-            dot = sum(a * b for a, b in zip(query, stored))
-            snorm = math.sqrt(sum(x * x for x in stored))
+                if conditions is not None and not conditions.matches(meta):
+                    continue
+            packed = array("f")
+            packed.frombytes(row["vector"])
+            stored = packed.tolist()
+            dot = sum(map(mul, query, stored))
+            snorm = math.sqrt(sum(map(mul, stored, stored)))
             scored.append((row["chunk_id"], dot / (qnorm * snorm) if qnorm and snorm else 0.0))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         return scored[:limit]
+
+    async def vectors_of(self, space: str, chunk_ids: Sequence[int]) -> dict[int, list[float]]:
+        """The stored vectors of these chunks in the space; a chunk without one is absent."""
+        found: dict[int, list[float]] = {}
+        ids = list(chunk_ids)
+        for start in range(0, len(ids), 500):
+            batch = ids[start:start + 500]
+            marks = ",".join("?" * len(batch))
+            for row in self.conn.execute(f"SELECT chunk_id, vector FROM vectors WHERE space = ? AND chunk_id IN ({marks})",
+                                         [space, *batch]):
+                stored = array("f")
+                stored.frombytes(row["vector"])
+                found[row["chunk_id"]] = list(stored)
+        return found
 
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         self.conn.executemany("DELETE FROM vectors WHERE chunk_id = ?", [(c,) for c in chunk_ids])
@@ -1137,3 +1287,12 @@ class SqliteVectorIndex:
     async def delete_space(self, space: str) -> None:
         self.conn.execute("DELETE FROM vectors WHERE space = ?", (space,))
         self.conn.commit()
+
+
+def _match(query: str, prefixes: Sequence[str] = ()) -> str | None:
+    """The FTS5 expression for ``query``'s tokens and any prefixes, OR-joined and quoted; None when empty."""
+    terms = ['"' + t.replace('"', '""') + '"' for t in tokenize(query)]
+    terms += ['"' + p.replace('"', '""') + '"*' for p in prefixes if p]
+    if not terms:
+        return None
+    return " OR ".join(terms)

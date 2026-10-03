@@ -162,6 +162,8 @@ class ElastiCacheVectorIndex:
         if bool(username) != bool(password):
             raise ValueError("username and password must be supplied together")
         self.prefix = prefix
+        #: The server as configured, or the injected client itself when it chose the server.
+        self._endpoint: object = (host, port) if client is None else id(client)
         self.index = f"{prefix}_idx"
         self.algorithm = algorithm
         self.batch_size = batch_size
@@ -188,6 +190,11 @@ class ElastiCacheVectorIndex:
             return struct.pack(f"<{len(vector)}f", *vector)
         except (OverflowError, struct.error) as exc:
             raise ValueError("vector values must fit FLOAT32") from exc
+
+    @property
+    def location(self) -> tuple[object, ...]:
+        """Where the rows live: equal for two handles that read and write the same ones."""
+        return (self._endpoint, self.prefix)
 
     async def ensure(self, dim: int) -> None:
         if self._closed:

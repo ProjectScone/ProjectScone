@@ -11,6 +11,7 @@ from typing import Awaitable, Callable, Optional, Protocol, Sequence
 
 from ..core.errors import Conflict, InvalidInput, NotFound
 from ..core.models import DEPENDENCY_KINDS, BatchDecision, DecisionOutcome, Fact
+from ..entities.merges import SAME_ENTITY
 from ..core.ports import DocumentStore
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import check_space
@@ -263,6 +264,9 @@ async def reopen(runtime: FactReviewRuntime, space: str, fact_id: int, reason: s
     fact = await runtime.documents.get_fact(space, fact_id)
     if fact is None:
         raise NotFound(f"fact {fact_id} not found in {space!r}")
+    if fact.predicate == SAME_ENTITY:
+        raise InvalidInput(f"fact {fact_id} records an entity merge; record it again with merge_entities, "
+                           "which checks it against the merges that replaced it")
     if fact.status != "closed":
         raise InvalidInput(f"fact {fact_id} is {fact.status}: it holds now, and nothing needs reopening")
     if fact.superseded_by:
@@ -279,7 +283,11 @@ async def reopen(runtime: FactReviewRuntime, space: str, fact_id: int, reason: s
     return again
 
 
-async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str, actor: Optional[str] = None) -> Fact:
+async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reason: str, actor: Optional[str] = None,
+                     *, kind: str = "manual") -> Fact:
+    """``kind`` says on the event why the claim closed: ``manual`` for a
+    person's decision, ``source_changed`` or ``source_removed`` when the
+    file an extracted claim was read from no longer says it."""
     check_space(space)
     reason = _reason(reason)
     fact = await runtime.documents.get_fact(space, fact_id)
@@ -287,6 +295,9 @@ async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reaso
         raise NotFound(f"fact {fact_id} not found in {space!r}")
     if fact.status == "closed":
         return fact
+    if fact.predicate == SAME_ENTITY and kind != "entity_unmerge":
+        raise InvalidInput(f"fact {fact_id} records an entity merge; undo it with unmerge_entities, "
+                           "a review decision")
     if not fact.in_ledger:
         raise InvalidInput(f"fact {fact_id} is {fact.status}; decline a proposal instead of closing it")
     end = runtime.clock()
@@ -301,7 +312,7 @@ async def close_fact(runtime: FactReviewRuntime, space: str, fact_id: int, reaso
         resumed = await fact_placement.write_resumption(runtime.documents, space, resumes) if resumes else None
         await runtime.documents.update_fact(closed)
         await runtime.documents.bump_revision(space)
-    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": "manual", "actor": actor,
+    await runtime.emit(space, "fact_close", {"fact_id": fact_id, "reason_kind": kind, "actor": actor,
                                              "resumed": resumed.fact_id if resumed else None})
     return closed
 

@@ -74,8 +74,21 @@ each with its own extraction manifest and deduplication identity.
 
 Configured PDF OCR and image readers retain typed `DocumentTextRegion` values
 on each segment. Each region includes its recognized text, normalized box,
-recognizer score, block/line identifiers and half-open `start`/`end` offsets
-in the **segment's UTF-8 bytes**. `coordinate_space` identifies the displayed
+recognizer score, block/line identifiers (and a `paragraph` number when the
+engine reports one) and half-open `start`/`end` offsets in the **segment's
+UTF-8 bytes**.
+
+Recognized words are kept as the lines and paragraphs they were read in:
+words on a line are joined by a space, lines by a line break and paragraphs
+by a blank line. An image read by an engine that reports its layout, as
+Tesseract does, is one segment per paragraph (`frame:N/paragraph:M`, with the
+paragraph's box, block and word count in its metadata), each word a region
+spanning its own bytes. Before this, every Tesseract word was its own
+segment, so two short paragraphs were stored as 31 one-word paragraphs. An
+engine that reports no block, paragraph or line is read as before, one
+segment per region (`frame:N/region:M`). A PDF page recognized by OCR puts
+the same breaks in its page text, and its parser identity ends
+`scone-ocr-v2`. `coordinate_space` identifies the displayed
 page or image frame with a top-left origin. PDF dimensions in segment metadata
 still describe the unrotated media box; apply the recorded rotation when
 displaying it. Recognition scores are not factual confidence.
@@ -93,24 +106,86 @@ existing serialized attachment identities; existing version 1 evidence stays
 readable. Re-extract an old OCR document to obtain typed regions. When using a
 workflow, change its `parser_revision` and use a new run for that re-extraction.
 
+## Claims from stored source files
+
+A source file, or a manifest the text reader keeps line by line
+(`pyproject.toml`, `Cargo.toml`, `requirements*.txt`), ingested as a document
+says what it defines, imports, calls and depends on, recorded as claims cited
+to the document's episode and quoted from its lines (at most 2,000 characters
+of a line), under the filename it was stored with; the receipt's `claims`
+counts them, and it is zero for every other document. A `package.json` is
+walked as JSON, not kept as lines, so its dependencies are read through `map`
+rather than from a stored document; so is an MCP configuration in JSON
+(`.mcp.json` and its kin), while Codex's `.codex/config.toml` is kept as
+lines and read from the stored document like any manifest in TOML.
+The reader sees the document's segments one per line, so every quote is a
+line the episode holds. A name given bare (`utils.py`) names a bare module;
+give the path from the project root, as the directory sync does, for the
+module the graph's other files name.
+
+## Note front matter
+
+A Markdown note that opens with a `---` line and closes it (`---` or `...`)
+within 200 lines (Obsidian, Jekyll, Hugo, Zettlr) has its front matter read
+into the document's metadata and kept out of the note's lines, whose numbers
+stay those of the file; a note that is only front matter keeps the block as
+its text. Scalars (a trailing ` #` comment cut, quotes removed), inline lists
+(`[a, b]`) and item lists (`- item`, indented or not) are read; `title`,
+`tags` and `aliases` keep their names, lists join with commas, and every
+other key is `frontmatter_<key>` (lowercased, `-` as `_`), so a note's
+`source:` cannot pass for the engine's. Sixteen keys are kept. What is data
+the reader cannot keep is counted in `frontmatter_skipped`, never guessed
+at: a nested mapping, a list of mappings, a folded or literal block scalar,
+a value over 256 characters, a key past the bound or repeated, and a key
+that names one of the reader's own counters; a blank line, a comment and an
+empty value are not data and are not counted. `frontmatter_keys` says how
+many landed. Only `.md`, `.markdown` and `.mdx` are read this way.
+
 ## Coverage
 
 | Reader | Evidence retained | Limits |
 |---|---|---|
-| Text, Markdown and code files | Line locators | Source text only; no AST or semantic code graph |
+| Text, Markdown and code files | Line locators; a Markdown note's YAML front matter as metadata (`title`, `tags`, `aliases`, `frontmatter_<key>`) | Source text only; no AST or semantic code graph; front matter read without a YAML parser: scalars and lists, nested mappings counted as skipped |
 | JSON/JSONL/NDJSON, CSV/TSV, XML | JSON paths, rows/cells or XML locators | No schema-specific semantic interpretation |
 | IPYNB v4 | Cell sources and saved text outputs with JSON Pointer locators | No code execution, image-output analysis, or legacy v3 conversion |
-| HTML | Visible text, table cells, spans and source-linked headers | Bounded parser; no browser execution, stylesheets or remote resource fetching |
-| DOCX | Paragraphs, typed table cells/merges, declared header rows and referenced notes | Direct source properties; no rendered layout, inherited style resolution or macros |
-| XLSX | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
-| PPTX | Slides, table text and notes | No rendered Office layout or macro execution |
+| HTML | Visible text, table cells, spans and source-linked headers; declared headings, list items, captions and preformatted blocks | Bounded parser; no browser execution, stylesheets or remote resource fetching |
+| DOCX, and DOCM, DOTX, DOTM | Paragraphs with declared heading, list and caption roles, typed table cells/merges, declared header rows, referenced notes and charts' cached series | Direct run properties; styles and numbering are followed only to name a paragraph's role and heading level; no rendered layout or macros |
+| XLSX, and XLSM, XLTX, XLTM | Sheet cell references, declared table headers, ranges and totals roles | Stored values; no formula execution or rendered layout |
+| PPTX, and PPTM, POTX, POTM, PPSX, PPSM | Slides, table text, notes and charts' cached series | No rendered Office layout or macro execution |
 | ODT, ODS, ODP, EPUB | Format-local segment locators | Text extraction; no rendered layout |
+| HWPX | Sections and paragraphs in order; a table's cells, and the paragraphs of a header, footer, note, caption or text box, after the paragraph that holds them (`content_role`, `parent_locator`) | Hangul's XML package (KS X 6101) only; the binary HWP 5 container is not read; pictures, charts and fields are not read; no rendered layout |
 | EML | Message-part locators | No recursive attachment ingestion |
 | RTF, XLS/XLSB, MSG | Converter/reader locators | Optional dependencies; message attachments are not extracted |
 | DOC, PPT | Converted text locators | Explicit offline converter; macOS textutil also supports DOC; page/slide structure may be lost |
-| PDF | Page locators, extraction method, configured OCR regions and engine | Native text by default; OCR requires an explicit parser |
+| PDF | Page locators, extraction method, configured OCR regions and engine, the section its bookmarks put each page in | Native text by default; OCR requires an explicit parser |
 | Images | Frame/region locators and typed OCR geometry | Explicit `ImageDocumentParser` and OCR engine required |
 | Audio/video | Audio-stream timestamps | Explicit `MediaDocumentParser` and transcription provider required; video frames are not analyzed |
+
+The macro-enabled, template and slideshow variants of Word, Excel and
+PowerPoint files are the same package as the plain one with another content
+type on its main part, and are read alike, under their own extension
+(`document_format` says `docm`). Macros a package carries are neither run nor
+read; a document that carried them says so in its metadata (`macros:
+present, not read`), so a search over a folder of macro-enabled files can
+tell which ones held code.
+
+A paragraph a document marks as a heading carries `heading_level` in its
+segment's metadata, as a decimal string, with its text unchanged. For DOCX the
+level is 1 to 9 and comes from the paragraph's own outline level, else from its
+style's (followed through the styles it is based on) or from a built-in style
+named `heading N` or `Title`, whatever the style's id is in the document's
+language (see Declared blocks below, which also gives `block_role` and
+`heading_basis`). For ODT it is 1 to 10, from `text:h` and its outline level (1
+when none is given). For HTML it is 1 to 6, from `h1` to `h6`. A DOCX without a
+readable styles part still reads; its paragraphs' own outline levels count, and
+a style id it cannot look up is read by its spelling (`Heading2`, `Title`). A
+style is followed through at most 32 styles it is based on. A paragraph whose
+style's chain runs longer, or round in a circle, before any style in it says
+whether it is a heading carries `heading_level_unresolved: style_chain` instead
+of a level. Headings inside
+text boxes keep their level; headings inside table cells become part of their
+row's text and carry none. Structure chunking cuts at these headings, and the heading path embeds
+each chunk under them (see retrieval-and-storage.md).
 
 OpenDocument extraction uses current content: `text:tracked-changes` revision
 history and `office:change-info` metadata are omitted. Current text, including
@@ -146,7 +221,8 @@ They are queued after body text instead of being concatenated into the anchor.
 Nested boxes receive nested locators; extraction order is not page layout order.
 For DOCX main/note/comment XML parts, alternate content selects the first choice
 whose required namespace URIs are supported for text extraction (Word main,
-Word 2010 wordprocessingShape, and VML), otherwise its fallback. Prefix aliases
+Word 2010 wordprocessingShape, VML, and the Office 2016 chart namespace, so a
+newer chart is read rather than its picture fallback), otherwise its fallback. Prefix aliases
 and local namespace shadowing are honored. Missing/invalid requirements, malformed
 branch ordering, or an unsupported choice without fallback are explicit errors.
 Unused alternatives still count against XML construction limits. This is text
@@ -163,6 +239,43 @@ Current-text filtering also applies inside notes. Dangling, ambiguous and invali
 part references are rejected. All extracted parts share the document's text and
 segment budgets, and nested reference locators are bounded.
 
+A link in a DOCX paragraph (body, textbox, note or comment) or in a slide or
+notes paragraph keeps its words in the text, and the segment's `links`
+metadata says where they point: a JSON list of `text`, `target` and the
+link's `start`/`end` in the segment's UTF-8 bytes, with the link's own
+surrounding spaces left out of the span. An internal bookmark is `#name`. A
+target lives in the part's relationships, which are external for a web or
+mail address; they are read only as addresses and never followed. A link
+whose relationship is missing, is not a hyperlink, is blank or is longer
+than 2,048 characters is counted in `links_unresolved` and not recorded, and
+so is every link of a part whose relationships cannot be read (the part's
+text is read as before). Links are recorded while the list fits one metadata
+value of 4,096 bytes, and at most 200 per segment; `links_cut` counts the
+rest, so two links to long presigned addresses never fail the document. Links
+in table cells and in field codes (`HYPERLINK` fields) are not read yet.
+Targets are recorded data: a page showing them must not make them live
+without the reader choosing to follow one.
+
+A chart in a Word or PowerPoint file (DOCX or PPTX, or another member of their
+families) becomes a segment of its own after the text it sits in (`paragraph:3/chart:1`, `slide:2/chart:1`; `content_role` `chart`,
+`parent_locator` its paragraph or slide). Its text is the chart's title and
+kind, then one line per series of category and value pairs, for example
+`Revenue (bar chart)` then `2025: Q1 10; Q2 12.5`. The chart kinds Office 2016
+added (waterfall, histogram, treemap, sunburst, box and whisker, funnel) keep
+their data apart from their series; each series is read from the data it names,
+its kind is its layout (`waterfall`, `treemap`), and of nested category levels
+the first is read and `chart_category_levels_cut` counts the rest. Only the values cached in the
+chart part are read: nothing is recalculated from the embedded workbook and
+nothing is rendered. A series without categories is read by point number. At
+most 64 series per chart and 1,000 points per series are read; past those,
+`chart_series_cut` and `chart_points_cut` say how many were left out. The
+segment also carries `chart_type`, `chart_series` and `chart_points`. A chart
+whose relationship or part cannot be read is not a reason to refuse the file:
+it is left out and counted in the document's `charts_unreadable`. A file with a
+chart read says `charts` and its parser id ends `+charts-v1`; a file without
+charts is read exactly as before. A package that also carries macros keeps its
+`macros` note beside the chart counts.
+
 DOCX, XLSX and PPTX locate their main document through `_rels/.rels` and resolve
 child relationships relative to that selected part. Nonstandard main-part paths
 are supported. An unreferenced conventional filename does not supply document
@@ -176,8 +289,8 @@ does not guarantee that every valid variant of a format is supported.
 Media readers must be registered explicitly on a `BuiltinDocumentParser`;
 the default HTTP route does not configure OCR or transcription providers.
 
-The local LlamaIndex reference also advertises HWP, PPTM and MBOX
-readers, which remain gaps. Table understanding, semantic chunking, layout
+The local LlamaIndex reference also advertises an HWP reader; HWPX, the
+XML package, is read here, and the binary HWP 5 container remains a gap. Table understanding, semantic chunking, layout
 reconstruction, directory synchronization and general connector ingestion
 also remain open. The [PDF OCR guide](pdf-ocr.md) describes separate OCR
 geometry, recognition limits and model-quality caveats.
@@ -200,6 +313,30 @@ without renumbering later row locators or their physical line ranges. HTML `pre`
 content preserves source indentation, tabs and newlines. Normal HTML flow
 collapses ASCII whitespace and preserves nonbreaking spaces; external CSS is not
 interpreted.
+
+### PDF table evidence
+
+A PDF page's tables, inferred from the geometry of the recognized or
+text-layer regions labelled `table` -- a text-layer page kept whole
+carries its runs as regions when a table is among them (see
+[pdf-ingestion.md](pdf-ingestion.md)) -- (see [pdf-ocr.md](pdf-ocr.md#inspect-possible-tables-without-repeating-ocr)),
+reach `segment.table_cells` with the same record: row, column,
+`column_span` where a cell reaches across the grid's columns, and the
+cell's exact byte span of the page's text (a cell's text is the page's
+bytes, spaces and all: a statement's `$` stands apart from its number).
+The first row filling every column, or every column but the first (a
+statement's years over its blank label column), is the header when none
+of its cells is a value -- a number, a loss in parentheses, a percentage
+or a dash, while a bare year is a label -- and a column below it is
+mostly values: its cells say
+`is_header`, the cells below carry `column` header references, and the
+segment says `header_basis: pdf_first_row` and counts `tables_headed`,
+so the [table query](#table-query) names the columns; a table of words
+alone, or one continued from an earlier page, gets none. No row span is
+inferred. The segment's `tables` and `tables_unreadable` metadata count
+the grids proposed and those left out because their cells did not read
+together. The cells come in the page's text order, each with its row
+and column.
 
 ### HTML table evidence
 
@@ -334,6 +471,219 @@ older flattened workbooks. General worksheet header inference, merged layouts
 outside declared tables, number-format rendering, XLS/XLSB table structure and
 spreadsheet image/chart interpretation remain separate gaps.
 
+## Rebuild a document as Markdown
+
+```bash
+scone doc-markdown report.docx > report.md          # the receipt goes to stderr
+scone doc-markdown report.docx --json               # the whole record, spans and all
+curl -H "Authorization: Bearer $KEY" \
+  "http://127.0.0.1:7437/v1/episodes/42/document/markdown?max_bytes=200000"
+```
+
+```python
+from scone_memory.ingestion import BuiltinDocumentParser
+from scone_memory.ingestion.formats.markdown_assembly import assemble_markdown
+
+parsed = await BuiltinDocumentParser().parse(data, "report.docx")
+result = assemble_markdown(parsed)
+print(result.markdown)
+```
+
+`assemble_markdown` writes a parsed document as Markdown: headings at their
+level, paragraphs in reading order, lists as nested lists, captions beside what
+they caption, preformatted text as fenced code, and tables as pipe tables. It
+runs no model and adds no structure the parsed document does not carry, so the
+same parsed document always gives the same bytes. The command reads a file and
+opens no store; the route rebuilds a stored document from its retained manifest.
+
+### Declared blocks
+
+The readers record what the source declares, in segment metadata:
+
+| Key | Values | Set by |
+|---|---|---|
+| `block_role` | `heading`, `list_item`, `caption`, `code` | Word paragraphs; HTML `h1`-`h6`, `li`, `figcaption`, `pre` |
+| `heading_level` | `1`-`9` (Word outline levels reach 9) | Both |
+| `heading_basis` | `outline_level`, `style`, `style_id` | Word |
+| `list_level` | Nesting depth from `0` | Both |
+| `list_kind` | `bullet`, `ordered`; absent when the source does not say | Both |
+| `list_id` | Word `numId`; HTML ordinal of the outermost list | Both |
+| `list_item_id` | Ordinal of the `li` the text sits in | HTML |
+| `list_start` | The number an `<ol start>` declares, when it is 0-999999999 | HTML |
+| `caption_target` | The table a `<caption>` belongs to | HTML |
+
+In an email or mailbox, each HTML part is read on its own, so its `list_id` and
+`list_item_id` carry the part's locator prefix (`message:2/mime:1/1`) and two
+parts' lists never share an id. A heading, `pre`, `figcaption` or table inside
+an `li` keeps its own role and also carries that item's `list_level`,
+`list_item_id`, `list_id` and `list_kind`.
+
+A Word paragraph is a heading because its own outline level, or the outline
+level or name (`heading 2`, `Title`) of the style it is based on, says so --
+never because of its font or length. Style IDs are localized (`Berschrift1`),
+so the style's name decides; only an ID the styles part does not define is read
+by its spelling, and `heading_basis=style_id` says so. Outline level 9 is body
+text. A list item has numbering attached, directly or through its style, that
+is not `numId 0`; its kind is read from the numbering part. The document's
+default paragraph style is not consulted. A styles or numbering part that
+cannot be read, or a `basedOn` chain longer than 32 styles, is named in the
+document's `structure_notes` (`styles_unreadable`, `numbering_unreadable`,
+`style_chain_cut`) and the text is read regardless.
+
+A document that declares none of this parses byte-identically to before, so
+its manifest and deduplication identity are unchanged. A document that does
+gets a new manifest digest; use a new durable run and parser revision to
+re-extract it.
+
+EPUB, PPTX, spreadsheets and PDF record no roles: their text becomes
+paragraphs (and declared tables stay tables). An ODT heading carries
+`heading_level` alone, and a level with no role is written as a heading. A PDF
+text layer declares no headings, and none are inferred from it; the record says
+`structure_declared: false`.
+
+### What the Markdown says and where it came from
+
+Text is escaped so it cannot read as structure: `# not a heading` becomes
+`\# not a heading`, and inline markup characters (`*`, `_` at a word edge,
+`[`, `<`, backticks, `|`) are escaped. A line break inside a block stays a line
+break; a blank line starts a new paragraph.
+
+A pipe table has one header row and no spans, and the writer does not pretend
+otherwise. A declared header row is the header. A table with no header cells
+uses column names its reader recorded (`table_columns`, for CSV and JSON), or
+else an empty header row -- its first row is never promoted. Any other header
+row, a second one at the top or one between body rows, is written as a body row
+and counted in `extra_header_rows`. A cell spanning rows or columns is written in
+its first slot with the slots it covers left empty, and a quoted note before the
+table says how many cells spanned and how many header rows were demoted. A line
+break in a cell or a column name is written as `<br>` and counted. A table its
+reader could only read as text (`table_status=text_fallback`) keeps its lines as
+paragraphs after a note naming the reason.
+
+A table is written whole where its first segment is. A spreadsheet reader emits
+cells row by row, so a cell beside a declared table sits between the table's
+rows, and an HTML `<caption>` can come after the first row. Such a caption is
+written before the table; any other segment between its rows is written after
+it, counted in `interleaved_segments`, and named in the note.
+
+Referenced Word notes, comments and text boxes, which the reader queues after
+the body, are quoted with their role: `> footnote 2: ...`. A Word heading below
+level 6 is written at 6 and counted in `headings_clamped`; a list item nested
+more than one level below its predecessor is nested one level and counted in
+`list_levels_clamped`; a list item whose kind is unsaid is written as a bullet
+and counted in `list_kinds_unsaid`; role metadata no reader writes (a heading
+level `0`, an unknown role) is written as a paragraph and counted in
+`roles_unreadable`. An ordered list the document interrupts carries on
+counting, and an `<ol start>` is where it starts; `<li value>` and a Word
+numbering's start value are not read, so those lists count from 1. A paragraph,
+code block, heading, caption or table inside an HTML list item stays inside it,
+indented under the item, and a block that is the first thing in its item is
+written after the item's marker (`- ## Title`). `blocks.list_item` counts items,
+whatever opens them. Two separate lists that would touch are written with
+different markers (`-` then `*`, `1.` then `1)`), which is how CommonMark tells
+them apart; no text changes.
+
+A code block's line ends are written as `\n`, and the closing fence follows the
+code's own final line break, so a Markdown reader sees the same code the source
+held.
+
+`spans` maps the Markdown back to the source. Each span has its byte range
+(`markdown_start`, `markdown_end`), its 1-based `first_line` and `last_line`,
+and `sources`: segment locators with `start` and `end` in
+`extracted_text_utf8_bytes` -- the segments joined by a blank line, which is a
+stored document's episode text, so a span and a retrieved chunk can be compared
+directly. Every non-blank line is in exactly one span. Lines the writer made up
+(a table's delimiter row, a generated header row, a note) are `generated: true`
+and name the rows they describe.
+
+`max_bytes` (default and maximum 8,000,000) bounds the Markdown. No block is
+written past it; a table's note, header and delimiter row are written together
+or not at all, and its rows are cut between rows. `bound.cut` says whether it
+cut, `bound.cut_at` is the first extracted-text byte not written (a table is
+written where its first segment is, so a segment between its rows can be
+unwritten though it comes before the row the bound cut at), and
+`bound.segments_omitted` counts segments not wholly written. The command repeats
+this on stderr.
+
+Inline formatting (bold, code spans) is not kept by the readers, so it is not
+in the Markdown, and images are not emitted. Some of what a segment carries is
+not written, and the record counts it among the segments written:
+
+- A Word or PowerPoint chart is quoted like other side content (`> chart:
+  Revenue (bar chart)`, then one line per series); its cached values are not
+  made a table.
+- A link's text is written as text; its target (the `links` metadata of a Word
+  or slide paragraph) is not, and `link_targets_unwritten` counts them.
+- A PDF page's bookmark `section` is not written as a heading, because the
+  titles are not in the text and a page can open mid-section;
+  `sections_unwritten` counts the pages that carried one.
+- A page whose text layer the PDF reader named `unreadable` is written as
+  extracted and counted in `unreadable_segments`.
+- A Word paragraph whose style chain ran short (`heading_level_unresolved`) is
+  written as a paragraph and counted in `headings_unresolved`.
+
+OCR paragraphs of an image (`frame:N/paragraph:M`) are paragraphs, each traced
+to its own locator. A PowerPoint deck's sections name no text; its slides are
+written in the presentation's order.
+
+Measured on this repository's `packages/memory/docs` (45 files): each file was
+rendered to HTML by an independent CommonMark renderer (markdown-it-py with
+tables), read by the HTML reader and rebuilt. Parsed back with the same
+renderer, the rebuilt Markdown holds 310 of 310 headings with the same level and
+text in order, 414 of 414 list items (61 nested) with the same text, 41 of 41
+tables with 279 of 279 rows and 806 of 806 cells equal, 156 of 156 code blocks
+whose content is exactly the source's, and 1,529 of 1,529 paragraphs. (Before
+the closing fence stopped adding a line, none of the 156 code blocks matched
+exactly: each gained a trailing blank line.) The extracted text as stored today,
+read as Markdown, holds none of those tables or list items, 2 code blocks, and
+95 "headings" that are all `#` comment lines from code blocks (none matches a
+source heading). The corpus has no code block, heading or table inside a list
+item, and no spreadsheet or mail, so those cases are covered by constructed
+fixtures only; one of them, a numbered step holding a code block, rebuilt with 3
+list items instead of 2 before list items kept their blocks. No DOCX corpus is
+in the repository; Word reconstruction is covered by constructed fixtures only.
+
+## Import a page by URL
+
+```bash
+SCONE_URL_IMPORT=1 scone import-url https://example.org/report.html
+curl -X POST http://127.0.0.1:7437/v1/documents/from-url -H "Authorization: Bearer $KEY" \
+  -d '{"url": "https://example.org/report.html"}'
+```
+
+The document lane reads what a caller hands it; this fetches the page
+itself and reads it as the document its media type says it is (HTML,
+plain text, Markdown, JSON, CSV or PDF, by the same readers as an
+uploaded file). The bytes fetched are retained as the original, the text
+is indexed, and the episode says where it came from: `document_url`,
+`document_final_url` after redirects, `document_media_type` and
+`document_fetched_at`. The same bytes read the same way are the same
+document, so importing a page again does not duplicate it.
+
+It is off unless the server is started with `SCONE_URL_IMPORT=1`, because
+a server that fetches whatever URL it is told to will fetch its own
+metadata service, its database, or the neighbour on its subnet. When on,
+three rules hold, each with a test: every address a hostname resolves to
+must be on the public internet, at the first URL and at every redirect,
+and the connection is made to the address that was checked rather than to
+the name again, so a name that changes its answer between the check and
+the connection gains nothing (`SCONE_URL_IMPORT_PRIVATE=1`, or
+`WebLimits(allow_private=True)` in code, is for a lab and says so); a page
+is read up to `max_bytes`
+(10 MiB by default) and refused past it rather than cut, a redirect chain
+past `max_redirects` (5) is refused, and the fetch has a deadline; a media
+type the document lane does not read is refused, not guessed at. Only
+`http` and `https` are fetched, and a URL carrying credentials is not
+sent. `scone import-url --json` prints the record: episode, URLs, media
+type, bytes, redirects, format, segment count and `forget_after`.
+
+`--forget-after 30d` (`"forget_after"` in the body, `forget_after=` in code)
+schedules the page's memory to be forgotten; a past or unreadable schedule is
+refused before anything is fetched. `POST /v1/documents`, `ingest_document` and
+`store_document` take it too, refused before the file is parsed or its manifest
+stored; a parse that outlasts it still stores the instant resolved then, due at
+once ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
+
 ## Durable extraction checkpoints
 
 `DocumentIngestionWorkflow` reuses the shared encrypted workflow journal:
@@ -441,7 +791,7 @@ Read provenance through
 `GET /v1/episodes/{episode_id}/document?chunk_id=...`. The API uses its
 authenticated space, write-role authorization and ingestion backpressure.
 HTTP indexing is synchronous and does not automatically create a durable
-workflow journal.
+workflow journal. A mailbox (`.mbox`) is read as one document of many messages: each message as an `.eml` is, its headers and text parts under `message:N/`, every segment carrying the message's number, date and sender so a passage recalled from a mailbox says which mail it came from; attachments are counted, not read, mbox `>From ` quoting is undone, a failure names the message it was in, and past 1,000 messages the rest are counted (`messages_unread`); the document's own limits (20,000 segments, 2 MB of text) refuse a mailbox whole before that, as they do an `.eml`. A message is opened only by an envelope line (`From sender Www Mmm dd hh:mm:ss yyyy`); a file not opened by one is read whole as one message.
 
 Parsers enforce input, extracted-text, segment, archive and execution limits.
 Office/ODF/EPUB ZIP members must use stored or deflated compression. Standalone
@@ -516,6 +866,91 @@ revision history, metadata-only updates and transactional attachment transfer
 remain separate gaps; ordinary content-addressed document ingestion does not
 itself manage an external source's current revision.
 
+### Reusing embeddings across updates
+
+A file that changes on one line is stored again whole, and every chunk of
+it is embedded again though all but one are the same text as before. With
+an embedding cache the embedder sees only the chunks whose text is new:
+vectors are kept by the embedder's id and width and the exact text it was
+given (a contextual prefix included), so a hit is the vector the embedder
+would have returned, and a different embedder, width or prefix is a
+different key. `SCONE_EMBEDDING_CACHE=memory` keeps vectors for the
+process; a path keeps them in a file every process that opens it shares,
+so tomorrow's `scone sync` reuses what today's embedded. Unset (or
+`none`), nothing is cached. A file cache holds at most 20,000 vectors
+(`max_entries`; about 120 MB on disk at 768 doubles each) and the
+in-memory one 5,000 (a Python list of floats is about four times the
+packed size); both drop the least recently used past that, evicting as
+they write, and their record says how many they dropped. A vector read
+back from the file is checked for width and finiteness, and a row that
+fails is removed rather than served. A cache is not evidence and cannot
+refuse a write: one that fails (a full disk, a damaged or read-only
+file, a locked database) is a miss, counted as `failures` in its record
+with the last failure named, and the embedder answers instead. A path
+that cannot be opened is refused by name before any store is opened.
+`reembed_vectors` clears the cache first, since a model can change
+behind an id that did not; the engine closes the cache with its stores.
+
+Every receipt says what it did not pay for: `Added.embeddings_reused` on
+the record, `embeddings_reused` in `map`'s and `sync`'s receipts.
+Interrupted preparation keeps nothing partial: a batch is kept in the
+cache only after every vector in it was validated. One interaction to
+know: contextual embeddings prefix each chunk with the record's day and
+source, so a file re-stored on a later day is a new key and is embedded
+again unless the record carries its own `created_at`.
+
+Measured on this framework's own source (409 files, 7,679 chunks, the
+hash embedder): a second `map` after a one-line edit to `engine.py`
+embedded 1 chunk and reused 140; a third with nothing changed embedded
+none. Without the cache the second pass embeds all 141 chunks of the
+edited file.
+
+```bash
+SCONE_EMBEDDING_CACHE=~/.scone/embeddings.sqlite scone map src/ --graph
+# 312 file(s) read, 1 updated, 311 already here, 4 chunk embedding(s) reused, unchanged since last stored, …
+```
+
+### More than one repository in a space
+
+A map names every file by its path below the root, so two repositories
+mapped into one space share every name they have in common (both have
+a `src/main.py`) and the graph folds them into one file. `scone map
+ROOT --repo NAME` (and `scone sync --repo NAME`) holds every file as
+`NAME/path` instead: the repositories keep their files apart, and the
+graph explorer shows each as a top directory. Name every repository in
+a shared space or none; a name is one path segment, refused otherwise
+(and `requirements` is refused, since files under a directory of that
+name are read as manifests), and a directory mapped again under a new
+name is read again under it. Without a name a map has no other
+repository to link to: its own package still resolves within it, and
+nothing the space holds of it -- possibly stale -- is read as another's.
+
+What a repository publishes is written in its manifest -- the package a
+`pyproject.toml` names (`libpkg`), a `package.json` (`@acme/ui`), a
+`Cargo.toml` (`acme-core`) or a `go.mod` (`example.com/svc`) -- and an
+import of it in another repository is the link between the two. Before
+reading, `map --graph` asks the space what its other repositories
+publish and which files they mapped, reads this tree's own manifests
+first, and follows such an import to the file by the language's own
+rule: `libpkg.util` under `src/libpkg`, `libpkg` or `lib/libpkg`;
+`@acme/ui/button` under the package's directory, `src`, `lib` or
+`dist`, and `@acme/ui` alone to its `index`; `acme_core::store` to
+`src/store.rs` or `src/store/mod.rs` and the crate alone to `lib.rs`; a
+Go import path to the directory of Go files below the module's path.
+The import then reaches the file, so a call through it reaches the
+function (`app/src/main.py:run calls lib/src/libpkg/util.py:tidy`). A
+package nobody here publishes, or a module whose file was never
+mapped, stays a name; nothing is guessed. The receipt counts the
+imports that reached another repository and names what the space
+publishes (`cross_repository_imports`, `published`); a map that changed
+nothing records nothing and counts 0.
+
+```bash
+scone map ~/code/lib --graph --repo lib
+scone map ~/code/app --graph --repo app
+# map: 3 file(s) read, 9 claim(s), 2 import(s) reach another repository's file
+```
+
 ### Inspecting source removal
 
 Servers with `episodes.forget: true` in `/v1/capabilities` expose the complete
@@ -585,8 +1020,18 @@ defaults to 150 and is bounded to 72–300. Unsupported settings or missing PDF
 rendering dependencies refuse startup. Installed dependencies and configuration
 do not promise that language data, a particular file or recognition will work.
 
+A host can also offer languages a request may choose for its own scan:
+`SCONE_DOCUMENT_OCR_LANGUAGES=deu,jpn+eng` (comma-separated, Tesseract names).
+Each is checked at startup the way `SCONE_DOCUMENT_OCR_LANGUAGE` is, and
+installing its language data is still the operator's job. A request then names
+one in `pdf_ocr.language` (`{"mode": "all_pages", "reading_order": "provider",
+"language": "deu"}`). A language the host did not list, including the host's own
+default named explicitly, is refused before the original is read. A request that
+names no language is read with the host's default, and its selection, its
+retained `pdf_ocr` metadata and its job identity serialize exactly as before.
+
 Authenticated `GET /v1/documents/formats` includes `pdf_ocr.available`, `modes`
-and `reading_orders`. A native host may instead supply
+and `reading_orders`, and `languages` when the host offers any. A native host may instead supply
 `document_ocr=DocumentOcr(my_recognizer, dpi=150)` to `create_app` or
 `create_conversation_app`, using `scone_memory.ingestion.document_ocr.DocumentOcr`
 and an existing `OcrEngine` implementation. The caller owns that recognizer.
@@ -601,9 +1046,15 @@ After uploading the original, select OCR explicitly in the indexing request:
 }
 ```
 
-`missing_text` preserves readable embedded text and recognizes pages lacking it
-or whose text extraction fails. `all_pages` recognizes every page, including
-those with embedded text. Reading order is `provider`, `columns_ltr` or
+`missing_text` preserves readable embedded text and recognizes pages lacking it,
+whose text extraction fails, or whose text layer is unreadable (mostly private-use
+code points, `(cid:N)` runs, replacement characters or control bytes). Without OCR
+such a page keeps its text, its segment carries `unreadable: true` and the
+document metadata lists it in `unreadable_pages`. `all_pages` recognizes every page, including
+those with embedded text. Every page's regions carry a `label` (title,
+heading, paragraph, list, table, footnote, header, footer, page number,
+…), inferred from the page or given by a layout engine; see
+[region labels](pdf-ocr.md#label-the-pages-regions). Reading order is `provider`, `columns_ltr` or
 `columns_rtl`; the latter two infer columns geometrically, not semantically.
 The browser Documents import queue exposes these choices per PDF when available.
 
@@ -702,3 +1153,47 @@ a temporary verification outage refuses the result without replaying work.
 
 The capability `documents.jobs` is advertised only when configured. The existing
 synchronous `/v1/documents` endpoint remains available.
+
+### Languages read from their syntax tree
+
+The Python reader walks Python's own tree and the brace reader finds
+the headers a brace family shares (JavaScript, TypeScript, Go, Rust,
+Java, C, C#, Kotlin, Swift, PHP and their kin — TypeScript and
+JavaScript also through a grammar when `scone-memory[code-graph]` is
+installed). Ruby, Lua, Perl, fish, shell and languages like them were
+neither, and a file in one of them was prose that happened to contain
+code: no declaration names on its chunks, no cuts at its definitions.
+With the optional `scone-memory[code-languages]` extra (one grammar
+pack) a file with a suffix the reader knows — `.rb`, `.rake`, `.lua`,
+`.sh`, `.bash`, `.zsh`, `.pl`, `.pm`, `.fish` — is read from
+its syntax tree by the one convention the grammars share: a definition
+node carries its name in a field called `name`. Declarations are named
+by everything that holds them (`Cart.total`), carry their byte and line
+spans, cut the chunks as the other readers' do, and name a recalled
+chunk in `declaration`. What the grammar does not name is not a
+declaration here; a language whose grammar names things another way
+(Kotlin's and Elixir's do) keeps the reader it had, and a brace-family
+file (PHP, Swift, Scala) keeps the brace reader. Without the extra
+nothing changes. `scone map` and `scone sync` read these suffixes as
+they read the Python and brace families, so a repository's Ruby, Lua,
+shell, Perl and fish files reach the graph by the same walk. The same
+pack gives the brace family beyond TypeScript -- Go, Rust, Java, C#,
+Swift, C, C++, Scala, PHP -- its
+declarations and its bound calls from a syntax tree (see the code
+graph in retrieval-and-storage.md); without it those files keep the
+line reader's declarations and no calls.
+
+The same tree speaks to the graph: every definition is a
+`defines` claim held by what encloses it (`app/cart.rb:Shop.Cart defines
+app/cart.rb:Shop.Cart.add`), what the file loads by a literal name is an
+`imports` claim (`require`/`require_relative`/`load`, Lua's `require`,
+`source` and `.` in shell and fish, Perl's `use` and `require` without the
+lowercase pragmas), and `WHY:`/`NOTE:`/`TODO:`/`ADR-12` comments become
+`notes`, `flags` and `cites` on the declaration they sit in. A load whose
+target is not a literal (`require name`, `source "$HOME/x.sh"`) is not
+claimed, and nor is one inside a function body, which runs when the
+function is called rather than when the file loads, or one nested more
+than five levels under a top-level statement; a file that shows no
+`imports` may still load something one of those ways. Calls are not
+claimed: binding one needs a receiver's type or a name resolved across
+files, which these grammars do not supply.

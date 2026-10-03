@@ -11,9 +11,32 @@ Examples below run from `packages/memory/` unless a section names another workin
 Items carry `score` (rank within this query; the top item is always 1.0)
 and `similarity` (cosine from the vector lane, when that lane saw the
 chunk). Two lanes, vector and lexical, are fused by reciprocal rank with a
-small recency term, capped at two chunks per episode. A lane that fails is
+small recency term, capped at two chunks per episode. The recency term is
+`SCONE_RECENCY_WEIGHT` at age zero (default 0.005, small against a fused rank
+score, so it breaks near-ties toward newer memory and nothing else), halved
+every `SCONE_RECENCY_HALF_LIFE_DAYS` (default 30); a memory of a support queue
+can weight it up, and zero turns it off. The same knobs are
+`MemoryEngine(recency_weight=…, recency_half_life_days=…)`. A lane that fails is
 named in `degraded` and the other lane still answers. `context_reduction`
 is the share of the space's bytes that were left behind.
+
+A recall narrowed by `conditions`, `kind`, `source_prefix`, `since` or
+`until` carries `narrowing` (`null` when nothing narrowed): per lane,
+whether the request was applied `in_store` (every row the lane holds was
+eligible) or `postfiltered` (the lane returned its best window and the
+request then removed what did not fit), how deep each lane looked
+(`text_window`, `vector_window`, and `image_window` when the recall ran the
+[image lane](image-embedding-lane.md)) and returned, how many candidates the
+filter removed (`postfiltered_out`), and `window_exhausted` -- the filter
+removed candidates while a post-filtered lane's window was full, so a
+memory that fits may lie deeper than the recall looked. An empty answer
+with that flag set is not "there is none". The in-process vector indexes
+evaluate conditions themselves; kind, source and date bounds live on the
+episode, which no vector row carries, so for those the vector lane is
+post-filtered from a window twenty-five times wider than an unnarrowed
+recall's, the same allowance the text lane has when its store cannot
+narrow. The CLI prints a note when the flag is set; the recall evidence
+event carries the same fields under `narrow`.
 
 `top_similarity` is the best cosine the vector lane saw for the query.
 With `SCONE_SIMILARITY_FLOOR` set (a cosine, e.g. `0.45`), a recall whose
@@ -24,6 +47,65 @@ floor has no default because the right value depends on the embedder:
 `scone-memory bench` prints, for each candidate floor, how many
 no-evidence questions it would catch and how many answerable ones it
 would wrongly withhold, and that sweep is where a floor comes from.
+
+`lanes=text` or `lanes=vector` (CLI `--lanes`) runs one lane alone; both
+run by default. A lane not asked for is not run at all: a text-only
+recall makes no embedding call, which suits an exact code or identifier
+no embedding knows, and comparing the two lanes on one question. It is
+not reported as degraded, because nothing failed. The answer's `lanes`
+names the lanes that answered, so with both asked and one failed it
+names the other, and the recall event records the same list. A vector
+lane that did not run judges no confidence: `top_similarity` and
+`low_confidence` are `null`. `lanes` names only these two; the entity
+lane is asked for with `graph_boost` and the context lane with
+`SCONE_CONTEXT_LANE`, whatever `lanes` says, and whether either ran shows
+on the items (`lanes.entity`, `lanes.context`) and in `degraded`, not in
+`lanes`. A note in `degraded` about a lane that still answered, such as
+a text lane whose lexical index is behind, does not take it out of
+`lanes`. When the only lane asked for fails, recall
+fails rather than returning an empty answer that reads as nothing found.
+Advertised as `recall.lanes`.
+
+`require` and `exclude` (repeat each for more; CLI `--require`,
+`--exclude`) are phrases a returned passage must all hold, or must hold
+none of. A phrase matches as whole words in order, whatever the case and
+the punctuation between them: `slew ring` matches `SLEW-RING`, and `art`
+does not match `party`. In scripts written without spaces a phrase
+matches inside a run. The reference's keyword filter drops nodes after
+retrieval, so a filter that drops three of five returns two and says
+nothing. Here the phrases are checked across every fused candidate before
+the per-episode cap and the limit, so a passage ranked below the limit
+that holds the phrase takes the place of one that does not. `phrases` in
+the answer (and the recall event) says how many candidates were checked,
+how many each rule dropped, and `short: true` when fewer passages came
+back than the limit after the phrases dropped some while a lane filled
+its candidate window, because passages beyond that window were never
+checked. Each lane is judged against its own window: a narrowed recall
+that post-filters the vector lane gives it a deeper one than the text
+lane's. When no lane filled its window every passage was a candidate,
+and a short answer is only a small space. Facts are not filtered.
+A phrase both required and excluded, one with no word to match, more than
+20 phrases or one over 200 characters is refused. Advertised as
+`recall.phrases`.
+
+`diversity`, a weight from 0 to 1 (CLI `--diversity`), keeps near-copies
+of one passage from taking several places. Fusion ranks by relevance
+alone, so three restatements of a note can fill three of five places.
+With `diversity` the places are filled one at a time, each by the
+candidate whose relevance (its fused score over the best one's) times
+`1 - weight`, less `weight` times its greatest cosine to a passage
+already placed, is highest: maximal marginal relevance, over the fused
+candidates rather than one vector lane. `0` keeps the relevance order.
+The likeness is read from the index's stored vectors where the index can
+give them back (in memory and SQLite), and otherwise every candidate is
+embedded once so all likenesses are on one scale; `diversity.vectors`
+says which. `diversity.replaced` counts the first `limit` places, before
+the per-episode cap, that relevance alone would have filled differently.
+Only the first 200 candidates are compared and only twice the limit's
+places are filled this way; the rest keep relevance order and are
+counted. It runs after any phrases and is refused beside an active
+reranker, which would set the order again. Unmeasured. Advertised as
+`recall.diversity`.
 
 `history=true` (CLI `--history`) adds, for every matched fact, the closed
 facts that held before it for the same subject and predicate, oldest
@@ -139,6 +221,187 @@ the claims that hold, then the space's recent activity. `GET /v1/profile`
   says which revision the answer is of.
 - Closed, excluded and proposed claims are never profiled, as before.
 
+### Static and dynamic buckets
+
+Some of a profile is settled (a name, a role, a diet) and some is what its
+subject is in the middle of (this quarter's project, this week's city). A
+reader can ask for the same claims in two buckets: `GET
+/v1/profile?buckets=both` (or `static`, or `dynamic`), `scone profile
+--buckets both`, `engine.profile(space, buckets=BucketBounds())`, and a
+conversation's standing claims (below). Unasked, nothing changes: the
+profile's body, order and coverage are what they were.
+
+Which bucket a claim goes in is a rule the ledger can check, never a guess at
+what its words mean. The first rule that applies decides, and each shown
+claim names it in `coverage.placed` with the numbers it read:
+
+1. `override`: the predicate is named in `SCONE_PROFILE_STATIC_PREDICATES`
+   or `SCONE_PROFILE_DYNAMIC_PREDICATES` (one predicate in both is refused).
+2. `changes`: the claim's slot changed value at least
+   `SCONE_PROFILE_DYNAMIC_CHANGES` times (default 2) in the last
+   `SCONE_PROFILE_CHANGE_WINDOW_DAYS` (default 365) -- dynamic, however long
+   this value has held. A slot is the subject and predicate, with the object
+   too for a many-valued predicate, as the ledger keys it; so a many-valued
+   predicate's values never count as changes of one another. The slot's
+   first value is not a change, a change on the window's first instant is
+   outside it, and the same value stated again after a gap is not a change.
+   Closed and excluded claims count as history, including claims
+   `forget(..., with_claims="exclude")` excluded: exclusion hides a claim
+   from reading, it does not rewrite the ledger's history. Proposed and
+   declined claims never held and do not count, nor does a value closed at
+   the instant it began (the ledger closes a value that way when another
+   supersedes it at the same instant).
+3. `tenure`: the claim's value has held unbroken for at least
+   `SCONE_PROFILE_STATIC_AFTER_DAYS` (default 90): static; younger, dynamic.
+   Unbroken counts earlier rows of the same value that reach the claim's
+   start, as when a value is backfilled to an earlier day or stated again
+   from the instant it was closed; a different value or a gap breaks it.
+   `held_days` is that span.
+
+The static bucket keeps the profile's own order (most restated, then
+newest). The dynamic bucket decays: each claim weighs `stated * 0.5 **
+(days since last stated / SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS)` (default
+30 days), where `stated` counts the claim and its restatements up to now,
+and last stated is the newest of those. Each statement adds as much weight
+as the first and each half-life halves it, so a claim stated `n` times
+falls behind one stated once only after `log2(n)` more half-lives: at the
+default, six statements two months ago still lead one yesterday.
+`placed` carries `last_stated` and `weight` for dynamic claims.
+
+Each bucket is bounded on its own: `static_limit` and `dynamic_limit` (1 to
+50, default 10) claims, `static_max_bytes` and `dynamic_max_bytes` (100 to
+16,000, default 2,000) bytes of the bucket's claim records
+(`{fact_id, subject, predicate, object, valid_from, rule}`) as compact JSON.
+`coverage.static` and `coverage.dynamic` say `candidates`, `shown`,
+`omitted`, `bytes`, the bounds, and `cut`: `"count"`, `"bytes"` or null.
+`coverage.candidates_truncated` says when the profile's own candidate bound
+(the newest 200 claims) left claims unplaced. A bound given without
+`buckets` is refused rather than ignored. The change count reads the same
+bounded ledger read as the profile, so a read cut by `fact_limit` (in
+`coverage.reasons`) can undercount changes.
+
+## What people said about a passage
+
+```bash
+scone lessons --window-days 90 --half-life-days 30 --min-corroboration 2
+scone recall "when was the crane survey booked" --lessons
+```
+
+A person can mark a returned passage useful or not (`POST /v1/feedback`),
+and that judgement is kept as an event. `lessons` reads those events back.
+For each passage, the latest judgement of each question counts: asking the
+same words again and judging again replaces a judgement rather than
+corroborating it, as the ranking prior below counts them (a judgement
+recorded before questions were counts per recall). Each one
+weighs 1, positive when useful and negative when not, and the weight halves
+every `half_life_days`. Each passage gets a state:
+
+- `preferred` needs at least `min_corroboration` useful judgements and none against, because one person's word is not a preference;
+- `dead_end` means judged and never useful;
+- `contested` means judged both ways;
+- `tentative` means useful but not yet corroborated.
+
+Each lesson says whether its passage can still be read (`present` or `gone`).
+The read covers `window_days` and at most `max_events` judgements; past that
+the oldest are left out and `events_cut` says so. Judgements are counted
+per space, since no per-person identity is recorded yet.
+
+`recall(lessons=True)` (`lessons=true` on `/v1/recall`, `--lessons`) puts
+each passage's lesson beside it, and `GET /v1/lessons` lists them all.
+Asking for lessons never changes the order; ranking by the same judgements
+is a separate setting, off by default (below).
+A recall asked for lessons also carries `lessons_read`: the window,
+half-life and corroboration used, and how many judgements were read and
+whether that read was cut. A recall not asked answers exactly as before,
+with no `lessons` or `lessons_read` field. `--lessons` is refused with
+`--merge`: a merged passage joins chunks that were judged separately, and
+one lesson cannot stand for them.
+
+## Ranking by what people said
+
+```bash
+SCONE_FEEDBACK_WEIGHT=0.00013 scone recall "what is the throttling threshold on the cafe plan"
+```
+
+`SCONE_FEEDBACK_WEIGHT` (`MemoryEngine(feedback_weight=…)`, default 0) adds
+a term to each fused candidate's score, the way recency is added, from the
+judgements of the last 90 days. Zero reads no feedback and leaves recall as
+it was. It reads the event log, so it is refused with `SCONE_EVENTS=none`.
+The judgements are weighed as lessons weigh them (+1 useful, −1 not, halving
+every 30 days), and counted per question as lessons count them: `feedback`
+records a hash of the question its recall asked (the
+same for the same words whether `record_queries` kept them in the clear or
+not), and asking the same question again and judging again replaces the
+judgement.
+Four rules sit on top:
+
+- useful judgements count only once two questions' do. One useful judgement
+  neither lifts a passage nor offsets a judgement against it. No identity is
+  recorded, so one caller asking two questions, or one question spelled two
+  ways, does corroborate;
+- only the newest two judgements each way count. However many pile up on a
+  popular passage, it weighs what its newest two weigh, and `held` counts
+  the candidates whose older judgements were left out;
+- a judgement against a passage outweighs every useful one older than it,
+  so a passage people stopped finding useful has to be corroborated again;
+- `feedback` records a fingerprint of what the judged passage said (its
+  text and its episode's content). A judgement whose passage no
+  longer matches is dropped as `stale`: a rebuilt store can hand its id to
+  other text, to a span of an episode whose content changed, or to a span
+  chunked differently. A judgement that cannot be checked is dropped as
+  `unverified`: one recorded before fingerprints and questions were, or one
+  of a candidate whose episode cannot be read now.
+
+The term is the weight times that score, cut at `MAX_FEEDBACK_BOOST` (what
+first place is worth over second under rank fusion when both lanes agree at
+full voice, 0.000529; with a hashed embedder's vector lane at its default
+hundredth, a place is worth half that, so the bound is about two places). The
+bound is on each candidate's term, not on who it can pass: a leader sunk
+and a follower lifted close twice it, and deeper ranks sit closer together
+than first and second. A recall with the weight set carries
+`feedback_prior` (on `/v1/recall` too): the weight and bound, how many
+candidates were `boosted`, `demoted`, `capped` and `held`, the `stale`,
+`unverified` and `tentative` counts, the terms of the returned passages, the
+`window_days`, `half_life_days` and `min_corroboration` it read and folded
+with, and `events_read` / `events_cut` (the read takes the newest 5,000
+judgements).
+`scone recall` prints a line when the read or the term was cut. The same
+record goes into the recall event. A recall with the weight at 0 has no
+`feedback_prior` field.
+
+The term does not know the question. With queries hashed in the event log
+(the default) there is nothing to compare a new question with. A passage
+judged useful rises for every question it is a candidate for, including
+one it was never judged for. On the replay in
+[`benchmarks/feedback-replay-v1.results.md`](../benchmarks/feedback-replay-v1.results.md),
+at the engine's defaults (`HashEmbedder`, its vector lane at a hundredth of
+the text lane's voice), 0.00013 lifted paraphrases of judged questions
+(MRR@10 0.7118 to 0.7188 under a judge who marks only the answer useful,
+0.7118 to 0.8090 under one who also marks what sat above it not useful) and
+left unrelated questions where they were (0.8669) only while every passage
+was stored at the same instant. With the vector lane that quiet, fused
+scores sit a whole text-lane place apart, and a term either stays under a
+place or crosses it for every question: 0.00014 cost unrelated questions
+0.11, and the weight chosen at the previous vector voice of 0.25, 0.0001,
+lifts nothing under the first judge now. Stored an hour apart, recency's
+few millionths decide which near-ties the term crosses: two unrelated
+questions of 36 fell on one half (0.8727 to 0.8657). Stored a day apart,
+newest first, nine fell (0.7824 to 0.6644). No weight measured both lifted
+judged questions and kept every layout's unrelated questions within 0.01:
+0.00003 kept them and lifted nothing, 0.00004 cost one half 0.044 a day
+apart, and 0.00002 already cost one question. 0.0002
+cost unrelated questions 0.12 even at one instant, questions about a
+sibling subject worded like a judged one (another rate tier, another
+clinic). A question-unaware term crosses whichever near-ties a store's
+creation times leave, so it trades unrelated questions for judged ones at
+any weight that moves anything. The weight is a
+near-tie breaker, and its scale is rank fusion's: `fusion="score"` and
+`"distribution"` have scores a hundred times larger, and the replay did not
+measure them. Setting the weight costs every recall a read of up to 5,000
+judgements. Over a SQLite log on a loaded machine, that measured 24.83 ms
+against 7.40 ms off with 1,000 judgements, and 79.62 ms against 5.66 ms
+with 5,000.
+
 ## Abstaining, by a floor that was measured
 
 A similarity is a number one embedder produces under one set of settings.
@@ -242,12 +505,482 @@ unless the fourth route is asked for by name:
    needs a model (`SCONE_CHAT_URL` and `SCONE_CHAT_MODEL`); without one
    the route is refused. `scone answer --route synthesize --limit 30`.
 
+   That is the **evidence** mode, the default. `synthesis_mode` picks one
+   of three more -- the reference framework's Refine and Accumulate, and
+   `facts` -- and all keep the rule that a sentence is shown only with a
+   quote the framework found in a passage:
+
+   - **refine** threads one answer through the rounds. The first round
+     that leaves a note is the answer; each later round is one call that
+     sees the answer so far (every sentence with its passage id and quote,
+     not the passages again) and the new round's passages, and returns the
+     whole answer rewritten. A rewritten sentence survives only if its
+     quote is found in a passage read so far; one that quotes nothing, or
+     names a passage not yet read, is dropped and counted like any note. A
+     readable rewrite replaces the answer; a reply that cannot be read, or
+     whose every sentence fails the check, leaves the answer as it stood,
+     and `refine_kept_prior` counts those rounds with a reason each. A
+     rewrite may also leave out a sentence the answer had: the rewrite is
+     the answer, `refine_dropped_carried` counts the checked sentences it
+     left out (matched by passage and quote, so a reworded sentence is
+     carried), and a reason names the round. `notes.kept` counts every
+     sentence each round kept, so a carried sentence is counted once per
+     round; `notes.carried` (and each round's `notes_carried`) counts those
+     repeats, so `notes.kept` less `notes.carried` is what the rounds
+     wrote new. Rounds are packed by bytes, and a round after the first answer
+     carries that answer inside the bound: its passages get
+     `max_round_bytes` less the answer's bytes, and each round's record
+     gives both `bytes` and `answer_bytes`. That is the reference's
+     CompactAndRefine. Passages are never cut, so when the answer leaves no
+     room for the next passage the rounds stop there, the rest are unread
+     with a reason, and the answer is `partial` and `truncated`. Nothing is
+     folded.
+   - **accumulate** gives the model one passage per call and joins what
+     each call kept, in passage order, with no fold; a sentence must quote
+     the passage its own call held. It spends the most calls on the
+     passages it reads.
+   - **facts** extracts first and writes second. Each passage is one call
+     that asks for the atomic facts the passage states that bear on the
+     question, each a short sentence with a quote from that passage. The
+     passage is named by the framework, not the model, so a fact cannot
+     cite the wrong one; a fact whose quote is not in the passage its call
+     held is dropped and counted under `notes.dropped_unquoted` (one with no
+     quote under `notes.dropped_malformed`). When any fact survives, one
+     more call writes the answer from the checked facts alone -- each fact
+     with its quote, never the passages -- and every sentence must name
+     the facts it uses (`f1`, `f2`, ...). A sentence that names none of the
+     facts it was given is dropped and counted, and a shown sentence
+     carries the quotes of the facts it names; a sentence whose fact ids
+     are not a list of strings is dropped as malformed. That call holds at
+     most one round's bytes of facts, in the order they were found; the
+     facts past it are not sent, and when the answer is written they are
+     counted and the answer is `truncated`. An answer that cannot be read
+     or fails, or has no sentence left, or a first fact too large for the
+     round, leaves every fact shown as it is, with a reason that says which
+     (for a reply with no sentence left: it held none, none cited a known
+     fact, or none could be read). The answer is then `partial`, and the
+     answer's bound makes it `truncated` only when an answer was written,
+     since otherwise every fact is shown. `detail.facts` gives
+     `extracted` (facts kept with a checked quote), `used` (distinct facts
+     the shown sentences of a written answer name), `unsent` (facts the
+     written answer's call could not hold), `sentences_dropped_uncited` and
+     `sentences_dropped_malformed`; `used` and `unsent` are 0 when the
+     facts are shown unmerged, and `folded` says the answer was written.
+     In the other modes `detail.facts` is `null`; `detail.fold_dropped_uncited`
+     and `detail.fold_dropped_malformed` count `evidence`'s fold sentences
+     the same way.
+
+   In every mode the calls are bounded by the rounds bound (six by
+   default; `evidence` may add its one fold and `facts` its one answer),
+   and passages past it are left unread, counted, and the answer is
+   `partial`. A `partial` answer's
+   text ends with one line, `partial:` and the reasons, so `scone answer`
+   without `--json` says what was left unread or cut. `detail` names the
+   `mode`, the `model_calls`, and under `passages` how many were read and
+   how many the shown sentences `cited`. A mode on any other route is
+   refused. `scone answer --route synthesize --synthesis-mode facts`,
+   `GET /v1/answer?route=synthesize&synthesis_mode=accumulate`,
+   `answer_question(..., route="synthesize", synthesis_mode="refine")`.
+
+   The route reads with rounds of 12,000 bytes and a bound of six rounds;
+   `limit` sets the passages, and no option of the command line or the API
+   sets the round size or the rounds. What a mode does depends on how much
+   its passages hold. Twelve passages of about 600 bytes fit one round:
+   `refine` makes one call, the same call `evidence` makes, and has nothing
+   to refine; `accumulate` reads six of the twelve, one call each, and is
+   `partial`; `facts` reads the same six, one call each, and writes its
+   answer from what they gave, seven calls in all. `refine` refines only when the passages
+   read overflow a round, and `accumulate` and `facts` read them all only
+   when `limit` is six or less.
+   A measurement on eight multi-session questions with a local 8B model
+   set rounds of 6,000 bytes and a bound of 16, limits the route does not
+   use, so that its twelve passages (6.6 to 7.2 kB) took two rounds: no
+   mode spoke more often than `evidence`, and `refine`'s second rounds
+   returned the answer so far with nothing new
+   ([results](../benchmarks/synthesis-modes-v1.results.md)). At the route's
+   limits those passages fit one round, and `refine` makes no second.
+   `facts` was measured at the modes run's limits too (6,000-byte rounds,
+   a bound of 16 and a 600 s deadline), not at the route's. At the route's
+   limits it reads six of the twelve passages and is `partial`, as above,
+   and that was not measured. At the measured limits one item's `facts`
+   synthesis took a median of 36 to 124 s over three runs on a shared box,
+   against the route's 120 s deadline for a whole synthesis. Three runs on
+   those eight questions (with the passages today's retrieval returns)
+   gave `facts` a text on 8 of 8 against `evidence`'s 7. `facts` wrote an
+   answer on 7, the same as `evidence`, and `evidence`'s missing item was
+   a call that ran to the deadline. `facts` spent 104 calls to
+   `evidence`'s 16. The judge scored its texts less faithful, 0.762
+   against 0.905, but each mean leaves out a different item. On the six
+   items judged on both sides it is 0.722 against 0.889, and the whole
+   gap is one item, `c18a7dc8`, where no evidence session was among the
+   passages: `evidence`'s off-topic sentences scored 1.0 and `facts`'s
+   answer 0.0. The sums its answer wrote on another item cost it 0.167
+   there, and a third item gave that back
+   ([results](../benchmarks/synthesis-facts-v1.results.md)).
+
 An ordinary answer shows each passage to its first 200 characters, and
 says so: `shown` carries `per_item_chars`, `items_cut` and
 `chars_omitted`, and when anything was cut the text ends with one line
 naming how many of how many were shortened and that `detail` holds them
 whole. `scone answer --whole`, `GET /v1/answer?whole=true` and
 `answer_question(..., max_item_chars=0)` show them whole instead.
+
+### What a question says about where to look
+
+```bash
+scone recall "what did we decide about the launch in last week's notes?" --infer
+curl "…/v1/recall?q=the+retry+policy+under+docs/agents/&infer=true"
+```
+
+A question often carries its own scope: a date ("last week", "in March"), a
+kind of memory ("in my notes", "from the files", "in our conversations"),
+tags ("tagged urgent", "#finance"), a place ("under docs/agents/", "in
+README.md"). The reference framework has a model infer metadata filters
+from the question; here the words that name a scope are read by rule, each
+recorded with the words that said it, and — with `--infer` or
+`infer=true` — searched with where no filter was given by hand: the
+question's date becomes `since`/`until` (the readings `dates.py` already
+makes for temporal questions), its kind `kind`, its tags `tags`, its place
+`source_prefix`. A filter the caller set is never replaced, and a caller's
+window, whichever end they set, is theirs whole; a tag filter is "all of",
+so a question's tag is never added to tags the caller set. The answer
+carries `inferred`: every reading, which were applied, and which were
+`withheld` with the reason, so a wrong reading is visible rather than a
+silent narrowing. A tag is the one reading whose mistake empties an answer
+outright (`#include` has the shape of a tag), so a tag the space holds no
+memory under is withheld and said, and one it holds is applied in its
+stored spelling; a hashtag begins a word, so the `#install` of a URL is not
+one. The words stay in the question the
+lanes search, since a word that names a scope can still name what the
+passage says. A kind is read only after a word that places the question in
+it ("in my notes"), a tag begins with a letter (`#12` is an issue, not a
+tag), and nothing is read without `--infer`.
+
+### Summary trees for long documents
+
+```bash
+scone summarize 42 --fan-in 6          # store the tree as notes beside the document
+scone summarize 42 --dry-run --json    # write it and show it, store nothing
+```
+
+A long document answers a broad question badly in chunks: "what does this
+report conclude?" is spread over forty passages, and the five that score
+best are five fragments. The leading frameworks build a tree of summaries
+at ingestion (RAPTOR: cluster, summarize, repeat) and index the summaries
+beside the leaves, so a broad question finds a summary and a narrow one
+finds a chunk; the summaries are the model's word. `summarize` builds that
+tree with the synthesizer above, so every sentence rests on a quote the
+framework found in the level below: level zero is the document's chunks in
+their order, each level above groups `--fan-in` adjacent nodes and writes
+one node from them, and a citation resolves downward to the chunk quotes it
+rests on. Adjacency is the grouping, not a clustering — a document's own
+order is a structure nobody has to guess at. A group the model wrote
+nothing about leaves no node and is counted; a lone remainder is carried
+up, not summarized from itself; a level nothing was written at stops the
+tree and says so; `--max-levels` (five at most) can leave the top level
+unjoined, and the record says so.
+
+The nodes are stored as notes the framework wrote, with the document's
+source and `#summary/<level>/<index>` as theirs (the index is the group's
+position at its level, so a group the model left empty leaves a gap rather
+than renaming what follows) and metadata saying what they are:
+`summary_of` (the episode), `summary_level`, `summary_index`,
+`summary_fan_in`, `summary_chunks` with `summary_first_chunk` and
+`summary_last_chunk`, `summary_model`, `summary_content_hash` of the
+document at the time, and `summary_detail`, the attachment the note links
+that holds the full account — every chunk under it, what it was written
+from, every sentence with its citations and quotes — since that account is
+longer than a metadata value may be. The ordinary lanes then retrieve a
+summary beside the chunks and a reader can see what a passage is. `GET
+/v1/episodes/{id}/summaries` lists a document's summaries top level first;
+`POST /v1/episodes/{id}/summaries` builds and stores the tree with the
+synthesis model, and without one it is refused. Building a tree again for
+the same episode replaces the tree that was there, whatever its shape (a
+different `fan_in`, a group the model left empty this time), so a document
+never holds two trees. A document that changes is a new episode, with no
+summaries until its own are built; the old episode's tree stays with it.
+Forgetting a document does not yet forget its summaries; they carry
+`summary_of`, so they can be found and forgotten by it. Not yet measured:
+coverage on broad questions with and without stored summaries waits for a
+run with the local model.
+
+### Expanding a summary hit to the chunks it cites
+
+```bash
+scone recall "what does the mill survey say about the river" --limit 10 --expand-summaries follow
+scone recall "what does the mill survey say about the river" --expand-summaries replace --expand-max-chunks 8 --json
+```
+
+A stored summary answers a broad question as the model's word, and a reader
+who has to quote the document wants the document's own text. The leading
+framework's document summary index retrieves over summaries and returns the
+nodes under the chosen one — every node of the document. `expand_summaries`
+returns the chunks the summary *cites*, and only those: `follow` puts them
+after the summary, `replace` puts them in its place (engine
+`recall(..., expand_summaries="follow")`, HTTP `GET
+/v1/recall?expand_summaries=follow`, CLI `--expand-summaries`). No model is
+called and nothing is re-embedded.
+
+Resolution runs downward through the account each summary keeps as its
+attachment. A level-one summary cites chunks. A summary above cites a node
+of the level below (or a chunk carried up as a lone remainder) with a quote
+at an offset of that node's text; the quote lands in some of that node's
+sentences, and only their citations are followed. So the root of a long
+document expands to the chunks its own sentences rest on, not to the
+document, and a chunk a summary's span covers but no citation names is not
+served. Chunks come back in the document's order, each scored as the summary
+was, with no lanes of its own, and each carries `via_summary`: the summary's
+episode and chunk, its level and index, the episode it summarizes, the mode,
+and `cited`, the character spans of the chunk's stored text where the quotes
+it rests on sit. Its `first_line`, `last_line` and `declaration` are worked
+out from the document as a direct hit's are, and so is `superseded`: expansion
+runs before supersession, so a chunk whose claim the ledger retired is marked
+and moved below its replacement whether it came back directly or through a
+summary. Spans rather than the quotes themselves, so an answer holds no second
+copy of a passage's text for withholding to miss. A cited chunk already in the
+answer is not repeated.
+
+What it refuses, and says so in `expanded`:
+
+- A citation is followed only when the text it names holds its quote at
+  its offsets. A chunk that is not one of the summarized document's chunks
+  is counted in `missing`; one that does not hold the quote in `unquoted`;
+  a node that is not stored below the citing level, was written from other
+  content, or whose account cannot be read, in `unresolved`. None is served.
+  A node is found by the source key its build stored it under, one read,
+  not by listing the document's summaries, which walks every episode in the
+  space.
+- The scope and the phrases the recall was given hold for what a summary
+  brings. A cited chunk the scope would not retain is not served and is
+  counted in `dropped_scope`: the same check the reranker makes before
+  exposing a passage's text (kind, source prefix, since and until, tags,
+  `where`, conditions, `as_of`, and a span that still holds its text), so a
+  recall narrowed to `kind=note` gets the summary and none of the file it
+  cites. A cited chunk lacking a `require` phrase or holding an `exclude` one
+  is counted in `dropped_required` or `dropped_excluded`.
+- Only a whole summary is replaced. One resting partly on citations that
+  failed, or that lost a chunk to the scope, the phrases or the cap, stands
+  beside what was left even under `replace`, and is named in `partial`.
+- A summary whose document is forgotten is refused as `source_gone` and
+  nothing of the document is served: forgetting a document leaves its
+  summaries, and what they cite is deleted text. A document whose content
+  hash no longer matches `summary_content_hash` is refused as
+  `content_changed` (a stored document is never rewritten, so this is a
+  note written by hand or carried from another store). A document that
+  could not be read is `unread`, and one whose id was never stored here (a
+  note carried from another store) is `source_unknown`; neither is a
+  finding that it is gone. Following citations awaits reads, and a
+  document can be forgotten during any of them, so every chunk about to be
+  served is read again after the last one, with nothing awaited between that
+  read and the answer: a document whose chunks moved is read again for its
+  reason, `source_gone` when it was forgotten and `changed_while_read` when it
+  is still there, and none of its chunks is served under any summary; a
+  store that cannot answer that read confirms nothing, and every summary is
+  `unread`. Those reads (one chunk read per pass, plus a document re-read for
+  each document found changed) are not counted against `MAX_READS`;
+  metadata that does not say what a note summarizes is `malformed`; an
+  account that cannot be read is `detail_unreadable`; citations that reach
+  no chunk are `nothing_cited`. A refused summary stands as it was.
+- `expand_max_chunks` (20 unless set, at most 200) bounds the chunks added
+  across the answer. When it cuts, `capped` counts the cited chunks left
+  out and `cut` names the summaries, and a cut summary is kept followed by
+  what fit, even under `replace`, since part of what it cites does not stand
+  for all of it; a summary the cap left no room for at all stands as it was
+  and is not counted in `expanded`. Citation accounts and node lookups read
+  per call are bounded too (`MAX_READS`, 200; a failed read counts), and a
+  summary past that budget stands as it was and is counted in `not_read`.
+
+The answer can hold more than `limit` items, and `returned_bytes` counts
+what is returned. Expansion runs inside recall before `lessons`, so the
+chunks a summary brings are read for lessons, and before the route's
+withholding stage, so what it adds is scanned like any passage. It is refused
+with `merge` and with a window (`window`, or `window_unit=sentences`, and so
+`compress`): a merged or widened passage holds text the summary does not rest
+on under its `via_summary`, and a widened one has a new `start` and text, so
+the spans in `cited` would no longer index the text returned. On the command
+line it is refused with `--parts` too, which answers without recall's
+expansion. The recall event is written after expansion: it lists the items
+returned, each chunk a summary brought marked with that summary's episode
+in `via_summary`, with `returned_bytes` and the `expanded` record, so
+feedback on a brought chunk is accepted and feedback on a replaced summary
+is refused as not returned. Whether the phrases left the answer short is
+still judged on what the lanes returned.
+
+Measured on a scripted fixture, not a quality claim
+(`benchmarks/summary_expansion.py`, 14 September 2026): four documents of
+three sections of three paragraphs, one chunk each, with summary trees built
+by `FakeChat` replies the script writes and `HashEmbedder`; twelve questions
+asking what a document says about one section's theme, the section's three
+chunks gold, `limit=10`, scored on the first ten items. With level-one
+summaries citing two of three paragraphs, recall_at(10) is 0.278 off, 0.667
+with `follow` and with `replace`; every chunk under each summary's span in its
+place (the document-summary-index shape, computed by the script) gives 1.000.
+With every paragraph cited: 0.278 off, 0.722 `follow` (whole list 1.000),
+1.000 `replace`, 1.000 under the span. With expansion off 4.58 of the ten
+places held summaries. The citation ratio is the script's, and so is the
+ceiling of cited-only expansion; this fixture does not show a summary whose
+span is much wider than what it cites, beyond the root. Median latency over
+five interleaved repeats was 3.3–4.0 ms per recall in every arm, inside the
+spread on a machine at load average about 60, so no latency claim is made.
+Not measured: summaries a real model wrote, and real documents.
+
+### Descending the summary trees
+
+```bash
+scone tree-recall "what does the mill survey say about the river" --branching 2
+scone --json tree-recall "what does the mill survey say about the river" --episode 42 --text --limit 5
+```
+
+Expansion starts from a summary the lanes happened to find. The leading
+framework's tree index goes the other way: it starts at the root summaries,
+keeps the children most like the question, and descends to the leaves.
+`tree_recall` is that descent over the trees `summarize` stores (engine
+`tree_recall(space, query, ...)`, HTTP `GET /v1/recall/tree`, CLI
+`tree-recall`; module `retrieval/summary_traverse.py`). No model is called.
+
+- **Where it starts.** The documents named (`episode_ids`, HTTP
+  `episode_id`, CLI `--episode`, repeatable), or every document with a stored
+  tree, kept only when `kind`, `source_prefix`, `since`, `until` and `tags`
+  fit the document itself. Each starts at the highest level of summaries
+  written from its present content. The trees are found by one walk over the
+  space's episodes, the same walk `GET /v1/episodes/{id}/summaries` makes, and
+  its size is reported in `walked`; a keyed pointer to each tree's top, which
+  would remove that walk, is not written by the builder yet. The space is
+  counted again after the listing, and episodes it did not return — a store
+  that caps what it lists (Elasticsearch lists at most 10,000), or episodes
+  stored meanwhile — are counted in `unlisted`, since a tree among them was
+  not found. With no documents named, a tree whose document the listing did
+  not return — a document forgotten, or replaced, leaves its summaries
+  behind — cannot be fitted to the filters and is not read: it is counted in
+  `unlisted_trees`, so trees left behind by every update cost a call a count,
+  not a read and a refusal each. More than
+  `MAX_DOCUMENTS` (100) documents with trees in scope is refused, not cut to
+  some of them, and so is a step with more than `MAX_CANDIDATES` (1,000)
+  candidates to score — a stored tree keeps a step to `branching` times its
+  `fan_in`, so only a wide unjoined top or a forged account reaches it.
+- **How it descends.** At every step all candidates are scored against the
+  question: by the cosine of the question's embedding with the vectors
+  already stored for the candidate's chunks (a summary stored as several
+  chunks scores as its best one) and, with `text`, by BM25 over that step's
+  candidates too, fused by rank with equal cosines sharing a rank. The
+  `branching` best (default 2, at most 10) are kept *across all documents*,
+  as the reference's retriever pools the children of every node it kept
+  before choosing, not `branching` per parent. A kept summary's children are
+  what its account says it was written from — the nodes of the level below
+  and chunks — so a group the model left empty is not guessed at from spans.
+  The chunks a first-level summary names are leaves. A chunk a higher summary
+  names is a remainder the builder carried up beside its nodes unsummarized
+  (a level of `fan_in` × n + 1 items), so it is a candidate at the next step
+  with those nodes and a leaf only if that step keeps it; each step records
+  the summaries kept in `chosen` and the chunks kept in `chunks`.
+  `max_depth` (default and most 5, a stored tree's most levels) bounds the
+  steps.
+- **What comes back.** The chunks reached, branch first: in the order of the
+  ranks down their paths, so every chunk under the summary kept first at a
+  step comes before any chunk under the next, whether its tree ends at that
+  step or goes further down (documents of different lengths give trees of
+  different heights), and within a branch in their own ranking; the first
+  `limit` (default 10, at most 50). Branch first, because a chunk's own words
+  are the signal a broad question defeats: ranked by those alone, the chunks
+  of a lower branch can displace the section the descent chose. The fixture
+  below has trees of one height only and does not measure that choice; the
+  tests pin the order on trees of one and two heights. Each
+  item carries `via_tree`: the document, and the path of summaries kept on the
+  way down, top first, each with its episode, level, index, `rank` among those
+  kept at its step and `similarity` (and `text_rank` with `text`); a chunk
+  carried up and kept at a step has its own `rank` there too.
+  `similarity` is the chunk's own cosine; `score` is its place in the order,
+  `1 / (1 + place)`, since no one number ranks it. The route answers with the
+  items and the whole record, not recall's shape: it is not a recall event,
+  so feedback cannot name its chunks, and it does not withhold.
+- **What it never returns.** A summary whose `summary_content_hash` does not
+  match its document's content is not a candidate at any step and is counted
+  in `stale`; a document whose every summary is stale is refused as
+  `content_changed`. A chunk named below a summary that is not one of the
+  document's is `missing`; a node named that is not stored from this content
+  and with this `fan_in`, is not below the node naming it, or is not a name
+  at all, and an account that cannot be read or does not list names, are
+  `unresolved`; none is followed. A document named and forgotten is refused
+  as `source_gone` (its summaries outlive it), one never stored as
+  `source_unknown`, one unreadable as `unread`, and one the listing left out
+  as `unlisted`. The walk awaits reads and a document or a summary can be
+  forgotten during any of them (building a tree again forgets the old
+  nodes), so the chunks about to be returned, and the chunks of every summary
+  on their paths, are read again in one read after the last one, with nothing
+  awaited between that read and the answer: a document whose chunks moved is
+  read again for its reason and serves none of its chunks, one with a summary
+  on a path gone or changed is refused as `tree_changed`, and the next chunks
+  in order are read again in their place; a store that cannot answer that
+  read confirms nothing, and every document with a chunk reached is refused
+  as `unread`. A document refused at that read is not in `documents`, and
+  its chunks are not in `leaves`.
+- **The bounds say when they cut.** `cut_by_limit` counts chunks reached and
+  not returned, `cut_by_depth` the candidates (summaries, and chunks carried
+  up beside them) reached and never scored because the depth ran out (the
+  chunks under them were not reached), and `uncovered` the
+  chunks of a descended document under no summary a descent starts from — a
+  group the model wrote nothing about, a remainder left beside an unjoined
+  top — since no descent can reach them. `untreed` names documents asked for
+  that have no tree, `out_of_scope` counts those the filters left out, and
+  `why` says all of it in words.
+- **What it costs.** One embedding call per question. A step whose
+  candidates do not all have a stored vector — an index without
+  `vectors_of`, a vector missing, or vectors another embedder wrote
+  (`vector_block`) — is embedded in one call, so every score at a step is on
+  one scale; `embed_calls`, `embedded_texts` and `vectors` (steps read from the
+  index, steps embedded) say what was spent. The in-memory and SQLite
+  indexes hand vectors back; the others embed.
+
+Measured on a scripted fixture, not a quality claim
+(`benchmarks/summary_traversal.py`, 15 September 2026, `--repeats 3 --cite
+2`): four documents of four sections of five paragraphs, one chunk each
+(twenty chunks a document), trees of `fan_in` 5 built by `FakeChat` replies
+the script writes — a node per section with a sentence for each of the first
+two paragraphs naming the theme and the document, and a root with a sentence
+per section — and `HashEmbedder`. Sixteen questions ask what a document says
+about one section's theme, the theme word in that section's first paragraph
+only; the five chunks of the section are gold. Every arm asks for ten chunks
+and is scored on the first ten items; embedder calls are counted by a wrapper
+around the embedder, not by the report.
+
+| arm | recall_at(10) | embedder calls / question | texts embedded / question |
+|---|---:|---:|---:|
+| flat recall, no trees stored | 0.150 | 1 | 1 |
+| flat recall, trees stored | 0.175 | 1 | 1 |
+| `expand_summaries=follow` | 0.225 | 1 | 1 |
+| `expand_summaries=replace` | 0.400 | 1 | 1 |
+| `tree_recall`, branching 1 (five chunks returned) | 0.938 | 1 | 1 |
+| `tree_recall`, branching 2 | 0.938 | 1 | 1 |
+| `tree_recall`, branching 3 | 0.938 | 1 | 1 |
+| `tree_recall`, branching 2, `text` | 1.000 | 1 | 1 |
+| `tree_recall`, branching 2, index without stored vectors | 0.938 | 4 | 23 |
+| LlamaIndex `TreeSelectLeafEmbeddingRetriever`, `child_branch_factor` 1 | 0.188 | 14 | 14 |
+| the same, `child_branch_factor` 2 | 0.188 | 23 | 23 |
+| the same, `child_branch_factor` 10 | 0.288 | 67 | 67 |
+
+The LlamaIndex arms run the installed reference retriever, unmodified, over
+the same trees — the same chunk and summary texts and parent-to-child links,
+read from the stored trees into its `IndexGraph` — embedding through the
+comparative runner's adapter around the same `HashEmbedder`. It returns only
+the leaves it selects (at most `child_branch_factor`), ranks those leaves by
+their own similarity, and embeds every node it scores on every question.
+Flat recall is held to two chunks of one document (`PER_EPISODE_CAP`), so it
+can reach at most 0.4 of a five-chunk section here; with the trees stored,
+5.19 of its ten places held summaries. Expansion follows citations, so with
+two of five paragraphs cited its ceiling is the script's; with every
+paragraph cited (`--cite 5`) `follow` and `replace` reach 0.838, flat recall
+0.163, and every traversal arm is unchanged (it follows `written_from`, not
+citations). The one question every vector-only traversal arm misses (the
+weather log's rainfall) is lost at the second step: the hashed words of the
+snow and instruments sections' summaries overlap the question's more; with
+`text` BM25 picks the rainfall section. Median latency per question over three
+interleaved repeats was 0.72–1.63 ms for the Scone arms at a load average near
+35, too close and too loaded for a latency claim among them; the LlamaIndex
+arms' 67–350 ms include the adapter's thread and event loop per embedding
+call, so no latency comparison with them is made either. Not measured:
+summaries a real model wrote, a real embedder, real documents, and narrow
+questions, where a chunk's own words are the right signal and branch-first
+order may cost what it gains here.
 
 ### Checking the rule instead of asserting it
 
@@ -532,8 +1265,81 @@ scone graph match --pattern "?who" calls "retrieval/temporal.py:_spelled"
 #      "if len(spells) == 1 else f\"answer: in {_spelled(len(spells))} spells\""]
 ```
 
+`scone map <dir> --watch` keeps mapping: after the pass it reads the tree
+again every `--every` seconds (5 by default) and records what changed — a
+changed file replaces its memory and, with `--graph`, its claims; a file
+that is gone is forgotten (`removed` in the receipt, its claims closed
+the way `sync` closes them); a quiet tree costs a read and a hash per file
+and writes nothing — until interrupted or `--rounds` passes are done. Each
+pass prints its own receipt under a timestamp (under `--json`, a
+`{"pass": n, "at": …}` line before each receipt, so the output stays a JSON
+stream `jq` can read), so what the graph reflects at any moment is what the
+last pass said.
+
+**A pass that suddenly sees far less refuses to forget it.** A directory
+that cannot be read this minute — a permission changed, a volume not
+mounted, a checkout half done — looks from here exactly like a directory
+whose files were deleted, and only one of those should forget a memory.
+So when more than half the files the last pass saw are missing
+(`--shrink-share`, over 0 to 1, 0.5 by default), and at least five of them
+are (below that a share says nothing: two files of three is an ordinary
+morning), the pass writes what it did read and forgets none of them. The
+receipt says so in words and, under `--json`, as `shrink_refused` with
+`would_forget`, `seen_before`, the `share` in force, and the first twenty
+`files` with `files_truncated` when there were more. What it kept stays
+under watch, so a file that really was deleted during the outage is
+forgotten by the first pass that can see the tree again. `--allow-shrink`
+forgets whatever is missing, however much that is, for a caller who knows
+the files are gone. A file that did not change is not recorded again, but what
+it declares still counts: a call in a changed file binds to a declaration
+in an unchanged one. This is the reference graph
+tool's watch mode without a file-system event library: polling, bounded,
+and honest about each pass.
+
+A repository has a better signal than the clock. `scone-memory hooks
+install` (from anywhere inside the repository, or `--root DIR`) writes a
+runner script into the repository's hooks directory, wherever
+`core.hooksPath` puts it, and a guarded block into `post-commit`,
+`post-checkout` and `post-merge` that calls it; each call maps the tree
+with `--graph` (`--no-graph` to store the files alone) in the background,
+so a commit is not made to wait, and appends the JSON receipt to
+`scone-map.log` in the repository's git directory (`.git/scone-map.log`;
+a linked worktree's own git directory, so two worktrees do not share a
+log). A checkout of files (the branch flag 0) maps nothing. `hooks
+status` says which hooks carry the block (`installed`, `absent`, or
+`other` for a hook of the person's own), the interpreter the runner
+names and whether it still exists, the settings it carries, and how the
+log ends: the last receipt when the last run finished, or the log's last
+line when it did not, so a failed run is never hidden behind the success
+before it. `hooks uninstall` takes the blocks out and leaves whatever
+else the hook files held, removing a file only when nothing but its
+shebang is left. A hook file that exists is appended to, never replaced;
+a second install replaces its own block where it stands, so what the
+person put after it stays after it; a block with a start and no end is
+refused rather than guessed at, and a marker is a whole line, so a
+comment that mentions one is not a block. The interpreter's path is
+written in full, so a commit from an editor with no shell environment
+still finds it, and `PYTHONPATH` goes with it when the install ran with
+one; only the settings that name a store kind or a local path
+(`SCONE_DOCUMENTS`, `SCONE_VECTORS`, `SCONE_EVENTS`, `SCONE_SQLITE_PATH`)
+are written into the runner, and a connection URL or a key never is: the
+runner reads those from the environment it runs in, or from a file the
+person names with `--env-file`, which the runner sources. `SCONE_HOOK_WAIT=1` makes the runner wait for the map. A
+file-system event watch is not built: the hooks cover the moments a
+repository's tree moves, and `--watch` covers an editor's saves.
+
 `map` walks a directory, remembers every source file under the path it
-was read from, and with `--graph` records what each says. An answer
+was read from, and with `--graph` records what each says. A map is of the
+tree as it is now: a file is held under the identity `sync` uses for it,
+so mapping again after an edit updates the file's memory rather than
+adding a second, the receipt counts it as `updated`, and with `--graph`
+the claims the new version no longer makes are closed, naming the file
+(`claims_closed`). What `map` stored, `sync` recognises as its own, and
+the other way round, and both follow a relative import the same way: only
+to a file the walk actually read -- the ones walked now and the ones the
+marker already holds -- never guessed at, through one resolver
+(`code_resolution.file_resolver`) that a batch of files remembered together
+also uses among themselves. An answer
 carries the line it rests on, **re-read from the file** before it is
 shown: a graph of a codebase goes stale the moment somebody edits it, and
 a citation that was not checked is the thing least worth trusting.
@@ -541,13 +1347,65 @@ a citation that was not checked is the thing least worth trusting.
 **Languages other than Python get what can be read and not what would
 have to be inferred.** For the brace family the declarations come from
 the same scanner that cuts those files into chunks, and imports are read
-from the lines that write them (`from "./x"`, a bare `import "x"`,
-`require("x")`, a Go import block, a Rust `use`). **No call is claimed**:
-resolving a call means knowing what a name refers to, which needs a
-parser this does not have, and an edge nobody can check is worse than no
-edge. Python gets calls because Python's own parser gives them.
+from the lines that write them, each language by its own spelling:
+`from "./x"`, a bare `import "x"` and `require("x")` (JavaScript,
+TypeScript), a Go import block, a Rust `use` kept whole with a group
+(`use a::{b, c::{d, self}}`) spread into every path it names, a PHP `use`
+with its namespace and `require`/`include` as a file, Java, Kotlin and
+Scala `import a.b.C` (a group spread, `.*` the package, an alias not the
+name), C# `using`, Swift `import`, a C-family `#include`/`#import` (a
+quoted one a file, an angle one a header's name), Zig's `@import`, and
+Dart's `import`/`export`/`part` (a scheme is a package, anything else a
+file). A package is named as written; a path is resolved as a relative
+import is, and a module path inside the project -- `crate::store::Shelf`
+from the nearest `src`, `super::` and `self::` from the module,
+`com.acme.store.Shelf` from where the file's `package` line roots it --
+is resolved to the file that holds the module (`src/store.rs`,
+`src/util/mod.rs`, `com/acme/store/Shelf.java`) when whoever walked the
+tree can confirm one, and kept as written otherwise. **The line reader
+claims no call**: resolving a call means knowing what a name refers to,
+which needs a parser it does not have, and an edge nobody can check is
+worse than no edge. Python gets calls because Python's own parser gives
+them; TypeScript and JavaScript get them from their grammar with the
+`code-graph` extra; and with the `code-languages` extra (the grammar
+pack that already reads Ruby, Lua, shell, Perl and fish) Go, Rust,
+Java, C#, Swift, C, C++, Scala and PHP get them the same way: a call to
+a bare name is an edge when this file declares the name at its top or
+in the type that holds the caller and nothing nearer binds it, so a
+parameter, a local, a closure's argument or a nested function is a
+value and not an edge, and a call through a receiver (`x.y()`,
+`T::f()`, `this.m()`) is left alone, since it needs a type nobody here
+has. Where a grammar speaks it decides `defines` and `calls` for that
+file, and a method is named by what holds it: Go's by its receiver
+(`K.m`), a Rust `impl`'s by its type, a `mod`'s functions by the mod, a
+C++ method by its class whether declared inside it or defined as `K::m`
+outside; a namespace or a package holds nothing by its own name.
+A bare call inside a Rust `impl` or `trait` or a PHP class names a
+free function, never a sibling method, since those need `Self::f` or
+`$this->f`; a C++ method defined outside its class still sees the
+class's other members. A bare call nothing in the file binds is a call
+to what an import brought in, when the import reached a file: `use
+crate::util::helper; helper()` is `src/util.rs:helper`, an alias (`use
+… as h`) binds the alias, a Java `import static lib.Text.trim` binds
+`Text.trim`, a TypeScript `import { tidy } from "@acme/ui"` binds
+`tidy` in the package's index -- within one repository, and across
+repositories where the import names a package another repository in
+the space publishes (see file-ingestion.md, "More than one repository
+in a space"); a glob, a module imported whole, a package nobody here
+publishes, and a name a local shadows bind nothing. Past the reader's
+depth or line bound the grammar says nothing and the line reader's
+whole answer stands.
+Measured over 2,545 files of the reference corpus: 18,128 calls bound
+in 1,389 files, and the grammar's declarations agreeing with the line
+reader's on 31,733 of the line reader's 41,819, most of the rest being
+closures and calls the line reader had read as declarations.
 
-A relative import is followed only to a file the map actually read.
+A relative import is followed only to a file the map actually read;
+an absolute import of a package that a manifest in the space publishes
+(`import libpkg.util`, `from "@acme/ui/button"`, `use acme_core::store`,
+a Go import path) is followed to that repository's file when the file
+was mapped, which is how two repositories named with `map --repo` link
+(see file-ingestion.md, "More than one repository in a space").
 Resolution belongs to the walk, because that is what knows which files
 exist; a file on its own cannot tell where its package root is, so on its
 own it says nothing about `from .code import x` rather than guessing. What it read
@@ -560,8 +1418,48 @@ repository is worse than no map.
 module's function, a method on a value whose type nobody stated — is
 left out rather than pointed at a name that might mean anything. A graph
 with edges nobody can check is worse than a smaller graph. What it does
-resolve: a bare name that is one of the file's own declarations, and
-`self.method` inside the class that defines it.
+resolve: a bare name that is one of the file's own declarations,
+`self.method` and `cls.method` inside the class that defines it, and a
+call through a class the file declares, `Shelf.keep()` or
+`Shelf.Label.print()`, when everything before the last name is a class
+declared there. A class brought in by an import is not followed that way:
+a file cannot tell an imported class from an imported object, so
+`from x import Y` then `Y.m()` stays unbound. Over this package's own
+source that added 15 call edges to 14,425.
+
+A function written inside another is its own caller. `defines` names it
+`outer.inner`, and its calls are now recorded under that name and only
+under it: before, they were made by `path:inner`, an entity nothing
+defined, and credited to `outer` too, while `outer`'s own call to
+`inner()` went unbound. A bare name is looked up from the innermost
+enclosing function outwards, skipping class bodies as Python does, and
+`self` inside a class written in a class is that class. Over this
+package: 1,072 of 9,837 distinct call edges started at a function nothing
+defined, and none do now; 1,619 edges went and 1,287 came, for 9,505.
+
+**Documents are in the graph too.** `map` reads `.md`, `.rst` and
+`.txt` files beside the code, and a document's links become claims the
+way a file's imports do: a link to a file the walk read (`[text](./x.md)`,
+`[[Title]]`, a reStructuredText `:doc:` or `<target>`_, a path in
+backticks such as `` `src/pkg/engine.py` ``) is `references` from the
+document to that file, one per pair however often the page links it, and
+a decision record or standard it names (`ADR-12`, `RFC 7231`) is `cites`,
+the same node the code's comments cite (a record does not cite itself).
+A link that leads outside the tree is counted, not claimed. A link to a
+file the walk did not read is unresolved and `map`'s receipt names it
+(`unresolved_links`), never guessed at; a bare name or wikilink title
+that two files would answer binds to neither and is named apart
+(`ambiguous_links`); a link that says where it is (`./x.md`, `../x.md`)
+is followed only there. Links inside fenced code blocks are examples and
+are skipped; a badge inside a link leaves the link it wraps. A document
+past the line bound, a line past 4,000 characters, or claims past the
+cap are not read further, and the result says which bound bit. Because
+`references` is one of the predicates `graph affected` follows, "what
+rests on this module" answers with its callers **and the pages that
+describe it** — the ones that go stale when it changes — and through
+them the pages that link those. A tree mapped before this reader gains
+its documents' claims as their files change, or on a map with the
+documents touched: an unchanged file is not read again.
 
 Because they are claims, everything else already works on them. "What
 calls this?" is `graph match` over `calls`; the path from one function to
@@ -599,7 +1497,27 @@ scone recall "write to ana about the deploy" --withhold email,secret
 ```
 
 `GET /v1/recall?withhold=email,secret` (capability `recall.withhold`).
-Kinds: `email`, `phone`, `ip`, `card`, `secret`.
+Kinds: `email`, `phone`, `ip`, `card`, `secret`, and the name kinds
+`person`, `organisation`, `place`.
+
+The name kinds withhold the names the space's graph holds for entities of
+that kind, matched whole on word boundaries, without regard to case or
+spacing: `Acme Robotics` is withheld in `ACME  Robotics`, not in
+`Acmeville`, and a longer name goes before a shorter one inside it, of any
+kind (`Paris Hilton` before the place `Paris`). A name in a script written
+without spaces needs no word boundary, so `田中太郎` is found in
+`田中太郎さんが来た`. The address patterns run before the names, so a name
+inside an address never breaks the address. Names
+shorter than three characters are too easily a word and are not used; the
+report counts them in `names_skipped` and the names it did use per kind in
+`names_known`. A name the graph does not hold is not found. Someone never
+recorded as an entity, or recorded without a kind, is not withheld, and
+the report says so. The graph is read before the search, at the moment the
+recall asks about (`as_of`), since a past passage names who counted then; a
+capped read of it is said in the report; and a graph still being built
+refuses the request rather than withholding nothing. Every kind now also
+scans a fact's `closed_reason`, which holds the prose a person gave when
+closing it.
 
 Four things it does deliberately:
 
@@ -672,10 +1590,61 @@ This reads the structure the document already carries.
 MemoryEngine(store, index, embedder, structure_aware=True)
 ```
 
+That is the engine's rule for every record. One record can choose for
+itself: `remember(..., chunking="structure")`, `scone remember --chunking
+structure`, `"chunking": "structure"` on `POST /v1/episodes` and in each
+batch record (`length`, `code`, `structure`, `semantic` or `unit`; unset keeps
+the rule). The receipt says which way was actually used -- `code` for a
+code source unless the record said otherwise -- and, for structure, the
+chunker's own counts (`at_boundary`, `by_size`, `over_target`, `capped`).
+
+An imported Word, OpenDocument or HTML file is stored as its paragraphs'
+text, where a heading is a line like any other. Its reader keeps each
+heading's level beside the text (`heading_level`), and a structure cut of
+that file reads those headings back from the manifest kept with the
+episode: it cuts at them whatever the line says, and the receipt carries
+`document_headings`, the number of the file's own headings it read. A
+record that is not an imported file carries no such count. A manifest
+that does not match the episode's text is refused rather than ignored.
+
+`unit` cuts an imported file one chunk per unit its reader named: a PDF
+page, a slide (with its notes), a table or sheet row, a spreadsheet
+cell's row (and a legacy `.xls` row), a JSON Lines record, an image or video frame or an audio segment.
+Consecutive paragraphs in no unit, such as a Word document's body text
+between two tables, are one `text` unit. A unit longer than the target
+is split exactly as the length cut would split it, and the receipt says
+so: `units`, `split_units`, `by_size` (chunks those splits added) and
+`kinds`, the units by kind. It is asked for per file: `chunking` on
+`POST /v1/documents` and `POST /v1/documents/pdf`, or on
+`ingest_document`, `store_document` and `ingest_pdf`. A record whose
+reader named no units, including anything that is not an imported file,
+is refused before its episode is stored. The units come from the
+manifest kept with the episode, so recovery cuts the same way. A file
+imported again with a different `chunking` is the same episode, so the
+first cut stands.
+The choice is kept on the episode's metadata under `chunking`, so a
+recovery after an interruption cuts the way the record asked; `code` on
+a source whose name does not say its language, a mode not on the list,
+or a metadata key that already says otherwise is refused before anything
+is stored.
+
 Built on `ingestion/structure.py`, which already finds headings, fenced
 code and pipe tables and is already used by retrieval and source
 inspection. Only what that parser deliberately leaves out is new:
 setext headings, numbered and lettered clauses, `Q:`/`A:` pairs.
+
+Chinese and Japanese numbering is a clause too, with or without a space
+after it: `第三条`, `第2章`, `一、`, `（二）`, `1、`. A numeral alone is not a
+clause, so `第一次` ("the first time") and `一九八四年` stay prose.
+
+Both chunkers also cut Chinese and Japanese prose where it divides itself.
+Its sentences end at a full-width stop (`。！？`) with nothing after it,
+and before this every chunk of such text was cut at exactly the byte
+target, inside a word. A full-width stop now counts as a sentence end,
+with any closing quote or bracket after it kept in the sentence. With no
+stop in reach, the later of a space and a full-width pause (`，、；：`) is
+the cut. Text with no full-width punctuation chunks byte for byte as it
+did, and a test holds the spans taken before the change.
 
 Measured over this repository's own 23 documents, 437,141 bytes, at
 commit 90ea0ce:
@@ -726,6 +1695,513 @@ unretrievable — and a heading above a table was separated from it. The
 invariant test that should have caught the first asserted exactly the
 right property and passed, because its fixture never contained the
 junction.
+
+## A chunk measured in tokens
+
+The length cut's target is 700 characters. A model reads tokens, and the
+reference framework's splitter measures its nodes in them -- 512 by
+default -- filling each with whole sentences, so one of its nodes carries
+more of a conversation than one of our chunks. `chunk_tokens` measures
+the length cut in tokens instead:
+
+```python
+MemoryEngine(store, index, embedder, chunk_tokens=512)                           # or SCONE_CHUNK_TOKENS=512
+MemoryEngine(store, index, embedder, chunk_tokens=512, chunk_overlap_tokens=64)  # SCONE_CHUNK_OVERLAP_TOKENS=64
+```
+
+- **Whole sentences are packed.** Sentences are found as the semantic cut
+  finds them (a stop followed by space, not after an initial, a title or
+  before a lower-case word) and added to a chunk while its count stays
+  within the target. A chunk ends where a sentence ends.
+- **A sentence is cut inside only when it alone is over the target**, and
+  then at a line break before a space, and at a space before a hard cut
+  inside a word. The receipt counts both: `sentences_over_target` and
+  `hard_cuts`.
+- **Counted by the embedder's tokenizer when it has one** (`tokenizer-v1`;
+  the local BGE models do), **by the budget's estimate otherwise**
+  (`estimate-v1`, no model: see "Keeping that context inside the embedder's
+  window" below). The count of an empty text -- the start and end markers
+  a model adds -- is paid once a chunk, so a 512-token chunk fits a
+  512-token window as that count sees it. The estimate is meant to err
+  high, and it is not a bound on any model's count: cutting every tenth
+  LongMemEval-S item's 2,443 sessions at 512 by the estimate, BGE-small's
+  own tokenizer counted 8 of the 16,301 chunks over 512, the largest 534
+  (Portuguese prose); on the first 200 LongMemEval oracle items at 256,
+  1 of 9,590, at 261. Nor is it a count of the reference's tokens
+  (tiktoken's `cl100k_base`): on the conversations below a chunk it held
+  to 512 had 330 of those at the median and 640 at most. An embedder
+  with a window and no tokenizer should be given a target below it.
+- **The bound says when it did not hold -- as its count sees it.** The
+  chunk is measured again whole, and `over_target` counts the chunks the
+  count measured over the target (a tokenizer need not count a chunk as
+  the sum of its sentences); `largest` gives the largest count. Under
+  `estimate-v1` both are the estimate measuring what it packed, the sum
+  of pieces it already held to the target, so `over_target` can be above
+  0 there only beside a hard cut, and says nothing about a model's window.
+- **An overlap repeats whole trailing sentences** of the chunk before, as
+  many as fit in `chunk_overlap_tokens`, and gives way from its front when
+  it and the next sentence do not fit. With it on, stored spans of
+  neighbouring chunks overlap; `overlapped` counts the chunks that start
+  with repeated text. Off (0) by default, and refused without
+  `chunk_tokens` or at or above it. It works with table context
+  (`table_context_embeddings`), which embeds each overlapping chunk with
+  the headers it lacks: the spans it checks must be in order -- each
+  starting after the one before starts and ending after it ends -- not
+  disjoint, so a space stored with an overlap can be rebuilt or recovered
+  with table context turned on later.
+- **Only the length cut.** Code, structure, semantic and unit cuts keep the
+  character target, and a record's receipt still says `chunking: length`,
+  with the token counts under `structure` (`measure: tokens`).
+- **Stored chunks are never recut.** The setting decides how records
+  stored from then on are cut; a record already stored keeps its chunks,
+  and the same content stored again is a duplicate that changes nothing.
+  Both values are part of the configuration a keyed replacement is
+  prepared under, so a replacement cut before the setting changed is
+  refused rather than stored as if cut under the new one.
+- **Scripts written without spaces are one sentence to it.** The sentence
+  finder knows `.`, `!` and `?`; Chinese or Japanese prose is packed by
+  hard cuts inside that one sentence and the receipt says so. Leave
+  `chunk_tokens` unset for such text until it learns the full-width stops.
+  A hard cut's end is found by widening from the part's start, doubling
+  until a part does not fit, so the count never reads far past the part
+  it finds: a 100,000-letter word is counted 16 times over, where halving
+  from the word's end counted it 341 times over and grew with the square
+  of the word. 300,000 characters of Chinese prose took 3.4 s at 256
+  tokens and 2.3 s at 512, against 135 s and 61 s (three interleaved
+  rounds, medians; the same cuts).
+- **Off by default.** Cut positions decide what chunks exist, and the
+  numbers below are one sample on a hashed-token embedder.
+
+### What it measured
+
+LongMemEval-S, the 50 items stratified by question type (seed 42), the
+hashed-token embedder on both sides, no model, no reranker, engine
+defaults otherwise (stem prefixes on, vector weight 0.25), engines built
+through `Settings.from_env` with `SCONE_CHUNK_TOKENS`. The reference is
+LlamaIndex 0.14.24 at its best retrieval configuration:
+`QueryFusionRetriever(VectorIndexRetriever + BM25Retriever)` over
+`SentenceSplitter(chunk_size=512, chunk_overlap=0)`, every node ranked and
+folded to sessions. Both sides are deterministic: ours returned the same
+rankings in each of three rounds, and the reference the same scores in
+each of its four runs.
+
+| our chunks | R@5 | all-sessions@5 | R@15 | MRR | k=5 against the reference: won / lost |
+| --- | --- | --- | --- | --- | --- |
+| 700 characters (default) | 0.88 | 0.72 | 0.98 | 0.807 | 1 / 1 |
+| 256 tokens | 0.88 | 0.74 | 0.98 | 0.831 | 1 / 1 |
+| **512 tokens** | **0.92** | **0.78** | 0.96 | 0.840 | 2 / 0 |
+| 1,024 tokens | 0.90 | 0.74 | **1.00** | **0.856** | 2 / 1 |
+| *reference: `SentenceSplitter(512)`, BM25 + vector fusion* | 0.88 | 0.74 | 0.98 | 0.831 | |
+
+Chunk sizes over the same 2,355 sessions:
+
+| | chunks | a session | median characters | median `cl100k_base` tokens | largest | sentences over the target |
+| --- | --- | --- | --- | --- | --- | --- |
+| 700 characters | 46,640 | 19.8 | 576 | 117 | 643 | -- |
+| 256 tokens | 33,717 | 14.3 | 762 | 159 | 400 | 532 of 253,069 |
+| 512 tokens | 16,689 | 7.1 | 1,581 | 330 | 640 | 104 |
+| 1,024 tokens | 8,745 | 3.7 | 3,201 | 666 | 1,325 | 18 |
+| reference, 512 | 11,946 | 5.1 | 2,233 | 482 | | |
+
+No word was hard-cut, and the estimate counted no chunk over its target
+(which, as above, it could only beside a hard cut: this is not a check
+against a model's window).
+
+What it says: at 512 estimated tokens our engine is ahead of the
+reference at its best at k=5 (R@5 0.92 vs 0.88, all-sessions@5 0.78 vs
+0.74, MRR 0.840 vs 0.831; two items won, none lost) and still one item
+behind at k=15; the best MRR was at 1,024. What it does not say: 50
+items is one or two items a column, so these are not differences a
+second sample is sure to repeat; with hashed-token vectors both lanes are
+lexical; and the two sides' chunks are not the same size -- the
+reference's 512 tiktoken nodes sit between our 512 and 1,024 estimated
+tokens. Nothing about answer quality.
+
+It costs time. Cutting those sessions (24.8 million characters) alone,
+the four ways interleaved, five rounds, medians: 0.60 s at 700
+characters, 9.0 s at 256 tokens, 8.7 s at 512 and 9.0 s at 1,024. The
+estimate reads each session once and every sentence, line, word and
+chunk is a difference of running totals. The first version estimated
+every sentence's text and then every chunk's again; against it, in one
+process, interleaved, five rounds, the medians were 75.0 s against 20.0 s
+at 256 tokens, 65.8 s against 24.5 s at 512 and 23.3 s against 8.5 s at
+1,024 -- 3.0, 2.7 and 2.6 times as fast by the median of each round's
+ratio, on a machine whose load went from 15 to 68 during the run (the
+quietest rounds: 13.2 against 5.8 s, 15.1 against 7.3 s, 16.2 against
+8.0 s). Both versions cut every session into the same spans with the
+same receipt at 256, 512, 1,024, and 512 with a 64-token overlap. The
+retrieval numbers above were taken with the first version.
+
+## Joining a semantic cut's chunks again
+
+A semantic cut (`chunking="semantic"`, or `semantic_aware=True` as the
+engine's rule) packs sentences up to the target and cuts where similarity
+dips below both sides and stands out from the rest of that text. That
+test is relative, so a passage about one subject all the way through can
+still be cut at its deepest dip. The reference's double-merging splitter
+answers with a second pass: neighbouring groups at least a threshold
+alike are joined again, within a maximum size. `semantic_merge_threshold`
+is that pass:
+
+```python
+MemoryEngine(store, index, embedder, semantic_merge_threshold=0.2)   # or SCONE_SEMANTIC_MERGE_THRESHOLD=0.2
+```
+
+- **Every semantic cut, and only those.** The engine's rule and a record's
+  own `chunking="semantic"` (`remember(..., chunking="semantic")`, `scone
+  remember --chunking semantic`, `"chunking": "semantic"` on
+  `POST /v1/episodes` and in each batch record) both get the pass; length,
+  code, structure and unit cuts never read it. `semantic_aware` has no
+  environment variable, so on a served process
+  `SCONE_SEMANTIC_MERGE_THRESHOLD` reaches exactly the records that ask
+  for a semantic cut.
+- **A record can name its own.** `remember(..., semantic_merge_threshold=0.5)`,
+  `scone remember --semantic-merge-threshold 0.5`, and
+  `"semantic_merge_threshold": 0.5` on `POST /v1/episodes` and in each
+  batch record (a JSON number: `true` and `"0.5"` are refused). It implies
+  `chunking="semantic"`, is refused beside any other chunking, and wins
+  over the engine's threshold for that record. It is kept on the episode's
+  metadata under `semantic_merge_threshold` (text, and one of the 16 keys
+  an episode may carry), so a recovery re-cuts under it and an archive
+  import that carries only the metadata is honoured; a value there that
+  is not a similarity, or that disagrees with the field, is refused. What
+  a record cannot do is turn off a threshold the engine has: no value
+  means "no second pass". To mix the two, leave the engine's unset and let
+  the records that want the pass ask for it.
+- **The rule.** The chunks are walked in order. A chunk is joined to the
+  one before it when the cosine between the two sides' mean sentence
+  vectors is at least the threshold **and** the joined span fits the
+  chunk target -- the same measure the first pass packs sentences by. A
+  joined chunk is compared by the mean of all its sentences, not by the
+  chunk it started as or the one it last took in, and keeps whether its
+  own end is a change of subject.
+- **It only undoes cuts.** The first pass packs sentences up to the
+  target, so a chunk it ended by size can never fit with the whole of the
+  next one; the only joins possible are across a valley. A merge never
+  makes a chunk the first pass could not have made for its length. The
+  one size cut packing cannot rule out is inside a sentence longer than
+  the target, whose first piece can be short, and that is ruled out
+  directly: a boundary beside or inside such a sentence is never reopened
+  and never compared. The sentence's vector describes text that lies in
+  its other pieces, so comparing it would judge a join on text that is
+  not in the chunk, and the join would put part of one sentence with
+  another, which the first pass never does.
+- **No second embedding call, and the same answer every time.** The
+  sentence vectors the first pass already has are compared. The
+  reference embeds every joined text again. A text of one sentence is not
+  embedded at all, with a threshold or without: all its boundaries are
+  the bound's.
+- **The receipt says what the pass did.** `structure` carries
+  `merge_threshold`, `groups` (the chunks the first pass made, exactly
+  the chunks it stores without a threshold), `merges`, and every join
+  that did not happen, counted once, so `merges + stopped_by_similarity +
+  stopped_by_size = groups - 1`: `stopped_by_similarity` when the two were
+  less alike than the threshold, `stopped_by_size` when they were alike
+  enough and too long together -- the size bound biting. Two chunks that
+  fail both count as unalike. A chunk the first pass ended by size can
+  never fit the next one, so its own size cuts between alike chunks are
+  counted here too, and every boundary beside or inside a sentence longer
+  than the target is counted here without being compared. A semantic cut
+  without a threshold has no such receipt (`structure` is null), as before.
+- **A similarity above 0 and at most 1.** At or below 0 any two chunks
+  that fit and are not opposed would be joined, which is size chunking
+  under a semantic name; above 1 nothing would, while the receipt says the pass ran. A
+  bool, NaN or anything that is not a number is refused, and the
+  environment variable is refused by name.
+- **The scale is the embedder's.** The first pass's own threshold is
+  derived from each text's depths and assumes no scale; this one does,
+  which is why it is off by default. Hashed-token cosines are word
+  overlap. Over the sample below (51,250 first-pass chunks in 2,355
+  sessions; `benchmarks/semantic_double_merge.py --pairs`), the 6,790
+  neighbouring pairs of whole-sentence chunks that would fit together had
+  a median cosine of 0.04, a 90th percentile of 0.30 and a 95th of 0.38
+  under `hash-256`: 1,386 of them at or above 0.2, 276 at or above 0.4
+  (2,190 more boundaries touch a sentence longer than the target and are
+  never compared); a neural model's cosines sit far higher, and a
+  threshold chosen for one embedder means nothing for another.
+- **Stored chunks are never recut, and a replacement is prepared under
+  it.** The threshold is part of the configuration a keyed replacement is
+  prepared under, so one cut before the setting changed is refused rather
+  than stored. Recovery after a crash re-cuts the stored content under the
+  engine's threshold, which lands on exactly the chunks the uninterrupted
+  write stores under the same setting. The engine's threshold is not
+  written on the episode: an engine restarted with another value recovers
+  an interrupted record under the new one, as it does with `chunk_target`
+  and `chunk_tokens`. A record's own threshold is written, and recovery
+  uses it.
+- **Not the reference's first pass, and no merging across a chunk.** The
+  reference groups sentences by absolute thresholds against the chunk so
+  far and can reach one or two chunks past a dissimilar neighbour to join
+  across it (`merging_range`). Here the first pass is the valley cut
+  above, and a join across a chunk would pull in a chunk that failed the
+  very test.
+
+### What it measured
+
+`benchmarks/semantic_double_merge.py`: LongMemEval-S, the 50 items
+stratified by question type (seed 42), the hashed-token embedder on both
+sides, no model, no reranker, engine defaults otherwise (vector weight
+0.01). Every row is `bench.comparative.compare()` itself with
+`hybrid=True`: a fresh engine per item against LlamaIndex 0.14.24's
+BM25 + vector fusion over `SentenceSplitter(512)`, both folded to
+sessions. Both sides are deterministic, so one run is the number.
+
+| our cut | R@5 | all-sessions@5 | R@10 | R@15 | MRR | NDCG@5 | chunks | merges | stopped: similarity / size |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| length, 700 characters (default) | 0.90 | 0.76 | 0.92 | 1.00 | 0.838 | 0.807 | 46,637 | | |
+| semantic | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.824 | 51,248 | | |
+| semantic, merge at 0.4 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.824 | 50,996 | 252 | 38,122 / 10,520 |
+| semantic, merge at 0.2 | 0.90 | 0.74 | 0.92 | 0.96 | 0.857 | 0.825 | 49,997 | 1,251 | 20,336 / 27,307 |
+| *reference: BM25 + vector fusion* | 0.88 | 0.74 | 0.90 | 0.98 | 0.831 | 0.784 | | | |
+
+What it says: on this sample the second pass changes almost nothing a
+metric can see. At 0.2 it removes 1,251 chunks (2.4%) and changes the
+top-15 session ranking of 32 items and the top 5 of 7, and no score moves
+but NDCG@5 by 0.001 (0.8236 to 0.8246); at 0.4 it removes 252 (0.5%), changing 6 and 2. The
+semantic cut itself scores as the length cut does at k=5 and 10, higher
+on MRR (0.857 vs 0.838), lower at k=15 (0.96 vs 1.00). What it does not
+say: 50 items is one or two items a column; hashed-token vectors carry
+0.01 of the fused ranking, so a cut changes the ranking mostly through
+the text lane; nothing about a neural embedder, whose scale needs its own
+thresholds, and nothing about answer quality. The record, with the
+per-item session rankings, is in
+`benchmarks/semantic-double-merge-v1.results.md`.
+
+## Cutting a document at its genre's boundaries
+
+Structure chunking reads what any document carries and packs it up to the
+target. It cannot know what a genre knows: that `Article 2` owns the `(a)`
+below it, that `A:` belongs to the `Q:` above it, that a references list is
+not part of the conclusion it follows, or that `Section 4.2 Transfers` is a
+section at all (the plain clause rule wants a bare number). Whoever stores a
+document often does know, so a record can say:
+
+```python
+await engine.remember(space, text, chunking_profile="statute")
+```
+
+`scone remember --chunking-profile statute`, `"chunking_profile": "statute"`
+on `POST /v1/episodes` and in each batch record, or the same key in a
+`--jsonl` record (the `--chunking` and `--chunking-profile` flags are
+refused with `--jsonl` rather than silently not applied to its records). The profiles are `statute`, `paper`, `manual`, `qa` and
+`resume` (`ingestion/chunking_profiles.py`, `PROFILES`).
+
+**Why a field and not another chunking mode.** A profile is a set of
+boundaries for structure chunking, not another way to cut: `chunking` stays
+the closed set of modes, and `chunking_profile` names what one of them cuts
+at. A profile implies `chunking="structure"` (stored explicitly), naming it
+with `length`, `code`, `semantic` or `unit` is refused, and the receipt's `chunking`
+still reads `structure`. It is not called `profile` because that already
+names a space's profile of facts (`GET /v1/profile`), and one name serves the
+record, the metadata key, the HTTP field and the flag.
+
+Each profile is data: a tuple of named rules, each a line pattern with a rank.
+The structure chunker's line scan asks the profile what each line is, so
+Markdown and setext headings, tables, fences and front matter are read
+exactly as without one, and a heading whose title matches a rule is named by
+it (`## References` is `references`). A plain line matching a rule sits where
+that rank sat as a heading, or just above the nearest deeper rank that did,
+so a plain `References` after `## Conclusion` is its sibling and kept apart
+from it, and a plain `Chapter 3` after `## Article 5` is not its child.
+
+| profile | rules (rank) | kept apart |
+| --- | --- | --- |
+| `statute` | `part` (Part/Title/Book/Division), `chapter` (Chapter, 第…章), `article` (Article/Art./Section/Sec./§/Clause/Rule, 第…条); then `subsection` (4.2), `paragraph` (1.), `numbered` ((1)), `roman` ((iv)), `letter` ((a), a)), `capital` ((A)) nested in the order the article first uses them | nothing |
+| `paper` | `abstract`, `section` (Introduction, Methods, Results, Discussion, Conclusion, Appendix and the usual others, the whole line), `references`, then `subsection` (2.1 Title) and `reference` ([1] or 1., only inside references) | each section, the references |
+| `manual` | `task` (To …:/How to …:), `procedure` (3.2 Title, Chapter 4 …), `step` (1., Step 3:), `substep` ((a), b.) | nothing |
+| `qa` | `question` (Q:/Question:, or a line ending in `?` that opens a paragraph); `answer` (A:/Answer:) is counted and never cut at | each question with its answer |
+| `resume` | `section` (Summary, Experience, Education, Skills, Projects and the rest, the whole line) | each section |
+
+The units are then packed as a tree rather than a list:
+
+- **A subtree that fits the target is never split.** An article with its
+  clauses, a task with its steps, a question with its answer is one chunk
+  when it can be. Small siblings still pack together while they fit.
+- **A heading travels with its first child.** When a subtree is too big,
+  its own text goes into the first chunk of its children if it is only a
+  marker (shorter than `MIN_CHUNK`) or the two fit together; otherwise it is
+  its own chunk, so a long introduction cannot drag a question over the
+  target and split it from its answer. A marker stays with a first child
+  that fits the target on its own even when the two together do not: that
+  chunk is over the target by less than `MIN_CHUNK` and counted in
+  `over_target`, rather than a pair that fits being split.
+- **Kept-apart units never share a chunk with a sibling.**
+- **A table is never cut**, as without a profile.
+- **An imported file's own headings are headings**, as without a profile: a
+  Word, OpenDocument or HTML heading the file marked is a unit, named by the
+  rule its title matches, and the receipt's `document_headings` counts those
+  read.
+- **A unit longer than the target is split by size**, the first piece at the
+  unit and the rest counted in `by_size`.
+
+The receipt carries the structure counts plus which profile cut, how many
+lines each rule matched (including rules that do not cut) and which kind of
+unit each chunk began at:
+
+```json
+{"chunking": "structure",
+ "structure": {"units": 13, "at_boundary": 6, "by_size": 2, "tables": 0, "over_target": 0, "capped": false,
+               "why": "profile statute: 6 chunk(s) begin at one of 13 boundary(ies) its rules found; 2 begin where the byte target fell, inside a unit longer than 700 or outside any unit",
+               "profile": "statute", "matched": {"part": 1, "article": 4, "paragraph": 3, "letter": 5},
+               "began": {"part": 1, "article": 3, "letter": 2}}}
+```
+
+`over_target` under a profile counts every chunk longer than the target,
+whatever put it there: a table kept whole, a heading shorter than
+`MIN_CHUNK` kept with the unit under it, or a last piece shorter than
+`MIN_CHUNK` that the size chunker joins to the one before it. The unit bound
+(`MAX_SECTIONS`) is the structure chunker's, reported the same way in
+`capped`.
+
+The profile is kept on the episode's metadata under `chunking_profile`
+beside `chunking`, so a recovery re-cuts with it, and a record holding it
+only in metadata (an archive import) is cut the same way. An unknown
+profile, one that is not text, a profile with another chunking, or a
+metadata key that says otherwise is refused while the record is validated,
+before anything is stored. That includes a record whose content is already
+stored and would come back as a duplicate, and one record of a partial
+batch, which is answered as failed on its own. The `chunking` and
+`chunking_profile` keys count toward the 16 metadata keys an episode may
+hold, so a record whose own keys leave no room for them is refused rather
+than stored with more keys than its export can be imported with.
+
+**Structure that is not there is not invented.** A named marker must be
+followed by the end of the line, punctuation or a capitalised title, so
+`Section 3 of this Act applies` is a sentence, and so are `Section 3.2 of
+this Agreement` (the point in a number is not punctuation), `Chapter 3. of`
+and `Article 6 (1) of this Regulation` (a lowercase word after punctuation or
+a sub-reference); a paper or resume section
+name must be the whole line, so `Experience shows that…` and `Results were
+mixed` are prose; a question without `Q:` must open a paragraph (after a blank
+line, a heading or a rule), so a rhetorical question inside an answer does
+not start a new pair; a reference
+entry is only read inside references. Each has a test.
+
+**Measured** with `benchmarks/chunking_profiles.py` on two synthetic
+fixtures generated from a fixed seed, at the default target of 700: a statute
+of 12,292 characters (3 parts, 13 articles, 14 numbered paragraphs, 27
+lettered clauses) and a Q&A file of 13,190 characters (24 pairs, answers of 75
+to 761 characters, some of two paragraphs). All three ways of cutting are
+scored against the profile's own units; the full output is in
+`benchmarks/chunking-profiles-v1.results.md`.
+
+| | length | structure | statute profile |
+| --- | --- | --- | --- |
+| chunks | 21 | 23 | 27 |
+| chunks starting at a genre boundary | 11 (52%) | 22 (96%) | 26 (96%) |
+| part or article split from its first clause | 8 of 14 | 4 of 14 | **0 of 14** |
+| part or article that fits the target, split anyway | 4 of 6 | 6 of 6 | **0 of 6** |
+
+| | length | structure | qa profile |
+| --- | --- | --- | --- |
+| chunks | 26 | 27 | 30 |
+| chunks starting at a genre boundary | 16 (62%) | 10 (37%) | 24 (80%) |
+| question split from its answer | 0 of 24 | 15 of 24 | **0 of 24** |
+| pair that fits the target, split anyway | 2 of 16 | 7 of 16 | **0 of 16** |
+
+On the statute the share of chunks starting at a boundary does not move:
+plain structure already starts its chunks at `Article` and `(a)` lines. What
+moves is where the chunk ends: plain structure leaves `Article 2` /
+`Definitions` as the last lines of one chunk and its clauses in the next.
+The only chunk not at a boundary in either is the document's title. On the
+Q&A file plain structure reads `A:` as a boundary of its own and cuts
+between a question and its answer 15 times out of 24; the six chunks under
+the profile that do not start at a question are the second pieces of answers
+longer than the target. Length chunking never separates the two there
+because `Q:` and `A:` sit on adjacent lines, but it splits pairs that fit.
+
+The cost is chunks: 17% more on the statute and 11% more on the Q&A file
+than plain structure, because whole subtrees do not pack as tightly as loose
+units. Whether a reader answers better from these chunks is unmeasured.
+
+Run over this directory's own documents (`--corpus docs`), where no genre
+applies, the rules stay quiet: `qa` and `resume` match nothing, `paper` one
+heading, and `statute` and `manual` 19 numbered-list lines, which are steps.
+Chunk counts under every profile were within 1% of plain structure; the
+counts, which move whenever these documents are edited, are in the results
+file.
+
+**Limits.** English markers, plus 第…章 and 第…条. A `(i)` is read as a roman
+numeral unless it follows `(h)` in the same article (likewise `(v)` after
+`(u)`, `(x)` after `(w)`) and no capital `(A)` is the innermost open
+enumerator: in the United States code's `(h)(1)(A)(i)` it is a clause, and
+after `(h)(1)(2)` the letter. A roman list directly under `(h)` reads its
+`(i)` as the letter. A hard-wrapped line that happens to begin with `(a)` or `12.` reads
+as a marker, as it does in plain structure. The title path is not prepended
+to a chunk as the reference implementation does, because stored text stays
+an exact excerpt; `heading_context` is the way to put Markdown headings into
+the embedding input, and it does not yet read profile markers. Nothing
+chooses a profile for a document: it is declared, per record, or not used.
+
+## Embedding a chunk with the headings above it
+
+A chunk cut from a long document loses what the document said it was
+about: "within 30 days" under "## Refund policy" in "# Chapter 4" is,
+once cut, only "within 30 days". With `heading_context=True`
+(`SCONE_HEADING_CONTEXT=1`) each chunk's embedding input starts with the
+path of headings above it, outermost first, and a code chunk's starts
+with its file and the declarations it sits inside. For an imported file,
+the headings its reader marked count as well, each running to the next
+of the same or a higher level; recovery reads the same ones, so a
+recovered chunk is embedded as an uninterrupted one would have been.
+
+- **Only what is embedded changes.** Stored text is untouched, so recall
+  still returns the exact excerpt.
+- **The path is bounded.** At most `MAX_HEADING_CONTEXT_BYTES`; a longer
+  path keeps its innermost headings, and the receipt counts the chunks it
+  was cut for.
+- **It is part of the vector writer's identity** (`heading-path-v2` since
+  imported files' own headings joined the path). Vectors embedded with
+  headings and vectors embedded without them never answer one search
+  together: turning the setting on or off for an existing store reads as
+  a mismatch until the vectors are rebuilt.
+- **Off by default.** On the hash embedder, queries made of heading
+  titles found their chunk about twice as often and queries made of the
+  chunk's own words barely moved; the learned-embedder run has not been
+  done yet. Both halves and their limits are in
+  `bench-runs/heading-context-2026-09-13/results.md`.
+
+### Keeping that context inside the embedder's window
+
+A model embeds at most so many tokens and drops the rest without saying
+so: the local BGE models read 512. What goes in front of a chunk -- the
+heading line, a table's header row, the source and date -- comes first,
+so a long enough prefix cuts off the end of the chunk it explains.
+`embedding_budget=True` (`SCONE_EMBEDDING_BUDGET=1`) shortens the context
+until the whole input fits:
+
+1. the outermost headings, one at a time;
+2. then the whole heading line;
+3. then the table context.
+
+The chunk itself is never cut. A chunk too long on its own is embedded
+without context and counted in `body_over`. The receipt's
+`embedding_context.budget` gives the window (`tokens`), how each chunk
+came out (`fits`, `shortened`, `dropped`, `body_over`) and the `method`
+that counted.
+
+- **Counted by the model's own tokenizer where it has one.** The local
+  embedder counts with an untruncated copy of its tokenizer
+  (`tokenizer-v1`).
+- **Estimated otherwise** (`estimate-v1`): a word counts one token per
+  four letters of each camel-case part, a digit run one per two, each
+  mark one, each character of a script written without spaces one, and
+  two for the markers a model adds. On this project's 1,173 documentation
+  chunks it never counted fewer tokens than BGE's tokenizer, and 1.36 times
+  as many at the median. That margin has a cost on long chunks. At a
+  2,000-character target with heading lines, the tokenizer found 332 of 371
+  inputs fit, 9 shortened, 10 dropped and 20 bodies over 512. The estimate
+  called 252 bodies over. Read `body_over` under `estimate-v1` as "might
+  be over".
+- **It bites rarely at the default target.** At 700 characters, no chunk of
+  those documents came near 512 tokens with its heading line. It matters
+  for long chunks and wide table headers.
+- **It needs an embedder that declares its window** (`max_input_tokens`).
+  The local BGE models do; one that does not is refused, rather than
+  budgeted against a number nobody stated.
+- **It is part of the vector writer's identity** (`;budget=tokenizer-v1`
+  or `;budget=estimate-v1`), so turning it on over an existing store reads
+  as a mismatch until the vectors are rebuilt. Off by default.
 
 ## A recalled body, with the signature and imports that make it readable
 
@@ -788,6 +2264,42 @@ A header longer than twelve lines is quoted to there, and says so —
 the name in the terminal. A bound that bit in silence is the fault this
 framework keeps making.
 
+## Where the question's words are in a passage
+
+A recalled passage says which lanes found it and how it ranked. It did
+not say where the matching words are, so a page drawing the passage had
+to tokenise it again, and got it wrong wherever its tokeniser differed
+from the lexical lane's: that lane folds case, normalises width, keeps a
+possessive with its word and reads scripts written without spaces as
+characters and pairs.
+
+```bash
+scone recall "crane repainted" --highlight
+# <score>  <date>  #<episode>  The harbour Crane was repainted in May.
+#       matched: Crane, repainted
+scone --json recall "crane repainted" --highlight   # adds "highlights"
+curl -H "authorization: Bearer $KEY" "$URL/v1/recall?q=crane+repainted&highlight=true"
+```
+
+`highlights` sits beside `items`, one entry per item in the same order,
+each with the question's `terms`, the `spans` (`start`, `end`, `term`)
+and `total`. The rules, each with a test:
+
+- **The lexical lane's own tokeniser decides.** The passage is read word
+  by word and a word is marked when its tokens include a query term, so
+  `CRANE` and `Alves's` are marked and a stopword in the question marks
+  nothing. No stemming is invented here: the lane does not stem, so
+  `repaint` does not mark `repainted`.
+- **Offsets are code points of the text as returned**, and the spans are
+  computed last, after windowing, merging, withholding and code context,
+  because a span is only true of the text it was measured on.
+- **In a script without spaces** the span is where the term's characters
+  stand inside the run, and the overlapping characters and pairs of one
+  query term merge into one region.
+- **The bound says it bit.** A passage keeps at most `MAX_HIGHLIGHTS`
+  spans; `total` counts all of them and `truncated` says some were not
+  listed.
+
 ## One passage instead of three fragments of it
 
 Small chunks match precisely and read badly. Three neighbouring fragments
@@ -802,15 +2314,18 @@ question, and re-indexing to change it.
 ```bash
 scone recall "crane survey rust jib slew" --merge --limit 5
 # 1 passage(s) joined from 3 chunk(s)
-# joined 3 chunk(s) into #12: 11, 12, 13
+# joined 3 chunk(s) into #12: 11, 12, 13 (84% of it retrieved)
 ```
+
+Over HTTP, `GET /v1/recall?q=...&merge=true`, with the record in
+`merged`. Advertised as `recall.merge`.
 
 **No hierarchy and no re-index**, because every chunk already carries the
 byte span it came from: neighbours from one episode are merged by reading
 the span that contains them. The shape of a merge is therefore decided by
 what was actually retrieved, not by a decision taken at ingestion.
 
-Three rules it keeps:
+The rules it keeps:
 
 - **A merged passage says what went into it.** `from_chunks` names every
   chunk absorbed, because a citation nobody can check is worse than three
@@ -818,10 +2333,35 @@ Three rules it keeps:
 - **It keeps the best score of its parts, never their sum.** A sum would
   make a merged passage outrank everything by arithmetic rather than by
   relevance.
-- **It is a passage, not a document.** Fragments further apart than
-  `max_merged` bytes are left alone and the report says so — silently
-  returning most of a document to answer a question about a sentence
-  would be worse than not merging.
+- **It is a passage, not a document.** An episode's fragments are joined
+  in clusters, taken in the order they sit, each spanning at most
+  `max_merged` bytes (4,000). A fragment too far from the rest is left
+  alone and the report says so; silently returning most of a document to
+  answer a question about a sentence would be worse than not merging. One
+  far fragment does not stop the fragments beside each other from
+  joining, and every cluster in an episode is merged from one read of it.
+- **It says how much of itself was retrieved.** A merge reads the text
+  between fragments too, so two short hits far apart would make a passage
+  mostly nobody retrieved. `shares` gives, for every merged passage, the
+  part of its bytes that retrieved chunks cover, overlaps counted once,
+  counting the spans the chunks were retrieved at rather than any window
+  around them.
+  `merge_min_share` (`--merge-min-share`) leaves a sparser merge as
+  fragments, counted in `too_sparse`. The reference merges children into
+  a parent only when enough of them were retrieved; this is that rule in
+  the bytes a reader gets. It defaults to 0, no floor, and is unmeasured.
+- **A budget that bit says so.** At most 50 episodes are read per call;
+  the rest stand unjoined, counted in `not_read`. A passage whose span
+  reads back blank from an episode that was read (its text changed under
+  the chunks) is left as fragments and counted in `blank`, apart from an
+  episode that could not be read.
+- **Withholding scans what a merge reads.** Merging runs after any window
+  and before withholding, so an address in the text between two
+  fragments is withheld like one inside them. The command line refused
+  `--withhold` beside `--merge` while it merged after withholding; it now
+  merges first and allows both. Merging does not combine with
+  `compress`: a merged passage is reported under one chunk, so
+  compression would not keep the others it holds.
 - **The caller's ranking survives.** Neighbours are found per episode and
   emitted in the order they arrived, a merged passage taking the place of
   its best fragment. Walking a ranked list by episode and appending group
@@ -837,6 +2377,153 @@ Three rules it keeps:
 Opt-in, because it is not yet measured. It changes the shape of an answer
 for certain; whether it changes what is *found* is a question for the
 bench, and until that number exists this does not become the default.
+
+## The passage around a precise hit
+
+Merging needs two hits in one episode. The commoner case is one: a
+sentence matches exactly, and the answer is in the sentence after it. A
+window returns each hit with the episode's own text around it, read at
+retrieval from the byte span every chunk carries.
+
+```bash
+scone recall "rust jib slew grease" --window 200                         # 200 bytes either side
+scone recall "rust jib slew grease" --window 1 --window-unit sentences   # one whole sentence either side
+```
+
+Over HTTP, `GET /v1/recall?window=1&window_unit=sentences`; the response's
+`widened` receipt says what was done.
+
+The leading framework builds its sentence window at ingestion: one
+sentence per node, the neighbours stored beside it, and a re-index to
+change the size. Here the unit and the count are the caller's, per
+request, and nothing is re-embedded.
+
+- **A window is quoted, never assembled.** Its text is the episode's
+  bytes between two offsets, both on character boundaries.
+- **Counted in bytes**, both edges land wherever the count does.
+- **Counted in sentences**, the hit first grows to the whole sentences it
+  touches, then by `window` whole sentences either side (at most 20), so
+  both edges sit on sentence boundaries. With `window=0` it only
+  completes the sentences it touches. A hit that is only the space
+  between sentences takes the sentence after it. The window always holds
+  the whole hit.
+  - A sentence ends at `.`, `!` or `?`, with any closing quote or
+    bracket, followed by space or the end. It does not end at an initial
+    (`J. Anderson`), a title (`Dr. Okafor`) or a stop followed by a
+    lower-case word (`i.e. before`), the rules the semantic chunker cuts
+    by. It also ends at a CJK full stop (`。！？`), which needs no space
+    after it, and at a blank line, so a heading or list item with no stop
+    is a sentence of its own.
+- **A window cut short says so.** `clipped` counts windows that met the
+  start or end of the episode. `capped` counts sentence windows stopped at
+  the 100,000-byte reach inside an over-long sentence. `aligned` counts
+  byte windows moved off a partial character. The `why` line says each in
+  words.
+- **A source confirmed gone is dropped, not served**, and one that could
+  not be read stands as it was and is counted.
+
+Advertised as `recall.window` and `recall.sentence_window`.
+
+## Cutting a window back to what bears on the question
+
+A window of sentences either side of a hit holds the answer more often
+than the hit alone, and it holds a good deal besides. `compress` keeps
+the sentences the passage was retrieved for, always, and at most a share
+of the sentences the window added around them:
+
+```
+GET /v1/recall?q=what+was+wrong+with+the+crane+jib&window=3&window_unit=sentences&compress=0.5
+scone recall "what was wrong with the crane jib" --window 3 --window-unit sentences --compress 0.5
+```
+
+The reference's sentence optimizer embeds every sentence of a node and
+drops the ones least like the question, so a node found by a sentence
+that happens to score low can lose that sentence. Here the retrieved
+span is never scored, only what widening added around it.
+
+- **Two scorers.** `terms`, the default, needs no model. A sentence
+  scores the weight of the question's words it names, each word weighted
+  by how few of the passage's sentences name it, so a word the whole
+  passage repeats counts for less than one it names once. Words that only
+  ask, such as how, why, or the many of a "how many", do not count: on
+  this documentation they kept every sentence saying "how many". A
+  sentence naming none of the rest is never kept. `embedding` scores a sentence by its cosine
+  to the question under the space's embedder, every sentence in one call,
+  at most 400 per recall.
+- **`compress` is a ceiling.** 0.5 of five sentences keeps at most two,
+  never rounded up; 0 keeps only what was retrieved. Between sentences of
+  equal score, the one nearer the hit is kept.
+- **Kept text is quoted in runs, never spliced.** Adjacent kept sentences
+  are one run of the episode's own bytes, listed in `compressed.runs` as
+  byte offsets per chunk. Runs that are not adjacent are joined by ` … `,
+  so the text never reads as one quote. The item's `start` and `end`
+  bound the first and last run.
+- **What was not cut says so.** A passage with no retrieved span inside
+  it is left whole and counted in `unpinned`; a passage past the
+  embedding budget is left whole and counted in `unscored`; a question
+  naming no word the terms scorer can weigh cuts nothing, and `why` says
+  each in words. `bytes_before` and `bytes_after` count what was saved.
+- **Refused without a window of sentences**, where there is nothing it
+  may cut, and beside a merge, whose passage is reported under one chunk
+  so the other retrieved chunks inside it would not be kept; on the
+  command line also beside `--parts`, which answers without it.
+  It runs after widening and before withholding, so what withholding
+  scans is what is returned.
+
+Neither scorer is measured. Which share keeps the answer while saving the
+most is an answer-bench question, and until that number exists `compress`
+stays opt-in and its record says `measured: false`. Advertised as
+`recall.compress`.
+
+## Where each sentence of an answer came from
+
+An answer composed from recalled passages reads as sourced whether it is
+or not. The leading framework asks the model to cite numbered sources as
+it writes, and nothing checks the numbers afterwards. Attribution takes an
+answer already written, by a model or a person, and the stored chunks it
+was composed from, and aligns each sentence to them without a model.
+
+```bash
+scone attribute --answer "Priya moved the launch to March because the audit ran late. The board was not told." \
+  --chunk 12 --chunk 14
+# quoted chunk:12: Priya moved the launch to March because the audit ran late.
+# unattributed: The board was not told.
+```
+
+Over HTTP, `POST /v1/answers/attribute` with `{"answer": ..., "chunk_ids": [...]}`.
+The chunks are read from the space, never taken from the caller, so an
+answer cannot be attributed to text the space does not hold. An id the
+space does not hold is named in `chunks_missing`, and one it holds whose
+text is blank, with nothing to attribute to, in `chunks_empty`.
+
+Each sentence gets one status:
+
+- **quoted**: it shares a run of at least 5 consecutive words with a
+  passage, compared case-folded, with the punctuation between words
+  ignored. The record gives the run's span in the passage and its text.
+- **overlapping**: no such run, but at least 60% of its content words
+  (the lexical lane's tokens, stopwords left out) are in one passage.
+- **unattributed**: neither, for every passage given.
+- **too_short**: fewer than two content words.
+
+A quote beats an overlap and a longer run beats a shorter one; then more
+of the sentence's words wins, then the passage given first. Numbers in a
+sentence that its passage does not hold, such as `14th` against a passage
+saying `twelfth`, are named on the sentence.
+
+What it is not:
+
+- **Word overlap is not support.** A sentence can quote a passage and
+  still misstate it, and a faithful paraphrase can come out unattributed.
+  The record says `verified_accuracy: false`.
+- **Both rules are unmeasured**, and the record says so (`rules.measured:
+  false`).
+- **A run is counted between words separated by space or punctuation**,
+  so text in scripts written without spaces can overlap but is rarely
+  quoted.
+
+An answer over 20,000 characters or more than 50 passages is refused, not
+cut. Advertised as `answers.attribution`.
 
 ## What a codebase says about itself beyond who calls whom
 
@@ -854,6 +2541,29 @@ pkg/shelf.py:Shelf  inherits  pkg.base.Store          # a base from an import
 web/shelf.ts:Shelf  inherits  Store                   # extends
 web/shelf.ts:Shelf  mixes_in  Face                    # implements
 ```
+
+**What a signature names.** A call edge says what a function runs;
+nothing said what it takes or returns, so "what uses `Receipt`?" found only
+its constructors. A Python function's parameters (including `*args` and
+`**kwargs`), its return and its annotated locals, and a class's annotated
+attributes, now give `uses_type` edges, through generics (`list[Receipt]`)
+and quoted forward references (`"Shelf.Label"`) alike:
+
+```
+pkg/shelf.py:put          uses_type  pkg/shelf.py:Shelf     # a class this file declares
+pkg/shelf.py:put          uses_type  pkg.receipts.Receipt   # a name imported from the project
+pkg/shelf.py:later.inner  uses_type  pkg.models.Paper       # a nested function, named as defines names it
+```
+
+A name in a class body means that class's member first. The standard library
+and built-ins are left out as noise (`str`, `Optional`, `datetime.date`), and
+so is a local function named in an annotation, since a function is not a
+type. A name taken out of a module (`from pkg import models`) and then used
+as `models.Paper` is not followed, for the same reason calls are not: a
+file cannot tell a module from an object. The edges are not part of a blast
+radius (`affected` walks `calls`, `imports`, `inherits` and `mixes_in`).
+Over this package's 408 files they add 4,139 edges beside 14,446 call
+edges, in the same pass.
 
 **Extending a class and satisfying an interface are different relations,
 and collapsing them loses the question people ask.** "What is a Shelf?"
@@ -940,10 +2650,13 @@ A manifest is where a project writes down what it needs, and until now
 none was read: the graph knew every `import requests` and nothing about
 which project declares requests, at what version, or only for its tests.
 `pyproject.toml` (PEP 621, PEP 735 dependency groups, Poetry),
-`requirements*.txt`, `package.json`, `Cargo.toml` and `go.mod` are now read
-wherever they sit, by `scone map --graph` and by any remembered file with
-one of those names as its source, into claims like a source file's --
-quoted from the line, cited to the file, extracted rather than stated:
+`requirements*.txt`, `Pipfile`, `package.json`, `Cargo.toml`, `go.mod`,
+`pom.xml`, `build.gradle` and `build.gradle.kts`, `Gemfile`,
+`composer.json` and a .NET project file (`.csproj`, `.fsproj`, `.vbproj`)
+are read wherever they sit, by `scone map --graph` and by any remembered
+file with one of those names as its source, into claims like a source
+file's -- quoted from the line, cited to the file, extracted rather than
+stated:
 
 ```
 packages/memory/pyproject.toml  defines        scone-memory
@@ -959,17 +2672,164 @@ dependency groups, dev dependencies. A project does not run on pytest.
 
 The object is the package's bare name, spelled as its index spells it (a
 Python name lowercased with runs of `-_.` as one `-`, a crate with `_` as
-`-`, an npm name lowercased), and the extras, version and marker stay in
-the quote. So a package five manifests name is one thing in the graph,
+`-`, an npm, Composer or NuGet name lowercased, a Maven or Gradle
+artifact as `group:artifact`, a gem as named), and the extras, version
+and marker stay in the quote. Each format's own way of saying "for
+tests" is read: Maven's `<scope>test</scope>` and build plugins,
+Gradle's `test*`, `annotationProcessor`, `kapt`, `ksp` and `classpath`
+configurations and its `plugins { id }` block, a Gemfile's
+`group :test, :development` blocks and inline `group:`, Composer's
+`require-dev`, a .NET `PrivateAssets="all"` reference, a Pipfile's
+`[dev-packages]`. What the reader cannot place it leaves out: a Gradle
+`project(':lib')` or map-style dependency, a Composer platform
+requirement (`php`, `ext-json`), a .NET `ProjectReference`. So a package five manifests name is one thing in the graph,
 and each manifest's line says what it asked for. The subject is the
 project's declared name where it has one, else the manifest's path. A Go
 `// indirect` requirement is left out: it is what a dependency needs, not
 what the module declares. A renamed Cargo dependency is the crate it names,
-not the alias. `pom.xml` is not read.
+not the alias. A Maven coordinate spelt with `${project.groupId}` or
+`${project.artifactId}` is read as Maven reads it, and a plugin without a
+group is Maven's own; any other placeholder is left out rather than
+guessed. Left unread, by design: Maven's `<dependencyManagement>`,
+`<pluginManagement>` and `<profiles>`, a Gradle `platform(...)` or
+version-catalog reference, a Gemfile's `gemspec`, and
+`Directory.Build.props`/`Directory.Packages.props`.
 
 Dependency names are not bound to import names. They differ often
 enough (`beautifulsoup4` and `bs4`, `Pillow` and `PIL`) that binding them
 would guess, and the graph does not.
+
+A package a manifest names is an entity, as a code symbol is, so the
+questions the graph answers about code reach it: `scone graph affected
+requests` lists the projects whose manifests declare it, through
+`depends_on`, beside the files that import it, and a test dependency's
+blast radius runs through `develops_with`.
+
+### What a project hands its agents
+
+An MCP configuration is a manifest of a different kind: where a project
+writes down the tool servers its agents talk to. Until now none was
+read, so the graph knew a project's packages and imports and nothing
+about the servers, what they run on, or which variables must be set
+before one starts. `.mcp.json` (Claude Code), `claude_desktop_config.json`
+(Claude Desktop), `mcp.json` (Cursor, Windsurf, VS Code under
+`.vscode/`), `mcp_servers.json`, `mcp_config.json`,
+`cline_mcp_settings.json`, `.gemini/settings.json` and Codex's
+`.codex/config.toml` are read wherever they sit, by `scone map --graph`,
+by `sync`, and by a remembered file with one of those names as its
+source. The `map` and `sync` walks pass dot-named entries by, as they
+always have, with these files and the four tool directories that hold
+one (`.vscode`, `.cursor`, `.gemini`, `.codex`) as the stated exception;
+from those directories only the configuration is read, so
+`.vscode/settings.json` stays unread as before. A configuration makes
+claims like a manifest's:
+
+```
+app/.mcp.json             defines       app/.mcp.json:git       "git"
+app/.mcp.json:git         runs_with     uvx                     uvx
+app/.mcp.json:git         depends_on    mcp-server-git          mcp_server_git
+app/.mcp.json:git         requires_env  $GIT_TOKEN              "GIT_TOKEN"
+app/.mcp.json:remote      connects_to   https://mcp.example.com https://mcp.example.com
+```
+
+- `defines`: the file defines each server it configures, named by the
+  file and the server's key, so two files that both configure a
+  `filesystem` stay two things. A server is no declaration a call could
+  reach: like a manifest's project name, it is left out of call
+  resolution.
+- `runs_with`: the executable a local server starts with, by its base
+  name (`npx`, `uvx`, `docker`, `node`), so "everything that runs
+  through docker" is one question. A command that is itself a reference
+  (`${TOOL_HOME}/bin/server`) names no executable.
+- `depends_on`: the package the server runs, when the executable says
+  which index it comes from -- the first positional argument of `npx`,
+  `bunx` or `pnpx` is an npm package (`--package` names it instead), of
+  `uvx` or `pipx` a PyPI distribution (`--from` and `--with` name
+  distributions too) -- spelled as its index spells it, the same object
+  a `package.json` or `pyproject.toml` names, so a server and a manifest
+  that name one package meet at one entity. A path, a URL, a VCS spec
+  and a reference are not packages. A docker image is left out: the
+  `run` line's flags cannot be told from the image without knowing every
+  flag, and a guess would name the wrong thing.
+- `requires_env`: the environment variables a server needs, by name and
+  never by value: the keys of its `env` map; a `${NAME}`,
+  `${NAME:-default}` or `${env:NAME}` reference in its command,
+  arguments, URL, headers or env values; a `-e NAME` or `--env NAME` a
+  docker run passes through from the host (`-e NAME=value` sets a value
+  and needs nothing); and Codex's `bearer_token_env_var` and
+  `env_http_headers`. The object is `$NAME`, as a shell writes it. A
+  reference in lower or mixed case (`${workspaceFolder}`,
+  `${input:token}`) is a tool's own variable, not the environment's,
+  unless it says `env:`. One variable a server names twice is one claim.
+- `connects_to`: the origin (scheme, host and port, lowercased) of a
+  remote server's URL, when the host is written out rather than
+  referenced.
+
+A value is never quoted. What an `env` map holds is what a configuration
+keeps secret, an argument or header may carry one, and a URL's query
+can; so every claim quotes the token that grounds it -- the server's key,
+the command, the package as written, the variable's name, the URL's
+origin -- and its byte span covers that token alone. The three new
+predicates are many-valued, code-shaped, followed by `graph affected`
+(a change to the variable or the executable reaches the servers that
+rest on it) and name entities the graph may only know by name, as
+`imports` does; the object of `runs_with` and `connects_to` is a product,
+as `depends_on`'s is.
+
+### Schemas as things code rests on
+
+A code graph that knows a project's files and packages still stopped at
+the database: a table is what half the functions read and write, and a
+migration that drops a column reaches every one of them. A `.sql` (or
+`.ddl`) file is now read as the schema it writes down — the reference
+graph introspects a live database; a repository holds the schema as text,
+a diff changes it, and nobody has to connect to anything. `scone map` and
+`remember()` with such a source record, each claim quoted from its line:
+the file `defines` each table and view (`db/schema.sql:orders`); a table
+`defines` each of its columns (`db/schema.sql:orders.customer_id`); a table
+with a foreign key — inline `REFERENCES`, a `FOREIGN KEY` constraint, or an
+`ALTER TABLE … ADD CONSTRAINT` — `depends_on` the table it references; a
+view `depends_on` the tables it selects from. Comments are not read, quotes
+and brackets around a name are not part of it, and a schema-qualified name
+is kept as written. `depends_on` is the predicate a manifest's dependencies
+already use, so `scone graph affected db/schema.sql:customers` lists the
+tables and views that rest on `customers`, nearest first, beside the code
+that imports a module. Nothing binds code to a table: a query is a string,
+and a string that names a table is a guess this graph does not make.
+
+### What a diff reaches
+
+```bash
+git diff main...HEAD | scone graph impact --root .
+scone graph impact change.diff --root . --json
+```
+
+`graph affected` answers for one symbol; a pull request touches lines in
+many files, and the question people bring to it is the same one asked of
+the diff as a whole. `graph impact` reads a unified diff (what `git diff`
+writes, quoted paths included), re-reads each changed file at `--root` —
+the tree **after** the change, the diff's `b` side, whose line numbers the
+hunks give — with the declaration reader that cuts files into chunks, and
+names what every hunk touches at two
+levels, because the graph holds edges at two levels: the declaration under
+the changed lines (`pkg/store.py:Shelf.keep`), for calls the graph bound to
+it, and the file, spelt as its path and, for Python, as the module an
+import names (`pkg.store`). A change outside every declaration — an import
+line, a constant — touches the file alone; a file the root no longer holds
+is taken as removed and asked about as a file. Each thing touched is listed
+with what the graph was asked and what it said (`found`, `nothing`,
+`unknown` for a file this graph was never given), and everything that rests
+on the change follows once, nearest first, with the fewest hops from
+anything touched and the name it was reached through. Bounds on files
+examined, things asked about and dependants listed are each disclosed when
+they bite; so is a bound that bit inside one of the graph's own answers (a
+list it cut, a depth it stopped at), a name longer than the graph takes, a
+file the diff names outside the root, and a root that is not a directory;
+and an empty answer means nothing *in this graph* rests on the
+change. The module spelling is a second question asked, not a link
+asserted: where a file and the module that names it are joined only at
+ingestion (`scone map` supplies the resolver; `remember()` does not), the
+answer says which spelling found what.
 
 ### Claims read from files hold side by side
 
@@ -980,14 +2840,42 @@ module with three imports held one and closed two as superseded, a file
 with two functions defined the second, and every graph built on the
 ledger kept the last claim of each kind and called the rest history.
 
-The predicates the framework extracts -- `defines`, `imports`, `calls`,
-`inherits`, `mixes_in`, `notes`, `flags`, `cites`, `depends_on`,
+The predicates the framework extracts -- `defines`, `imports`,
+`imports_when_called`, `imports_for_types`, `calls`, `inherits`,
+`mixes_in`, `uses_type`, `notes`, `flags`, `cites`, `depends_on`,
 `develops_with` -- are many-valued by their nature, declared so in the
 core (`scone_memory.core.extracted.MANY_VALUED`), and no configuration
 takes one out of that set. `SCONE_MANY_VALUED` still adds predicates a
-person names; `GET /v1/graph/schema` marks both kinds as `many`. A file
-read again restates its claims; a claim a changed file no longer makes is
-not closed by this, which remains open.
+person names; `GET /v1/graph/schema` marks both kinds as `many`.
+
+### A claim read from a file holds while the file says it
+
+`replace` and `sync` store a changed file as an update: the old episode
+is forgotten, the new one stored, its claims read. Forget's contract
+leaves claims standing, rightly -- a person's memory of a fact survives
+deleting its source -- but for what a reader extracted that meant the
+ledger held what the file used to say beside what it says now: a module
+that dropped an import still imported it, a function that was removed
+was still defined.
+
+So on replacement, the extracted claims the old episode grounded that the
+new content did not restate are closed, reason `no longer stated by
+<path>`, event kind `source_changed`; a restated claim -- the same
+subject, predicate and object read out of the new content -- is one fact,
+still holding. When a sync asked to `remove` forgets a file that is gone,
+every extracted claim it grounded is closed, reason `<path> was removed`,
+kind `source_removed`. Neither is counted as a manual closure. What a
+person stated about the episode is left alone, a plain `forget` still
+touches no claim, and nothing happens with the code graph off.
+
+The receipts say what was done. `Replaced.claims_closed` counts the
+closures, `None` when the store cannot read claims by episode (nothing is
+closed on a guess); `claims_unread` is true when the old episode grounded
+more claims than one read returns, so some were not examined and may
+still stand. A sync receipt carries `claims_closed` and `claims_unread`
+only when there is something to say, so a sync without the code graph
+reads exactly as it did. The durable directory-sync service does not read
+claims and is untouched.
 
 ## Code: cut where the declarations are
 
@@ -1054,6 +2942,63 @@ interesting one: asked in a person's words, two in five questions do not
 return the function's own definition. That is an embedder question, not a
 chunker one, and it is where the next gain is.
 
+### Judging an answer with a local model
+
+Retrieval metrics say whether the right passages came back; `bench.evaluators`
+says what a local judge (any `ChatModel`) makes of the answer written from
+them, our way: the judge is handed the exact texts and asked for a small JSON
+verdict, the verdict is parsed strictly, and what could not be parsed, what
+the judge failed to produce, or what exceeded the input bound comes back as
+**unverified** — never a pass, never a fail. `faithfulness` (every claim in
+the answer, and whether a context supports it), `answer_relevancy`,
+`context_relevancy` and `correctness` (against a reference, on a five-point
+scale) are the four the reference framework also asks. Two more:
+
+- `pairwise(judge, question=…, answer_a=…, answer_b=…, reference=None)` asks
+  which of two answers is better, **in both orders**. A judge that prefers
+  whatever it read first gives two different verdicts; that disagreement is
+  reported as a tie with the reason, not resolved by a coin. The score is 1
+  when A wins, 0 when B wins, 0.5 for a tie; two calls per judgment.
+- `semantic_similarity(embedder, answer=…, reference=…, passing_similarity=0.8)`
+  is the cosine between the two embeddings, clamped to [0, 1], with no judge
+  called. It says nothing about truth — two fluent wrong answers can sit
+  close together — and what it says depends on the embedder, whose id is on
+  the reason.
+
+A judgment is the judge's opinion, not proof; the bench reports it beside the
+metrics that need no judge, and says which is which.
+
+### Questions your own corpus answers
+
+```bash
+SCONE_CHAT_URL=http://127.0.0.1:11434/v1 SCONE_CHAT_MODEL=gemma4-e4b-ctx8k \
+  scone bench-questions docs/ --set docs-questions.json --write
+scone bench-questions docs/ --set docs-questions.json --k 1,5,10
+```
+
+LongMemEval-S measures conversations and `bench-code` measures functions;
+nothing measured retrieval on a corpus of your own. `bench-questions --write`
+stores every text file (`.md`, `.txt`, `.rst`) and PDF under a directory in
+its own in-process store, shows a sample of the chunks to the configured
+local model (at most `--max-chunks`, sampled by `--seed`; the set says how
+many chunks there were), and asks it for `--per-chunk` questions each with
+the sentence that answers it. A question is kept only when that sentence is
+in the chunk the model was shown, word for word (whitespace aside); one
+whose quote is invented is dropped and counted, as is a reply that is not
+the JSON asked for, a call that failed, and a chunk too long to show. Every
+kept question can therefore be checked by anyone holding the text.
+
+Measuring needs no model and no chunk ids: the same root is stored again,
+every question is asked, and a returned passage that holds the quote is a
+hit — `quote in top k`, MRR, and `source in top k` for questions whose
+chunk came from a file. Because the truth is a quote and not a chunk id,
+one set measures the corpus stored with a different chunk size, store or
+embedder, as long as the text is the same; that is what makes it a bench
+for ingestion changes (a PDF read in a different order, a chunker cut at
+different places) and not only for retrieval settings. The set is a JSON
+file with a version, so a saved set is refused by a reader that does not
+know its shape.
+
 ## Choosing settings by measuring them
 
 ```bash
@@ -1067,6 +3012,235 @@ found. It varies three things and holds everything else at whatever the
 environment says, so what it measures is the difference between the
 settings and nothing else: `SCONE_RECALL_CANDIDATES`,
 `SCONE_DEMOTE_RESTATED`, `SCONE_CONTEXTUAL_EMBEDDINGS`.
+
+### The context lane: found by what it is under
+
+A chunk under the heading "Refunds" in a document titled "Billing
+rules" need not say either word, and a query about billing refunds then
+misses it in the text lane, which finds the words a passage has and
+only those. With `SCONE_CONTEXT_LANE=1` (`MemoryEngine(...,
+context_lane=True)`) each chunk's context is derived at ingestion with
+no model — the headings enclosing it, the document's title (its top
+heading, or a short first line that does not read as a sentence) and
+the words of the source's name — keeping only what the chunk itself
+lacks, and indexed **beside** its text, never in it. Stored text and
+offsets do not change. At recall the same query the text lane got is
+searched over that index as a third lane and fused by rank at twice the
+weight of the others; `lanes.context` on each item says where the lane
+placed it.
+
+The weight is measured, not guessed. Rank fusion is flat, so a lane
+that finds what the others cannot needs weight to be heard at all: on
+the `under-v1` benchmark (`testing.context_lane_benchmark`: twenty
+passages under a heading whose words they never say, eight distractors
+each repeating the question's words) the passage reached the top five
+in 0 of 20 cases without the lane, and with it in 0 at weight 0.5, 1 at
+1.0 and 13 at 2.0 — where the distractor also lost first place in 13
+cases. The entity lane made the same choice for the same reason. The
+cost is on the record too: a passage under the words can now come
+before one that merely says them, which is what the benchmark's
+question wants and a literal search would not. A document's frequent
+words were tried as context and left out: spread over every chunk they
+make the lane fire on mentions rather than on structure.
+
+The words are bounded — at most 32 per chunk, headings first, then
+title, then source words, the rest counted as omitted — and the lane is
+honest about where it is not: the SQLite and in-memory stores keep the
+index, and an engine with the lane on over a store that does not
+reports `context lane: not kept by …` in `degraded` rather than
+pretending the lane ran.
+
+### The question lane: found by the questions it answers
+
+With `SCONE_QUESTION_LANE=1` (`MemoryEngine(..., question_lane=True)`)
+a pass run by hand with a chat model (`engine.build_chunk_questions`,
+`scone chunk-questions`, `POST /v1/chunk-questions`) writes, per chunk,
+questions the chunk answers, keeps only those whose answering sentence
+is quoted verbatim from the chunk, and puts them in an index of their
+own, apart from the context lane's words. Recall searches it only while
+the question lane is on, as the `question` lane; the passage returned is
+the chunk's own text, and forgetting an episode takes its questions with
+it. Off by default, one model call per
+chunk. See [chunk-questions.md](chunk-questions.md) for what is kept,
+the bounds and the measurement.
+
+### Fusing by distribution
+
+`--fusion distribution` (`fusion="distribution"` on `recall`, the same name
+over HTTP) is a third way to add the lanes, beside rank fusion and
+relative-score fusion. Relative-score fusion scales each lane by its two
+extremes, so one outlier at the top of a lane pushes every other candidate
+toward zero. Distribution fusion scales each lane by its own mean and
+spread: the mean less three standard deviations is 0, the mean plus three
+is 1, and a score outside that range is clipped. An outlier then counts as
+an outlier, and the candidates near the lane's mean keep their credit
+instead of being pushed toward zero by it. (Neither scaling cares about a
+lane's units; both place a score by its lane's own shape.) What follows: a
+lane's top candidate no longer gets full credit for being top -- the top of
+a two-candidate lane sits at two thirds -- so a lane that returns few
+candidates speaks more quietly than one that returns many, and the lanes'
+weights apply on top of that; the clip itself bites only on lanes of eleven
+or more, since fewer candidates cannot put one past three deviations. The
+conventions of relative fusion hold: a lane whose scores do not spread gives
+every candidate full credit, and a lane that reports no score contributes
+its order. The recall event records which fusion ran. It is a choice, not a
+default, until a measurement on the benches says which mode should be.
+
+### The vector lane's voice in fusion
+
+Reciprocal rank fusion gives every lane the same voice. That is right
+when both lanes know something the other does not, and wrong when one
+is a weak echo of the other: an embedder whose vectors are hashed
+tokens ranks by word overlap, badly, and its confident wrong picks can
+outvote the text lane's right ones. Measured on LongMemEval-S with that
+embedder, the text lane alone was ahead of the fused ranking.
+`SCONE_VECTOR_WEIGHT` (`MemoryEngine(..., vector_weight=)`) is the
+vector lane's weight against the text lane's 1.0 — a number above 0 and
+at most 4 — and every recall event records `fusion_weights`, so a
+ranking can always be read back to the voices that made it. Unset, it
+follows the embedder: 1.0 for any embedder but hashed tokens, and 0.01
+for hashed tokens. Change it only on a number.
+
+The hashed default is measured against LlamaIndex's best retrieval
+(its BM25 retriever fused with its vector retriever) on LongMemEval-S,
+both sides on the same hashed vectors, sessions folded from passages
+([results](../benchmarks/northstar-defaults-2026-09-14.results.md)):
+
+| hashed vector weight | frozen 50: R@5 / all@5 / R@15 / MRR | 100 other items: R@5 / all@5 / R@15 / MRR |
+|---|---|---|
+| 1.0 | 0.84 / 0.72 / 0.92 / 0.759 | 0.93 / 0.74 / 0.98 / 0.789 |
+| 0.25 (the default before) | 0.88 / 0.72 / 0.98 / 0.807 | 0.95 / 0.79 / 0.99 / 0.852 |
+| **0.01** | **0.90 / 0.76 / 1.00 / 0.838** | **0.96 / 0.84 / 0.99 / 0.885** |
+| LlamaIndex BM25 + vector | 0.88 / 0.74 / 0.98 / 0.831 | 0.91 / 0.71 / 0.99 / 0.810 |
+
+Every voice the hashed vector lane had in the order cost the ranking.
+At 0.01 the fused ranking scored exactly as the text lane alone did on
+both samples, and its top five sessions were the text lane's in 149 of
+the 150 items. The
+lane still runs at that weight: it gives the confidence signal
+(`top_similarity`, the similarity floor), it answers alone when the text
+lane fails, and a passage only it found can still come back.
+`SCONE_VECTOR_WEIGHT=0.25` restores the previous
+default. Relative-score fusion and larger chunks also moved the numbers
+on these samples; neither is a default, and the results file says why.
+
+The weight is a voice against the text lane, so it applies only when the
+text lane brings passages. When it brings none (`lanes=["vector"]`, a text
+lane that failed, or one that found nothing), the vector lane ranks at a
+full voice of 1.0, and that recall's `fusion_weights` says so. The recency
+term is sized against a full voice: at a hundredth, the vector lane's
+first and second places differ by what about half an hour of age is
+worth to that term (at 1.0, about two days), so newer passages would
+come back first instead of closer ones.
+
+### Both stores agree on every script
+
+Two stores that answer the same query differently are a bug a reader
+cannot see. The in-memory lane cuts an unspaced run — a Japanese or
+Thai phrase — into character grams and finds a part of it; SQLite's
+built-in tokenizer kept the run as one token and could not. The SQLite
+text lane now ranks our own tokens: a derived table holds each chunk's
+terms exactly as the lexical tokenizer makes them, diacritics folded as
+the in-memory lane folds them, searched through an FTS5 shadow that
+splits only on the spaces between them. It is versioned by the
+tokenizer and the Unicode data it ran under and rebuilt whole when
+either changes — lazily, so an old database opens at once and each
+space pays as it is read — and triggers keep it current on write and
+delete. A parity test pins that Japanese, Chinese, Thai, Korean and
+accented Latin queries find their passage through the text lane in
+both stores.
+
+### A word's family by prefix
+
+"bills", "billing" and "billed" are one word to a reader and three to the
+text lane. The usual answer is a stemmer over the index, and it is the
+wrong one here: it rewrites what every store holds, ties the tokenizer's
+version to a set of language rules, and puts a guess ("policies" and
+"police" as one) where a reader cannot see it. `SCONE_LEXICAL_STEMS=1`
+(`MemoryEngine(..., lexical_stems=True)`) does less: a query term that
+ends in a known English suffix also searches as a prefix of its stem —
+`bill*` for "billing", `invoic*` for "invoices" — so the family is found,
+the index is untouched, and the result's `prefixes` says which prefixes
+were added and whether the store could take them (`applied`; the SQLite
+and in-memory stores can, and a family counts as one term in the score,
+not several). A language the rules do not know, a short word, a number,
+is left exactly as it was. The rules keep a stem of at least three
+letters after a strong suffix and four after a plural or a final "e", do
+not strip a plural after "s", "u" or "i", and reduce a doubled consonant
+except where English keeps it. A prefix that starts with another one the
+query gives is left to the broader one: "states" gives `stat` and
+"statement" `state`, `stat*` finds every word `state*` does, and with
+both "statement" would count in two families. A family's document
+frequency is the passages holding any member, each once, in both stores.
+Measured on LongMemEval-S before it was a flag; the numbers are on the
+pull request that added it.
+
+A family counts once, so a passage holding "bills" earns as much from a
+question about "billing" as a passage holding "billing" itself.
+`SCONE_LEXICAL_EXACT_FORMS=1` (`MemoryEngine(..., lexical_exact_forms=True)`)
+keeps the family one term and moves its weight: in a passage that holds
+one of the query's own words, the family's count is weighed at the idf of
+the rarest such word it holds instead of the family's, which is never
+higher. A passage holding only "billing" then scores what "billing" alone
+would; one holding "billing" and "bills" scores their joint count at
+"billing"'s idf, not the word and then the family again; one holding only
+relatives scores as it did. The extra credit is the gap between the two
+idfs times BM25's count part, which reaches `k1 + 1`: at most 2.2 times
+the gap, and more than the gap for a short passage. Both stores that take prefixes apply it: the
+in-memory scorer directly, and SQLite by moving the family phrase's part
+of `bm25()` to the word's idf, computed as FTS5 computes it. That part is
+read only for rows holding the word (the `bm25()` of the family AND the
+word, less that of the word), two small index reads per query word a
+family holds. A word no row holds, a repeated word and a word as common
+as its family read nothing. Each word read adds two tables to the join,
+and SQLite joins at most 64, so at most `MAX_EXACT_FORMS` (24) words move
+in one search, the rarest first; the rest keep their family's weight, and
+the result's `degraded` says how many
+(`text: N query word(s) past MAX_EXACT_FORMS kept their family's weight`).
+The in-memory scorer has no such bound. It does nothing without `SCONE_LEXICAL_STEMS`, and the
+result's `prefixes.exact_forms` says whether it was on; like the prefixes
+themselves, it takes effect only where `prefixes.applied` is true. On by default;
+`SCONE_LEXICAL_EXACT_FORMS=0` turns it off. Measured on LongMemEval-S at
+today's defaults, against LlamaIndex's BM25 + vector retrieval
+([results](../benchmarks/exact-forms-2026-09-15.results.md)):
+
+| exact forms | frozen 50: R@5 / all@5 / R@15 / MRR | 100 other items: R@5 / all@5 / R@15 / MRR |
+|---|---|---|
+| off | 0.90 / 0.78 / 1.00 / 0.841 | 0.96 / 0.83 / 0.99 / 0.886 |
+| **on** | **0.90 / 0.78 / 1.00 / 0.844** | **0.97 / 0.86 / 0.99 / 0.904** |
+| SQLite off | 0.90 / 0.78 / 0.98 / 0.839 | 0.96 / 0.83 / 0.99 / 0.888 |
+| **SQLite on** | **0.90 / 0.78 / 1.00 / 0.844** | **0.97 / 0.86 / 0.99 / 0.903** |
+| LlamaIndex BM25 + vector | 0.88 / 0.74 / 0.98 / 0.831 | 0.91 / 0.71 / 0.99 / 0.810 |
+
+Both samples informed the design; a third, blind sample of 100 items
+moved MRR from 0.855 to 0.870. On SQLite the text lane costs more with it
+on: a median text-lane read of 27.1 ms against 22.3 ms off (means 34.8
+and 24.7 ms) on one space of 45,169 chunks. The results file
+has both.
+
+### Synonyms the caller wrote down
+
+The lexical lane finds the words a passage has, and only those. A
+passage that says "automobile" is invisible to a query about a "car"
+unless somebody wrote down that in this corpus the two are one word.
+`SCONE_SYNONYMS=./synonyms.txt` names that list — one group per line,
+terms separated by commas, `#` for comments — and `MemoryEngine(...,
+synonyms=Synonyms(groups))` gives it in code. A query term that is in a
+group adds the group's other members to the **text lane's** query; the
+vector lane's query stays as written, because an embedder already knows
+what it knows about the two words and padding its input with a list
+would move the vector in ways nobody measured. The lanes are fused by
+rank, so a passage found only through an added word competes on rank,
+never on a score the addition inflated.
+
+No model proposes a synonym here, and nothing is guessed: matching uses
+the lane's own tokenizer, so case, possessives and stopwords are treated
+exactly as the index treats them, a phrase matches as a phrase, and the
+result's `expansion` says which terms matched and which words were
+added (`matched`, `added`, `offered`, `capped`; the recall event carries
+the counts). The list is bounded — 2,000 groups of up to 16 terms of up
+to 64 characters, at most 12 words added to one query, the rest left
+out with `capped: true` — and a list over a bound is refused, not cut.
 
 The rule for choosing is stated rather than implied: the setting that
 answered most wins; a tie goes to the quicker; and a change that only
@@ -1083,6 +3257,67 @@ is a recommendation with its measurement attached and the environment
 lines that put it in force — nothing is written anywhere, and no engine
 reads a tuning file behind anyone's back. It uses its own in-process
 stores per item, so the configured store is neither read nor written.
+
+## Scoring an answer by what it means, with a threshold from its own embedder
+
+Exact match and token F1 score a correct paraphrase as wrong: a one-word
+reference restated in a sentence gets nearly nothing.
+`bench.answer_similarity.answer_similarity` gives the answer's best cosine to
+any of its references. A pass needs a `SimilarityThreshold`, which carries the
+embedder id and width it was measured with; with any other embedder the
+result keeps its score, decides nothing, and says why, because a cosine's
+scale belongs to the model that made it. The reference framework passes at a
+fixed 0.8 for every embedder.
+
+`measure_threshold` takes the threshold without a judge. The scores of
+answers that match their reference exactly are the passes it must allow; the
+scores of answers set against another question's reference are the passes it
+must refuse; the threshold is the lowest that passes at most
+`target_false_pass` (5% by default) of those, with the matched pass rate
+beside it. A threshold that passes no matched answer is not taken. A pass is
+a score above the threshold. The measurement over the public QA rows with
+the local embedder has not been run yet.
+
+## Measuring on a BEIR dataset
+
+```bash
+scone bench-beir datasets/scifact --split test --k 1,3,10 --queries 300 --seed 1 --json
+```
+
+Every other bench here reads a dataset this project shaped. BEIR is the
+ground retrieval systems are compared on: a directory holding
+`corpus.jsonl`, `queries.jsonl` and `qrels/<split>.tsv`, relevance judged
+in grades. `bench-beir` reads those files itself, with no BEIR package:
+any split, not only `test`. A malformed judgement is refused with its
+line number, and a judgement naming a document or query the files do not
+hold is counted in the report, never dropped in silence. Queries nobody
+judged are counted and not run.
+
+The corpus goes into a fresh in-process memory, one episode per document
+under `beir:<id>`, so the configured store is neither read nor written.
+Each judged query is recalled, and the passages returned are mapped back
+to documents in rank order, a document chunked many times counted once at
+its best rank. The scores are graded nDCG, with gain equal to the grade
+as trec_eval computes it and the ideal the judged grades in their best
+order; recall and precision of documents judged relevant (grade above 0);
+and reciprocal rank at the largest k. Every per-query ranking and score is
+in the JSON.
+
+Recall takes a query of at most 1,000 characters, and argument-retrieval
+sets hold whole paragraphs as queries. A longer query is recalled cut at
+the last space within the limit, marked `"cut": true` in its per-query
+entry and counted in `queries_cut`. A query with no text retrieves
+nothing, scores zero and is counted in `queries_empty`. Neither stops the
+run after the corpus is stored, and both stay in the averages, so a run
+over such a set says how many of its queries it asked as written.
+
+`--queries` runs that many judged queries chosen by `--seed`.
+`--max-documents` stores at most that many documents, keeping every
+document judged for the queries run and filling the rest in file order.
+A cut corpus has fewer distractors and scores higher, so the report says
+it was cut and by how much. The embedder is the one the report names:
+with the default hashing embedder the numbers measure lexical overlap,
+not a semantic model.
 
 ## Trying a parked record again, on purpose
 
@@ -1131,10 +3366,12 @@ nothing parked in it — a CLI retry would report success and do nothing.
 
 ## Keeping a space in step with a directory
 
-`map` remembers the files under a directory and notices when it has seen
-one before. What it cannot notice is that a file has **changed** or that
-a file is **gone** — and those two are the difference between an import
-you run once and a sync you run on a schedule.
+`map` remembers the files under a directory, notices when it has seen
+one before, and updates one that has **changed**. What it cannot notice
+is that a file is **gone**, and it never plans before writing — those are
+the difference between an import you run once and a sync you run on a
+schedule. The two share one identity for a file, so either can follow the
+other.
 
 ```bash
 scone sync ~/work/notes                          # a plan: nothing is written
@@ -1145,12 +3382,58 @@ scone sync ~/work/notes                          # a plan: nothing is written
 
 scone sync ~/work/notes --apply                  # writes the added and changed
 scone sync ~/work/notes --apply --remove         # also forgets what is gone
+scone sync ~/work/notes --apply --forget-after 30d  # every file written is forgotten in 30 days
 ```
+
+`--forget-after` is resolved once, so the run writes one instant; an unchanged
+file keeps the schedule it holds, and the receipt counts those in
+`schedule_kept` ([scheduled forgetting](scheduled-forgetting.md#from-ingestion)).
 
 An unchanged file is **not a write**: the space's revision does not move,
 so a sync on a timer does not churn the store. A changed file is an
 update through the engine's keyed `replace`, so a source that changed
-leaves **one** memory and not two.
+leaves **one** memory and not two — and with `SCONE_EMBEDDING_CACHE` set,
+only the chunks whose text changed reach the embedder; the receipt's
+`embeddings_reused` counts the rest (see [file ingestion](file-ingestion.md#reusing-embeddings-across-updates)). A sync
+that reads code reads the
+project's manifests too (`pyproject.toml`, `package.json`, `Cargo.toml`,
+`go.mod`, `requirements*.txt` and `requirements/*.txt`, and the rest
+`map` knows), whatever their suffix, judged by their path below the
+root as `map` judges them, so with the code graph on (`code_graph=True`;
+the command line records claims only under `map --graph`) a scheduled
+sync keeps what the project depends on as current as what it defines; a
+sync of notes alone (`--suffix .md`) leaves them, and a manifest that
+falls out of a narrowed sync's scope is out of scope, not missing. The
+receipt's `files_found` counts them with the files the suffixes chose.
+
+**What the tree says not to read is left unread.** A repository walked
+whole is a repository with its `node_modules`, `build`, `dist`, `target`
+and `vendor` in it: thousands of files nobody wrote, embedded and put in
+the graph ahead of the source. So `sync` and `map` read every
+`.gitignore` below the root and leave what it excludes unread, with
+git's own rules (`ingestion/ignore.py`, written here rather than
+borrowed): a blank line or `#` comment says nothing; `!` re-includes; a
+trailing `/` matches only a directory; a pattern with a slash anywhere
+but its end is anchored to its file's directory and one without matches
+at any depth below it; `*` and `?` never cross a slash and `**` does;
+the last matching pattern wins, and a deeper file's patterns come after
+a shallower one's. A `.sconeignore` in any directory is read after the
+`.gitignore` beside it and can only exclude more: what `.gitignore`
+excludes stays excluded whatever it says, and a file under an excluded
+directory is never re-included, as in git. The receipt says what the
+rules did (`ignored`, `ignored_directories`, `ignore_files`); at most
+500 files and 20,000 patterns are read, and when that bound bit the
+receipt says so (`ignore_truncated`), since a run past it may have read
+what the tree said not to; a pattern that cannot be read is passed over
+and named (`ignore_unusable`). A memory `sync` holds for a file the rules
+now exclude is not a file that is gone: it is left alone, neither read
+nor removed, and counted (`ignored_memories`). `--no-ignore` reads the
+tree whole. Dot-named directories and files and `__pycache__` are never
+walked, rules or no rules, and a symbolic link is left alone and counted
+(`links`): what it points at is outside the root. One thing that is
+git's and not here: git matches case-insensitively where
+`core.ignorecase` is set, as it is on a Mac's default file system; these
+rules match as written.
 
 ### Deletion is opt-in, previewed, and refused when the path looks wrong
 
@@ -1213,6 +3496,13 @@ came back 0 with every file on disk, `checked_for_missing` was `true`
 because `0 == 0`, and the receipt said every memory the marker held was
 gone from disk and offered to forget it. The guard above refused the
 deletion, which is the only reason it was not data loss.
+
+The rule has one stated exception. An MCP configuration lives in a
+dot-name by every tool's convention (`.mcp.json`, `.vscode/mcp.json`,
+`.cursor/mcp.json`, `.gemini/settings.json`, `.codex/config.toml`), so
+those files and those four directories are walked, and from the
+directories only the configuration is read; see *What a project hands
+its agents* above.
 
 ### The marker is a name, not a path
 
@@ -1366,7 +3656,11 @@ order as history.
   the predicate, the instant and both claims, and points at `scone facts`.
   The ledger cannot decide which is right; a person can.
 - Saying the same thing twice at one moment is agreement, not a
-  collision, and is not counted.
+  collision, and is not counted. Nor is a many-valued predicate
+  (`calls`, `imports`, `depends_on`, or one named in `SCONE_MANY_VALUED`):
+  its values hold side by side by design, so a file that imports two
+  modules on one line is not contested. Counted, they made a code graph
+  read as thousands of collisions.
 
 ## Moving one space into another
 
@@ -1531,11 +3825,27 @@ and every item points back to the facts behind it.
   Values keep their exact text: `3 MB` and `3 mb` are two attributes.
 - **Names** are the entity's recorded spellings. The label is the most
   common one, and casing is recovered from the source quote, so `alice chen`
-  is labelled `Alice Chen`.
-- **Kinds** (person, organisation, place, project, product, event, concept)
+  is labelled `Alice Chen`. A code name (a path, or a path and a
+  declaration) is shown as the code declares it, whatever the count: a
+  declaration is called by its lowercased key once per call it receives,
+  and a busy method would otherwise be labelled `directorysync._finish`
+  beside a quiet one labelled `DirectorySync.open`.
+- **Kinds** (person, organisation, place, project, product, event, concept;
+  and for a code graph file, declaration, module)
   are inferred hints from the predicates around an entity. They carry
   `kind_status: "inferred"` and list the fact ids that suggested them. Hints
-  that disagree give `"conflict"` and no kind, never a guess.
+  that disagree give `"conflict"` and no kind, never a guess. A code
+  graph's entities are hinted by their shape, since a predicate alone
+  cannot tell a file from the class it holds: a name whose last segment
+  carries a suffix a reader knows is a **file** (`pkg/a.py`, `README.md`,
+  `pyproject.toml`); a file, a colon and a name is a **declaration**
+  (`pkg/a.py:Thing.run`); a name with neither that a file imports is a
+  **module** (`typing`, `github.com/gorilla/mux`); a module a manifest
+  also depends on is the package it comes from, so it is a **product**
+  rather than a conflict. A ratio, a time or a URL is none of these.
+  Before this (`kinds/1`) every code entity was `kind_unknown`, which
+  made the report's Kind column empty and `graph health` count a whole
+  codebase as entities nothing says the kind of.
 
 ### What a predicate means, and what follows from it
 
@@ -1725,7 +4035,7 @@ The response (`api.entity_routes.KnowledgeView`):
 {
   "schema_version": 1,
   "space": "alpha",
-  "projection": {"version": "scone.entities/1", "classifier": "objects/1", "kinds": "kinds/1",
+  "projection": {"version": "scone.entities/1", "classifier": "objects/1", "kinds": "kinds/2",
                  "id_scheme": "scone.entity/1", "digest": "<sha256>", "revision": 12},
   "filters": {"status": "current", "as_of": "2026-09-11T11:00:00.000Z"},
   "entities": [{"id": "ent:…", "key": "alice chen", "label": "Alice Chen",
@@ -1791,7 +4101,56 @@ the same `status` and `as_of`:
 - **Communities**: found by modularity optimisation over recorded
   relations, weighted by the facts behind each pair, and split into
   connected parts. Each is named after its most central members, with
-  cohesion, kinds and predicates.
+  cohesion, kinds and predicates. A community of files is named by the
+  directory they share, then its central members with that directory
+  left off (`scone_memory/ingestion/ · code_graph.py · manifests.py`):
+  when at least two members are paths, most are, and every path sits
+  under one directory. Three file names are not what a person calls a
+  subsystem; its directory is.
+  Before communities are named, two guards look again at the
+  communities a reader cannot use, each re-partitioning one community on
+  its own links at the same resolution:
+  - one holding over a quarter of the analysed entities (and at least 10)
+    is split into what its links give, since a map by community draws it
+    as one blob;
+  - one of 50 or more is split when its own partition reaches modularity
+    0.3, because over a large graph modularity merges small modules into
+    one community that holds several. The share of member pairs linked is
+    not the test: in a sparse graph it falls with size, and on this
+    project's own code graph it fired on 12 of the 17 communities of 50
+    or more.
+
+  The resolution is never raised to force a split. A community a guard
+  looked at and kept whole (one piece, or a weak split of a large one) is
+  counted in `unsplittable`, and splits in `split_oversized` and
+  `split_nested`. The pieces of a split are looked at again, like any
+  community, until none splits: a community's own partition can leave a
+  piece that still holds two. Finer communities often score lower on
+  modularity, so `modularity_before_guards` gives the modularity before
+  any split beside the final `modularity`, both over the graph's own
+  entities (externals and held-apart hubs left out, detached hubs
+  rejoined). Measured on an
+  earlier base, before externals were kept out of the partition, on this
+  project's retrieval, entities, API and ingestion code (2,713 entities):
+  28 communities became 158, the largest three (341, 205 and 199 entities)
+  became 62, 48 and 42, and modularity went from 0.702 to 0.584, with 19
+  nested splits and one community kept whole.
+
+  A person's name for a community of people
+  or things ("Acme's Lisbon team") needs a reader: `GET
+  /v1/graph/communities/names` (`limit`, 1 to 50, largest first) asks the
+  server's model for one, showing it the community's central members,
+  kinds and predicates and taking its answer only when it is a name (one
+  line, at most eight words; otherwise `name` is null and `why` says what
+  came back). The computed `label` stays beside every name, the record
+  carries the projection digest and `verified_accuracy: false`, and the
+  route is refused without a model. Opt-in, one model round per
+  community, all inside one deadline (`timeout_s`, 0.1 to 600 seconds,
+  120 by default): a community the deadline or a model failure leaves
+  unnamed says so in its `why`, the names already made stand, and the
+  record counts `communities_asked`, `communities_named`,
+  `communities_timed_out` and `communities_failed`. Never read by the
+  analysis itself.
 - **Central entities**: by PageRank, with degree, fact weight,
   betweenness (exact up to 500 entities, from 64 evenly spaced sources
   beyond) and participation across communities.
@@ -1818,14 +4177,60 @@ Two parameters tune the analysis:
   With no event log, or no recall kept, it says usage is unknown and
   names nothing as unreached. It also says what the log keeps and which
   events it could not count.
-- `exclude_hubs` (a degree percentile, 50 to 100) leaves entities whose
-  number of neighbours is above that percentile out of the central
-  entities, and lists them under `hubs_excluded` instead. A hub that
-  everything links to otherwise leads every ranking. Excluded hubs stay
-  in their communities.
+- `exclude_hubs` (a degree percentile, 50 to 100; `--exclude-hubs` on
+  the command line) holds the graph's own entities whose number of
+  neighbours is above that percentile (nearest rank, among the graph's
+  own) apart, the way externals are held apart without asking: out of
+  the community partition, the community names, the surprising
+  connections and the counts of links between communities, and out of
+  the central ranking; each is attached for reading to the community it
+  links most (one whose every neighbour is itself held apart stands
+  alone, as an external does), and listed under `hubs_excluded` with
+  that community. A base class every file inherits, or a person every
+  note mentions, otherwise glues every community into one and leads
+  every ranking. The coverage says how many were held apart
+  (`hubs_held_apart`), and the Markdown lists them under "Hubs held
+  apart". A report built over an analysis that was not run with the
+  percentile ranks the same hubs out by the same rule and says the
+  partition was found with them in it.
+- `detach_hubs` (a degree percentile, 50 to 100; CLI `--detach-hubs`)
+  leaves those entities out while communities are found, so an entity
+  everything links to does not pull unrelated groups into one; each then
+  joins the community most of its link weight goes to as a full member,
+  so, unlike a hub held apart by `exclude_hubs`, it names communities,
+  counts in their links and in modularity, and can be a surprising
+  connection. `hubs_detached` counts them. Removing hubs can leave
+  groups with no link between them, so expect more communities. Hubs
+  are picked among the graph's own entities, by their links to each
+  other, once externals (below) and any hubs held apart by `exclude_hubs`
+  are out; the guards above run on the partition found without them.
 
-The report echoes both under `analysis`, and `analysis.coverage` carries
-`resolution`.
+**What the graph names and never reads is kept apart, without asking.**
+In a code graph every file imports `typing`, so `typing` was the most
+central entity of the codebase, the strongest tie between any two
+communities, a "surprising connection" from each, and the middle of
+every drawing; `pydantic.BaseModel`, `json` and a cited `ADR-12` were
+close behind. An entity that is the object of `imports`,
+`imports_when_called`, `imports_for_types`, `depends_on`, `develops_with`,
+`cites`, `uses_type` or `references` and the subject of nothing at all is
+*external*: named here, read nowhere here (a module of
+the codebase is imported too, but it also defines its own things, so it
+is the graph's own). Externals are left out of the community partition
+(so modularity is the codebase's), attached for reading to the community
+that names each most (by the weight of what names it; one whose namers
+were all cut by the entity budget stands alone), kept out of the central
+ranking, bridging entities, participation, surprising connections and
+the counts of links between communities, and listed apart under
+`external_dependencies` ("Named but never read" in the Markdown), by how
+many things name them. A community's `members` list its own members and
+then its attached externals; its link counts and cohesion are of its own.
+The drawing spends its room on the graph's own entities first. The
+coverage says how many were set apart (`external_entities`); a graph of
+people and places has none.
+
+The report echoes these under `analysis`, and `analysis.coverage` carries
+`resolution`, `external_entities` and what the guards and `detach_hubs`
+did.
 
 Results are deterministic: the same facts give the same report. The report
 states the projection digest and analysis version it came from, and
@@ -2021,6 +4426,95 @@ answer. It reads and changes nothing.
   moving is said (`ledger_moved_during_read`) rather than answered from
   two different moments.
 
+#### `GET /v1/graph/stats`
+
+The graph counted, for a reader who wants a number rather than a
+report: how many entities, relations (and how many of those are
+implied rather than stated), attributes and facts the projection holds;
+how many communities the analysis found and their modularity; how many
+entities stand alone or are only named by the graph (external); the
+entity kinds and the relation predicates, each with its count (the
+twenty most common listed, the rest counted); and the facts by origin
+(`stated`, `extracted`, `inferred`), by grounding (`quoted`,
+`unquoted`, `unsourced`) and by standing (`active`, `proposed`,
+`closed`). Every number is a count over recorded data; nothing is
+sampled and no model is called. Advertised as `graph.stats`; `scone
+graph stats`, the MCP tool `memory_graph_stats`, the MCP resources
+`scone://graph/stats` and `scone://{space}/graph/stats`, and the ToolBox
+tool `graph_stats` give the same answer. It reads and changes nothing.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
+`coverage.reasons` says when the analysis was truncated, when more
+kinds or predicates exist than are listed, and when the ledger moved
+during the read.
+
+#### `GET /v1/graph/hubs`
+
+The graph's own entities with the most neighbours, most linked first:
+its core abstractions, or its utility hubs (a logger every file
+imports). Each hub carries its label, key and kind, its degree (distinct
+neighbours), fact weight, PageRank, betweenness and community. What the
+graph only names (a library, a cited record) is counted as external and
+not ranked; the report lists those apart. Advertised as `graph.hubs`;
+`scone graph hubs`, the MCP tool `memory_graph_hubs`, the MCP resources
+`scone://graph/hubs` and `scone://{space}/graph/hubs`, and the ToolBox
+tool `graph_hubs` give the same answer. It reads and changes nothing.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `limit` | 10 (1–100) | Hubs shown; the rest are counted |
+| `above` | none (50–100) | Only the hubs above this degree percentile, by the rule the report's `exclude_hubs` uses to hold them apart |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
+#### `GET /v1/graph/cycles`
+
+The dependency cycles a space's code graph holds. A cycle is the one
+shape a dependency graph should not have, and the one nobody sees
+reading files one at a time; it is also the shape most codebases work
+around rather than remove, by writing an import inside a function (it
+runs when the function is called) or under `if TYPE_CHECKING:` (it never
+runs). Counting every `imports` fact would report every one of those
+workarounds as a cycle, so the Python reader records when an import runs
+-- `imports` at load, `imports_when_called` in a function body,
+`imports_for_types` under the type-checking guard -- and this route
+reads two things apart: the groups of files that cannot load without
+each other (the strongly connected parts of `imports` and `depends_on`),
+each with one shortest loop and the fact ids behind every hop; and the
+groups that join only once the deferred imports are counted, each naming
+the deferred facts that hold it open. Advertised as `graph.cycles`;
+`scone graph cycles`, the MCP tool `memory_graph_cycles` and the ToolBox
+tool `graph_cycles` give the same answer. It reads and changes nothing.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `limit` | 20 (1–100) | Groups shown of each kind; the rest are counted |
+| `max_bytes` | 8,000 (512–64,000) | Byte budget for the text |
+| `status`, `as_of` | `current`, now | Which facts count, and when |
+
+- `status` is `cycles` when a load-time loop exists, `held_apart` when
+  only deferred loops do, and `none` otherwise. `totals` counts both
+  kinds whole; `cycles` and `held_apart` list up to `limit` of each,
+  largest first, and `coverage` says what was cut.
+- The loop shown for a group held apart crosses one of its deferred
+  imports, so it shows what the group is about rather than a load-time
+  cycle inside it. A loop is walked up to 32 hops; a group whose loop is
+  longer is still counted and listed, its example left empty, and the
+  coverage says `loops_over_bound N`.
+- A self-import is not a cycle, and a file importing a module the space
+  has no file for (`json`) is a leaf. Other languages' readers record
+  every import as `imports`, so their function-level imports count as
+  load-time until the reader tells them apart; the answer does not guess.
+- A projection over 50,000 entities is declined with
+  `entities_over_bound` in the coverage rather than answered slowly.
+- **One answer, one revision.** The components and the loops are read at
+  one revision; a ledger that keeps moving is said
+  (`ledger_moved_during_read`) rather than answered from two moments.
+
 #### `GET /v1/entities/duplicates`
 
 Entities that may be one thing under two names, suggested with why. The
@@ -2065,6 +4559,14 @@ that decision. Nothing is merged.
   1.23" is not "version 12.3"). Two related to each other are halved, since
   a thing rarely points at itself under another name, and the relation is
   named.
+  A name the projection classified as a code symbol (the object of
+  `calls`, `imports`, `defines` or another code predicate, with a
+  symbol's shape) is never judged by spelling, whatever the finder makes
+  of its shape: `json.dump` and `json.dumps` are two functions, not a
+  misspelling, while `J.Anderson` and `J.Andersen`, objects of no code
+  relation, are still compared. A code relation's subject is judged by
+  its shape alone, since `depends_on` may have a company for a subject
+  and a company one letter from another is still a misspelling.
 - **Every pair that can score is compared, and few others.**
   - Of two names alike by their words, one has all its words matched in
     the other. So each name is filed under the spellings of all its words
@@ -2103,6 +4605,52 @@ that decision. Nothing is merged.
 - Advertised as `entities.duplicates`. MCP `memory_entity_duplicates`, the
   ToolBox `find_duplicates` and `scone graph duplicates` take the same
   bounds.
+
+#### `POST /v1/entities/merges`, `POST /v1/entities/merges/close`, `GET /v1/entities/merges`
+
+Record that two names are one entity, and undo it. A duplicate suggestion
+is evidence; a merge is the decision a person makes on it, so both writes
+belong to the `review` role, beside approving and declining claims, and a
+`write` key is refused.
+
+- **The decision is a ledger claim.** `{"alias", "into", "reason"}` stores
+  `alias` under the reserved predicate `scone:same entity` with `into` as
+  its object, valid from now. The reason and the actor (the key's
+  fingerprint and `X-Scone-Actor`) go on the `entity_merge` event. No
+  assertion may use the predicate, whether stated, proposed or extracted,
+  so no document and no model can merge two entities; a document saying
+  two names are one is a claim to weigh under a predicate of its own.
+- **One target per alias.** The predicate holds one value at a time, so
+  merging an alias somewhere new closes the decision it replaces.
+- **Refused before anything is written** (422): a name that cannot name
+  one thing (prose, a quotation, a pronoun), two names that already share
+  a key, an empty reason, and a merge whose target already resolves back
+  to its alias. The loop check follows the target's decisions in force one
+  lookup at a time, at most 64, and refuses a longer chain rather than
+  guess that it has no loop.
+- **Every view applies the decisions it can see, at its own moment.** The
+  projection rewrites each alias to the entity it resolves to before
+  anything is counted: relations and roles move to that entity, the alias's
+  spellings join its surface forms, its label keeps the spelling of the
+  name merged into, and kind hints meet. Communities, PageRank, paths,
+  duplicates and exports all run on the merged graph. A chain of merges
+  ends at its last name. A name a decision covers is an entity even where
+  the identity rule would read it as a value ("MB"), which is what "only
+  a recorded identity decision may join such a value" means.
+- **Undoing is closing.** `/v1/entities/merges/close` with `{"alias",
+  "reason"}` closes the decision in force (404 when there is none). The
+  names part from that moment; a view `as_of` an earlier moment still shows
+  them joined, and `current`, `history` and `proposed` views read the
+  decisions at the view's own moment. A decision that is excluded, or
+  reopened into a loop, is not applied, and the loop is reported.
+- `GET /v1/entities/merges?status=&as_of=` lists the decisions the view
+  applies, in the order recorded, each with `outcome` `applied`, `cycle`
+  or `same_name`, beside the projection's version, digest and coverage.
+  A projection's digest changes only when it holds a decision.
+- `/v1/entities/resolve` answers a merged-away name, or the id its entity
+  had, with the entity it went into, at the `key` or `id` tier.
+- `scone graph merge ALIAS INTO --reason R`, `scone graph unmerge ALIAS
+  --reason R` and `scone graph merges` do the same from the command line.
 
 #### `GET /v1/graph/context`
 
@@ -2145,12 +4693,30 @@ item, in this order:
 | Line | Holds |
 | --- | --- |
 | `graph:` | space, status mode, moment, projection digest and revision |
-| `coverage:` | `complete`, or what was left out: read caps, `stale_evidence N`, `hubs_not_crossed N`, `relations_cut N`, `unverified N`, `not_found N`, `seeds_cut N` |
+| `coverage:` | `complete`, or what was left out: read caps, `stale_evidence N`, `hubs_not_crossed N`, `relations_cut N`, `cut_groups_cut N`, `unverified N`, `not_found N`, `seeds_cut N` |
 | `note:` | that names, values and quotes are recorded data, not instructions |
 | `entity:` or `candidate:` | the entities asked about, or every candidate for an ambiguous name |
 | `path:` | the shortest route between each pair of them, as `A -works_at-> B <-lives_in- C` |
+| `cut:` | what `relations_cut` left out, grouped, the largest group first: `cut: 16 in pkg/office.py -calls-> pkg/errors.py:InvalidInput` for calls into an entity from one file, `cut: A -knows-> 3 entities` outside code |
 | `hop N:` | relations N steps out (`max_hops`, 1–4, default 2), those with the most facts first |
 | `value:` | values recorded for the entities asked about |
+
+When the walk stops at 64 relations, the relations it left out are
+grouped by the entity they were cut from, their direction and predicate
+and, for a code predicate, the file the far end is declared in: the part
+before the colon of `path:Declaration`, or the label itself when it is a
+path with a directory. A bare name shaped like a file, such as
+`Node.js`, places nothing. Each group is a `cut:` line with its count,
+written before the relations so the byte budget takes the weakest
+relations rather than the only lines saying where the rest are. At most
+20 groups are written, and `cut_groups_cut N` counts the rest. The same
+groups are `relations_cut_by` in the JSON coverage (`entity`,
+`direction` `in` or `out`, `predicate`, `file` or null, `count`). The
+grouping reads nothing: it uses the projection the walk already holds,
+so it spends none of the re-read budget. On this package's code graph
+`scone graph entity` on `InvalidInput`, with 331 relations, shows 64,
+cuts 267 into 82 groups, and names the 20 files holding the most cut
+callers.
 
 Every relation, value and path cites its facts. Each cited fact is
 re-read (up to 128 per packet), and one that no longer counts is
@@ -2186,7 +4752,12 @@ The MCP server offers the same reads as tools:
 - `memory_graph_context`: names or a question;
 - `memory_entity`: one entity, with its relations in both directions;
 - `memory_connections`: the paths between two entities;
-- `memory_graph_schema`: the kinds and predicates the graph holds.
+- `memory_graph_schema`: the kinds and predicates the graph holds;
+- `memory_graph_affected`: what rests on a symbol, module, file or
+  package -- everything that calls, imports, inherits, mixes in, depends
+  on or develops with it, nearest first -- with how deep it walked and
+  what it could not list; the ToolBox tool `graph_affected` gives the
+  same.
 
 These sit beside the six tools shared with the Rust server, and none of
 them writes.
@@ -2454,12 +5025,15 @@ The view's whole graph as a file for another tool. It takes `status` and
 | `cypher` | one idempotent `MERGE` per line | Neo4j, Memgraph |
 | `csv` | zip of `entities.csv`, `relations.csv`, `attributes.csv`, `about.json` | spreadsheets, bulk loaders |
 | `jsonld` | JSON-LD linked data | RDF tooling |
-| `obsidian` | zip of one Markdown note per entity, wiki-linked, plus `index.md` and `graph.canvas`, a canvas of the notes | Obsidian and other note tools |
+| `obsidian` | zip of one Markdown note per entity and one per community, wiki-linked and tagged by community, plus `index.md`, `graph.canvas`, a canvas of the notes, and graph-view colours per community; or written into a vault a person already keeps with `scone graph export --format obsidian --into VAULT` | Obsidian and other note tools |
 | `wiki` | zip of `index.md`, one article per topic and one per entity, in plain Markdown links | agents reading instead of the raw ledger |
-| `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them | GitHub, Markdown viewers, docs |
+| `mermaid` | a Mermaid flowchart of the 60 most connected entities and the relations between them, grouped by community and styled by kind | GitHub, Markdown viewers, docs |
 | `svg` | a drawing of the 200 most connected entities by community, with no script | browsers, READMEs, slides, documents |
 | `canvas` | JSON Canvas 1.0: a group per community, a card per entity, a labelled arrow per relation | Obsidian's canvas, other JSON Canvas tools |
-| `html` | one page: the drawing, search by name, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
+| `communities` | an SVG map of the graph by community: a circle per community sized by its members, a line between communities weighted by the links joining them | a graph too large to draw entity by entity |
+| `html` | one page: the drawing, search that moves the view to the entity chosen, a legend that shows or hides each community, a panel of each entity's relations and facts, zoom and pan; it fetches nothing | anyone with a browser, offline |
+| `explorer` | the whole graph as one page: laid out in the browser by the page's own force simulation, coloured by community with a legend that turns each on and off, searched, hovered (the neighbourhood lit), clicked for an entity's relations and their facts, filtered by predicate, and read as a module tree (directories, files, what each defines) whose entries choose their entity; what the graph names but never reads (`typing`, a package) hidden until the legend shows it, then drawn small; up to 5,000 entities and it says what it left out; it fetches nothing | reading a codebase's graph, not a poster of it |
+| `tree` | one page: the graph's code as directories, files and declarations in folds, with a filter, expand and collapse all, and a panel of what the chosen node calls, imports and defines and what does each to it, each link naming its facts; it fetches nothing | finding a declaration by where it lives in a codebase read with `scone map --graph` |
 
 Every relation and every value carries the ids of the facts behind it,
 in every format. Every file records its projection digest and an `about`
@@ -2473,8 +5047,63 @@ the view it shows without opening a zip or parsing XML:
 - `X-Scone-Truncated`, true when the read was capped, so a partial
   export says so in the response as well as in the file.
 
+**The code tree export** is built from what the code readers record: a
+file `defines` a declaration, a declaration defines a method, files and
+declarations `import`, `call`, `inherit` and `depend on` one another, and
+a document `references` a file it links; the page lists each relation
+from both ends. It
+places an entity only when a code relation holds it and its label is a
+path or a declaration qualified by one, so a prose name shaped like a
+file (`Node.js`) is not taken for one. A name with no directory is
+placed only when the graph read it or it holds a declaration, so a
+package a manifest depends on or a file imports (`lodash.merge`,
+`socket.io`) is not a file here. The rest are counted as not in the
+tree. A file or declaration that only a call, an import or a link in a
+document names was not read where it is defined and is marked "not
+read". A chain of
+directories each holding only the next is one fold. At most 200 children
+are listed under one node and 50 links in one list, and the rest are
+counted where they were cut. A graph with no code gets a page that says
+so.
+
 How each format places values and escapes its own syntax:
 
+- **The explorer** is the one format laid out by simulation: the page
+  runs its own force layout (repulsion through a grid, springs along
+  relations, a pull toward each community's centre) from a start seeded
+  by each entity's id, so the same graph opens the same way, and settles
+  after a few hundred steps; Fit, Pause and Resume are on the page. The
+  drawing's room goes to the graph's own entities first (`typing` and
+  `json`, imported everywhere, are drawn last and hidden by default);
+  every name reaches the page as text through one JSON block, and the
+  page's content security policy allows only its own style and code,
+  pinned by hash. Beside the legend, a module tree lists the drawn
+  codebase as a person reads it: directories made from the files'
+  paths, the files in them, and what each defines nested as the code
+  nests it (`Box` under `x.py`, `open` under `Box`), a declaration
+  placed by its `defines` relation from its file or another declaration
+  or, when none is drawn, under its file by name; a chain of definitions
+  is followed at most 32 deep, and a loop or a deeper chain sits under
+  the file, so nothing drawn is lost. An entry chooses its entity in the
+  drawing and shows a hidden community again. A person, a package or a cited record is not
+  in the tree, and a graph with no file has none. At most 200 entries
+  are listed under one directory or file; the rest fold into `+N more`
+  and the page's notes say how many were folded.
+- **Into a vault.** `scone graph export --format obsidian --into VAULT`
+  writes the same notes under `VAULT/scone/` instead of a zip, by three
+  rules. A file this did not write is never written over: every note it
+  writes opens with `scone_projection: <digest>` in its frontmatter and
+  a folder manifest (`scone/.scone-vault.json`) lists what the last write
+  left, so a file at a target path that is neither listed nor signed is
+  the person's, kept, and counted under `kept_theirs` (the wiki links to
+  that name reach their note, which is about the same thing). What it
+  wrote last time and does not write now is removed, so a forgotten
+  entity keeps no note; a person's file is never removed, and nothing
+  outside `scone/` is read or touched, `.obsidian/` least of all. The
+  receipt says what happened: `written`, `updated`, `unchanged`,
+  `removed`, `kept_theirs` and the projection the notes carry. Writes are
+  atomic per file. The canvas names its cards' notes by their path under
+  the vault (`scone/entities/...`), so it opens where it is written.
 - **The drawings** (`svg`, `canvas`, and the canvas in the vault) are laid
   out by construction, not simulated, so the same graph always draws
   the same way.
@@ -2517,6 +5146,62 @@ How each format places values and escapes its own syntax:
     page's code writes every name with `textContent`, never as markup.
   - Entities can be reached by keyboard: Tab to one, and Enter or Space
     opens its panel.
+  - Typing in the search box dims the entities whose names do not hold it
+    and lists up to eight that do, names that begin with it first; a longer
+    list says how many more there are. Choosing one, or pressing Enter for
+    the first, moves the view to it at the current zoom and opens its
+    panel. A relation in the panel moves the view to the entity at its
+    other end the same way.
+  - A legend lists the drawn communities in the drawing's order, each with
+    its colour and how many of its entities are drawn. That is a count of
+    the drawing, not the community's size: the drawing may leave entities
+    out, and the header says how many. Clearing a community's box hides its
+    box, its entities and every relation with an end in it; the first box
+    shows or hides every community, and is half-set when only some are
+    hidden. Choosing a hidden entity from the search shows its community
+    again, and the search list says which matches are hidden.
+  - The SVG carries what the page needs for this: each community's box and
+    title, and each entity, name the community (`data-group`); each arrow
+    names its relation and the communities at both ends
+    (`data-relation`, `data-from-group`, `data-to-group`), loops included.
+- **Recall use on the drawings.** With `usage=true` (or `usage_since`, as
+  on the knowledge view; `scone graph export --usage` on the command line)
+  the SVG and the page say what recent recalls reach. Other formats
+  ignore it.
+  - Each drawn entity's title says how many of the recalls read returned
+    one of its facts, each recall counted once for an entity.
+  - The description says over which recalls: how many the event log
+    keeps, since when, the oldest read, and whether older ones were left
+    unread. It is a window, never all time.
+  - When the engine keeps no events, or the log holds no recalls, it says
+    recall use is unknown and draws no count, never a zero.
+  - The page carries the counts in its data and on each entity
+    (`data-recalled`). It adds a box that dims the entities no recall
+    returned, and the panel says how many recalls returned the chosen one.
+- **The community map** (`communities`) is for a graph the drawings cannot
+  show whole. They draw the 200 most connected entities, and when they
+  leave some out their description says the community map exists.
+  - Every community the analysis found is a circle, up to 80, largest
+    first. A circle's area grows with its members, and entities with no
+    relation to another share a grey one.
+  - The circles sit on one ring, each given arc in proportion to its size.
+    A line between two communities is a chord across the middle, so it
+    never runs through a third, and names are written outward, clear of
+    the lines.
+  - A line's weight and title count the links between the two
+    communities. A link is a pair of entities that one or more relations
+    join, which is how the analysis counts a community's links inside
+    and to others. What the graph names and never reads (`typing`) is
+    attached to a community for reading, as the analysis attaches it, but
+    a link through it joins no two communities, so when no community or
+    line is left out a circle's lines add up to its links to other
+    communities. Each circle's title gives its members and those two
+    counts. Up to 400 lines are drawn, strongest first.
+  - The description says which view the map draws. It says whether the
+    analysis found communities among every entity with a relation to
+    another or only among the 20,000 most strongly linked. It gives how many
+    communities and their entities were left out, how many links between
+    how many pairs of communities, and what a link is.
 - **Canvas** cards and group labels are escaped as notes are. Positions
   and sizes are whole numbers, as JSON Canvas requires. In the vault's
   `graph.canvas` each card is the entity's own note.
@@ -2568,7 +5253,22 @@ How each format places values and escapes its own syntax:
   view the chart draws, what the read left out, what the chart left
   out, and that values are not drawn.
   - Node ids are the chart's own (`n1`, `n2`, ...).
-  - A name is a quoted label, in which `"`, `#`, `<`, `>`, `&`, `` ` ``
+  - Entities of one community drawn together sit in a subgraph named for
+    the community (`c1`, `c2`, ..., largest first), from the same
+    analysis the drawings box them by. An entity drawn without another of
+    its community, because it has none or the chart cut the rest, sits
+    outside any subgraph. Relations run between nodes as before, across
+    subgraphs included.
+  - Each entity is styled by its kind: a class named for the kind
+    (`person`, `organisation`, `place`, `project`, `product`, `event`,
+    `concept`), a white node with a border in the drawings' colours. An
+    entity of unknown kind is left plain. Kind names are fixed words, not
+    stored text. The palette means something different here: in the SVG,
+    the page and the canvas a colour is a community, and in this chart a
+    border colour is a kind; the subgraphs already show the communities.
+  - The subgraphs and classes count toward the 45,000 units like every
+    other line.
+  - A name, and a community's name, is a quoted label, in which `"`, `#`, `<`, `>`, `&`, `` ` ``
     and `|` are written as Mermaid entity codes. No stored text can
     close a label or add an edge.
 - **Cypher** writes `(:Entity)`, `(:Value)`, `[:RELATES]` and
@@ -2598,6 +5298,25 @@ How each format places values and escapes its own syntax:
   way a case- and normalisation-insensitive disk folds it. On a clash it
   takes more of the entity's id, then a number, so every entity keeps its
   own note and every `[[link]]` opens one.
+  - Every community the analysis found has a hub note in `communities/`.
+    It holds the community's members, most central first, and its counts
+    of entities, links inside and links to other communities, and cohesion.
+    It also lists the kinds, the most used predicates, and each community
+    it links to with how many links, counted as the map counts them, never
+    through what the graph only names. A hub's file name is kept distinct
+    from every entity note's, since Obsidian opens a bare `[[name]]`
+    wherever that file sits.
+  - Each community has one tag, `community/c<rank>-<words of its first
+    name>`, rank first so no tag is only digits and no two share one. The
+    tag is on the hub and on every member's note, and a member's note
+    links to its hub. An entity with no relation to another has neither.
+  - `.obsidian/graph.json` gives the graph view a colour group per
+    community, querying that same tag, in the drawings' colours. Unzipped
+    into an existing vault, it replaces that vault's graph view settings.
+    Written with `--into`, the notes keep their tags and hubs but this file
+    is left out: the vault's `.obsidian/` is not the writer's to touch, and
+    a copy under `scone/` would be read by nothing.
+  - `index.md` lists the communities, then the entities.
 
 Entity ids are defined for any text the ledger holds, lone surrogates
 included. Valid text gets the same id it always had.
@@ -2623,6 +5342,9 @@ store:
 | `scone graph overview [--question Q] [--limit N] [--facts N] [--resolution R]` | each community digested with cited facts |
 | `scone graph changes --since T [--until T] [--limit N]` | what changed between two moments, one line per change; exits 1 when nothing did |
 | `scone graph duplicates [--limit N] [--min-score S]` | entities that may be one thing under two names, and why; nothing is merged |
+| `scone graph merge ALIAS INTO --reason R` | records that ALIAS is the entity INTO names, as `merged:` |
+| `scone graph unmerge ALIAS --reason R` | closes the merge in force for ALIAS, as `unmerged:` |
+| `scone graph merges` | the merges the current graph applies, one line each |
 | `scone graph export --format F [--out FILE]` | the export; the zip formats need `--out` |
 
 Every command takes `--space`, and reads the clock once, so what it
@@ -2789,10 +5511,16 @@ With 20,000 facts on SQLite, a view costs:
 
 ### Limits of this first version
 
-- Identity is key identity only: two spellings of one thing ("Dr. Alice
-  Chen" and "alice chen") stay two entities until identity decisions
-  exist to record a merge. `/v1/entities/duplicates` suggests the pairs
-  worth that decision, but merges nothing.
+- Identity is key identity, plus the merges a person recorded. Two
+  spellings of one thing ("Dr. Alice Chen" and "alice chen") stay two
+  entities until someone merges them; `/v1/entities/duplicates` suggests
+  the pairs worth that decision.
+- The graph applies merges; retrieval's walk does not yet. Multi-hop
+  expansion still joins a claim's object to another claim's subject by the
+  identity rule alone, so a walk from "alice chen" does not reach claims
+  about "dr. alice chen" through a merge.
+- A merge older than the newest 50,000 facts a projection reads is not
+  seen by that projection, which already reports the read as truncated.
 - Duplicate suggestions read spellings, not meanings. "Acme Inc" and
   "Acme Corp" each keep a word the other lacks, so they are not suggested,
   and nor are spellings two edits apart ("Mohammed" and "Muhammad") or in
@@ -2806,6 +5534,19 @@ With 20,000 facts on SQLite, a view costs:
   closed.
 - The drawings show at most 200 entities and 600 relations, and say what
   they left out.
+
+### Proposing triples under a suggested vocabulary
+
+A pass run by hand with a chat model (`ingestion.dynamic_schema.extract_dynamic_schema`,
+`scone dynamic-schema`) asks, per chunk, for the triples the chunk states
+with the kind of each end, under suggested entity kinds and predicates
+and a switch that allows or forbids new ones. A triple is kept only with
+a span quoted verbatim from the chunk and past the distiller's grounding
+gate; it is stored as a proposal for review, never as a held claim. Kinds
+and predicates outside the suggestion are reported as proposed vocabulary
+with example quotes, and calls, triples per chunk and new types are
+bounded, each saying when it cut. Off by default, one model call per
+chunk. See [dynamic-schema-extraction.md](dynamic-schema-extraction.md).
 
 ## Which embedder wrote the vectors
 

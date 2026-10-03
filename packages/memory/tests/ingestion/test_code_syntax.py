@@ -393,3 +393,18 @@ def test_the_grammar_overrules_the_line_reader_about_declarations():
     assert not any("useEffect" in one for one in defines), defines
     # The line reader's other work is untouched.
     assert any(claim.predicate == "imports" for claim in found), found
+
+
+def test_a_named_import_of_a_published_package_binds_across_repositories():
+    from scone_memory.ingestion.code_graph import code_claims
+    from scone_memory.ingestion.code_resolution import file_resolver
+    from scone_memory.ingestion.code_syntax import available
+
+    if not available():
+        pytest.skip("the code-graph extra is not installed")
+    source = 'import { tidy } from "@acme/ui";\nimport { other } from "somewhere-else";\nexport function run() { tidy(); other(); }\n'
+    walked = file_resolver(["app/src/run.ts"], {"@acme/ui": "ui"}, known=["ui/src/index.ts"])
+    found = {(c.predicate, c.object) for c in code_claims(source, "app/src/run.ts", language="braces", resolve=walked)}
+    assert ("imports", "ui/src/index.ts") in found and ("calls", "ui/src/index.ts:tidy") in found
+    assert not any(obj.endswith(":other") for predicate, obj in found if predicate == "calls"), \
+        "a package nobody here publishes binds nothing"

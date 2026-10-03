@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler
 
 from .turn_journal import ToolTurnJournal, TurnJournalError, TurnJournalPaused
 from .progress import AgentEventStream, ProgressEmitter
+from .traps import AgentTrapDetected
 from .workflow import JSONValue, StepCheckpoints
 from .custom_tools import AgentTool, snapshot_tools
 from .evidence_loop import EvidenceToolLoop, ToolLoopLimits, ToolLoopResult, ToolModel
@@ -147,6 +148,11 @@ class BoundAgent:
         except asyncio.CancelledError:
             if progress is not None:
                 progress.finish('turn_cancelled')
+            raise
+        except AgentTrapDetected as trap:
+            if progress is not None:
+                progress.emit('trap_detected', trap_graph=trap.graph)
+                progress.finish('turn_failed')
             raise
         except BaseException:
             if progress is not None:

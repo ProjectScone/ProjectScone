@@ -28,6 +28,7 @@ the same rule, including the audio socket's hello.
 
 | Route | What |
 |---|---|
+| `POST /v1/chat-imports` | Import an uploaded WhatsApp, Telegram, Discord or Slack export as one conversation memory per message, keyed so a grown export adds only what is new; see [Chat exports](chat-exports.md) |
 | `POST /v1/documents/pdf` · `GET /v1/episodes/{id}/pdf?chunk_id=...` | Parse an uploaded PDF text layer and inspect retained page evidence; see [PDF ingestion](pdf-ingestion.md) for dependency capabilities and bounds |
 | `POST /v1/episodes` | remember; `{content, tags?, source?, created_at?, kind?}`; unknown fields are refused |
 | `DELETE /v1/episodes/{id}` | forget |
@@ -35,7 +36,8 @@ the same rule, including the audio socket's hello.
 | `GET /v1/recall?q&limit&as_of&tags&where&history&kind&source_prefix&since&until` | hybrid recall plus the facts that held at `as_of`; `history=true` adds the closed facts that came before them; `kind`, `source_prefix` (literal text), `since` and `until` (inclusive) narrow the candidates the way the Rust engine does |
 | `GET /v1/facts?all&as_of` · `POST /v1/facts` · `POST /v1/facts/{id}/close` | the fact ledger |
 | `POST /v1/consolidate` `{scope: distill \| derive}` | one consolidation pass by hand over this key's space: `distill` runs the worker's pass (extraction, retention and, with `SCONE_DERIVE=1`, derivation), `derive` only the derivation pass, which proposes claims that follow from the claims held, each with its premises as `derived_from` links and no quote (`scone-memory derive`); 501 without a model. `GET /v1/status` carries `pending_derivation` (groups not yet sent at their current membership) and `derivation` on/off |
-| `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews; the profile's `static_facts` are the claims that hold now (one not yet valid, ended, or excluded stays out) and its `recent` is `dynamic` with its evidence, one `{episode_id, excerpt, created_at}` per entry, most recent by the episode's own time first, the same rule and shape the Rust engine serves |
+| `POST /v1/openai/chat/completions` | chat completions with memory: recalls from the key's space with the latest user message, injects the passages as one delimited system block, answers with the configured model (`SCONE_CHAT_URL`, `SCONE_CHAT_MODEL`) and keeps the turn; a `scone` field names what was recalled, injected and kept; `stream: true` is refused with a 422 in this version; see [OpenAI-compatible chat](openai-compatible-chat.md) |
+| `GET /v1/profile` · `GET /v1/tags` · `GET /v1/status` · `GET /healthz` | overviews; the profile's `static_facts` are the claims that hold now (one not yet valid, ended, or excluded stays out) and its `recent` is `dynamic` with its evidence, one `{episode_id, excerpt, created_at}` per entry, most recent by the episode's own time first, the same rule and shape the Rust engine serves; `?buckets=static\|dynamic\|both` adds `buckets` with the claims placed as static or dynamic, each bucket bounded by its own `static_limit`/`dynamic_limit` and `static_max_bytes`/`dynamic_max_bytes` and saying which bound cut it (see [static and dynamic buckets](retrieval-and-storage.md#static-and-dynamic-buckets)) |
 
 Errors are `{"error": "..."}` with 401, 404 or 422.
 

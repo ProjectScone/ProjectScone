@@ -26,6 +26,16 @@ class SyncRunSpec(_Record):
     delete_missing: bool = False
     deadline_s: float = Field(default=300.0, gt=0, le=3600, allow_inf_nan=False)
     max_attempts: int = Field(default=3, ge=1, le=4)
+    #: The instant every revision the run writes is to be forgotten, resolved
+    #: when the run was admitted, so every attempt writes the same one.
+    forget_after: str | None = Field(default=None, max_length=64)
+    #: The schedule as the request named it (``30d``, a date, a time).
+    forget_after_asked: str | None = Field(default=None, max_length=64)
+
+    def same_request(self, other: 'SyncRunSpec') -> bool:
+        """Whether two specs are one request. The schedule is compared as it
+        was asked: a duration sent again resolves to a later instant."""
+        return self.model_copy(update={'forget_after': None}) == other.model_copy(update={'forget_after': None})
 
 
 class SyncRunRecord(_Record):
@@ -45,6 +55,14 @@ class SyncRunRecord(_Record):
     issue_count: int = Field(default=0, ge=0, le=MAX_OUTCOMES)
     outcome_count: int = Field(default=0, ge=0, le=MAX_OUTCOMES)
     skipped: int = Field(default=0, ge=0)
+    #: Totals over the outcomes: claims recorded, claims closed, and whether
+    #: some could not be read by episode and so were not closed.
+    claims: int = Field(default=0, ge=0, le=2**31 - 1)
+    claims_closed: int = Field(default=0, ge=0, le=2**31 - 1)
+    claims_unread: bool = False
+    #: Unchanged sources holding another schedule than the run's, which the
+    #: run did not write and so did not change.
+    schedule_kept: int = Field(default=0, ge=0, le=MAX_OUTCOMES)
 
     @model_validator(mode='after')
     def consistent(self) -> Self:
@@ -79,7 +97,14 @@ class SyncSourceOutcome(_Record):
     status: Literal['added', 'updated', 'unchanged', 'deleted', 'absent', 'suppressed', 'failed', 'withheld']
     episode_id: int | None = Field(default=None, gt=0, lt=2**63)
     previous_episode_id: int | None = Field(default=None, gt=0, lt=2**63)
+    #: Claims the stored revision makes, and claims of the previous revision
+    #: closed by this outcome; None when the store could not read them.
+    claims: int = Field(default=0, ge=0, le=2**31 - 1)
+    claims_closed: int | None = Field(default=0, ge=0, le=2**31 - 1)
+    claims_untracked: int = Field(default=0, ge=0, le=2**31 - 1)
     code: Identifier | None = None
+    #: When the stored revision is to be forgotten (``SourceReceipt.forget_after``).
+    forget_after: str | None = Field(default=None, max_length=64)
 
     @field_validator('path')
     @classmethod

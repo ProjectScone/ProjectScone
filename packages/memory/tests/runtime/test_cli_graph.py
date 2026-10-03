@@ -4,6 +4,7 @@ the HTTP routes and MCP tools read."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import sys
 import json
@@ -59,6 +60,17 @@ async def test_report_prints_markdown_or_json(engine):
     assert code == 0 and json.loads(text)["summary"]["entities"] >= 4
 
 
+async def test_report_can_hold_hubs_apart(engine):
+    for number in range(8):
+        await engine.assert_fact("default", f"person {number}", "works_at", "Acme Robotics", valid_from=DAY)
+    code, text = await graph(engine, "report", "--exclude-hubs", "80", "--json")
+    report = json.loads(text)
+    assert code == 0 and [hub["key"] for hub in report["hubs_excluded"]] == ["acme robotics"]
+    assert report["hubs_excluded"][0]["community"] and report["analysis"]["coverage"]["hubs_held_apart"] == 1
+    with pytest.raises(InvalidInput, match="50 to 100"):
+        await graph(engine, "report", "--exclude-hubs", "10")
+
+
 async def test_timeline_prints_an_entitys_items(engine):
     code, text = await graph(engine, "timeline", "alice chen", "--json")
     assert code == 0 and [item["predicate"] for item in json.loads(text)["items"]] == ["works_at"]
@@ -69,6 +81,14 @@ async def test_export_writes_any_format_to_a_file(engine, tmp_path):
     code, text = await graph(engine, "export", "--format", "graphml", "--out", str(target))
     assert code == 0 and str(target) in text
     assert ElementTree.fromstring(target.read_bytes()).tag.endswith("graphml")
+
+
+async def test_export_writes_the_community_map(engine, tmp_path):
+    target = tmp_path / "graph-communities.svg"
+    code, text = await graph(engine, "export", "--format", "communities", "--out", str(target))
+    root = ElementTree.fromstring(target.read_bytes())
+    assert code == 0 and root.tag == "{http://www.w3.org/2000/svg}svg"
+    assert root.find("{http://www.w3.org/2000/svg}title").text.startswith("Communities of ")
 
 
 @pytest.mark.parametrize("arguments, code", [(("path", "alice chen", "lisbon"), 0),
@@ -135,6 +155,20 @@ async def test_a_report_is_read_and_labelled_at_one_instant(moved):
     keys = {entity["key"] for entity in report["central_entities"]}
     assert code == 0 and report["filters"]["as_of"] == "2024-12-31T23:59:59.000Z"
     assert "acme" in keys and "beta" not in keys
+
+
+async def test_export_writes_obsidian_notes_into_a_vault(engine, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Own.md").write_text("mine\n", encoding="utf-8")
+    code, text = await graph(engine, "export", "--format", "obsidian", "--into", str(vault))
+    receipt = json.loads(text)
+    assert code == 0 and receipt["written"] >= 3 and receipt["kept_theirs"] == [] and receipt["folder"] == "scone"
+    assert (vault / "scone" / "index.md").exists() and (vault / "Own.md").read_text(encoding="utf-8") == "mine\n"
+    with pytest.raises(InvalidInput, match="obsidian format only"):
+        await graph(engine, "export", "--format", "json", "--into", str(vault))
+    with pytest.raises(InvalidInput, match="two destinations"):
+        await graph(engine, "export", "--format", "obsidian", "--into", str(vault), "--out", str(tmp_path / "z.zip"))
 
 
 async def test_an_export_says_the_instant_it_was_read_at(moved):
@@ -254,6 +288,20 @@ async def test_report_can_say_what_recall_uses():
     assert code == 0 and "## What recall uses" in text and "Alice Chen (1)" in text.replace("alice chen (1)", "Alice Chen (1)")
 
 
+async def test_export_can_draw_what_recall_returned():
+    from scone_memory.observability.events import InMemoryEventLog
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await memory.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    await memory.recall("default", "alice chen")
+    code, text = await graph(memory, "export", "--format", "svg", "--usage")
+    plain_code, plain = await graph(memory, "export", "--format", "svg")
+    await memory.close()
+    assert code == 0 and "returned by 1 of the 1 recall read" in text
+    assert plain_code == 0 and "returned by" not in plain
+
+
 async def test_match_answers_a_structured_question_and_exits_zero_on_a_row(engine):
     code, text = await graph(engine, "match", "--pattern", "?who", "works_at", "?org",
                              "--pattern", "?org", "based_in", "Lisbon", "--returns", "?who")
@@ -327,6 +375,32 @@ async def test_health_prints_what_wants_attention(engine):
     assert "see scone facts," in text
     code, shown = await graph(engine, "health", "--json")
     assert code == 0 and json.loads(shown)["status"] == "concerns"
+
+
+async def test_cycles_prints_the_loops_and_what_holds_one_apart(engine):
+    for subject, predicate, obj in (("app/a.py", "imports", "app/b.py"), ("app/b.py", "imports", "app/a.py"),
+                                    ("lib/x.py", "imports", "lib/y.py"), ("lib/y.py", "imports_when_called", "lib/x.py")):
+        await engine.assert_fact("default", subject, predicate, obj, valid_from=DAY, origin="extracted")
+    code, text = await graph(engine, "cycles", "--limit", "1")
+    assert code == 0 and "cycles: space default" in text and "app/a.py" in text and "lib/x.py" in text
+    code, shown = await graph(engine, "cycles", "--json")
+    report = json.loads(shown)
+    assert code == 0 and report["status"] == "cycles" and (report["totals"]["cycles"], report["totals"]["held_apart"]) == (1, 1)
+
+
+async def test_stats_and_hubs_print_the_graph_counted_and_its_most_linked(engine):
+    code, text = await graph(engine, "stats")
+    assert code == 0 and "stats: space default" in text and "facts by origin:" in text
+    code, shown = await graph(engine, "stats", "--json")
+    counted = json.loads(shown)
+    assert code == 0 and counted["totals"]["entities"] >= 2 and counted["facts"]["origin"]
+    code, text = await graph(engine, "hubs", "--limit", "1")
+    assert code == 0 and "hubs: space default" in text and "1. " in text and "neighbours" in text
+    code, shown = await graph(engine, "hubs", "--json", "--above", "90")
+    ranked = json.loads(shown)
+    assert code == 0 and ranked["totals"]["above"] == 90.0 and len(ranked["hubs"]) <= ranked["totals"]["own"]
+    with pytest.raises(InvalidInput, match="1 to 100"):
+        await graph(engine, "hubs", "--limit", "0")
 
 
 async def temporal(engine, *arguments: str) -> tuple[int, str]:
@@ -598,6 +672,24 @@ async def test_recall_can_join_neighbouring_chunks_and_say_what_it_joined():
     assert code == 0 and "joined" not in plain.getvalue(), "merging stays opt-in"
 
 
+async def test_recall_can_widen_a_hit_by_whole_sentences():
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                chunk_target=70).open()
+    await memory.remember("default", (
+        "The survey of the harbour crane was booked for the third of May. "
+        "It found rust on the jib and a slew ring that needed grease. "
+        "The yard did both in the same week."))
+    out = io.StringIO()
+    asked = ["recall", "rust jib slew grease", "--window", "1", "--window-unit", "sentences", "--limit", "1", "--json"]
+    code = await run(build_parser().parse_args(asked), memory, io.StringIO(""), out)
+    await memory.close()
+    printed = json.loads(out.getvalue())
+    widened = printed["widened"]
+    assert code == 0 and widened["unit"] == "sentences", widened
+    [item] = printed["items"]
+    assert item["text"].startswith("The survey") and item["text"].endswith("same week."), item["text"]
+
+
 async def test_recall_can_widen_a_single_hit():
     """The case --merge cannot serve: one chunk matched, and the answer is
     in the sentence after it."""
@@ -615,3 +707,92 @@ async def test_recall_can_widen_a_single_hit():
     code = await run(build_parser().parse_args(asked[:2] + ["--limit", "1"]),
                      memory, io.StringIO(""), plain)
     assert code == 0 and "widened" not in plain.getvalue(), "widening stays opt-in"
+
+
+def json_stream(text: str) -> list[dict]:
+    """Every JSON value in the text, however it is indented -- what `jq` reads."""
+    decoder, at, values = json.JSONDecoder(), 0, []
+    while at < len(text):
+        while at < len(text) and text[at].isspace():
+            at += 1
+        if at >= len(text):
+            break
+        value, at = decoder.raw_decode(text, at)
+        values.append(value)
+    return values
+
+
+async def test_map_watch_records_what_changed_between_passes(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (root / "c.py").write_text("def c():\n    return a()\n", encoding="utf-8")
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    out = io.StringIO()
+
+    async def change_between_passes():
+        await asyncio.sleep(0.15)
+        (root / "a.py").write_text("def a():\n    return 2\n", encoding="utf-8")
+        (root / "b.py").write_text("def b():\n    return 3\n", encoding="utf-8")
+        (root / "c.py").unlink()
+
+    changing = asyncio.create_task(change_between_passes())
+    code = await run(build_parser().parse_args(["--json", "map", str(root), "--watch", "--every", "0.3", "--rounds", "2", "--graph"]),
+                     memory, io.StringIO(""), out)
+    await changing
+    lines = json_stream(out.getvalue())
+    assert code == 0 and [line.get("pass") for line in lines] == [1, None, 2, None], "a JSON stream: a pass marker, then its receipt"
+    first, second = lines[1], lines[3]
+    assert (first["read"], first["updated"], first["removed"]) == (2, 0, 0), "pass one read a.py and c.py"
+    assert (second["read"], second["updated"], second["removed"]) == (2, 1, 1), "pass two: a.py changed, b.py new, c.py gone"
+    assert (await memory.status("default")).episodes == 2, "c.py is forgotten, a.py replaced, b.py added"
+    found = await memory.recall("default", "return 2", limit=2)
+    assert any("return 2" in item.text for item in found.items), "the changed file's new text is what is remembered"
+    out = io.StringIO()
+    with pytest.raises(InvalidInput, match="--every"):
+        await run(build_parser().parse_args(["map", str(root), "--watch", "--every", "0", "--rounds", "1"]), memory, io.StringIO(""), out)
+    await memory.close()
+
+
+async def test_map_watch_lets_a_changed_caller_find_an_unchanged_declaration(tmp_path):
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "b.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    # A call by a bare name with no import: the graph cannot bind it inside
+    # the file, so the corpus-wide pass is what places it.
+    (root / "pkg" / "a.py").write_text("def go(x):\n    return x.helper()\n", encoding="utf-8")
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), code_graph=True).open()
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--json", "map", str(root), "--graph"]), memory, io.StringIO(""), out)
+    first = json_stream(out.getvalue())[-1]
+    assert code == 0 and first["unconfirmed_call_candidates"] == [["pkg/a.py:go", "pkg/b.py:helper"]], \
+        "the first pass binds the call to the declaration"
+    (root / "pkg" / "a.py").write_text("def go(x):\n    return x.helper() + 1\n", encoding="utf-8")
+    out = io.StringIO()
+    code = await run(build_parser().parse_args(["--json", "map", str(root), "--graph"]), memory, io.StringIO(""), out)
+    second = json_stream(out.getvalue())[-1]
+    assert code == 0 and second["deduplicated"] == 1 and second["updated"] == 1
+    assert second["unconfirmed_call_candidates"] == first["unconfirmed_call_candidates"], \
+        "the unchanged file's declaration still binds the changed caller's call"
+    await memory.close()
+
+
+async def test_merge_records_a_decision_the_graph_honours_and_close_parts_the_names():
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(),
+                                events=InMemoryEventLog()).open()
+    await engine.assert_fact("default", "alice chen", "works_at", "Acme Robotics", valid_from=DAY)
+    await engine.assert_fact("default", "dr. alice chen", "leads", "Robotics Lab", valid_from=DAY)
+    code, text = await graph(engine, "merge", "Dr. Alice Chen", "alice chen", "--reason", "one badge")
+    assert code == 0 and "merged: dr. alice chen into alice chen" in text
+    code, text = await graph(engine, "duplicates")
+    assert code == 0 and "pair: alice chen" not in text
+    [event] = await engine.events.query("default", kind="entity_merge", limit=3)
+    assert event.payload["actor"].startswith("cli:") and event.payload["reason"] == "one badge"
+    code, text = await graph(engine, "merges", "--json")
+    assert code == 0 and [item["alias_key"] for item in json.loads(text)["merges"]] == ["dr. alice chen"]
+    code, text = await graph(engine, "unmerge", "dr. alice chen", "--reason", "two people")
+    assert code == 0 and "unmerged: dr. alice chen" in text
+    code, text = await graph(engine, "merges")
+    assert code == 0 and "no merges in force" in text
+    with pytest.raises(InvalidInput, match="reason"):
+        await graph(engine, "merge", "dr. alice chen", "alice chen", "--reason", " ")

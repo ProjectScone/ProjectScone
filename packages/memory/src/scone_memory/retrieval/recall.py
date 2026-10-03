@@ -10,22 +10,54 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 import math
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import Literal, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING, cast
 
+from ..core import forget_after
 from ..core.errors import InvalidInput
+from ..core.timeutil import parse_rfc3339
 from ..ingestion.code import code_language, declaration_at, line_span
-from ..core.models import Episode, QueryEntity, RecallItem, RecallResult, RerankTrace
-from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter
+from ..ingestion.embedding_cache import EmbeddingCache, cache_key
+from ..core.models import Chunk, DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
+from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search, question_index
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
 from . import fact_recall, fusion, supersession
 from .entity_lane import ENTITY_WEIGHT, entity_lane
+from .image_lane import IMAGE_SEARCHES, IMAGE_WEIGHT, ImageLane, search_images
+from ..core.vector_writers import VectorsNotComparable
+
+#: The context lane's share of a fused rank. Rank fusion is flat, so a lane
+#: that finds what the others cannot needs weight to be heard at all: on
+#: the ``under-v1`` benchmark (testing.context_lane_benchmark, twenty
+#: passages under a heading whose words they never say, eight distractors
+#: each repeating the question) the tail chunk reached the top five in 0
+#: of 20 cases at 0.5, 1 at 1.0 and 13 at 2.0. The entity lane made the
+#: same choice for the same reason. The cost is on the record too: a
+#: passage under the words can now come before one that merely says them.
+CONTEXT_WEIGHT = 2.0
+#: The question lane's share (ingestion.chunk_questions): the context lane's,
+#: which is what it was measured at (benchmarks/chunk-question-lane-v1.results.md,
+#: where no lower weight beat the lane off on held-out questions either).
+QUESTION_WEIGHT = 2.0
 from .episode_scope import episode_fits
-from .filters import parse_filter
+from .filters import Filter, parse_filter
+from .phrases import Phrases, checked_phrases
 if TYPE_CHECKING:
+    from .summary_expand import Expanded
+    from .synonyms import Synonyms
+    from .feedback_prior import PriorTerms
     from ..entities.project import EntityProjection
 from .reranking import (Reranker, RerankCandidate, candidate_is_retained,
     rerank_candidates, validate_candidate_limit, validate_rerank_options)
+
+class _ConditionNarrowing(Protocol):
+    """An index that evaluates metadata conditions itself; checked by its
+    ``narrows_conditions`` attribute before this is assumed."""
+
+    async def search(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
+                     tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None,
+                     conditions: Optional[Filter] = None) -> list[tuple[int, float]]: ...
+
 
 LANE_DEPTH = 4
 UNFILTERED_DEPTH = 25
@@ -44,6 +76,7 @@ class RecallRuntime:
     clock: Callable[[], str]
     emit: EventEmitter
     query_for_evidence: QueryEvidence
+    embedding_cache: EmbeddingCache | None = None
     candidate_limit: int | None = None
     reranker: Reranker | None = None
     rerank_limit: int = 32
@@ -56,16 +89,142 @@ class RecallRuntime:
     #: the reader actually got.
     demote_superseded: bool = True
     similarity_floor: float | None = None
+    #: How much newer memory is favoured in fusion: the term's size at age
+    #: zero and the age at which it halves. Zero weight favours nothing.
+    recency_weight: float = fusion.W_RECENCY
+    recency_half_life_days: float = fusion.RECENCY_HALF_LIFE_DAYS
     #: The width the floor was measured at, when it came from a measured
     #: policy. The query's own vector is checked against it, because an
     #: embedder that never reports a width still has one.
     floor_dim: int | None = None
     #: Why stored vectors cannot be compared with this embedder's, if so.
     vector_block: str | None = None
+    #: The caller's synonym list, applied to the text lane's query only.
+    synonyms: "Synonyms | None" = None
+    #: Whether the words a chunk is under are searched as a lane of their own.
+    context_lane: bool = False
+    #: Whether the questions each chunk answers, kept in an index of their own, are searched.
+    question_lane: bool = False
+    #: Whether a query term's family is searched by stem prefix in the text lane.
+    lexical_stems: bool = False
+    #: With stem prefixes: whether a passage holding the query's own word weighs its family at that word's idf.
+    lexical_exact_forms: bool = False
+    #: The vector lane's voice in rank fusion, against the text lane's 1.0.
+    vector_weight: float = 1.0
+    #: Reads recorded feedback's term for each fused candidate, when the
+    #: engine's feedback weight is set; None leaves fusion as it was.
+    feedback_prior: "Callable[[str, Mapping[int, Chunk], str], Awaitable[PriorTerms]] | None" = None
+    #: The image lane's embedder and its index of its own; None without the lane.
+    image: ImageLane | None = None
+
+
+#: Given the items recall would return, its required and excluded phrases and
+#: its scope, the answer with each stored summary expanded (``summary_expand``).
+SummaryExpander = Callable[[Sequence[RecallItem], Sequence[str], Sequence[str], TextFilter], Awaitable["Expanded"]]
+
+
+def placed_in_file(episode: Episode, chunk: Chunk) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """Where in its file a chunk sits -- its first and last line, and the
+    declaration holding it when the source is code -- worked out from the
+    episode rather than stored: the same span always answers the same way,
+    and a chunk written before any of this can still answer."""
+    language = code_language(episode.source)
+    held = (declaration_at(episode.content, chunk.start, chunk.end, language=language, offsets="bytes")
+            if language is not None else None)
+    lines = line_span(episode.content, chunk.start, chunk.end, "bytes")
+    return (lines[0] if lines else None, lines[1] if lines else None, held.name if held is not None else None)
 
 
 def _ms(since: float) -> float:
     return round((time.perf_counter() - since) * 1000, 3)
+
+
+def _finished(trace: "PhraseTrace | None", returned: int, limit: int, *, window_full: bool) -> "PhraseTrace | None":
+    """``trace`` told whether the answer came back short after the phrases dropped passages. It is
+    short only when a lane filled its window: otherwise every passage was a candidate, and nothing
+    beyond the window went unchecked."""
+    if trace is None:
+        return None
+    dropped = trace.dropped_required + trace.dropped_excluded
+    short = returned < limit and dropped > 0 and window_full
+    why = (f"{dropped} of the {trace.checked} candidates checked were dropped by the phrases"
+           + (f"; {returned} of {limit} came back, and passages beyond the candidate window were not checked"
+              if short else ""))
+    return trace.model_copy(update={"short": short, "why": why})
+
+
+#: Candidates diversity fills places from; the rest keep relevance order after them.
+MAX_DIVERSIFIED = 200
+
+
+async def _diversified(runtime: "RecallRuntime", space: str, items: list, chunks: dict, weight: float, limit: int,
+                       degraded: list[str]) -> tuple[list, DiversityTrace]:
+    """``items`` with their first places filled by maximal marginal relevance.
+
+    Each place goes to the candidate with the highest relevance (its fused
+    score over the best one's) times ``1 - weight``, less ``weight`` times
+    its greatest cosine to a passage already placed. Only the first
+    ``2 * limit`` places are filled this way, enough to survive the
+    per-episode cap; the rest keep their relevance order."""
+    considered, rest = items[:MAX_DIVERSIFIED], items[MAX_DIVERSIFIED:]
+    ids = [item.chunk_id for item in considered]
+    vectors: dict[int, list[float]] = {}
+    source = "index"
+    try:
+        reader = getattr(runtime.vectors, "vectors_of", None)
+        if callable(reader):
+            vectors = await reader(space, ids)
+        if len(vectors) < len(ids):
+            # One source for every candidate, so each likeness is on one scale.
+            embedded = await runtime.embedder.embed([chunks[cid].text for cid in ids]) if ids else []
+            vectors, source = dict(zip(ids, embedded)), "embedded"
+    except Exception as error:  # noqa: BLE001 - the order is kept and the reason said
+        degraded.append(f"diversity: {type(error).__name__}: {error}")
+        return items, DiversityTrace(weight=weight, candidates=len(considered), not_diversified=len(rest),
+                                     vectors="unavailable", why="no vectors to compare, so relevance order was kept")
+    unit = {cid: _unit(vector) for cid, vector in vectors.items()}
+    top = max((item.score for item in considered), default=0.0) or 1.0
+    remaining = list(considered)
+    placed: list = []
+    while remaining and len(placed) < 2 * limit:
+        def gain(item) -> float:
+            like = max((_dot(unit[item.chunk_id], unit[other.chunk_id]) for other in placed), default=0.0)
+            return (1 - weight) * item.score / top - weight * like
+        best = max(remaining, key=gain)  # the first of equals, so ties keep relevance order
+        placed.append(best)
+        remaining.remove(best)
+    ordered = placed + remaining + rest
+    replaced = len({item.chunk_id for item in ordered[:limit]} - {item.chunk_id for item in items[:limit]})
+    why = f"{replaced} of the first {limit} places went to passages less like those above them"
+    if rest:
+        why += f"; {len(rest)} candidates past the budget of {MAX_DIVERSIFIED} kept relevance order"
+    return ordered, DiversityTrace(weight=weight, candidates=len(considered), not_diversified=len(rest),
+                                   vectors=source, replaced=replaced, why=why)
+
+
+def _unit(vector: Sequence[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vector))
+    return [x / norm for x in vector] if norm else [0.0 for _ in vector]
+
+
+def _dot(left: Sequence[float], right: Sequence[float]) -> float:
+    return sum(a * b for a, b in zip(left, right))
+
+
+#: The lanes a recall may be asked for, in the order they are named.
+LANES: tuple[str, ...] = ("vector", "text")
+
+
+def asked_lanes(lanes: object) -> tuple[str, ...]:
+    """``lanes`` as the known lanes asked for, in their own order; refused when empty or unknown."""
+    if not isinstance(lanes, (list, tuple)):
+        raise InvalidInput(f"lanes is a list naming {' and '.join(LANES)}, not {lanes!r}")
+    unknown = sorted({str(lane) for lane in lanes} - set(LANES))
+    if unknown:
+        raise InvalidInput(f"recall has no lane named {', '.join(unknown)}; its lanes are {', '.join(LANES)}")
+    if not lanes:
+        raise InvalidInput(f"ask for at least one lane: {', '.join(LANES)}")
+    return tuple(lane for lane in LANES if lane in lanes)
 
 
 async def recall(
@@ -85,9 +244,16 @@ async def recall(
     candidate_limit: int | None = None,
     rerank: bool = True,
     graph_boost: bool = False,
+    fusion_mode: str = "rank",
     entity_projection: "EntityProjection | None" = None,
     entity_unavailable: str | None = None,
     entity_notes: Sequence[str] = (),
+    lanes: Sequence[str] = LANES,
+    require: Sequence[str] = (),
+    exclude: Sequence[str] = (),
+    diversity: Optional[float] = None,
+    summaries: Optional[SummaryExpander] = None,
+    image_lane: bool = False,
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -113,14 +279,34 @@ async def recall(
     signals, not confidence. A failed reranker retains baseline ordering;
     ``rerank=False`` explicitly disables the configured adapter."""
     check_space(space)
+    if type(image_lane) is not bool:
+        raise InvalidInput("image_lane must be a boolean")
+    if fusion_mode not in fusion.FUSIONS:
+        raise InvalidInput(f"fusion must be one of {', '.join(fusion.FUSIONS)}, not {fusion_mode!r}")
     query = query.strip()
     if not query or len(query) > MAX_QUERY:
         raise InvalidInput(f"query must be 1..={MAX_QUERY} chars")
     limit = max(1, min(limit, MAX_LIMIT))
+    expansion = runtime.synonyms.expand(query) if runtime.synonyms is not None else None
+    if expansion is not None and not expansion.matched:
+        expansion = None
+    text_query = expansion.text_query if expansion is not None else query
+    stem_prefixes: list[str] = []
+    prefix_store = prefix_search(runtime.documents) if runtime.lexical_stems else None
+    if runtime.lexical_stems:
+        from .lexical import tokenize as _tokenize
+        from .stems import prefixes as _prefixes
+        stem_prefixes = _prefixes(_tokenize(text_query))
     candidate_limit = validate_candidate_limit(runtime.candidate_limit if candidate_limit is None else candidate_limit)
     if type(rerank) is not bool:
         raise InvalidInput("rerank must be a boolean")
     active_reranker = runtime.reranker if rerank else None
+    if diversity is not None:
+        if isinstance(diversity, bool) or not isinstance(diversity, (int, float)) or not 0 <= diversity <= 1:
+            raise InvalidInput(f"diversity is a weight from 0 to 1, not {diversity!r}")
+        if active_reranker is not None:
+            raise InvalidInput("diversity and a reranker both set the order, and the reranker would undo the "
+                               "diversity; ask for rerank=false with it")
     if active_reranker is not None:
         validate_rerank_options(runtime.rerank_limit, runtime.rerank_max_bytes, runtime.rerank_timeout)
     boundary = normalise_time(as_of) if as_of else None
@@ -140,41 +326,93 @@ async def recall(
     # which the filter may then reject, and the search comes back
     # empty while the memory that answers it sits outside the window.
     in_store = narrow_by is None or bool(getattr(runtime.documents, "narrows_metadata", False))
-    narrowing = (kind is not None or source_prefix is not None or since_at is not None
-                 or until_at is not None or narrow_by is not None)
+    # The vector lane holds no episode: kind, source and date bounds are
+    # post-filtered for it, and a condition is too unless the index says
+    # it evaluates conditions itself. A lane that is post-filtered looks
+    # deeper, and the result says how deep and whether that was enough.
+    vector_narrows_conditions = bool(getattr(runtime.vectors, "narrows_conditions", False))
+    episode_bound = kind is not None or source_prefix is not None or since_at is not None or until_at is not None
+    vector_postfiltered = episode_bound or (narrow_by is not None and not vector_narrows_conditions)
+    narrowing = episode_bound or narrow_by is not None
     depth = candidate_limit if candidate_limit is not None else limit * LANE_DEPTH * (1 if in_store else UNFILTERED_DEPTH)
+    vector_depth = (candidate_limit if candidate_limit is not None
+                    else limit * LANE_DEPTH * (UNFILTERED_DEPTH if vector_postfiltered else 1))
+    # The image lane's index is another index: whether it evaluates a
+    # condition is its own answer, not the text vectors' index's.
+    image_postfiltered = episode_bound or (
+        narrow_by is not None and not (runtime.image is not None
+                                       and getattr(runtime.image.vectors, "narrows_conditions", False)))
+    image_depth = (candidate_limit if candidate_limit is not None
+                   else limit * LANE_DEPTH * (UNFILTERED_DEPTH if image_postfiltered else 1))
     degraded: list[str] = []
     started = time.perf_counter()
     latency: dict[str, float] = {}
     evidence = {
         **runtime.query_for_evidence(query),
+        "fusion": fusion_mode,
         "limit": limit,
         "as_of": boundary,
         "tags": list(clean_tags),
         "where": clean_where,
         "embedder": runtime.embedder.id,
         "contextual_embeddings": runtime.contextual_embeddings,
+        "synonyms": (None if expansion is None
+                     else {"matched": len(expansion.matched), "added": len(expansion.added), "capped": expansion.capped}),
+        "context_lane": runtime.context_lane,
+        "question_lane": runtime.question_lane,
+        "prefixes": ({"added": len(stem_prefixes), "applied": prefix_store is not None,
+                      "exact_forms": runtime.lexical_exact_forms} if runtime.lexical_stems else None),
+        "fusion_weights": {"vector": runtime.vector_weight, "text": 1.0, **({"image": IMAGE_WEIGHT} if image_lane else {})},
+        "image_lane": image_lane,
         "similarity_floor": runtime.similarity_floor,
         "narrow": {"kind": kind, "source_prefix": source_prefix, "since": since_at, "until": until_at,
                    "conditions": dict(conditions) if conditions is not None else None,
                    "conditions_in_store": None if narrow_by is None else in_store},
     }
 
+    asked = asked_lanes(lanes)
+    # The lanes asked for that failed, recorded where they fail: degraded
+    # also carries notes on lanes that ran (a lexical index behind, the
+    # context lane unkept), which are not failures.
+    failed: set[str] = set()
+    required, excluded = checked_phrases(require, exclude)
     vector_lane: list[tuple[int, float]] = []
     width: int | None = None
-    if runtime.vector_block is not None:
+    if "vector" not in asked:
+        # Not asked for, so not run: no embedding call, and nothing degraded.
+        pass
+    elif runtime.vector_block is not None:
         degraded.append(f"vectors: {runtime.vector_block}")
+        failed.add("vector")
     else:
         try:
             t0 = time.perf_counter()
-            [qvec] = await runtime.embedder.embed([query])
+            from ..core.embedding import embed_queries, query_cache_text
+            cached: dict[str, list[float]] = {}
+            cache_text = query_cache_text(runtime.embedder, query)
+            key = cache_key(runtime.embedder.id, runtime.embedder.dim, cache_text) if cache_text is not None else None
+            if key is not None and runtime.embedding_cache is not None and runtime.embedder.dim:
+                try:
+                    cached = runtime.embedding_cache.take([key], runtime.embedder.dim)
+                except Exception as error:
+                    runtime.embedding_cache.failed("query lookup", error)
+            if key is not None and key in cached:
+                qvec = cached[key]
+            else:
+                [qvec] = await embed_queries(runtime.embedder, [query])
+            evidence["embedding_cache_hit"] = key in cached
             width = len(qvec)
             latency["embed"] = _ms(t0)
             t0 = time.perf_counter()
-            vector_lane = await runtime.vectors.search(space, qvec, depth, boundary, clean_tags, clean_where)
+            if narrow_by is not None and vector_narrows_conditions:
+                vector_lane = await cast(_ConditionNarrowing, runtime.vectors).search(
+                    space, qvec, vector_depth, boundary, clean_tags, clean_where, conditions=narrow_by)
+            else:
+                vector_lane = await runtime.vectors.search(space, qvec, vector_depth, boundary, clean_tags, clean_where)
             latency["vector"] = _ms(t0)
         except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
             degraded.append(f"vectors: {type(e).__name__}: {e}")
+            failed.add("vector")
 
     # A floor is a number on one embedder's scale. The query it is about
     # to judge says what scale this really is, whatever the embedder said
@@ -186,28 +424,89 @@ async def recall(
             f"about another's")
 
     if candidate_limit is not None or active_reranker is not None:
-        vector_lane = vector_lane[:depth]
+        vector_lane = vector_lane[:vector_depth]
 
     text_lane: list[tuple[int, float]] = []
-    try:
-        t0 = time.perf_counter()
-        text_lane = await runtime.documents.search_text(
-            space, query, depth,
-            TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
-                       kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
-        )
-        latency["text"] = _ms(t0)
-    except Exception as e:  # noqa: BLE001
-        degraded.append(f"text: {type(e).__name__}: {e}")
+    if "text" in asked:
+        try:
+            t0 = time.perf_counter()
+            text_filter = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                                     kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
+            if prefix_store is not None and stem_prefixes:
+                text_lane = await prefix_store.search_terms(space, text_query, depth, text_filter, prefixes=stem_prefixes,
+                                                            exact_forms=runtime.lexical_exact_forms)
+            else:
+                text_lane = await runtime.documents.search_text(space, text_query, depth, text_filter)
+            latency["text"] = _ms(t0)
+            # A store that keeps a derived lexical index brings it up to date a
+            # bounded amount per query; what is still behind is said, since a
+            # passage not yet indexed is a passage this lane could not find.
+            backlog = getattr(runtime.documents, "lexical_backlog", None)
+            behind = backlog(space) if callable(backlog) else 0
+            if behind:
+                degraded.append(f"text: {behind} chunk(s) not yet in the lexical index; the text lane is behind")
+            # A store that moves a bounded number of the query's own words to
+            # their idf says how many it left at their family's weight.
+            forms_cut = getattr(runtime.documents, "exact_forms_cut", None)
+            cut = forms_cut(space) if callable(forms_cut) else 0
+            if cut:
+                degraded.append(f"text: {cut} query word(s) past MAX_EXACT_FORMS kept their family's weight")
+        except Exception as e:  # noqa: BLE001
+            degraded.append(f"text: {type(e).__name__}: {e}")
+            failed.add("text")
+
+    # The context lane: what each passage is under, searched with the same
+    # query the text lane got, fused at CONTEXT_WEIGHT -- twice the text
+    # lane's, so a passage only under the words can come before one that says them.
+    context_hits: list[tuple[int, float]] = []
+    if runtime.context_lane:
+        keeper = context_index(runtime.documents)
+        if keeper is None:
+            degraded.append(f"context lane: not kept by the {runtime.documents.name} document store")
+        else:
+            try:
+                t0 = time.perf_counter()
+                context_hits = await keeper.search_context(
+                    space, text_query, depth,
+                    TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                               kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
+                )
+                latency["context"] = _ms(t0)
+            except Exception as e:  # noqa: BLE001
+                degraded.append(f"context lane: {type(e).__name__}: {e}")
+
+    # The question lane: the questions a model wrote that each passage
+    # answers (ingestion.chunk_questions), in an index of their own so the
+    # flag that searches them searches nothing else.
+    question_hits: list[tuple[int, float]] = []
+    if runtime.question_lane:
+        asked_index = question_index(runtime.documents)
+        if asked_index is None:
+            degraded.append(f"question lane: not kept by the {runtime.documents.name} document store")
+        else:
+            try:
+                t0 = time.perf_counter()
+                question_hits = await asked_index.search_questions(
+                    space, text_query, depth,
+                    TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
+                               kind=kind, source_prefix=source_prefix, since=since_at, until=until_at),
+                )
+                latency["question"] = _ms(t0)
+            except Exception as e:  # noqa: BLE001
+                degraded.append(f"question lane: {type(e).__name__}: {e}")
 
     if candidate_limit is not None or active_reranker is not None:
         text_lane = text_lane[:depth]
 
-    if len(degraded) == 2:
+    answered = [lane for lane in asked if lane not in failed]
+    evidence["lanes"] = answered
+    if not answered:
+        said = "both lanes failed" if len(asked) == 2 else f"the {asked[0]} lane asked for failed"
         latency["total"] = _ms(started)
         await runtime.emit(space, "recall", {**evidence, "degraded": degraded, "latency_ms": latency,
-                                           "error": "both lanes failed", "fact_ids": [], "history_fact_ids": []})
-        raise RuntimeError("both recall lanes failed: " + "; ".join(degraded))
+                                           "error": said, "fact_ids": [], "history_fact_ids": []})
+        raise RuntimeError(("both recall lanes failed: " if len(asked) == 2
+                            else f"the only recall lane asked for, {asked[0]}, failed: ") + "; ".join(degraded))
 
     # The entity lane, only when asked for: passages naming the question's
     # entities or their neighbours, under the same filter as the text lane.
@@ -230,6 +529,40 @@ async def recall(
         if candidate_limit is not None or active_reranker is not None:
             entity_hits = entity_hits[:depth]
 
+    # The image lane, only when asked for: stored images nearest the query in
+    # the image embedder's space, from an index the text embedder never
+    # writes, under the vector lane's filters, as deep as its own index needs.
+    image_hits: list[tuple[int, float]] = []
+    #: Rows the image index returned on the lane's last search, forgotten images' included.
+    image_returned = 0
+    image_ran = False
+    if image_lane:
+        if runtime.image is None:
+            degraded.append("image lane: this engine has no image embedder and image index")
+        else:
+            try:
+                t0 = time.perf_counter()
+                searched = await search_images(runtime.image, runtime.documents, space, query, image_depth,
+                                               boundary, clean_tags, clean_where, narrow_by)
+                image_hits, image_returned = searched.hits, searched.returned
+                latency["image"] = _ms(t0)
+                image_ran = True
+                if searched.removed:
+                    # Left by forgets through an engine without the lane, which cannot reach its index.
+                    degraded.append(f"image lane: removed {searched.removed} vectors of images already forgotten"
+                                    + (f"; forgotten images still filled its window after {IMAGE_SEARCHES} searches, "
+                                       "so it ranked fewer images than it looks for" if searched.short else ""))
+                if searched.ignored:
+                    # An index that cannot record its writer: the lane's own tag left these out.
+                    degraded.append(f"image lane: ignored {'at least ' if searched.ignored_at_least else ''}"
+                                    f"{searched.ignored} image vectors under this recall's filters that "
+                                    f"{runtime.image.embedder.id} did not tag (another image model's, or written "
+                                    "before image vectors were tagged); rebuild them with reembed_images()")
+            except VectorsNotComparable as e:
+                degraded.append(f"image lane: {type(e).__name__}: {e}; rebuild them with reembed_images()")
+            except Exception as e:  # noqa: BLE001 - the lane is reported, not hidden
+                degraded.append(f"image lane: {type(e).__name__}: {e}")
+
     # An index that ranks without a cosine (a bridged store with an
     # unknown score) reports NaN: its order counts for fusion, but no
     # similarity is shown and no confidence is judged from it.
@@ -238,7 +571,7 @@ async def recall(
     # confidence signal. A degraded vector lane cannot judge (None); a
     # lane that ran and found nothing is as weak as evidence gets.
     top_similarity = round(vector_lane[0][1], 6) if vector_lane and not math.isnan(vector_lane[0][1]) else None
-    vector_ran = not any(d.startswith("vectors:") for d in degraded)
+    vector_ran = "vector" in answered
     low_confidence: Optional[bool] = None
     if runtime.similarity_floor is not None and vector_ran and (top_similarity is not None or not vector_lane):
         low_confidence = top_similarity is None or top_similarity < runtime.similarity_floor
@@ -246,27 +579,76 @@ async def recall(
         "vector": {cid: i + 1 for i, (cid, _) in enumerate(vector_lane)},
         "text": {cid: i + 1 for i, (cid, _) in enumerate(text_lane)},
     }
+    lane_hits: list[list[tuple[int, float]]] = [vector_lane, text_lane]
+    # The vector lane's weight is its voice against the text lane's. With
+    # nothing from the text lane (not asked, failed, or found nothing) it
+    # has nothing to speak against, and a light voice would only shrink its
+    # rank scores under the recency term, which is sized against a full
+    # voice: at a hundredth, half an hour of age outranks an exact match.
+    # So it speaks at full voice, and the event records the voice it had.
+    vector_voice = runtime.vector_weight if text_lane else 1.0
+    evidence["fusion_weights"] = {"vector": vector_voice, "text": 1.0, **({"image": IMAGE_WEIGHT} if image_lane else {})}
+    weights = [vector_voice, 1.0]
     if graph_boost:
         ranks["entity"] = {cid: i + 1 for i, (cid, _) in enumerate(entity_hits)}
-    fused = (fusion.rrf([vector_lane, text_lane, entity_hits], weights=[1.0, 1.0, ENTITY_WEIGHT]) if graph_boost
-             else fusion.rrf([vector_lane, text_lane]))
+        lane_hits.append(entity_hits)
+        weights.append(ENTITY_WEIGHT)
+    if image_lane:
+        ranks["image"] = {cid: i + 1 for i, (cid, _) in enumerate(image_hits)}
+        lane_hits.append(image_hits)
+        weights.append(IMAGE_WEIGHT)
+    if runtime.context_lane:
+        ranks["context"] = {cid: i + 1 for i, (cid, _) in enumerate(context_hits)}
+        lane_hits.append(context_hits)
+        weights.append(CONTEXT_WEIGHT)
+    if runtime.question_lane:
+        ranks["question"] = {cid: i + 1 for i, (cid, _) in enumerate(question_hits)}
+        lane_hits.append(question_hits)
+        weights.append(QUESTION_WEIGHT)
+    fuse = {"score": fusion.relative_scores, "distribution": fusion.distribution_scores}.get(fusion_mode, fusion.rrf)
+    fused = fuse(lane_hits, weights=weights)
     chunks = {c.chunk_id: c for c in await runtime.documents.get_chunks(space, list(fused))}
     now = runtime.clock()
+    prior = await runtime.feedback_prior(space, chunks, now) if runtime.feedback_prior is not None else None
+    judged = prior.terms if prior is not None else {}
     items = [
-        fusion.Fused(cid, score + fusion.recency_boost(chunks[cid].created_at, now), similarity.get(cid))
+        fusion.Fused(cid, score + fusion.recency_boost(chunks[cid].created_at, now, weight=runtime.recency_weight,
+                                                       half_life_days=runtime.recency_half_life_days)
+                     + judged.get(cid, 0.0), similarity.get(cid))
         for cid, score in fused.items()
         if cid in chunks
     ]
     items = fusion.order(items)
+    phrase_trace: PhraseTrace | None = None
+    if required or excluded:
+        # Across every fused candidate and before the per-episode cap and the
+        # limit, so a passage that fails gives its place to one that holds.
+        dropped = {"required": 0, "excluded": 0}
+        kept_items = []
+        phrases = Phrases(required, excluded)
+        for item in items:
+            fits, rule = phrases.passes(chunks[item.chunk_id].text)
+            if fits:
+                kept_items.append(item)
+            else:
+                dropped[rule] += 1
+        phrase_trace = PhraseTrace(required=required, excluded=excluded, checked=len(items),
+                                   dropped_required=dropped["required"], dropped_excluded=dropped["excluded"])
+        items = kept_items
+    diversity_trace: DiversityTrace | None = None
+    if diversity is not None:
+        items, diversity_trace = await _diversified(runtime, space, items, chunks, float(diversity), limit, degraded)
     episode_of = {cid: c.episode_id for cid, c in chunks.items()}
     capped_items = fusion.cap_per_episode(items, episode_of)
     baseline_allowed = {item.chunk_id for item in capped_items}
     if active_reranker is None:
         items = capped_items
     episodes: dict[int, Episode] = {}
+    postfiltered_out = 0
     if narrowing:
         # Read every candidate's episode and keep the ones that fit,
         # before the limit is applied; the window is the lanes' depth.
+        before_narrowing = len(items)
         for item in items:
             eid = chunks[item.chunk_id].episode_id
             if eid not in episodes:
@@ -278,6 +660,7 @@ async def recall(
             if (episode := episodes.get(chunks[item.chunk_id].episode_id)) is not None
             and episode_fits(episode, kind, source_prefix, since_at, until_at, narrow_by)
         ]
+        postfiltered_out = before_narrowing - len(items)
     scope = TextFilter(as_of=boundary, tags=clean_tags, where=clean_where, conditions=narrow_by,
                        kind=kind, source_prefix=source_prefix, since=since_at, until=until_at)
     if active_reranker is not None:
@@ -294,6 +677,32 @@ async def recall(
             if episode is not None and candidate_is_retained(chunk, episode, space, scope):
                 retained.append(item)
         items = retained
+    # A memory past its forget_after is not returned, whether or not a sweep
+    # has forgotten it yet (memory.scheduled_forget). Checked before the
+    # limit, so a withheld passage gives its place to the next one. Without a
+    # reranker ``items`` is already capped per episode and only the candidates
+    # needed to fill the answer are read, which are the episodes the answer
+    # reads anyway; a reranker's candidates are all judged.
+    moment = parse_rfc3339(now)
+    withheld: dict[int, int] = {}
+    unwithheld: list[fusion.Fused] = []
+    placed = 0
+    fill_only = active_reranker is None
+    for item in items:
+        if fill_only and placed >= limit:
+            break
+        eid = chunks[item.chunk_id].episode_id
+        if eid not in episodes:
+            found = await runtime.documents.get_episode(space, eid)
+            if found is not None:
+                episodes[eid] = found
+        held = episodes.get(eid)
+        if held is not None and forget_after.is_due(held.metadata, moment):
+            withheld[eid] = withheld.get(eid, 0) + 1
+            continue
+        unwithheld.append(item)
+        placed += 1
+    items = unwithheld
     candidate_items = items
     items = [item for item in items if item.chunk_id in baseline_allowed][:limit]
     if runtime.demote_restated:
@@ -329,6 +738,7 @@ async def recall(
         latency["rerank"] = outcome.trace.duration_ms
         if outcome.failure is not None:
             degraded.append(f"rerank: {outcome.failure}")
+        degraded.extend(f"rerank: {note}" for note in outcome.notes)
         if outcome.trace.status == "applied":
             rerank_scores = outcome.scores
             ranked = list(outcome.ordered_ids) + [cid for cid in candidate_order if cid not in rerank_scores]
@@ -360,13 +770,7 @@ async def recall(
     for item in items:
         chunk = chunks[item.chunk_id]
         episode = episodes.get(chunk.episode_id)
-        # Where in the file this came from, worked out from the episode
-        # rather than stored: the same span always answers the same way,
-        # and a chunk written before any of this can still answer.
-        language = code_language(episode.source) if episode else None
-        held = (declaration_at(episode.content, chunk.start, chunk.end, language=language, offsets="bytes")
-                if episode is not None and language is not None else None)
-        lines = line_span(episode.content, chunk.start, chunk.end, "bytes") if episode is not None else None
+        first_line, last_line, declaration = placed_in_file(episode, chunk) if episode is not None else (None, None, None)
         result_items.append(
             RecallItem(
                 chunk_id=chunk.chunk_id,
@@ -382,13 +786,22 @@ async def recall(
                 metadata=dict(episode.metadata) if episode else {},
                 start=chunk.start,
                 end=chunk.end,
-                first_line=lines[0] if lines else None,
-                last_line=lines[1] if lines else None,
-                declaration=held.name if held is not None else None,
+                first_line=first_line,
+                last_line=last_line,
+                declaration=declaration,
             )
         )
     fact_scope = scope if narrowing or clean_tags or clean_where else None
     facts = await fact_recall.facts_for_query(runtime.documents, space, query, boundary or now, scope=fact_scope, degraded=degraded)
+    retrieved = len(result_items)
+    expanded: "Expanded | None" = None
+    if summaries is not None:
+        # Before the event is written, so it lists what is returned and a
+        # chunk a summary brought can be judged; held to the same scope and
+        # phrases the lanes' passages were; and before supersession, so a
+        # retired claim is marked and moved whichever way it came back.
+        expanded = await summaries(result_items, required, excluded, scope)
+        result_items = list(expanded.items)
     if runtime.demote_superseded:
         # After the facts, because this is the one thing in the recall path
         # that reads the ledger rather than the index -- what the returned
@@ -399,18 +812,56 @@ async def recall(
             runtime.documents, space, result_items, boundary or now, degraded=degraded)
     previous = await fact_recall.history_for(runtime.documents, space, facts, boundary or now, scope=fact_scope) if history else []
     counts = await runtime.documents.counts(space)
+    narrowing_report: Optional[Narrowing] = None
+    if narrowing:
+        text_ran = "text" in asked and not any(d.startswith("text:") for d in degraded)
+        narrowing_report = Narrowing(
+            conditions=narrow_by is not None, kind_or_source_or_dates=episode_bound,
+            text_lane="off" if not text_ran else ("in_store" if in_store else "postfiltered"),
+            vector_lane="off" if not vector_ran else ("postfiltered" if vector_postfiltered else "in_store"),
+            image_lane="off" if not image_ran else ("postfiltered" if image_postfiltered else "in_store"),
+            text_window=depth, vector_window=vector_depth, image_window=image_depth if image_ran else 0,
+            text_returned=len(text_lane), vector_returned=len(vector_lane), image_returned=image_returned,
+            postfiltered_out=postfiltered_out,
+            # The bound bit: the filter removed candidates and a lane that
+            # is post-filtered had returned its whole window.
+            window_exhausted=postfiltered_out > 0 and (
+                (vector_ran and vector_postfiltered and len(vector_lane) >= vector_depth)
+                or (image_postfiltered and image_returned >= image_depth)
+                or (text_ran and not in_store and len(text_lane) >= depth)),
+        )
+        # Beside the request's own `narrow`, never merged into it: that
+        # payload is what the caller asked for, this is what the lanes did.
+        evidence["narrowing"] = narrowing_report.model_dump()
     result = RecallResult(
         items=result_items,
         rerank=rerank_trace,
         facts=facts,
         history=previous,
         degraded=degraded,
+        narrowing=narrowing_report,
+        fusion=cast(Literal["rank", "score", "distribution"], fusion_mode),
+        lanes=answered,
+        diversity=diversity_trace,
+        # What the lanes returned: a summary's chunks do not fill a place the phrases emptied.
+        phrases=_finished(phrase_trace, retrieved, limit,
+                          window_full=(len(vector_lane) >= vector_depth or len(text_lane) >= depth
+                                       or image_returned >= image_depth)),
         entities=query_entities,
         top_similarity=top_similarity,
         low_confidence=low_confidence,
         returned_bytes=sum(len(i.text.encode()) for i in result_items),
         space_bytes=counts.bytes,
+        expansion=expansion.record() if expansion is not None else None,
+        expanded=expanded.record() if expanded is not None else None,
+        prefixes=({"added": list(stem_prefixes), "applied": prefix_store is not None,
+                   "exact_forms": runtime.lexical_exact_forms} if runtime.lexical_stems else None),
+        past_forget_after=({"withheld": sum(withheld.values()), "episode_ids": sorted(withheld), "at": now}
+                           if withheld else None),
+        feedback_prior=prior.record([item.chunk_id for item in result_items]) if prior is not None else None,
     )
+    if result.past_forget_after is not None:
+        evidence["past_forget_after"] = result.past_forget_after
     latency["total"] = _ms(started)
     if candidate_limit is not None:
         evidence["candidate_limit"] = candidate_limit
@@ -425,11 +876,13 @@ async def recall(
         "items": [
             {"chunk_id": i.chunk_id, "episode_id": i.episode_id, "score": i.score,
              "similarity": i.similarity, "lanes": i.lanes,
-             **({"rerank_score": i.rerank_score} if i.rerank_score is not None else {})}
+             **({"rerank_score": i.rerank_score} if i.rerank_score is not None else {}),
+             **({"via_summary": i.via_summary["episode_id"]} if i.via_summary is not None else {})}
             for i in result_items
         ],
         "items_coverage": "returned",
-        "lane_candidates": {"vector": len(vector_lane), "text": len(text_lane)},
+        "lane_candidates": {"vector": len(vector_lane), "text": len(text_lane),
+                            **({"image": len(image_hits)} if image_lane else {})},
         "top_similarity": top_similarity,
         "low_confidence": low_confidence,
         "facts": len(facts),
@@ -437,6 +890,10 @@ async def recall(
         "history_fact_ids": [f.fact_id for f in previous],
         "returned_bytes": result.returned_bytes,
         "space_bytes": result.space_bytes,
+        **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
+        **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
+        **({"expanded": result.expanded} if result.expanded is not None else {}),
+        **({"feedback_prior": result.feedback_prior} if result.feedback_prior is not None else {}),
     })
     if event is not None:
         result.event_id = event.event_id

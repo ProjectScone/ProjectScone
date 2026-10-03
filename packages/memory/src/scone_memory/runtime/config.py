@@ -26,21 +26,55 @@
     SCONE_EMBED_URL            remote: OpenAI-compatible base, e.g. http://localhost:11434/v1
     SCONE_EMBED_API_KEY        remote: bearer, optional
     SCONE_EMBED_CACHE          local: model cache dir, optional
+    SCONE_EMBED_QUERY_PREFIX   remote: explicit query instruction, default empty
+    SCONE_EMBED_DOCUMENT_PREFIX remote: independent document instruction, default empty
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
+    SCONE_HEADING_CONTEXT=1        embed each chunk with the headings above it, or its file and declarations (off by default)
+    SCONE_EMBEDDING_BUDGET=1       shorten that context to fit the embedder's declared window, never the chunk (off by default)
+    SCONE_CHUNK_TOKENS=512         measure the length chunker's target in tokens, packing whole sentences, instead
+                                   of 700 characters; counted by the embedder's tokenizer or the estimate (unset: characters)
+    SCONE_CHUNK_OVERLAP_TOKENS=64  tokens of the chunk before that each such chunk starts with (default 0)
+    SCONE_SEMANTIC_MERGE_THRESHOLD=0.2  join a semantic cut's neighbouring chunks again when at least this alike
+                                   and they fit the chunk target together (unset: no second pass)
     SCONE_DEMOTE_RESTATED=1        rank a restated claim ahead of what it replaces (experiment 5; off by default)
     SCONE_MANY_VALUED=knows,owns   predicates whose values hold side by side; any other holds one at a time
     SCONE_RELATION_INVERSE=works_at:employs   which predicates are the other side of which
     SCONE_RELATION_SYMMETRIC=married_to       which read the same both ways
     SCONE_RELATION_TRANSITIVE=part_of         which carry through
     SCONE_ABSTENTION_POLICY        a policy file from `scone calibrate`: the measured floor to abstain by
+    SCONE_CONVERSATIONS_TOOL_TABLES=1  offer list_tables and query_table in tool mode: exact answers from a
+                                   document's table cells, every cell quoted (off by default)
+    SCONE_SYNONYMS                 a file of synonym groups, one per line, comma-separated; the text lane's
+                                   query gains the other members of every group a query term is in
+    SCONE_CONTEXT_LANE=1           index what each chunk is under (headings, title, source name, document
+                                   terms) beside its text and search it as a lane of its own (off by default)
+    SCONE_LEXICAL_STEMS=0          turn off the text lane's stem-prefix families (bill* for billing); on by
+                                   default, measured; the index is untouched either way
+    SCONE_LEXICAL_EXACT_FORMS=0    turn off weighing a stem family at the query word's own idf in a passage that
+                                   holds that word (still one term); on by default, measured
+    SCONE_VECTOR_WEIGHT=0.5        the vector lane's voice in rank fusion against the text lane's 1.0 (a number
+                                   above 0 and at most 4); unset, a hashed-token embedder gets 0.01 and any
+                                   other embedder 1.0, measured (0.25 was the hashed default before)
     SCONE_PROFILE_PREDICATES       only these predicates make a profile (default: all of them)
     SCONE_PROFILE_WITHOUT          predicates a profile never shows
+    SCONE_PROFILE_STATIC_PREDICATES   predicates a bucketed profile always calls static
+    SCONE_PROFILE_DYNAMIC_PREDICATES  predicates a bucketed profile always calls dynamic
+    SCONE_PROFILE_STATIC_AFTER_DAYS   days a claim holds before it is static (default 90)
+    SCONE_PROFILE_DYNAMIC_CHANGES     value changes in the window that make a slot dynamic (default 2)
+    SCONE_PROFILE_CHANGE_WINDOW_DAYS  the days those changes are counted over (default 365)
+    SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS  days until a dynamic claim's weight halves (default 30)
     SCONE_RERANKER_FACTORY        trusted module:factory for an optional reranker
     SCONE_RERANKER_CROSS_ENCODER_DIR, SCONE_RERANKER_CROSS_ENCODER_MODEL
                                  alternatively load preprovisioned CPU model files; both required
     SCONE_RERANKER_CROSS_ENCODER_MAX_PAIR_TOKENS, *_THREADS, *_BATCH_SIZE
                                  optional offline tuning (defaults 512, 2, 8); no model downloads
+    SCONE_RERANKER_LISTWISE=1     alternatively the chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL) orders the
+                                 candidates listwise, a window at a time, with a receipt of its calls
+    SCONE_RERANKER_LISTWISE_WINDOW, *_STEP, *_PASSAGE_BYTES, *_TIMEOUT
+                                 passages per call 2..20 (default 20), step 1..window-1 (default half the
+                                 window), bytes per passage 64..8192 (default 1024), seconds for the whole
+                                 pass >0..600 (default 60; SCONE_RERANK_TIMEOUT does not apply to it)
     SCONE_EVENTS      memory | sqlite | mongo | postgres | elasticsearch | none  (default follows SCONE_DOCUMENTS)
                       (default follows SCONE_DOCUMENTS: sqlite -> sqlite, mongo -> mongo, else memory)
     SCONE_EVENTS_QUERIES  hash | text           (default hash: a sha256 prefix, never the query text)
@@ -48,6 +82,7 @@
     SCONE_EVENTS_MAX     in-memory sink ring size (default 10000)
 
     SCONE_CHAT_URL, SCONE_CHAT_MODEL   OpenAI-compatible chat model for consolidation; unset = no distiller
+                                       (also the listwise reranker's model; setting it for that starts the distiller)
     SCONE_CHAT_API_KEY                 optional bearer
     SCONE_CHAT_THINK   true | false    for Ollama reasoning models; unset leaves the field out
     SCONE_CHAT_TIMEOUT                 seconds one chat call may take (default 180)
@@ -55,10 +90,42 @@
     SCONE_DISTILL_BATCH                episodes per pass per space (default 20)
     SCONE_DISTILL_ACCEPT_AT            confidence at or above which extractions enter the ledger
     SCONE_DERIVE       1 | 0          run the derivation pass after extraction (default 0; needs the chat model)
+    SCONE_URL_IMPORT   1 | 0          let POST /v1/documents/from-url and `scone import-url` fetch a page (default 0)
+    SCONE_URL_IMPORT_PRIVATE 1 | 0    also fetch hosts on private, loopback or link-local addresses (default 0)
                                        directly; unset = every extraction is proposed for review
     SCONE_MCP_PROPOSE_BELOW            confidence below which a fact submitted over MCP is parked for
                                        review; unset = every submitted fact is a ledger claim, which
                                        is what the Rust server does without --propose-below
+
+    SCONE_FOLLOWUP_QUERIES off | carry | rewrite   served text conversations also search a follow-up turn
+                                   ("since when?") with what earlier user turns named (carry), or as a
+                                   self-hosted model restates it (rewrite); off by default. Text
+                                   conversations of serve and serve-conversations --model-factory only;
+                                   history-only serving refuses it, and voice sessions do not take it
+    SCONE_FOLLOWUP_URL, SCONE_FOLLOWUP_MODEL, SCONE_FOLLOWUP_API_KEY, SCONE_FOLLOWUP_TIMEOUT (5)
+                                   rewrite only: its own self-hosted endpoint, never another setting's key
+    SCONE_SEMANTIC_TURN 1 | 0      served voice sessions judge each final transcript: one that stops
+                                   mid-clause ("book a table for") is held 1.5 s more for the rest
+                                   of it, instead of being answered at the recognizer's pause; speech
+                                   starting while it is held extends the wait to 10 s after its
+                                   first transcript; an empty transcription (a cough) is the HTTP
+                                   recognizer's error, which ends the session with a held turn
+                                   stored, not answered (default 0; no model; `scone serve` voice
+                                   personas only)
+    SCONE_VOICE_KEYPAD off | append | collect   served voice sessions take keys the client sends as
+                                   {"type": "keypad", "key": "5"} on the audio socket: each key
+                                   finishes the user's turn (append), or keys are collected until
+                                   #, 3 s without a key or 32 keys into one turn (collect). Off by
+                                   default, when the socket refuses a keypad message
+    SCONE_VOICE_IDLE_TIMEOUT (0)   served voice sessions count an idle after this many seconds with no
+                                   user speech while the bot is not speaking; 0 is off
+    SCONE_VOICE_IDLE_PROMPT        what an idle says ("Are you still there?")
+    SCONE_VOICE_IDLE_END_AFTER (3) the idle in a row that ends the session instead; 0 for never. Each
+                                   idle is a conversation_idle event; a prompt is kept as said
+    SCONE_VOICE_TURN_STRATEGY end_of_turn | min_speech | keypad_submit   when the bot may take its
+                                   turn: when the turn ends (default), once its speech lasted
+                                   SCONE_VOICE_MIN_SPEECH seconds (0.8), or when the caller presses #
+                                   (needs SCONE_VOICE_KEYPAD)
 
     SCONE_API_KEYS    "key:space[:role],..."     bearer keys, the space each one sees, and its role:
                                                read | write | review | full (the default)
@@ -78,9 +145,15 @@ from typing import TYPE_CHECKING, Mapping, Optional, cast
 
 if TYPE_CHECKING:
     from ..providers.aws_auth import AwsSigV4Auth
+    from ..providers.llm import OpenAICompatibleTextModel
 
 from ..memory.engine import MemoryEngine
 from ..core.errors import InvalidInput
+from ..realtime.idle import END_AFTER as IDLE_END_AFTER, PROMPT as IDLE_PROMPT
+from ..retrieval.followup import REWRITE_TIMEOUT_S
+from ..retrieval.feedback_prior import validate_feedback_weight
+from ..retrieval.fusion import RECENCY_HALF_LIFE_DAYS, W_RECENCY, validate_recency
+from ..retrieval.listwise import DEFAULT_PASSAGE_BYTES, DEFAULT_TIMEOUT, DEFAULT_WINDOW, validate_listwise_options
 from ..retrieval.reranking import Reranker, validate_candidate_limit, validate_rerank_options
 
 
@@ -145,6 +218,8 @@ class Settings:
     embed_url: Optional[str] = None
     embed_api_key: Optional[str] = None
     embed_cache: Optional[str] = None
+    embed_query_prefix: str = ""
+    embed_document_prefix: str = ""
     chat_url: Optional[str] = None
     chat_model: Optional[str] = None
     chat_api_key: Optional[str] = None
@@ -153,21 +228,68 @@ class Settings:
     #: local model on a busy machine is the ordinary case, and 180 is not
     #: always enough for it.
     chat_timeout: float = 180.0
+    chat_first_text_timeout: float | None = None
+    chat_start_retries: int = 0
     distill_interval_s: float = 30.0
     distill_batch: int = 20
     distill_accept_at: Optional[float] = None
     derive: bool = False
+    #: Whether POST /v1/documents/from-url and `scone import-url` may fetch a page; off by default,
+    #: because a server that fetches whatever URL it is told to fetches its own network.
+    url_import: bool = False
+    #: Whether a host resolving to a private, loopback or link-local address may be fetched (a lab).
+    url_import_private: bool = False
     contextual_embeddings: bool = False
+    heading_context: bool = False
+    embedding_budget: bool = False
+    #: SCONE_CHUNK_TOKENS and SCONE_CHUNK_OVERLAP_TOKENS: the length
+    #: chunker's target in tokens and the overlap between its chunks; None
+    #: keeps the character target.
+    chunk_tokens: Optional[int] = None
+    chunk_overlap_tokens: int = 0
+    #: SCONE_SEMANTIC_MERGE_THRESHOLD: the similarity at which a semantic
+    #: cut's neighbouring chunks are joined again; None keeps its cuts.
+    semantic_merge_threshold: Optional[float] = None
     table_context_embeddings: bool = False
+    #: SCONE_EMBEDDING_CACHE: unset embeds every chunk of every stored
+    #: record; "memory" keeps vectors for the process; a path keeps them in
+    #: a file every process that opens it shares (ingestion/embedding_cache.py).
+    embedding_cache: str | None = None
     demote_restated: bool = True
+    context_lane: bool = False
+    #: SCONE_QUESTION_LANE: recall searches the questions each chunk answers
+    #: (ingestion/chunk_questions.py), and the pass that writes them may run.
+    question_lane: bool = False
+    lexical_stems: bool = True
+    #: SCONE_LEXICAL_EXACT_FORMS: with stem prefixes, a passage holding the
+    #: query's own word weighs its family at that word's idf.
+    lexical_exact_forms: bool = True
+    vector_weight: Optional[float] = None
     many_valued: tuple[str, ...] = ()
     relation_inverse: tuple[str, ...] = ()
     relation_symmetric: tuple[str, ...] = ()
     relation_transitive: tuple[str, ...] = ()
     abstention_policy: str | None = None
+    #: A synonym file for the lexical lane, read when an engine is built.
+    synonyms: str | None = None
     profile_predicates: tuple[str, ...] = ()
     profile_without: tuple[str, ...] = ()
+    #: How a bucketed profile places claims (see memory/profile_buckets.py).
+    profile_static_predicates: tuple[str, ...] = ()
+    profile_dynamic_predicates: tuple[str, ...] = ()
+    profile_static_after_days: float = 90.0
+    profile_dynamic_changes: int = 2
+    profile_change_window_days: float = 365.0
+    profile_dynamic_half_life_days: float = 30.0
     similarity_floor: Optional[float] = None
+    #: How much newer memory is favoured in fusion (SCONE_RECENCY_WEIGHT,
+    #: SCONE_RECENCY_HALF_LIFE_DAYS): the term's size at age zero and the
+    #: age at which it halves. Zero weight turns it off.
+    recency_weight: float = W_RECENCY
+    recency_half_life_days: float = RECENCY_HALF_LIFE_DAYS
+    #: How much recorded feedback moves a candidate in fusion
+    #: (SCONE_FEEDBACK_WEIGHT; retrieval/feedback_prior.py). Zero, the default, turns it off.
+    feedback_weight: float = 0.0
     candidate_limit: int | None = None
     reranker_factory: str | None = None
     reranker_cross_encoder_dir: str | None = None
@@ -175,6 +297,13 @@ class Settings:
     reranker_cross_encoder_max_pair_tokens: int | None = None
     reranker_cross_encoder_threads: int | None = None
     reranker_cross_encoder_batch_size: int | None = None
+    #: Whether the chat model orders recall's candidates listwise
+    #: (retrieval/listwise.py); the tuning below is None for its defaults.
+    reranker_listwise: bool = False
+    reranker_listwise_window: int | None = None
+    reranker_listwise_step: int | None = None
+    reranker_listwise_passage_bytes: int | None = None
+    reranker_listwise_timeout: float | None = None
     rerank_limit: int = 32
     rerank_max_bytes: int = 64000
     rerank_timeout: float = 1.0
@@ -201,10 +330,18 @@ class Settings:
     document_video_config: Optional[str] = None
     document_ocr_executable: Optional[str] = None
     document_ocr_language: str = 'eng'
+    #: Languages a request may choose for its scan, besides document_ocr_language.
+    document_ocr_languages: tuple[str, ...] = ()
     document_ocr_psm: int = 3
     document_ocr_dpi: int = 150
+    #: Turn a page Tesseract's orientation detection is sure is turned before reading it.
+    document_ocr_orientation: bool = False
+    #: A layout engine that labels a scanned page's regions (see ocr/layout_json.py);
+    #: without one the labels are inferred from geometry and text.
+    document_layout_executable: Optional[str] = None
     conversations_journal: Optional[str] = None
     conversations_model_factory: Optional[str] = None
+    conversations_recall_timeout: float = 2.0
     # A persona catalog (JSON array of Persona documents) needs a registry
     # (trusted module:callable returning a ProviderRegistry) to bind it.
     conversations_personas: Optional[str] = None
@@ -212,6 +349,7 @@ class Settings:
     conversations_tool_mode: str = "off"
     conversations_tool_initial_search: bool = True
     conversations_tool_compute: bool = False
+    conversations_tool_tables: bool = False
     conversations_tool_max_calls: int = 4
     conversations_tool_max_rounds: int = 4
     conversations_tool_timeout: float = 120.0
@@ -222,6 +360,9 @@ class Settings:
     answer_review_timeout: float = 20.0
     answer_review_quote_mode: str = "text"
     adaptive_retrieval: bool = False
+    answer_grounding: bool = False
+    answer_grounding_workspace: str = ''
+    adaptive_provider: str = 'self-hosted'
     adaptive_url: str | None = None
     adaptive_model: str | None = None
     adaptive_api_key: str | None = field(default=None, repr=False)
@@ -232,18 +373,54 @@ class Settings:
     adaptive_max_evidence_bytes: int = 16000
     adaptive_graph_hops: int = 0
     adaptive_search_history: bool = False
+    decision_memory: str | None = None
+    decision_memory_key: str | None = field(default=None, repr=False)
+    decision_memory_max_age: float = 3600.0
+    #: SCONE_FOLLOWUP_QUERIES: off, carry (earlier turns' named terms searched
+    #: beside a follow-up), or rewrite (a self-hosted model restates it).
+    followup_queries: str = "off"
+    followup_url: str | None = None
+    followup_model: str | None = None
+    followup_api_key: str | None = field(default=None, repr=False)
+    followup_timeout: float = REWRITE_TIMEOUT_S
+    #: SCONE_SEMANTIC_TURN: voice turns end on what was said as well as the pause.
+    semantic_turn: bool = False
+    #: SCONE_VOICE_KEYPAD: off, append (each key finishes the turn) or collect (keys until #).
+    voice_keypad: str = "off"
+    #: SCONE_VOICE_IDLE_*: seconds before a quiet user is prompted (0 is off), the prompt, and the
+    #: idle in a row that ends the session (0 for never). See runtime.voice_turns.
+    voice_idle_timeout: float = 0.0
+    voice_idle_prompt: str = IDLE_PROMPT
+    voice_idle_end_after: int = IDLE_END_AFTER
+    #: SCONE_VOICE_TURN_STRATEGY and SCONE_VOICE_MIN_SPEECH: when the bot may take its turn.
+    voice_turn_strategy: str = "end_of_turn"
+    voice_min_speech: Optional[float] = None
     # Opt-in private local service settings and operational diagnostics.
     model_connections: Optional[str] = None
     log_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         from .conversation_review import validate_review_settings
+        from .conversation_followup import validate_followup_settings
         from .conversation_retrieval import validate_adaptive_settings
         from .conversation_tools import validate_tool_settings
+        from .voice_turns import validate_voice_settings
 
+        validate_voice_settings(self)
         validate_review_settings(self)
         validate_adaptive_settings(self)
+        validate_followup_settings(self)
         validate_tool_settings(self)
+        if self.chat_first_text_timeout is not None and (type(self.chat_first_text_timeout) not in (int, float)
+                or not math.isfinite(self.chat_first_text_timeout) or self.chat_first_text_timeout <= 0):
+            raise InvalidInput('SCONE_CHAT_FIRST_TEXT_TIMEOUT must be positive finite seconds')
+        if type(self.chat_start_retries) is not int or not 0 <= self.chat_start_retries <= 1:
+            raise InvalidInput('SCONE_CHAT_START_RETRIES must be 0 or 1')
+        if (isinstance(self.conversations_recall_timeout, bool)
+                or not isinstance(self.conversations_recall_timeout, (int, float))
+                or not math.isfinite(self.conversations_recall_timeout)
+                or self.conversations_recall_timeout <= 0):
+            raise InvalidInput("SCONE_CONVERSATIONS_RECALL_TIMEOUT must be positive finite seconds")
         if self.qdrant_hnsw_ef is not None and (type(self.qdrant_hnsw_ef) is not int or self.qdrant_hnsw_ef < 1):
             raise InvalidInput("SCONE_QDRANT_HNSW_EF must be a positive integer")
         if self.blobs not in ("auto", "memory", "file", "s3"):
@@ -272,6 +449,32 @@ class Settings:
                 ("rerank_timeout", "SCONE_RERANK_TIMEOUT")):
                 message = message.replace(field_name, env_name)
             raise InvalidInput(message) from None
+        try:
+            validate_recency(self.recency_weight, self.recency_half_life_days)
+        except InvalidInput as error:
+            raise InvalidInput(str(error).replace("recency_weight", "SCONE_RECENCY_WEIGHT")
+                               .replace("recency_half_life_days", "SCONE_RECENCY_HALF_LIFE_DAYS")) from None
+        try:
+            build_profile_bucket_rules(self)
+        except InvalidInput as error:
+            message = str(error)
+            for field_name, env_name in (
+                    ("static_predicates", "SCONE_PROFILE_STATIC_PREDICATES"),
+                    ("dynamic_predicates", "SCONE_PROFILE_DYNAMIC_PREDICATES"),
+                    ("static_after_days", "SCONE_PROFILE_STATIC_AFTER_DAYS"),
+                    ("dynamic_changes", "SCONE_PROFILE_DYNAMIC_CHANGES"),
+                    ("change_window_days", "SCONE_PROFILE_CHANGE_WINDOW_DAYS"),
+                    ("half_life_days", "SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS")):
+                message = message.replace(field_name, env_name)
+            raise InvalidInput(message) from None
+        try:
+            validate_feedback_weight(self.feedback_weight)
+        except InvalidInput as error:
+            raise InvalidInput(str(error).replace("feedback_weight", "SCONE_FEEDBACK_WEIGHT")) from None
+        if self.feedback_weight > 0 and self.events == "none":
+            # It reads judgements from the event log: with none, recall would be unchanged and nothing would say why.
+            raise InvalidInput("SCONE_FEEDBACK_WEIGHT reads recorded feedback from the event log, "
+                               "which SCONE_EVENTS=none turns off")
         if self.reranker_factory is not None:
             _reranker_spec(self.reranker_factory)
         for name, value in (("DIR", self.reranker_cross_encoder_dir), ("MODEL", self.reranker_cross_encoder_model)):
@@ -292,6 +495,30 @@ class Settings:
                 raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} must be an integer in {minimum}..{maximum}")
             if self.reranker_cross_encoder_dir is None:
                 raise InvalidInput(f"SCONE_RERANKER_CROSS_ENCODER_{name} requires the cross encoder directory and model")
+        self._validate_listwise()
+
+    def _validate_listwise(self) -> None:
+        if type(self.reranker_listwise) is not bool:
+            raise InvalidInput("SCONE_RERANKER_LISTWISE must be 1 or 0")
+        tuning = {"WINDOW": self.reranker_listwise_window, "STEP": self.reranker_listwise_step,
+                  "PASSAGE_BYTES": self.reranker_listwise_passage_bytes, "TIMEOUT": self.reranker_listwise_timeout}
+        if not self.reranker_listwise:
+            for name, value in tuning.items():
+                if value is not None:
+                    raise InvalidInput(f"SCONE_RERANKER_LISTWISE_{name} requires SCONE_RERANKER_LISTWISE=1")
+            return
+        if self.reranker_factory is not None or self.reranker_cross_encoder_dir is not None:
+            raise InvalidInput("SCONE_RERANKER_LISTWISE cannot be combined with SCONE_RERANKER_FACTORY "
+                               "or SCONE_RERANKER_CROSS_ENCODER_DIR")
+        if not (self.chat_url and self.chat_model):
+            raise InvalidInput("SCONE_RERANKER_LISTWISE orders with the chat model and needs SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+        try:
+            validate_listwise_options(*listwise_options(self))
+        except InvalidInput as error:
+            message = str(error)
+            for word in ("window", "step", "passage_bytes", "timeout"):
+                message = message.replace(f"listwise {word}", f"SCONE_RERANKER_LISTWISE_{word.upper()}")
+            raise InvalidInput(message) from None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
@@ -303,6 +530,8 @@ class Settings:
                      "SCONE_RERANK_MAX_BYTES", "SCONE_RERANK_TIMEOUT"):
             if env.get(name) is not None and not isinstance(env[name], str):
                 raise InvalidInput(f"{name} must be an environment string")
+        chunk_tokens, chunk_overlap_tokens = _chunk_tokens(env.get("SCONE_CHUNK_TOKENS"),
+                                                           env.get("SCONE_CHUNK_OVERLAP_TOKENS"))
         return cls(
             documents=env.get("SCONE_DOCUMENTS", "memory"),
             vectors=env.get("SCONE_VECTORS", "memory"),
@@ -361,20 +590,40 @@ class Settings:
             embed_url=env.get("SCONE_EMBED_URL"),
             embed_api_key=env.get("SCONE_EMBED_API_KEY"),
             embed_cache=env.get("SCONE_EMBED_CACHE"),
+            embed_query_prefix=env.get("SCONE_EMBED_QUERY_PREFIX", ""),
+            embed_document_prefix=env.get("SCONE_EMBED_DOCUMENT_PREFIX", ""),
             chat_url=env.get("SCONE_CHAT_URL"),
             chat_model=env.get("SCONE_CHAT_MODEL"),
             chat_api_key=env.get("SCONE_CHAT_API_KEY"),
             chat_think={"true": True, "false": False}.get((env.get("SCONE_CHAT_THINK") or "").lower()),
             chat_timeout=parse_seconds("SCONE_CHAT_TIMEOUT", env.get("SCONE_CHAT_TIMEOUT"), 180.0),
+            chat_first_text_timeout=(parse_seconds('SCONE_CHAT_FIRST_TEXT_TIMEOUT',
+                env.get('SCONE_CHAT_FIRST_TEXT_TIMEOUT'), 5.0) if env.get('SCONE_CHAT_FIRST_TEXT_TIMEOUT') else None),
+            chat_start_retries=_environment_integer('SCONE_CHAT_START_RETRIES', env.get('SCONE_CHAT_START_RETRIES', '0')),
             distill_interval_s=float(env.get("SCONE_DISTILL_INTERVAL_S", "30")),
             distill_batch=int(env.get("SCONE_DISTILL_BATCH", "20")),
             derive=parse_flag("SCONE_DERIVE", env.get("SCONE_DERIVE")),
+            url_import=parse_flag("SCONE_URL_IMPORT", env.get("SCONE_URL_IMPORT")),
+            url_import_private=parse_flag("SCONE_URL_IMPORT_PRIVATE", env.get("SCONE_URL_IMPORT_PRIVATE")),
             distill_accept_at=float(env["SCONE_DISTILL_ACCEPT_AT"]) if env.get("SCONE_DISTILL_ACCEPT_AT") else None,
             contextual_embeddings=env.get("SCONE_CONTEXTUAL_EMBEDDINGS") == "1",
+            heading_context=env.get("SCONE_HEADING_CONTEXT") == "1",
+            embedding_budget=env.get("SCONE_EMBEDDING_BUDGET") == "1",
+            chunk_tokens=chunk_tokens,
+            chunk_overlap_tokens=chunk_overlap_tokens,
+            semantic_merge_threshold=_semantic_merge_threshold(env.get("SCONE_SEMANTIC_MERGE_THRESHOLD")),
             table_context_embeddings=env.get("SCONE_TABLE_CONTEXT_EMBEDDINGS") == "1",
+            embedding_cache=env.get("SCONE_EMBEDDING_CACHE") or None,
             demote_restated=(parse_flag("SCONE_DEMOTE_RESTATED", env["SCONE_DEMOTE_RESTATED"])
                              if env.get("SCONE_DEMOTE_RESTATED") else True),
             many_valued=tuple(item.strip() for item in env.get("SCONE_MANY_VALUED", "").split(",") if item.strip()),
+            context_lane=parse_flag("SCONE_CONTEXT_LANE", env.get("SCONE_CONTEXT_LANE")),
+            question_lane=parse_flag("SCONE_QUESTION_LANE", env.get("SCONE_QUESTION_LANE")),
+            lexical_stems=(parse_flag("SCONE_LEXICAL_STEMS", env["SCONE_LEXICAL_STEMS"])
+                           if env.get("SCONE_LEXICAL_STEMS") else True),
+            lexical_exact_forms=(parse_flag("SCONE_LEXICAL_EXACT_FORMS", env["SCONE_LEXICAL_EXACT_FORMS"])
+                                 if env.get("SCONE_LEXICAL_EXACT_FORMS") else True),
+            vector_weight=_vector_weight(env.get("SCONE_VECTOR_WEIGHT")),
             relation_inverse=tuple(item.strip() for item in env.get("SCONE_RELATION_INVERSE", "").split(",")
                                    if item.strip()),
             relation_symmetric=tuple(item.strip() for item in env.get("SCONE_RELATION_SYMMETRIC", "").split(",")
@@ -382,11 +631,28 @@ class Settings:
             relation_transitive=tuple(item.strip() for item in env.get("SCONE_RELATION_TRANSITIVE", "").split(",")
                                       if item.strip()),
             abstention_policy=env.get("SCONE_ABSTENTION_POLICY") or None,
+            synonyms=env.get("SCONE_SYNONYMS") or None,
             profile_predicates=tuple(item.strip() for item in env.get("SCONE_PROFILE_PREDICATES", "").split(",")
                                      if item.strip()),
             profile_without=tuple(item.strip() for item in env.get("SCONE_PROFILE_WITHOUT", "").split(",")
                                   if item.strip()),
+            profile_static_predicates=tuple(item.strip() for item in
+                                            env.get("SCONE_PROFILE_STATIC_PREDICATES", "").split(",") if item.strip()),
+            profile_dynamic_predicates=tuple(item.strip() for item in
+                                             env.get("SCONE_PROFILE_DYNAMIC_PREDICATES", "").split(",") if item.strip()),
+            profile_static_after_days=_environment_float(
+                "SCONE_PROFILE_STATIC_AFTER_DAYS", env.get("SCONE_PROFILE_STATIC_AFTER_DAYS") or "90"),
+            profile_dynamic_changes=_environment_integer(
+                "SCONE_PROFILE_DYNAMIC_CHANGES", env.get("SCONE_PROFILE_DYNAMIC_CHANGES") or "2"),
+            profile_change_window_days=_environment_float(
+                "SCONE_PROFILE_CHANGE_WINDOW_DAYS", env.get("SCONE_PROFILE_CHANGE_WINDOW_DAYS") or "365"),
+            profile_dynamic_half_life_days=_environment_float(
+                "SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS", env.get("SCONE_PROFILE_DYNAMIC_HALF_LIFE_DAYS") or "30"),
             similarity_floor=float(env["SCONE_SIMILARITY_FLOOR"]) if env.get("SCONE_SIMILARITY_FLOOR") else None,
+            recency_weight=_environment_float("SCONE_RECENCY_WEIGHT", env.get("SCONE_RECENCY_WEIGHT") or str(W_RECENCY)),
+            recency_half_life_days=_environment_float("SCONE_RECENCY_HALF_LIFE_DAYS",
+                                                      env.get("SCONE_RECENCY_HALF_LIFE_DAYS") or str(RECENCY_HALF_LIFE_DAYS)),
+            feedback_weight=_environment_float("SCONE_FEEDBACK_WEIGHT", env.get("SCONE_FEEDBACK_WEIGHT") or "0"),
             candidate_limit=(_environment_integer("SCONE_RECALL_CANDIDATES", env["SCONE_RECALL_CANDIDATES"])
                              if env.get("SCONE_RECALL_CANDIDATES") else None),
             reranker_factory=env.get("SCONE_RERANKER_FACTORY") or None,
@@ -398,6 +664,16 @@ class Settings:
                 env["SCONE_RERANKER_CROSS_ENCODER_THREADS"]) if "SCONE_RERANKER_CROSS_ENCODER_THREADS" in env else None),
             reranker_cross_encoder_batch_size=(_environment_integer("SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE",
                 env["SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE"]) if "SCONE_RERANKER_CROSS_ENCODER_BATCH_SIZE" in env else None),
+            reranker_listwise=parse_flag("SCONE_RERANKER_LISTWISE", env.get("SCONE_RERANKER_LISTWISE")),
+            reranker_listwise_window=(_environment_integer("SCONE_RERANKER_LISTWISE_WINDOW", env["SCONE_RERANKER_LISTWISE_WINDOW"])
+                                      if env.get("SCONE_RERANKER_LISTWISE_WINDOW") else None),
+            reranker_listwise_step=(_environment_integer("SCONE_RERANKER_LISTWISE_STEP", env["SCONE_RERANKER_LISTWISE_STEP"])
+                                    if env.get("SCONE_RERANKER_LISTWISE_STEP") else None),
+            reranker_listwise_passage_bytes=(_environment_integer("SCONE_RERANKER_LISTWISE_PASSAGE_BYTES",
+                                                                  env["SCONE_RERANKER_LISTWISE_PASSAGE_BYTES"])
+                                             if env.get("SCONE_RERANKER_LISTWISE_PASSAGE_BYTES") else None),
+            reranker_listwise_timeout=(parse_seconds("SCONE_RERANKER_LISTWISE_TIMEOUT", env["SCONE_RERANKER_LISTWISE_TIMEOUT"], 0.0)
+                                       if env.get("SCONE_RERANKER_LISTWISE_TIMEOUT") else None),
             rerank_limit=_environment_integer("SCONE_RERANK_LIMIT", env.get("SCONE_RERANK_LIMIT", "32")),
             rerank_max_bytes=_environment_integer("SCONE_RERANK_MAX_BYTES", env.get("SCONE_RERANK_MAX_BYTES", "64000")),
             rerank_timeout=parse_seconds("SCONE_RERANK_TIMEOUT", env.get("SCONE_RERANK_TIMEOUT"), 1.0),
@@ -418,10 +694,16 @@ class Settings:
             document_video_config=env.get("SCONE_DOCUMENT_VIDEO_CONFIG") or None,
             document_ocr_executable=env.get('SCONE_DOCUMENT_OCR_EXECUTABLE') or None,
             document_ocr_language=env.get('SCONE_DOCUMENT_OCR_LANGUAGE', 'eng'),
+            document_ocr_languages=tuple(one.strip() for one in env.get('SCONE_DOCUMENT_OCR_LANGUAGES', '').split(',')
+                                         if one.strip()),
             document_ocr_psm=int(env.get('SCONE_DOCUMENT_OCR_PSM', '3')),
             document_ocr_dpi=int(env.get('SCONE_DOCUMENT_OCR_DPI', '150')),
+            document_ocr_orientation=env.get('SCONE_DOCUMENT_OCR_ORIENTATION') == '1',
+            document_layout_executable=env.get('SCONE_DOCUMENT_LAYOUT_EXECUTABLE') or None,
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
+            conversations_recall_timeout=parse_seconds("SCONE_CONVERSATIONS_RECALL_TIMEOUT",
+                env.get("SCONE_CONVERSATIONS_RECALL_TIMEOUT"), 2.0),
             conversations_personas=env.get("SCONE_CONVERSATIONS_PERSONAS") or None,
             conversations_registry=env.get("SCONE_CONVERSATIONS_REGISTRY") or None,
             answer_review_policy=env.get("SCONE_ANSWER_REVIEW_POLICY", "off"),
@@ -431,20 +713,43 @@ class Settings:
             answer_review_timeout=parse_seconds("SCONE_ANSWER_REVIEW_TIMEOUT", env.get("SCONE_ANSWER_REVIEW_TIMEOUT"), 20.0),
             answer_review_quote_mode=env.get("SCONE_ANSWER_REVIEW_QUOTE_MODE", "text"),
             adaptive_retrieval=parse_flag("SCONE_ADAPTIVE_RETRIEVAL", env.get("SCONE_ADAPTIVE_RETRIEVAL")),
-            adaptive_url=env.get("SCONE_ADAPTIVE_URL") or None,
-            adaptive_model=env.get("SCONE_ADAPTIVE_MODEL") or None,
-            adaptive_api_key=env.get("SCONE_ADAPTIVE_API_KEY") or None,
+            answer_grounding=parse_flag("SCONE_ANSWER_GROUNDING", env.get("SCONE_ANSWER_GROUNDING")),
+            answer_grounding_workspace=env.get('SCONE_ANSWER_GROUNDING_WORKSPACE', ''),
+            adaptive_provider=env.get('SCONE_ADAPTIVE_PROVIDER', 'self-hosted'),
+            adaptive_url=env.get("SCONE_ADAPTIVE_URL") or (env.get('TYPESAFE_BASE_URL', 'https://api.typesafe.ai')
+                if env.get('SCONE_ADAPTIVE_PROVIDER') == 'typesafe' else None),
+            adaptive_model=env.get("SCONE_ADAPTIVE_MODEL") or (env.get('TYPESAFE_DEFAULT_MODEL', 'jev-latest')
+                if env.get('SCONE_ADAPTIVE_PROVIDER') == 'typesafe' else None),
+            adaptive_api_key=env.get("SCONE_ADAPTIVE_API_KEY") or (env.get('TYPESAFE_API_KEY')
+                if env.get('SCONE_ADAPTIVE_PROVIDER') == 'typesafe' else None),
             adaptive_timeout=parse_seconds("SCONE_ADAPTIVE_TIMEOUT", env.get("SCONE_ADAPTIVE_TIMEOUT"), 15.0),
             adaptive_max_rounds=_environment_integer("SCONE_ADAPTIVE_MAX_ROUNDS", env.get("SCONE_ADAPTIVE_MAX_ROUNDS", "3")),
             adaptive_max_queries=_environment_integer("SCONE_ADAPTIVE_MAX_QUERIES", env.get("SCONE_ADAPTIVE_MAX_QUERIES", "6")),
             adaptive_candidate_limit=_environment_integer("SCONE_ADAPTIVE_CANDIDATE_LIMIT", env.get("SCONE_ADAPTIVE_CANDIDATE_LIMIT", "20")),
             adaptive_max_evidence_bytes=_environment_integer("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", env.get("SCONE_ADAPTIVE_MAX_EVIDENCE_BYTES", "16000")),
             adaptive_graph_hops=_environment_integer("SCONE_ADAPTIVE_GRAPH_HOPS", env.get("SCONE_ADAPTIVE_GRAPH_HOPS", "0")),
+            decision_memory=env.get('SCONE_DECISION_MEMORY') or None,
+            decision_memory_key=env.get('SCONE_DECISION_MEMORY_KEY') or None,
+            decision_memory_max_age=parse_seconds('SCONE_DECISION_MEMORY_MAX_AGE', env.get('SCONE_DECISION_MEMORY_MAX_AGE'), 3600.0),
             adaptive_search_history=parse_flag("SCONE_ADAPTIVE_SEARCH_HISTORY", env.get("SCONE_ADAPTIVE_SEARCH_HISTORY")),
+            followup_queries=env.get("SCONE_FOLLOWUP_QUERIES") or "off",
+            followup_url=env.get("SCONE_FOLLOWUP_URL") or None,
+            followup_model=env.get("SCONE_FOLLOWUP_MODEL") or None,
+            followup_api_key=env.get("SCONE_FOLLOWUP_API_KEY") or None,
+            followup_timeout=parse_seconds("SCONE_FOLLOWUP_TIMEOUT", env.get("SCONE_FOLLOWUP_TIMEOUT"), REWRITE_TIMEOUT_S),
+            semantic_turn=parse_flag("SCONE_SEMANTIC_TURN", env.get("SCONE_SEMANTIC_TURN")),
+            voice_keypad=_voice_keypad(env.get("SCONE_VOICE_KEYPAD")),
+            voice_idle_timeout=_environment_seconds("SCONE_VOICE_IDLE_TIMEOUT", env.get("SCONE_VOICE_IDLE_TIMEOUT")) or 0.0,
+            voice_idle_prompt=(env.get("SCONE_VOICE_IDLE_PROMPT") or "").strip() or IDLE_PROMPT,
+            voice_idle_end_after=_environment_integer("SCONE_VOICE_IDLE_END_AFTER",
+                                                      env.get("SCONE_VOICE_IDLE_END_AFTER") or str(IDLE_END_AFTER)),
+            voice_turn_strategy=(env.get("SCONE_VOICE_TURN_STRATEGY") or "").strip().lower() or "end_of_turn",
+            voice_min_speech=_environment_seconds("SCONE_VOICE_MIN_SPEECH", env.get("SCONE_VOICE_MIN_SPEECH")),
             model_connections=env.get("SCONE_MODEL_CONNECTIONS") or None,
             conversations_tool_mode=env.get("SCONE_CONVERSATIONS_TOOL_MODE", "off"),
             conversations_tool_initial_search=parse_flag("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", env.get("SCONE_CONVERSATIONS_TOOL_INITIAL_SEARCH", "1")),
             conversations_tool_compute=parse_flag("SCONE_CONVERSATIONS_TOOL_COMPUTE", env.get("SCONE_CONVERSATIONS_TOOL_COMPUTE", "0")),
+            conversations_tool_tables=parse_flag("SCONE_CONVERSATIONS_TOOL_TABLES", env.get("SCONE_CONVERSATIONS_TOOL_TABLES", "0")),
             conversations_tool_max_calls=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_CALLS", "4")),
             conversations_tool_max_rounds=_environment_integer("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", env.get("SCONE_CONVERSATIONS_TOOL_MAX_ROUNDS", "4")),
             conversations_tool_timeout=parse_seconds("SCONE_CONVERSATIONS_TOOL_TIMEOUT", env.get("SCONE_CONVERSATIONS_TOOL_TIMEOUT"), 120.0),
@@ -498,6 +803,18 @@ def build_profile_policy(settings: Settings):
     return ProfilePolicy.of(predicates=settings.profile_predicates, without=settings.profile_without)
 
 
+def build_profile_bucket_rules(settings: Settings):
+    """How a bucketed profile places each claim, as the operator configured it."""
+    from ..memory.catalog import BucketRules
+
+    return BucketRules.of(static_predicates=settings.profile_static_predicates,
+                          dynamic_predicates=settings.profile_dynamic_predicates,
+                          static_after_days=settings.profile_static_after_days,
+                          dynamic_changes=settings.profile_dynamic_changes,
+                          change_window_days=settings.profile_change_window_days,
+                          half_life_days=settings.profile_dynamic_half_life_days)
+
+
 def build_relation_meanings(settings: Settings):
     """What the space's predicates mean to each other, as the operator
     wrote it, or None when nothing was configured and the graph holds only
@@ -527,6 +844,16 @@ def build_abstention(settings: Settings):
     return AbstentionPolicy.read(settings.abstention_policy) if settings.abstention_policy else None
 
 
+def build_synonyms(settings: Settings):
+    """The caller's synonym list for the text lane, or None when no file is named.
+
+    Read when the engine is built, so a missing or malformed file stops
+    the process at startup rather than the first query."""
+    from ..retrieval.synonyms import Synonyms
+
+    return Synonyms.from_file(settings.synonyms) if settings.synonyms else None
+
+
 def build_embedder(settings: Settings):
     if settings.embedder == "hash":
         from ..embedders import HashEmbedder
@@ -541,7 +868,9 @@ def build_embedder(settings: Settings):
 
         if not settings.embed_url or not settings.embed_model:
             raise InvalidInput("SCONE_EMBEDDER=remote needs SCONE_EMBED_URL and SCONE_EMBED_MODEL")
-        return RemoteEmbedder(settings.embed_url, settings.embed_model, settings.embed_api_key)
+        return RemoteEmbedder(settings.embed_url, settings.embed_model, settings.embed_api_key,
+                              query_prefix=settings.embed_query_prefix,
+                              document_prefix=settings.embed_document_prefix)
     raise InvalidInput(f"unknown SCONE_EMBEDDER {settings.embedder!r}")
 
 
@@ -675,12 +1004,28 @@ def build_vectors(settings: Settings, documents=None):
 
 #: Settings that change what an engine does, so every one of them must
 #: reach a bench's per-item engines (see build_in_process_engine).
-ENGINE_SETTINGS = ("contextual_embeddings", "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
-                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued")
+ENGINE_SETTINGS = ("contextual_embeddings", "heading_context", "embedding_budget", "chunk_tokens", "chunk_overlap_tokens",
+                   "semantic_merge_threshold",
+                   "table_context_embeddings", "similarity_floor", "demote_restated", "candidate_limit",
+                   "rerank_limit", "rerank_max_bytes", "rerank_timeout", "many_valued", "context_lane", "question_lane",
+                   "lexical_stems", "lexical_exact_forms",
+                   "vector_weight", "recency_weight", "recency_half_life_days", "feedback_weight")
 #: Settings carried into an engine that are read from a file, not a value.
-FILE_SETTINGS = ("abstention_policy",)
+FILE_SETTINGS = ("abstention_policy", "synonyms")
 #: Settings carried into an engine through a policy they build.
-POLICY_SETTINGS = ("profile_predicates", "profile_without")
+POLICY_SETTINGS = ("profile_predicates", "profile_without", "profile_static_predicates", "profile_dynamic_predicates",
+                   "profile_static_after_days", "profile_dynamic_changes", "profile_change_window_days",
+                   "profile_dynamic_half_life_days")
+
+
+def _environment_float(name: str, value: str) -> float:
+    try:
+        number = float(value.strip())
+    except (ValueError, AttributeError):
+        raise InvalidInput(f"{name} must be a number, got {value!r}") from None
+    if not math.isfinite(number):
+        raise InvalidInput(f"{name} must be a finite number, got {value!r}")
+    return number
 
 
 def _environment_integer(name: str, value: str) -> int:
@@ -699,6 +1044,16 @@ def _reranker_spec(spec: str) -> tuple[str, str]:
     if not separator or not all(part.isidentifier() for part in module.split(".")) or not name.isidentifier():
         raise InvalidInput("SCONE_RERANKER_FACTORY must name a trusted module:factory")
     return module, name
+
+
+def listwise_options(settings: Settings) -> tuple[int, int, int, float]:
+    """The listwise pass's window, step, passage bytes and deadline, defaults filled in."""
+    window = DEFAULT_WINDOW if settings.reranker_listwise_window is None else settings.reranker_listwise_window
+    step = window // 2 if settings.reranker_listwise_step is None else settings.reranker_listwise_step
+    passage_bytes = (DEFAULT_PASSAGE_BYTES if settings.reranker_listwise_passage_bytes is None
+                     else settings.reranker_listwise_passage_bytes)
+    timeout = DEFAULT_TIMEOUT if settings.reranker_listwise_timeout is None else settings.reranker_listwise_timeout
+    return window, step, passage_bytes, timeout
 
 
 def build_reranker(settings: Settings) -> Reranker | None:
@@ -721,6 +1076,12 @@ def build_reranker(settings: Settings) -> Reranker | None:
                 batch_size=settings.reranker_cross_encoder_batch_size or 8)
         except Exception:
             raise InvalidInput("SCONE_RERANKER_CROSS_ENCODER requires valid preprovisioned model files and scone-memory[offline-rerank]") from None
+    if settings.reranker_listwise:
+        from ..retrieval.listwise import ListwiseReranker
+
+        window, step, passage_bytes, timeout = listwise_options(settings)
+        return ListwiseReranker(build_chat(settings), window=window, step=step, passage_bytes=passage_bytes,
+                                timeout=timeout)
     if settings.reranker_factory is None:
         return None
     module, name = _reranker_spec(settings.reranker_factory)
@@ -755,8 +1116,14 @@ async def build_in_process_engine(settings: Settings, embedder):
     return await MemoryEngine(
         InMemoryDocumentStore(), InMemoryVectorIndex(), embedder,
         contextual_embeddings=settings.contextual_embeddings,
-        table_context_embeddings=settings.table_context_embeddings,
+        heading_context=settings.heading_context,
+        embedding_budget=settings.embedding_budget,
+        chunk_tokens=settings.chunk_tokens, chunk_overlap_tokens=settings.chunk_overlap_tokens,
+        table_context_embeddings=settings.table_context_embeddings, semantic_merge_threshold=settings.semantic_merge_threshold,
         similarity_floor=settings.similarity_floor,
+        recency_weight=settings.recency_weight,
+        recency_half_life_days=settings.recency_half_life_days,
+        feedback_weight=settings.feedback_weight,  # carried, though these engines keep no event log to read
         demote_restated=settings.demote_restated,
         candidate_limit=settings.candidate_limit,
         reranker=reranker,
@@ -766,7 +1133,12 @@ async def build_in_process_engine(settings: Settings, embedder):
         many_valued=settings.many_valued,
         relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
+        synonyms=build_synonyms(settings),
+        context_lane=settings.context_lane, question_lane=settings.question_lane,
+        lexical_stems=settings.lexical_stems, lexical_exact_forms=settings.lexical_exact_forms,
+        vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
+        profile_bucket_rules=build_profile_bucket_rules(settings),
     ).open()
 
 
@@ -798,6 +1170,20 @@ def build_chat(settings: Settings):
                                 think=settings.chat_think, timeout=settings.chat_timeout)
 
 
+def configured_text_model() -> "OpenAICompatibleTextModel":
+    """Conversation factory using the operator's SCONE_CHAT_* environment."""
+    from ..providers.llm import OpenAICompatibleTextModel
+
+    settings = Settings.from_env()
+    if not settings.chat_url or not settings.chat_model:
+        raise InvalidInput("text conversations need SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+    return OpenAICompatibleTextModel(
+        settings.chat_url, settings.chat_model, api_key=settings.chat_api_key,
+        think=settings.chat_think, timeout=settings.chat_timeout, trust_env=False,
+        first_text_timeout=settings.chat_first_text_timeout, start_retries=settings.chat_start_retries,
+    )
+
+
 def build_worker(engine: MemoryEngine, settings: Settings, spaces):
     """A ConsolidationWorker over the configured spaces, or None when there
     is neither a model to distil with nor a retention policy to apply."""
@@ -822,6 +1208,60 @@ def build_worker(engine: MemoryEngine, settings: Settings, spaces):
                                batch=settings.distill_batch, retention=settings.retention, deriver=deriver)
 
 
+def _chunk_tokens(tokens: Optional[str], overlap: Optional[str]) -> tuple[Optional[int], int]:
+    """SCONE_CHUNK_TOKENS and SCONE_CHUNK_OVERLAP_TOKENS, refused by name
+    when they cannot work together, rather than left for the engine to
+    refuse in words that name neither."""
+    from ..ingestion.token_chunks import refused
+
+    def whole(name: str, raw: str) -> int:
+        try:
+            return int(raw)
+        except ValueError:
+            raise InvalidInput(f"{name} must be a whole number of tokens, got {raw!r}") from None
+
+    target = whole("SCONE_CHUNK_TOKENS", tokens) if tokens is not None and tokens.strip() else None
+    carried = whole("SCONE_CHUNK_OVERLAP_TOKENS", overlap) if overlap is not None and overlap.strip() else 0
+    if target is None:
+        if carried:
+            raise InvalidInput("SCONE_CHUNK_OVERLAP_TOKENS needs SCONE_CHUNK_TOKENS: an overlap in tokens is of a target in tokens")
+        return None, 0
+    reason = refused(target, carried)
+    if reason is not None:
+        raise InvalidInput(f"SCONE_CHUNK_TOKENS/SCONE_CHUNK_OVERLAP_TOKENS: {reason}")
+    return target, carried
+
+
+def _semantic_merge_threshold(raw: Optional[str]) -> Optional[float]:
+    """SCONE_SEMANTIC_MERGE_THRESHOLD, refused by name here rather than
+    left for the engine to refuse in words that do not name it."""
+    from ..ingestion.semantic_chunks import merge_refused
+
+    given = (raw or "").strip()
+    if not given:
+        return None
+    try:
+        value = float(given)
+    except ValueError:
+        raise InvalidInput(f"SCONE_SEMANTIC_MERGE_THRESHOLD must be a number, got {raw!r}") from None
+    reason = merge_refused(value)
+    if reason is not None:
+        raise InvalidInput(f"SCONE_SEMANTIC_MERGE_THRESHOLD: {reason}")
+    return value
+
+
+def _vector_weight(raw: Optional[str]) -> Optional[float]:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise InvalidInput("SCONE_VECTOR_WEIGHT must be a number above 0 and at most 4") from None
+    if not 0 < value <= 4 or value != value:
+        raise InvalidInput("SCONE_VECTOR_WEIGHT must be a number above 0 and at most 4")
+    return value
+
+
 def parse_flag(name: str, raw: Optional[str]) -> bool:
     """An on/off setting: 1, true, yes, on; 0, false, no, off, or unset."""
     value = (raw or "").strip().lower()
@@ -830,6 +1270,23 @@ def parse_flag(name: str, raw: Optional[str]) -> bool:
     if value in ("1", "true", "yes", "on"):
         return True
     raise InvalidInput(f"{name} must be 1 or 0, got {raw!r}")
+
+
+#: What a served voice session does with a key the client sends: nothing, or a realtime.keypad mode.
+VOICE_KEYPAD_MODES = ("off", "append", "collect")
+
+
+def _environment_seconds(name: str, raw: Optional[str]) -> Optional[float]:
+    from .voice_turns import environment_seconds
+
+    return environment_seconds(name, raw)
+
+
+def _voice_keypad(raw: Optional[str]) -> str:
+    value = (raw or "off").strip().lower()
+    if value not in VOICE_KEYPAD_MODES:
+        raise InvalidInput(f"SCONE_VOICE_KEYPAD must be off, append or collect, got {raw!r}")
+    return value
 
 
 def parse_retention(raw: str) -> dict[str, float]:
@@ -913,8 +1370,13 @@ def build_blobs(settings: Settings):
 
 
 async def build_engine(settings: Settings) -> MemoryEngine:
+    from ..ingestion.embedding_cache import build_embedding_cache
+
     reranker = build_reranker(settings)
     blobs = build_blobs(settings)
+    # Before any store is opened: a setting that cannot be honoured is
+    # refused with nothing left open behind it.
+    embedding_cache = build_embedding_cache(settings.embedding_cache)
     documents = build_documents(settings)
     if hasattr(documents, "open"):
         await documents.open()
@@ -930,9 +1392,16 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         events=events,
         record_queries=settings.events_queries == "text",
         contextual_embeddings=settings.contextual_embeddings,
+        heading_context=settings.heading_context,
+        embedding_budget=settings.embedding_budget,
+        chunk_overlap_tokens=settings.chunk_overlap_tokens, chunk_tokens=settings.chunk_tokens,
         table_context_embeddings=settings.table_context_embeddings,
+        embedding_cache=embedding_cache, semantic_merge_threshold=settings.semantic_merge_threshold,
         demote_restated=settings.demote_restated,
         similarity_floor=settings.similarity_floor,
+        recency_weight=settings.recency_weight,
+        recency_half_life_days=settings.recency_half_life_days,
+        feedback_weight=settings.feedback_weight,  # read from the event log given above
         candidate_limit=settings.candidate_limit,
         reranker=reranker,
         rerank_limit=settings.rerank_limit,
@@ -941,7 +1410,12 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         many_valued=settings.many_valued,
         relation_meanings=build_relation_meanings(settings),
         abstention=build_abstention(settings),
+        synonyms=build_synonyms(settings),
+        context_lane=settings.context_lane,
+        question_lane=settings.question_lane, lexical_stems=settings.lexical_stems,
+        lexical_exact_forms=settings.lexical_exact_forms, vector_weight=settings.vector_weight,
         profile_policy=build_profile_policy(settings),
+        profile_bucket_rules=build_profile_bucket_rules(settings),
         blobs=blobs,
     )
     if settings.embedder == "remote" and engine.embedder.dim == 0:

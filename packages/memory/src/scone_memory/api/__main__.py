@@ -24,6 +24,14 @@ from ..agents.workflow import WorkflowError
 from .app import create_app
 
 
+def document_ocr_identity(settings: Settings) -> str:
+    """What names the configured OCR for a document job or a directory sync: a change here
+    means a document already extracted must be extracted again. Orientation is named only
+    when on, so a store synced before it existed keeps its identity."""
+    identity = f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}'
+    return identity + ':orientation' if settings.document_ocr_orientation else identity
+
+
 def build_app(settings: Settings, engine, *, document_media: DocumentMedia | None = None, document_video: DocumentVideo | None = None):
     from ..runtime.agent_runtime import load_agent_runtime
     from ..runtime.document_jobs import load_document_imports
@@ -43,11 +51,11 @@ def build_app(settings: Settings, engine, *, document_media: DocumentMedia | Non
         ocr = build_document_ocr(settings)
         if settings.document_jobs_config:
             imports = load_document_imports(settings.document_jobs_config, engine, document_ocr=ocr, document_media=document_media, document_video=document_video,
-                ocr_identity=f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}')
+                ocr_identity=document_ocr_identity(settings))
         if settings.directory_sync_config:
             directory_sync = load_directory_sync(settings.directory_sync_config, engine,
                 document_ocr=ocr, document_media=document_media, document_video=document_video,
-                ocr_identity=f'{settings.document_ocr_executable}:{settings.document_ocr_language}:{settings.document_ocr_psm}')
+                ocr_identity=document_ocr_identity(settings))
         app = _build_app(settings, engine, agents, document_ocr=ocr, document_import_service=imports,
                          document_media=document_media, document_video=document_video, directory_sync_service=directory_sync)
         return agents.own(app) if agents is not None else app
@@ -108,6 +116,8 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
         install_http_diagnostics(app)
         return app
 
+    from ..ingestion.web import WebLimits
+    url_import = WebLimits(allow_private=settings.url_import_private) if settings.url_import else None
     if not settings.conversations_journal:
         return finish(create_app(engine, settings.keys, worker=worker,
                           document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media, document_video=document_video,
@@ -117,16 +127,19 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                           agent_run_service=agents.service if agents else None,
                           ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                           model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory,
-                          synthesis_factory=synthesis_factory))
+                          synthesis_factory=synthesis_factory, url_import=url_import))
     from .conversation_server import journal_path, load_model_factory
     from .conversations import create_conversation_app
     from ..runtime.conversation_review import build_conversation_review
-    from ..runtime.conversation_retrieval import build_adaptive_retrieval
+    from ..runtime.conversation_retrieval import build_adaptive_retrieval, build_answer_grounder
+    from ..runtime.conversation_followup import build_followup
+    from ..runtime.voice_turns import build_voice_turns
     from ..runtime.conversation_tools import build_conversation_tools
 
     journal = journal_path(settings, settings.conversations_journal)
     answer_review = build_conversation_review(settings)
     adaptive_retriever = build_adaptive_retrieval(settings, engine)
+    answer_grounder = build_answer_grounder(settings)
     conversation_tools = build_conversation_tools(settings)
     catalog: PersonaCatalog | DynamicLocalCatalog | None = None
     if settings.conversations_personas:
@@ -152,6 +165,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
         from ..realtime.text import TextConversation
 
         def scoped(space, sid, scope, **conversation_options):
+            conversation_options.setdefault('recall_timeout', settings.conversations_recall_timeout)
             return TextConversation(engine, space, sid, factory, turn_timeout=settings.chat_timeout,
                                     **scope.kwargs(), **conversation_options)
     elif store is not None:
@@ -161,6 +175,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
         runtime_available = lambda: store.get('chat') is not None
     return finish(create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    public_text_streaming=scoped is not None or catalog is not None,
+                                   text_resumption=scoped is not None or catalog is not None,
                                    worker=worker, catalog=catalog,
                                    document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media, document_video=document_video,
                                    directory_sync_service=directory_sync_service,
@@ -170,9 +185,11 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                                    ingest_concurrency=settings.ingest_concurrency, roles=settings.roles,
                                    runtime_available=runtime_available,
                                    model_connections_available=model_management, vision_available=vision_available, vision_factory=vision_factory,
-                                   synthesis_factory=synthesis_factory,
-                                   answer_review=answer_review, adaptive_retriever=adaptive_retriever,
-                                   tool_retrieval=conversation_tools))
+                                   synthesis_factory=synthesis_factory, url_import=url_import,
+                                   answer_review=answer_review, adaptive_retriever=adaptive_retriever, answer_grounder=answer_grounder,
+                                   tool_retrieval=conversation_tools, followup=build_followup(settings),
+                                   semantic_turn=settings.semantic_turn, voice_keypad=settings.voice_keypad,
+                                   **build_voice_turns(settings)))
 
 
 def build_server(settings: Settings, app):

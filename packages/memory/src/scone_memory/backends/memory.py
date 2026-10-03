@@ -11,9 +11,14 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from operator import mul
 from itertools import count
 from bisect import bisect_left, bisect_right, insort
-from typing import Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..retrieval.filters import Filter
 
 from ..retrieval.lexical import Bm25
 from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone, LINK_KINDS
@@ -61,6 +66,9 @@ class InMemoryDocumentStore:
         self._fact_ids = count(1)
         self._link_ids = count(1)
         self._bm25: dict[str, Bm25] = defaultdict(Bm25)
+        #: The context lane: what each chunk is under, indexed beside its text.
+        self._context: dict[str, Bm25] = defaultdict(Bm25)
+        self._questions: dict[str, Bm25] = defaultdict(Bm25)
         self._revision: dict[str, int] = defaultdict(int)
         #: Fact writes per space, only ever growing: the ledger stamp.
         self._fact_writes: dict[str, int] = defaultdict(int)
@@ -97,6 +105,7 @@ class InMemoryDocumentStore:
         for key in [key for key in self._chunks_by_episode if key[0] == space]:
             del self._chunks_by_episode[key]
         self._bm25.pop(space, None)
+        self._questions.pop(space, None)
         if fact_ids:
             self._fact_writes[space] += 1
         for fact_id in fact_ids:
@@ -198,6 +207,8 @@ class InMemoryDocumentStore:
         removed = [c.chunk_id for c in self._chunks.values() if c.space == space and c.episode_id == episode_id]
         for chunk_id in removed:
             self._bm25[space].remove(chunk_id)
+            self._context[space].remove(chunk_id)
+            self._questions[space].remove(chunk_id)
             del self._chunks[chunk_id]
         self._chunks_by_episode.pop((space, episode_id), None)
         if episode is not None:
@@ -244,19 +255,47 @@ class InMemoryDocumentStore:
     #: This store applies a metadata filter itself, so the lanes
     #: do not have to be widened to compensate for it.
     narrows_metadata = True
+    #: This store keeps a context index beside chunk text (see ContextIndex).
+    context_lane = True
+    #: This store keeps the questions each chunk answers (see QuestionIndex).
+    question_lane = True
+    #: This store can search a term's family by prefix (see PrefixSearch).
+    prefix_terms = True
 
     async def search_text(
         self, space: str, query: str, limit: int, filter: TextFilter
     ) -> list[tuple[int, float]]:
-        allowed = None
+        return self._bm25[space].search(query, limit, self._allowed(space, filter))
+
+    async def search_terms(self, space: str, query: str, limit: int, filter: TextFilter, *,
+                           prefixes: Sequence[str], exact_forms: bool = False) -> list[tuple[int, float]]:
+        return self._bm25[space].search(query, limit, self._allowed(space, filter), prefixes, exact_forms)
+
+    async def index_context(self, space: str, chunk_id: int, text: str) -> None:
+        self._context[space].remove(chunk_id)
+        self._context[space].add(chunk_id, text)
+
+    async def search_context(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        return self._context[space].search(query, limit, self._allowed(space, filter))
+
+    async def index_questions(self, space: str, chunk_id: int, questions: Sequence[str]) -> bool:
+        chunk = self._chunks.get(chunk_id)
+        if chunk is None or chunk.space != space:
+            return False
+        index = self._questions[space]
+        index.remove(chunk_id)
+        if questions:
+            index.add(chunk_id, "\n".join(questions))
+        return True
+
+    async def search_questions(self, space: str, query: str, limit: int, filter: TextFilter) -> list[tuple[int, float]]:
+        return self._questions[space].search(query, limit, self._allowed(space, filter))
+
+    def _allowed(self, space: str, filter: TextFilter) -> list[int] | None:
         if (filter.as_of or filter.tags or filter.where or filter.conditions
                 or any(value is not None for value in (filter.kind, filter.source_prefix, filter.since, filter.until))):
-            allowed = [
-                c.chunk_id
-                for c in self._chunks.values()
-                if c.space == space and self._passes(c, filter)
-            ]
-        return self._bm25[space].search(query, limit, allowed)
+            return [c.chunk_id for c in self._chunks.values() if c.space == space and self._passes(c, filter)]
+        return None
 
     def _passes(self, chunk: Chunk, filter: TextFilter) -> bool:
         if filter.as_of and not is_before_or_at(chunk.created_at, filter.as_of):
@@ -519,9 +558,19 @@ class InMemoryDocumentStore:
 
 class InMemoryVectorIndex:
     name = "memory"
+    #: Metadata conditions are evaluated here, against the row's own
+    #: metadata, so a condition reaches every stored vector rather than
+    #: the best few a post-filter then thins.
+    narrows_conditions = True
 
     def __init__(self) -> None:
         self._points: dict[int, VectorPoint] = {}
+        #: Each held point's vector norm, taken when it was written, so a
+        #: search pays one dot product per point rather than two norms more.
+        self._norms: dict[int, float] = {}
+        #: Each space's vectors as one numpy matrix with the row of each chunk,
+        #: built at the first fast search after a write and dropped by every write.
+        self._matrices: dict[str, tuple[Any, dict[int, int]]] = {}
         self.dim: Optional[int] = None
         self._writer: tuple[str, str] | None = None
         #: Writes that have taken the record and not yet returned, by writer.
@@ -579,7 +628,7 @@ class InMemoryVectorIndex:
 
     async def search_as(self, space: str, vector: Sequence[float], limit: int, as_of: Optional[str] = None,
                         tags: tuple[str, ...] = (), where: Mapping[str, str] | None = None, *,
-                        writer: str) -> list[tuple[int, float]]:
+                        writer: str, conditions: "Filter | None" = None) -> list[tuple[int, float]]:
         # While another embedder's write is pending the record never vouches
         # for anyone else: writes change it before they yield, and swap_writer
         # refuses to vouch past them.
@@ -587,7 +636,7 @@ class InMemoryVectorIndex:
         if not vouches(record, writer, bool(self._points)):
             raise VectorsNotComparable(f"stored vectors are recorded as "
                                        f"{record[0] if record else 'unrecorded'}, not {writer}")
-        found = await self.search(space, vector, limit, as_of, tags, where)
+        found = await self.search(space, vector, limit, as_of, tags, where, conditions)
         # A search override may yield; any write that changed the record
         # while it ran may have put another writer's vectors into it.
         if self._writer != record:
@@ -607,6 +656,8 @@ class InMemoryVectorIndex:
             validate_vector(point.vector, self.dim)
         for point in points:
             self._points[point.chunk_id] = point
+            self._norms[point.chunk_id] = _norm(point.vector)
+        self._matrices.clear()
 
     async def search(
         self,
@@ -616,34 +667,107 @@ class InMemoryVectorIndex:
         as_of: Optional[str] = None,
         tags: tuple[str, ...] = (),
         where: Mapping[str, str] | None = None,
+        conditions: "Filter | None" = None,
     ) -> list[tuple[int, float]]:
         validate_vector(vector, self.dim)
+        query_norm = _norm(vector)
+        norms = self._norms
+        candidates = [point for point in self._points.values()
+                      if point.space == space
+                      and not (as_of and not is_before_or_at(point.created_at, as_of))
+                      and not (tags and not set(tags) <= set(point.tags))
+                      and not (where and any(point.metadata.get(k) != v for k, v in where.items()))
+                      and not (conditions is not None and not conditions.matches(point.metadata))]
+        if query_norm != 0 and limit > 0 and len(candidates) > max(EXACT_ALL_BELOW, limit + SHORTLIST_SPARE):
+            candidates = self._shortlist(space, candidates, vector, query_norm, limit)
         scored = []
-        for point in self._points.values():
-            if point.space != space:
-                continue
-            if as_of and not is_before_or_at(point.created_at, as_of):
-                continue
-            if tags and not set(tags) <= set(point.tags):
-                continue
-            if where and any(point.metadata.get(k) != v for k, v in where.items()):
-                continue
-            scored.append((point.chunk_id, _cosine(vector, point.vector)))
+        for point in candidates:
+            norm = norms[point.chunk_id]
+            # sum over map(mul) adds the same products in the same order as a
+            # generator, so the score is the plain formula's to the last bit;
+            # math.sumprod rounds differently and would reorder near-ties.
+            scored.append((point.chunk_id, 0.0 if query_norm == 0 or norm == 0
+                           else sum(map(mul, vector, point.vector)) / (query_norm * norm)))
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         return scored[:limit]
+
+    def _shortlist(self, space: str, candidates: list[VectorPoint], vector: Sequence[float], query_norm: float,
+                   limit: int) -> list[VectorPoint]:
+        """The candidates that can be in the exact top ``limit``, found without the exact formula.
+
+        A fast score (numpy's matrix product, or math.sumprod) differs from the
+        exact one only in its last bits: for a cosine in [-1, 1] by far less
+        than ``SHORTLIST_MARGIN``. So every candidate whose fast score is
+        within that margin of the ``limit + SHORTLIST_SPARE``-th best is kept,
+        and the exact formula then orders them. A candidate of the exact top
+        ``limit`` always survives, ties included, so the result is the full
+        scan's to the last bit. Without numpy or math.sumprod (Python 3.10,
+        3.11) nothing is cut and the full scan runs."""
+        approx = self._fast_scores(space, candidates, vector, query_norm)
+        if approx is None:
+            return candidates
+        keep = min(len(candidates), limit + SHORTLIST_SPARE)
+        cutoff = sorted(approx, reverse=True)[keep - 1] - SHORTLIST_MARGIN
+        return [point for point, fast in zip(candidates, approx) if fast >= cutoff]
+
+    def _fast_scores(self, space: str, candidates: list[VectorPoint], vector: Sequence[float],
+                     query_norm: float) -> Optional[list[float]]:
+        norms = self._norms
+        if _numpy is not None:
+            matrix, rows = self._matrix(space)
+            picked = matrix[[rows[point.chunk_id] for point in candidates]]
+            dots = picked @ _numpy.asarray(vector, dtype=_numpy.float64)
+            norm_row = _numpy.asarray([norms[point.chunk_id] for point in candidates], dtype=_numpy.float64)
+            with _numpy.errstate(divide="ignore", invalid="ignore"):
+                scores = _numpy.where(norm_row == 0, 0.0, dots / (norm_row * query_norm))
+            return [float(x) for x in scores]
+        sumprod = getattr(math, "sumprod", None)
+        if sumprod is None:
+            return None
+        return [0.0 if norms[point.chunk_id] == 0 else sumprod(vector, point.vector) / (norms[point.chunk_id] * query_norm)
+                for point in candidates]
+
+    def _matrix(self, space: str) -> tuple[Any, dict[int, int]]:
+        """The space's vectors as one float64 matrix and each chunk's row, built once per write."""
+        cached = self._matrices.get(space)
+        if cached is None:
+            points = [point for point in self._points.values() if point.space == space]
+            matrix = _numpy.asarray([point.vector for point in points], dtype=_numpy.float64)
+            cached = (matrix, {point.chunk_id: row for row, point in enumerate(points)})
+            self._matrices[space] = cached
+        return cached
+
+    async def vectors_of(self, space: str, chunk_ids: Sequence[int]) -> dict[int, list[float]]:
+        """The stored vectors of these chunks in the space; a chunk without one is absent."""
+        return {chunk_id: list(point.vector) for chunk_id in chunk_ids
+                if (point := self._points.get(chunk_id)) is not None and point.space == space}
 
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         for chunk_id in chunk_ids:
             self._points.pop(chunk_id, None)
+            self._norms.pop(chunk_id, None)
+        self._matrices.clear()
 
     async def delete_space(self, space: str) -> None:
         self._points = {chunk_id: p for chunk_id, p in self._points.items() if p.space != space}
+        self._norms = {chunk_id: self._norms[chunk_id] for chunk_id in self._points}
+        self._matrices.clear()
 
 
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+#: A search over fewer candidates than this scores every one exactly; above it,
+#: a fast pass first drops those that cannot reach the top (``_shortlist``).
+EXACT_ALL_BELOW = 1024
+#: How many places past ``limit`` the fast pass keeps before its margin.
+SHORTLIST_SPARE = 256
+#: How far below the cut a fast score may sit and still be scored exactly. The
+#: fast scores of cosines differ from the exact ones by around 1e-13 at most.
+SHORTLIST_MARGIN = 1e-9
+
+try:  # numpy makes the fast pass one matrix product; without it math.sumprod, or no fast pass.
+    import numpy as _numpy
+except ImportError:  # pragma: no cover - numpy ships with most extras but is not required
+    _numpy = None  # type: ignore[assignment]
+
+
+def _norm(vector: Sequence[float]) -> float:
+    return math.sqrt(sum(map(mul, vector, vector)))

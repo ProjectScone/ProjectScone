@@ -160,8 +160,8 @@ def test_json_pointer_amplification_is_bounded() -> None:
 
 def test_csv_physical_lines_include_bare_carriage_returns_in_quoted_fields() -> None:
     doc = parse_text(b'name,note\rAda,"first\rsecond"\rBob,last\r', 'data.csv', DocumentLimits())
-    assert doc.segments[0].metadata == {'line_start': '2', 'line_end': '3'}
-    assert doc.segments[1].metadata == {'line_start': '4', 'line_end': '4'}
+    assert {'line_start': '2', 'line_end': '3'}.items() <= doc.segments[0].metadata.items()
+    assert {'line_start': '4', 'line_end': '4'}.items() <= doc.segments[1].metadata.items()
 
 
 def test_xml_text_node_ordinals_count_only_existing_text_nodes() -> None:
@@ -235,3 +235,210 @@ def test_html_implied_cell_closure_stays_within_nearest_table() -> None:
            b'<td>Visible item</table>')
     doc = parse_text(raw, 'page.html', DocumentLimits())
     assert [segment.text for segment in doc.segments] == ['Intro', 'Visible item']
+
+
+def _mailbox_bytes() -> bytes:
+    first = EmailMessage()
+    first["Subject"] = "Harbour closing"
+    first["From"] = "ada@example.test"
+    first["Date"] = "Mon, 04 Nov 2024 09:00:00 +0000"
+    first.set_content("The harbour closes to sailing boats every November.\nFrom the mole you can see it.")
+    second = EmailMessage()
+    second["Subject"] = "Re: Harbour closing"
+    second["From"] = "bob@example.test"
+    second["Date"] = "Tue, 05 Nov 2024 10:00:00 +0000"
+    second.set_content("Plain reply")
+    second.add_alternative("<p>HTML reply</p><script>never run</script>", subtype="html")
+    second.add_attachment(b"attachment secret", maintype="text", subtype="plain", filename="secret.txt")
+    body_first = first.as_bytes().replace(b"\nFrom the mole", b"\n>From the mole")  # mbox quoting of a body line
+    return (b"From ada@example.test Mon Nov  4 09:00:00 2024\n" + body_first + b"\n"
+            b"From bob@example.test Tue Nov  5 10:00:00 2024\n" + second.as_bytes() + b"\n")
+
+
+def test_a_mailbox_reads_each_message_as_an_email_and_says_which_mail_a_passage_came_from() -> None:
+    doc = parse_text(_mailbox_bytes(), "inbox.mbox", DocumentLimits())
+    assert doc.format == "mbox" and doc.metadata == {"messages": "2", "messages_unread": "0", "attachments_skipped": "1"}
+    joined = "\n".join(s.text for s in doc.segments)
+    assert "Subject: Harbour closing" in joined and "Subject: Re: Harbour closing" in joined
+    assert "From the mole you can see it." in joined, "mbox quoting of a body line is undone"
+    assert ">From the mole" not in joined
+    assert "Plain reply" in joined and "HTML reply" in joined
+    assert "attachment secret" not in joined and "never run" not in joined
+    first = [s for s in doc.segments if s.locator.startswith("message:1/")]
+    second = [s for s in doc.segments if s.locator.startswith("message:2/")]
+    assert first and second and all(s.metadata["message"] == "1" for s in first)
+    assert all(s.metadata["from"] == "bob@example.test" and s.metadata["date"].startswith("Tue, 05 Nov 2024") for s in second)
+    assert any(s.locator.startswith("message:2/mime:1.1") and s.locator.endswith("/line:1") for s in second), \
+        "the same locators an .eml gets, under the message"
+
+
+def test_a_bare_message_saved_as_a_mailbox_is_one_message_and_the_bound_counts_the_rest(monkeypatch) -> None:
+    email = EmailMessage()
+    email["Subject"] = "alone"
+    email.set_content("one message, no From line")
+    doc = parse_text(email.as_bytes(), "one.mbox", DocumentLimits())
+    assert doc.metadata["messages"] == "1" and any("no From line" in s.text for s in doc.segments)
+    from scone_memory.ingestion.formats import text as text_formats
+
+    monkeypatch.setattr(text_formats, "MAX_MAILBOX_MESSAGES", 1)
+    doc = parse_text(_mailbox_bytes(), "inbox.mbox", DocumentLimits())
+    assert doc.metadata["messages"] == "1" and doc.metadata["messages_unread"] == "1"
+    assert not any(s.locator.startswith("message:2/") for s in doc.segments)
+
+
+def test_a_mailbox_with_a_malformed_message_names_it() -> None:
+    raw = b"From a@b Mon Jan 1 00:00:00 2024\nSubject: ok\n\nfine\n\nFrom c@d Mon Jan 1 00:00:00 2024\nContent-Type: text/plain; charset=not-a-charset\n\ncaf\xe9\n"
+    with pytest.raises(InvalidInput, match="mailbox message 2: "):
+        parse_text(raw, "inbox.mbox", DocumentLimits())
+
+
+def test_a_body_line_that_begins_with_from_is_not_a_message_and_a_bom_is_not_a_preamble() -> None:
+    raw = (b"\xef\xbb\xbfFrom alice@example.com Mon Jan  1 00:00:00 2024\nFrom: alice@example.com\nSubject: Notes\n\n"
+           b"Hello.\nFrom now on I will write more.\nBye.\n"
+           b"From bob@example.com Tue Jan  2 10:00:00 2024\nFrom: bob@example.com\nSubject: Second\n\nSecond body.\n")
+    doc = parse_text(raw, "inbox.mbox", DocumentLimits())
+    assert doc.metadata["messages"] == "2", "an unquoted body line is not an envelope line, and the BOM is not text before the first"
+    joined = "\n".join(s.text for s in doc.segments)
+    assert "From now on I will write more." in joined and "Bye." in joined
+    assert {s.metadata["message"] for s in doc.segments if "Second body" in s.text} == {"2"}
+
+
+def test_an_html_table_in_a_mail_carries_the_mails_metadata_and_a_bare_file_is_not_unquoted() -> None:
+    email = EmailMessage()
+    email["Subject"] = "Table"
+    email["From"] = "ada@example.test"
+    email.set_content("plain")
+    email.add_alternative("<table><caption>Costs</caption><tr><th>item</th><th>cost</th></tr><tr><td>rope</td><td>3</td></tr></table>",
+                          subtype="html")
+    raw = b"From ada@example.test Mon Nov  4 09:00:00 2024\n" + email.as_bytes() + b"\n"
+    doc = parse_text(raw, "inbox.mbox", DocumentLimits())
+    rows = [s for s in doc.segments if "table_locator" in s.metadata or s.locator.endswith("/caption")]
+    assert rows and all(s.metadata.get("message") == "1" and s.metadata.get("from") == "ada@example.test" for s in rows), \
+        "every segment, table rows and captions included, says which mail it came from"
+    bare = EmailMessage()
+    bare["Subject"] = "reply"
+    bare.set_content(">From my notes, the harbour closes in November.")
+    doc = parse_text(bare.as_bytes(), "one.mbox", DocumentLimits())
+    assert any(s.text == ">From my notes, the harbour closes in November." for s in doc.segments), \
+        "a file no mbox writer made was never quoted, so nothing is unquoted"
+
+
+async def test_a_mailbox_file_is_ingested_end_to_end_and_its_original_kept_under_its_own_type() -> None:
+    """The reader is not enough: ingesting a file keeps its original bytes as
+    an attachment under the file's media type, and the engine refuses a type
+    it does not attach."""
+    from scone_memory import HashEmbedder, InMemoryDocumentStore, InMemoryVectorIndex, MemoryEngine
+    from scone_memory.ingestion.files import ingest_document
+
+    memory = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder()).open()
+    try:
+        ingested = await ingest_document(memory, "mail", _mailbox_bytes(), filename="inbox.mbox")
+        assert ingested.format == "mbox" and ingested.original.media_type == "application/mbox"
+        episode = await memory.episode("mail", ingested.added.episode_id)
+        assert "The harbour closes to sailing boats every November." in episode.content
+    finally:
+        await memory.close()
+
+
+def test_csv_rows_carry_their_cells_with_spans_and_the_column_names() -> None:
+    import json
+
+    from scone_memory.ingestion.formats.table_types import validate_tables
+
+    doc = parse_text(b'region,revenue\r\nWest,"1,250.50"\r\nEast,35\r\n', "sales.csv", DocumentLimits())
+    validate_tables(doc.segments)
+    first, second = doc.segments
+    assert first.text == "region: West\nrevenue: 1,250.50" and json.loads(first.metadata["table_columns"]) == ["region", "revenue"]
+    assert [(c.row, c.column, c.text) for c in first.table_cells] == [(0, 0, "West"), (0, 1, "1,250.50")]
+    for cell in (*first.table_cells, *second.table_cells):
+        assert cell.table_locator == "delimited" and not cell.headers
+    assert first.text.encode()[first.table_cells[1].start:first.table_cells[1].end] == b"1,250.50"
+    assert [c.locator for c in second.table_cells] == ["row:3/column:1", "row:3/column:2"]
+    assert doc.parser == "scone-text-tables-v1"
+
+
+def test_a_json_array_of_flat_objects_is_a_table_with_cells() -> None:
+    import json
+
+    from scone_memory.ingestion.formats.table_types import validate_tables
+
+    raw = json.dumps({"title": "Sales", "rows": [{"region": "West", "revenue": "1,250.50"}, {"region": "East", "revenue": 35}],
+                      "tags": ["a", "b"], "nested": [{"x": {"y": 1}}]}).encode()
+    doc = parse_text(raw, "sales.json", DocumentLimits())
+    validate_tables(doc.segments)
+    cells = [(c.table_locator, c.row, c.column, c.text) for s in doc.segments for c in s.table_cells]
+    assert cells == [("json:/rows", 0, 0, "West"), ("json:/rows", 0, 1, "1,250.50"), ("json:/rows", 1, 0, "East"), ("json:/rows", 1, 1, "35")]
+    west = next(s for s in doc.segments if s.table_cells and s.table_cells[0].text == "West")
+    assert west.text == '/rows/0/region: "West"' and west.text.encode()[west.table_cells[0].start:west.table_cells[0].end] == b"West"
+    assert json.loads(west.metadata["table_columns"]) == ["region", "revenue"] and west.metadata["header_basis"] == "json_object_keys"
+    plain = [s for s in doc.segments if s.metadata["json_pointer"] in ("/title", "/tags/0", "/nested/0/x/y")]
+    assert plain and all(not s.table_cells for s in plain), "scalars, arrays of scalars and nested objects are not tables"
+
+
+NOTE = """---
+title: Harbour plan
+tags: [harbour, boats]
+aliases:
+  - Harbour
+  - "The plan"
+date: 2024-03-12
+Layout-Kind: note
+source: my head
+draft: false # set true to hide the page
+
+# a vault comment
+summary: >
+  a folded scalar the reader does not follow
+extra: {nested: mapping}
+empty: []
+people:
+  - name: Ann
+  - name: Bob
+skipped: 4
+---
+# Harbour plan
+
+The harbour closes in November.
+"""
+
+
+def test_a_notes_front_matter_becomes_metadata_and_its_lines_are_not_the_notes_text() -> None:
+    doc = parse_text(NOTE.encode(), "harbour.md", DocumentLimits())
+    assert doc.metadata["title"] == "Harbour plan" and doc.metadata["tags"] == "harbour,boats" and doc.metadata["aliases"] == "Harbour,The plan"
+    assert doc.metadata["frontmatter_date"] == "2024-03-12" and doc.metadata["frontmatter_layout_kind"] == "note"
+    assert doc.metadata["frontmatter_source"] == "my head", "a note's own keys are prefixed so they cannot pass for the engine's"
+    assert doc.metadata["frontmatter_draft"] == "false", "a trailing comment is not the value"
+    assert doc.metadata["frontmatter_extra"] == "{nested: mapping}", "an inline mapping is a scalar the reader keeps as written"
+    assert "frontmatter_summary" not in doc.metadata and "frontmatter_people" not in doc.metadata and "frontmatter_empty" not in doc.metadata
+    assert doc.metadata["frontmatter_keys"] == "8" and doc.metadata["frontmatter_skipped"] == "3", \
+        "the block scalar, the list of mappings and the note's own `skipped` key are lost data; a blank line, a comment and an empty list are not"
+    assert [s.locator for s in doc.segments] == ["line:22", "line:24"], "the front matter's lines are not segments; the note's lines keep their numbers"
+    assert doc.segments[0].text == "# Harbour plan" and "November" in doc.segments[1].text
+
+
+def test_front_matter_takes_the_shapes_notes_write_and_counts_lines_as_the_reader_does() -> None:
+    zero_indent = parse_text(b"---\ntitle: Plan\ntags:\n- harbour\n- boats\n...\r\n# Plan\r\nbody\r\n", "z.md", DocumentLimits())
+    assert zero_indent.metadata["tags"] == "harbour,boats" and "frontmatter_skipped" not in zero_indent.metadata, "the YAML dumpers' own list form, closed by ..., with CRLF lines"
+    assert [s.locator for s in zero_indent.segments] == ["line:7", "line:8"]
+    odd = parse_text("---\ntitle: Plan\x0cdraft\n---\n# Heading\n\nBody\n".encode(), "odd.md", DocumentLimits())
+    assert [s.text for s in odd.segments] == ["# Heading", "Body"], "a separator str.splitlines knows and the line reader does not cannot shift the first line"
+    twice = parse_text(b"---\ntitle: One\ntitle: Two\n---\nbody\n", "twice.md", DocumentLimits())
+    assert twice.metadata["title"] == "One" and twice.metadata["frontmatter_skipped"] == "1", "a repeated key is counted, not overwritten"
+    only = parse_text(b"---\ntitle: Ann Patel\ntags: [people]\n---\n", "ann.md", DocumentLimits())
+    assert only.metadata["title"] == "Ann Patel" and [s.text for s in only.segments] == ["---", "title: Ann Patel", "tags: [people]", "---"], \
+        "a note that is only front matter is still a document: the block is its text"
+
+
+def test_front_matter_is_only_a_block_that_opens_the_note_and_closes_within_the_bound() -> None:
+    plain = parse_text(b"# Title\n---\nnot: front matter\n---\n", "plain.md", DocumentLimits())
+    assert "frontmatter_keys" not in plain.metadata and len(plain.segments) == 4, "a rule after the first line is a rule"
+    unclosed = parse_text(b"---\ntitle: x\n" + b"line\n" * 300, "open.md", DocumentLimits())
+    assert "title" not in unclosed.metadata and unclosed.segments[0].text == "---", "a block that never closes within 200 lines is text"
+    from scone_memory.ingestion.formats import text as module
+    many = "---\n" + f"big: {'x' * 300}\n" + "".join(f"k{i}: v{i}\n" for i in range(20)) + "---\nbody\n"
+    doc = parse_text(many.encode(), "many.md", DocumentLimits())
+    assert "frontmatter_big" not in doc.metadata and doc.metadata["frontmatter_k15"] == "v15" and "frontmatter_k16" not in doc.metadata
+    assert doc.metadata["frontmatter_keys"] == str(module.MAX_FRONTMATTER_KEYS) and doc.metadata["frontmatter_skipped"] == "5", \
+        "the over-long value first, then sixteen keys kept and four past the bound counted"
+    txt = parse_text(NOTE.encode(), "harbour.txt", DocumentLimits())
+    assert "title" not in txt.metadata and txt.segments[0].text == "---", "only a note (Markdown) has front matter"

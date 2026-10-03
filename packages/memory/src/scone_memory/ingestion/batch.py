@@ -6,21 +6,28 @@ owns validation, chunking, deduplication, embedding, write ordering and recovery
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
-from typing import cast
+from typing import Sequence, cast
 
+from ..core import forget_after
 from ..core.errors import InvalidInput, SconeError
-from ..core.models import Added, MAX_CONTENT_BYTES
+from ..core.timeutil import parse_rfc3339
+from ..core.models import Added, ForgetReceipt, MAX_CONTENT_BYTES, ScheduledForget
 from ..core.ports import DocumentStore, Embedder, EmbeddingCheckpoint, Event, NewChunk, NewEpisode, VectorIndex, VectorPoint
-from ..core.validation import KINDS, normalise_metadata, normalise_tags, normalise_time
+from ..core.validation import KINDS, MAX_METADATA_KEYS, normalise_metadata, normalise_tags, normalise_time
 from .chunker import Span, byte_spans, chunk_spans
-from .semantic_chunks import semantic_spans
+from .semantic_chunks import held_threshold, merge_refused, semantic_cut
 from .structure_chunks import structured_spans
-from .code import code_language, code_spans
-from .records import Record, RetainedVideoRecord, RecoveryReport, _DupOf, _Pending, content_hash
+from .chunking_profiles import profile_named, profiled_spans
+from .embedding_cache import EmbeddingCache, cache_key
+from .code import code_context, code_language, code_spans
+from .document_outline import DocumentOutline
+from .structure import Heading, parse_structure
+from .unit_chunks import unit_spans
+from .records import Chunking, Record, RetainedVideoRecord, RecoveryReport, _DupOf, _Pending, content_hash
 
 from .vectors import validated_vectors
 
@@ -35,9 +42,45 @@ EMBED_BATCH = 64
 
 async def _embed_chunks(embedder: Embedder, texts: Sequence[str], *,
                         checkpoint: EmbeddingCheckpoint | None = None,
-                        binding: str = '') -> list[list[float]]:
-    """Persist only complete validated batches, and validate receipts on reuse."""
+                        binding: str = '', cache: EmbeddingCache | None = None,
+                        reused: list[bool] | None = None) -> list[list[float]]:
+    """Persist only complete validated batches, and validate receipts on reuse.
+
+    With a ``cache``, a text the cache holds a vector for is not sent to
+    the embedder, and ``reused`` (when given) receives one flag per text
+    saying whether its vector came from the cache. An embedder of
+    undeclared width bypasses the cache: a vector cannot be checked
+    against a width nobody has stated."""
     identifier, dimension = embedder.id, embedder.dim
+    if cache is not None and dimension:
+        keys = [cache_key(identifier, dimension, text) for text in texts]
+        # A cache is not evidence and may not refuse a write: one that
+        # fails is a miss, told so, and the embedder answers instead.
+        try:
+            found = cache.take(keys, dimension)
+        except Exception as error:  # noqa: BLE001 - whatever the store raised, the record is still stored
+            cache.failed("taking", error)
+            found = {}
+        if reused is not None:
+            reused.extend(key in found for key in keys)
+        # Each missing text once, however many chunks share it.
+        wanted = list(dict.fromkeys(key for key in keys if key not in found))
+        first_text: dict[str, str] = {}
+        for key, text in zip(keys, texts):
+            first_text.setdefault(key, text)
+        fresh = (await _embed_chunks(embedder, [first_text[key] for key in wanted], checkpoint=checkpoint, binding=binding)
+                 if wanted else [])
+        # Kept once the whole batch is validated: a partial batch fails
+        # before this line and leaves nothing behind.
+        answered = dict(zip(wanted, fresh))
+        if answered:
+            try:
+                cache.keep(answered, dimension)
+            except Exception as error:  # noqa: BLE001
+                cache.failed("keeping", error)
+        return [list(answered[key]) if key in answered else found[key] for key in keys]
+    if reused is not None:
+        reused.extend(False for _ in texts)
     prefix = ''
     if checkpoint is not None:
         digest = hashlib.sha256(json.dumps(['embedding-batch-v1', identifier, dimension, EMBED_BATCH, binding]).encode())
@@ -85,6 +128,19 @@ class IngestionRuntime:
     embed_text: Callable[[NewEpisode, str], str]
     emit: Callable[[str, str, dict[str, object]], Awaitable[Event | None]]
     embedding_checkpoint: EmbeddingCheckpoint | None = None
+    #: Vectors kept by the text they embed, so a chunk unchanged since it
+    #: was last stored is not embedded again. None embeds everything.
+    embedding_cache: EmbeddingCache | None = None
+    #: With an embedding budget on: the tokens the embedder reads, which
+    #: the context in front of each chunk is shortened to fit.
+    embedding_budget: int | None = None
+    #: The embedder's own token count, when it has one; the estimate otherwise.
+    count_tokens: Callable[[str], int] | None = None
+    #: The length chunker's target in tokens, packed from whole sentences;
+    #: None cuts at chunk_target characters. Only the length cut reads it.
+    chunk_tokens: int | None = None
+    #: Tokens of the chunk before that each token-measured chunk starts with.
+    chunk_overlap_tokens: int = 0
     #: Whether a source stored under a name that says it is code is cut at
     #: its declarations rather than every chunk_target characters.
     code_aware: bool = True
@@ -99,13 +155,41 @@ class IngestionRuntime:
     #: `structure_aware`, and costs one extra embedding call per episode
     #: -- its sentences are embedded to find the boundaries.
     semantic_aware: bool = False
+    #: The similarity at which a semantic cut's neighbouring chunks are
+    #: joined again within the target (semantic_chunks.semantic_cut); None
+    #: keeps the first pass's cuts. Only the semantic cut reads it.
+    semantic_merge_threshold: float | None = None
+    #: Whether each chunk is embedded with the headings it sits under (for
+    #: code, its file and declarations). Changes vectors, never stored text.
+    heading_context: bool = False
     context_inputs: Callable[[NewEpisode, Sequence[tuple[int, int]]], Awaitable[list[str]]] | None = None
+    #: Whether each chunk's context -- what it is under and does not say --
+    #: is indexed beside its text for the context lane. Stored text is
+    #: never changed by it; a store without the index is left alone.
+    context_lane: bool = False
     # With an episode id, verification also repairs its original/manifest links.
     verify_visual: Callable[[str, Record, int | None], Awaitable[None]] | None = None
+    #: The headings and units an imported file's reader found, read from its
+    #: retained manifest; None for an episode that is not an imported file.
+    document_outline: Callable[[NewEpisode], Awaitable[DocumentOutline | None]] | None = None
+    #: Outlines already read in this dispatch, by space and content hash:
+    #: the cut, its receipt and the embedding inputs ask for the same one,
+    #: and each read fetches, hashes and validates the whole manifest.
+    outlines_read: dict[tuple[str, str], DocumentOutline | None] = field(default_factory=dict)
+    #: Forget one episode through the engine's ordinary forget. A write whose
+    #: identity is held by a memory already past its ``forget_after`` forgets
+    #: that memory first and is stored afresh: the overdue one is as good as
+    #: gone, and a duplicate of it would go with it at the next sweep. None
+    #: leaves such a write a duplicate.
+    forget_overdue: Callable[[str, int], Awaitable[ForgetReceipt]] | None = None
 
 
-def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False) -> NewEpisode:
-    """Validate and snapshot caller input before any source can be removed."""
+def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False,
+                     past_schedule: bool = False) -> NewEpisode:
+    """Validate and snapshot caller input before any source can be removed.
+
+    A ``forget_after`` already past ``when`` is refused unless ``past_schedule``,
+    which only a caller re-deriving a stored record's identity passes."""
     content = record.content
     if not isinstance(content, str) or (not content.strip() and not (verified_visual and content == "")):
         raise InvalidInput("content must not be empty")
@@ -117,7 +201,49 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
     if record.source is not None and not isinstance(record.source, str):
         raise InvalidInput("source must be a string or None")
     clean_tags = normalise_tags(record.tags)
-    clean_meta = normalise_metadata(record.metadata or {})
+    clean_meta = dict(normalise_metadata(record.metadata or {}))
+    asked, held = record.chunking, clean_meta.get("chunking")
+    if asked is not None and held is not None and asked != held:
+        raise InvalidInput(f"metadata says chunking={held!r} but the record asks for {asked!r}")
+    mode = asked if asked is not None else held
+    named, kept = record.chunking_profile, clean_meta.get("chunking_profile")
+    if named is not None and kept is not None and named != kept:
+        raise InvalidInput(f"metadata says chunking_profile={kept!r} but the record asks for {named!r}")
+    profile = named if named is not None else kept
+    if profile is not None:
+        # Refused here rather than at the cut, so a duplicate or one record
+        # of a partial batch is answered too.
+        profile_named(profile)
+        if mode not in (None, "structure"):
+            raise InvalidInput(f"chunking_profile={profile!r} names boundaries for chunking=structure, "
+                               f"not chunking={mode!r}")
+        mode = "structure"
+        clean_meta["chunking_profile"] = profile
+    threshold = _record_threshold(record.semantic_merge_threshold, clean_meta.get("semantic_merge_threshold"))
+    if threshold is not None:
+        if mode not in (None, "semantic"):
+            raise InvalidInput(f"semantic_merge_threshold joins the chunks of chunking=semantic, "
+                               f"not chunking={mode!r}")
+        mode = "semantic"
+        clean_meta["semantic_merge_threshold"] = repr(threshold)
+    if mode is not None:
+        # Whether the mode exists and fits the source is `cut_for`'s to say,
+        # and it says so before anything is stored.
+        clean_meta["chunking"] = mode
+    scheduled, held_schedule = record.forget_after, clean_meta.get(forget_after.KEY)
+    if scheduled is not None or held_schedule is not None:
+        asked_at = forget_after.resolve(scheduled, when, allow_past=past_schedule) if scheduled is not None else None
+        held_at = (forget_after.resolve(held_schedule, when, allow_past=past_schedule)
+                   if held_schedule is not None else None)
+        if asked_at is not None and held_at is not None and asked_at != held_at:
+            raise InvalidInput(f"metadata says forget_after={held_at!r} but the record asks for {asked_at!r}")
+        clean_meta[forget_after.KEY] = cast(str, asked_at or held_at)
+    if len(clean_meta) > MAX_METADATA_KEYS:
+        # Counted after all are added, or the episode is stored with more
+        # keys than its own export may carry back in.
+        raise InvalidInput(f"at most {MAX_METADATA_KEYS} metadata keys, counting chunking, chunking_profile, "
+                           f"semantic_merge_threshold and forget_after, which are stored on the episode when a "
+                           f"record names them")
     try:
         for value in (record.source or '', *clean_tags, *clean_meta.values()):
             value.encode('utf-8')
@@ -132,6 +258,21 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
                       tags=clean_tags, metadata=clean_meta)
 
 
+def _record_threshold(given: object, kept: str | None) -> float | None:
+    """A record's merge threshold, from its field or from the metadata an
+    archive carries it in; refused when either is not a similarity or the
+    two disagree."""
+    held = None if kept is None else held_threshold(kept)
+    if given is None:
+        return held
+    reason = merge_refused(given)
+    if reason is not None:
+        raise InvalidInput(reason)
+    if held is not None and held != given:
+        raise InvalidInput(f"metadata says semantic_merge_threshold={kept!r} but the record asks for {given!r}")
+    return cast(float, given)
+
+
 async def _validated_record(runtime: IngestionRuntime, space: str, record: Record, when: str) -> NewEpisode:
     visual = isinstance(record, RetainedVideoRecord) and record.content == ''
     if visual:
@@ -141,40 +282,174 @@ async def _validated_record(runtime: IngestionRuntime, space: str, record: Recor
     return validated_record(space, record, when, verified_visual=visual)
 
 
+#: Bytes of heading path put in front of one chunk's embedding input. A
+#: path longer than this keeps its innermost headings, and the receipt
+#: counts the chunks it was cut for.
+MAX_HEADING_CONTEXT_BYTES = 256
+#: Names the rule that builds a heading path into an embedding input. It is
+#: part of the vector writer's identity, so change it whenever that rule, or
+#: the bound above, changes what a chunk is embedded with.
+HEADING_CONTEXT_VERSION = "heading-path-v2"
+#: How many records' outlines one runtime keeps for reuse. Recovery and a
+#: vector rebuild use one runtime for a whole pass; past this the oldest is
+#: dropped, which costs another read of its manifest, never a heading.
+OUTLINES_READ_MAX = 256
+
+
+async def outline_of(runtime: IngestionRuntime, episode: NewEpisode | None) -> DocumentOutline | None:
+    """A file episode's own outline, or None when there is none to read. The key is the
+    episode's identity in its space, which for an imported file is derived from its original
+    and manifest."""
+    if episode is None or runtime.document_outline is None:
+        return None
+    key = (episode.space, episode.content_hash)
+    if key in runtime.outlines_read:
+        return runtime.outlines_read[key]
+    found = await runtime.document_outline(episode)
+    while len(runtime.outlines_read) >= OUTLINES_READ_MAX:
+        del runtime.outlines_read[next(iter(runtime.outlines_read))]
+    runtime.outlines_read[key] = found
+    return found
+
+
+async def headings_of(runtime: IngestionRuntime, episode: NewEpisode | None) -> tuple[Heading, ...] | None:
+    """The headings a file episode's own manifest marks, or None when there is none to read."""
+    found = await outline_of(runtime, episode)
+    return None if found is None else found.headings
+
+
+def context_lines(content: str, source: str | None, spans: Sequence[tuple[int, int]],
+                  target: int, headings: Sequence[Heading] | None = None) -> tuple[list[str], int]:
+    """The line put in front of each chunk before it is embedded, and how
+    many were cut to the bound.
+
+    For code whose name says its language, the file and the declarations
+    the chunk sits in (``code_context``). For prose, the titles of the
+    headings above the chunk's first byte, outermost first: those its text
+    carries, and those an imported file marked itself (``headings``), each
+    of which runs to the next of the same or a higher level. An empty line
+    means nothing to add. Nothing here reads or changes stored text."""
+    language = code_language(source)
+    if language is not None:
+        found = list(code_spans(content, target, language=language))
+        declared = {(cut_at.start, cut_at.end): span.names
+                    for cut_at, span in zip(byte_spans(content, cast(list[Span], found)), found)}
+        return [code_context(source, declared.get(span, ())) for span in spans], 0
+    try:
+        sections = [(section.start, section.end, section.level, section.title)
+                    for section in parse_structure(content).sections if section.level > 0 and section.title]
+    except ValueError:
+        sections = []
+    marks = sorted(headings or (), key=lambda heading: heading.start)
+    size = len(content.encode())
+    for index, heading in enumerate(marks):
+        end = next((later.start for later in marks[index + 1:] if later.level <= heading.level), size)
+        sections.append((heading.start, end, heading.level, heading.title))
+    lines: list[str] = []
+    cut = 0
+    for start, _ in spans:
+        titles = [title for _, _, _, title in sorted(
+            (section for section in sections if section[0] <= start < section[1]), key=lambda section: section[2])]
+        line = " > ".join(titles)
+        if len(line.encode()) > MAX_HEADING_CONTEXT_BYTES:
+            cut += 1
+            while len(titles) > 1 and len(" > ".join(titles).encode()) > MAX_HEADING_CONTEXT_BYTES:
+                titles.pop(0)
+            line = " > ".join(titles).encode()[:MAX_HEADING_CONTEXT_BYTES].decode("utf-8", errors="ignore")
+        lines.append(line)
+    return lines, cut
+
+
 async def chunk_record(runtime: IngestionRuntime, new: NewEpisode, *, slot: int = 0) -> _Pending:
-    spans = await spans_for(runtime, new.content, new.source)
-    return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in spans],
-                    spans=[(sp.start, sp.end) for sp in byte_spans(new.content, spans)])
+    cut = await cut_for(runtime, new.content, new.source, new.metadata.get("chunking"),
+                        new.metadata.get("chunking_profile"), episode=new,
+                        merge_threshold=new.metadata.get("semantic_merge_threshold"))
+    byte_offsets = [(sp.start, sp.end) for sp in byte_spans(new.content, cut.spans)]
+    receipt: dict[str, object] | None = None
+    if runtime.heading_context:
+        lines, lines_cut = context_lines(new.content, new.source, byte_offsets, runtime.chunk_target,
+                                         await headings_of(runtime, new))
+        receipt = {"mode": "headings", "chunks_with_context": sum(1 for line in lines if line),
+                   "context_bytes": sum(len(line.encode()) for line in lines), "context_cut": lines_cut}
+    if runtime.embedding_budget is not None:
+        from .embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION
+
+        # Counted as the inputs are built, which is where the context is known.
+        method = TOKENIZER_VERSION if runtime.count_tokens is not None else BUDGET_VERSION
+        receipt = {**(receipt or {}), "budget": {"tokens": runtime.embedding_budget, "method": method,
+                                                 "fits": 0, "shortened": 0, "dropped": 0, "body_over": 0}}
+    return _Pending(slot=slot, new=new, texts=[new.content[sp.start:sp.end] for sp in cut.spans],
+                    spans=byte_offsets, chunking=cut.chunking, structure=cut.structure, embedding_context=receipt)
 
 
 async def embedding_inputs(runtime: IngestionRuntime, new: NewEpisode, spans: Sequence[tuple[int, int]],
-                           texts: Sequence[str]) -> list[str]:
+                           texts: Sequence[str], *, outcomes: dict[str, object] | None = None) -> list[str]:
     if not texts:
         return []
     if runtime.context_inputs is not None:
         content = new.content.encode()
-        previous = 0
+        # In order, not disjoint: a token cut with an overlap stores
+        # neighbouring spans that share text (ingestion/token_chunks.py).
+        previous_start, previous_end = -1, 0
         if len(spans) != len(texts):
             raise InvalidInput('document embedding chunk does not match its source span')
         for (start, end), text in zip(spans, texts):
             if (type(start) is not int or type(end) is not int
-                    or not previous <= start < end <= len(content)
+                    or not previous_start < start < end <= len(content) or end <= previous_end
                     or content[start:end] != text.encode()):
                 raise InvalidInput('document embedding chunk does not match its source span')
-            previous = end
+            previous_start, previous_end = start, end
     contextual = await runtime.context_inputs(new, spans) if runtime.context_inputs is not None else texts
     if len(contextual) != len(texts):
         raise InvalidInput('embedding context must preserve the chunk count')
+    lines = (context_lines(new.content, new.source, spans, runtime.chunk_target, await headings_of(runtime, new))[0]
+             if runtime.heading_context else ["" for _ in texts])
+    if runtime.embedding_budget is not None:
+        from .embedding_budget import estimated_tokens, fitted
+
+        inputs = []
+        for line, text, with_table in zip(lines, texts, contextual):
+            made, outcome = fitted(body=text, heading=line, table=with_table if with_table != text else None,
+                                   wrap=lambda chunk: runtime.embed_text(new, chunk), budget=runtime.embedding_budget,
+                                   count=runtime.count_tokens or estimated_tokens)
+            if outcomes is not None:
+                outcomes[outcome] = cast(int, outcomes.get(outcome, 0)) + 1
+            inputs.append(made)
+        return inputs
+    # One place for both ingestion and recovery, so a recovered chunk is
+    # embedded exactly as an uninterrupted one would have been.
+    contextual = [f"{line}\n{text}" if line else text for line, text in zip(lines, contextual)]
     return [runtime.embed_text(new, text) for text in contextual]
 
 
-async def embed_pending(runtime: IngestionRuntime, space: str, fresh: Sequence[_Pending]) -> list[list[float]]:
-    texts = []
+async def embed_pending_counted(runtime: IngestionRuntime, space: str,
+                                fresh: Sequence[_Pending]) -> tuple[list[list[float]], list[int]]:
+    """Every pending record's vectors in order, and for each record how
+    many of them the embedding cache answered rather than the embedder."""
+    texts: list[str] = []
+    counts: list[int] = []
     for pending in fresh:
-        texts.extend(await embedding_inputs(runtime, pending.new, pending.spans, pending.texts))
+        budget = (pending.embedding_context or {}).get("budget")
+        inputs = await embedding_inputs(runtime, pending.new, pending.spans, pending.texts,
+                                        outcomes=cast(dict[str, object], budget) if budget is not None else None)
+        counts.append(len(inputs))
+        texts.extend(inputs)
     binding = '' if runtime.embedding_checkpoint is None else json.dumps(
         [space, [(p.new.content_hash, p.spans) for p in fresh]], separators=(',', ':'))
-    return await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding)
+    flags: list[bool] = []
+    vectors = await _embed_chunks(runtime.embedder, texts, checkpoint=runtime.embedding_checkpoint, binding=binding,
+                                  cache=runtime.embedding_cache, reused=flags)
+    reused: list[int] = []
+    at = 0
+    for count in counts:
+        reused.append(sum(flags[at:at + count]))
+        at += count
+    return vectors, reused
+
+
+async def embed_pending(runtime: IngestionRuntime, space: str, fresh: Sequence[_Pending]) -> list[list[float]]:
+    vectors, _ = await embed_pending_counted(runtime, space, fresh)
+    return vectors
 
 
 async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]) -> list[Added]:
@@ -205,26 +480,89 @@ async def _each(runtime: IngestionRuntime, space: str, records: Sequence[Record]
 
 
 
-async def spans_for(runtime: IngestionRuntime, content: str, source: str | None) -> list[Span]:
-    """Where to cut: at declarations when the source is code and the name
-    it was stored under says which language, at the document's own
-    headings and clauses when asked, where its subject changes when asked,
-    and by length otherwise.
+#: The ways one record can ask to be cut.
+CHUNKINGS: tuple[str, ...] = ("length", "code", "structure", "semantic", "unit")
+
+
+@dataclass(frozen=True)
+class Cut:
+    """Where a record was cut, which way, and the structure chunker's own
+    counts when that was the way."""
+
+    spans: list[Span]
+    chunking: Chunking
+    structure: dict[str, object] | None = None
+
+
+async def cut_for(runtime: IngestionRuntime, content: str, source: str | None,
+                  chunking: str | None = None, profile: str | None = None, *,
+                  episode: NewEpisode | None = None, merge_threshold: str | None = None) -> Cut:
+    """Where to cut, and which way it was: at declarations when the source
+    is code and the name it was stored under says which language, at the
+    document's own headings and clauses when asked, where its subject
+    changes when asked, and by length otherwise. An explicit ``chunking``
+    is the record's own choice and wins over the engine's rule; None is
+    the rule as it was.
 
     The one dispatch point, and awaitable even though only one branch
     needs it. A synchronous twin would let a caller reach chunking
     without an embedder and receive length-cut chunks believing they
-    were something else."""
-    language = code_language(source) if runtime.code_aware else None
-    if language is not None:
-        return list(code_spans(content, runtime.chunk_target, language=language))
-    if runtime.structure_aware:
+    were something else.
+
+    A ``profile`` is structure chunking at that genre's boundaries, and
+    is the record's own choice over a code source too.
+
+    Given the ``episode``, a structure cut also cuts at the headings an
+    imported file marked itself, which its text alone does not show."""
+    if profile:
+        profiled = profiled_spans(content, runtime.chunk_target, profile=profile,
+                                  headings=await headings_of(runtime, episode))
+        return Cut(list(profiled.spans), "structure",
+                   {key: value for key, value in profiled.record().items() if key not in ("spans", "chunks")})
+    if chunking is not None and chunking not in CHUNKINGS:
+        raise InvalidInput(f"chunking must be one of {', '.join(CHUNKINGS)}, not {chunking!r}")
+    language = code_language(source) if (runtime.code_aware or chunking == "code") else None
+    if chunking == "code" and language is None:
+        raise InvalidInput("chunking=code needs a source whose name says its language")
+    if language is not None and chunking in (None, "code"):
+        return Cut(list(code_spans(content, runtime.chunk_target, language=language)), "code")
+    mode = cast(Chunking, chunking or ("structure" if runtime.structure_aware else "semantic" if runtime.semantic_aware else "length"))
+    if mode == "structure":
         # Prose only. Code has a better boundary than a heading, and the
-        # branch above already took it.
-        return list(structured_spans(content, runtime.chunk_target).spans)
-    if runtime.semantic_aware:
-        return list(await semantic_spans(content, runtime.embedder, runtime.chunk_target))
-    return chunk_spans(content, runtime.chunk_target)
+        # branch above already took it unless the record said otherwise.
+        found = structured_spans(content, runtime.chunk_target, headings=await headings_of(runtime, episode))
+        receipt = {key: value for key, value in found.record().items() if key not in ("spans", "chunks")}
+        return Cut(list(found.spans), "structure", receipt)
+    if mode == "unit":
+        outlined = await outline_of(runtime, episode)
+        named = outlined.units if outlined is not None else ()
+        if not any(unit.label != "text" for unit in named):
+            raise InvalidInput("chunking=unit needs an imported file whose reader named its units: "
+                               "pages, slides, rows, records, frames or audio segments")
+        by_unit = unit_spans(content, named, runtime.chunk_target)
+        return Cut(list(by_unit.spans), "unit", {key: value for key, value in by_unit.record().items() if key != "chunks"})
+    if mode == "semantic":
+        # The record's own threshold, as its metadata keeps it, wins over the engine's.
+        threshold = runtime.semantic_merge_threshold if merge_threshold is None else held_threshold(merge_threshold)
+        meant = await semantic_cut(content, runtime.embedder, runtime.chunk_target, merge_threshold=threshold)
+        return Cut(list(meant.spans), "semantic", meant.record())
+    if runtime.chunk_tokens is not None:
+        from .embedding_budget import BUDGET_VERSION, TOKENIZER_VERSION
+        from .token_chunks import token_spans
+
+        counted = token_spans(content, runtime.chunk_tokens, overlap=runtime.chunk_overlap_tokens,
+                              count=runtime.count_tokens,
+                              method=TOKENIZER_VERSION if runtime.count_tokens is not None else BUDGET_VERSION)
+        return Cut(list(counted.spans), "length", counted.record())
+    return Cut(chunk_spans(content, runtime.chunk_target), "length")
+
+
+async def spans_for(runtime: IngestionRuntime, content: str, source: str | None,
+                    chunking: str | None = None, profile: str | None = None, *,
+                    episode: NewEpisode | None = None, merge_threshold: str | None = None) -> list[Span]:
+    """The spans of ``cut_for``, for callers that need only where."""
+    return (await cut_for(runtime, content, source, chunking, profile, episode=episode,
+                          merge_threshold=merge_threshold)).spans
 
 
 async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence[Record], *,
@@ -246,6 +584,9 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
     results: list[Added | _DupOf | None] = []
     fresh: list[_Pending] = []
     seen: dict[str, int] = {}  # content hash -> index into results
+    # Episodes past their forget_after that a write here replaces: the slot
+    # of the write, the episode, and when it was due.
+    overdue: list[tuple[int, int, str]] = []
     for record in records:
         new = await _validated_record(runtime, space, record, when)
         digest = new.content_hash
@@ -255,24 +596,42 @@ async def remember_many(runtime: IngestionRuntime, space: str, records: Sequence
             results[-1] = _DupOf(fresh_or_dup)  # resolved after inserts
             continue
         existing = await runtime.documents.episode_by_hash(space, digest)
+        if (existing is not None and runtime.forget_overdue is not None
+                and forget_after.is_due(existing.metadata, parse_rfc3339(when))):
+            # Forgotten once the whole batch is validated and embedded, just
+            # before it is written, so a refused batch forgets nothing early.
+            overdue.append((len(results), existing.episode_id, existing.metadata[forget_after.KEY]))
+            existing = None
         if existing is not None:
             seen[digest] = len(results)
-            results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
+            # The schedule the stored episode holds, which this write did not change.
+            results.append(Added(episode_id=existing.episode_id, deduplicated=True, chunks=0, outcome="duplicate",
+                                 forget_after=existing.metadata.get(forget_after.KEY)))
             continue
         seen[digest] = len(results)
         results.append(None)
         fresh.append(await chunk_record(runtime, new, slot=len(results) - 1))
 
     if fresh:
-        vectors = await embed_pending(runtime, space, fresh)
-        await write_batch(runtime, space, fresh, vectors, results)
+        vectors, reused = await embed_pending_counted(runtime, space, fresh)
+        forgot: dict[int, ScheduledForget] = {}
+        for slot, episode_id, stamp in overdue:
+            receipt = await cast(Callable[[str, int], Awaitable[ForgetReceipt]], runtime.forget_overdue)(space, episode_id)
+            forgot[slot] = ScheduledForget(episode_id=episode_id, forget_after=stamp, outcome="forgotten",
+                                           reason=forget_after.reason(stamp, when), receipt=receipt)
+        await write_batch(runtime, space, fresh, vectors, results, reused=reused)
         await runtime.documents.bump_revision(space)
+        for slot, taken in forgot.items():
+            # The receipt names the memory this write forgot, so the caller
+            # does not learn of it only from a 410 later.
+            results[slot] = cast(Added, results[slot]).model_copy(update={"forgot_overdue": taken})
 
     resolved: list[Added] = []
     for r in results:
         if isinstance(r, _DupOf):
             target = cast(Added, results[r.slot])
-            resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate"))
+            resolved.append(Added(episode_id=target.episode_id, deduplicated=True, chunks=0, outcome="duplicate",
+                                  forget_after=target.forget_after))
         else:
             resolved.append(cast(Added, r))
     return resolved
@@ -296,16 +655,19 @@ async def _retain_visual(runtime: IngestionRuntime, space: str, record: Record) 
     await runtime.documents.bump_revision(space)
     await runtime.documents.clear_inflight(space, new.content_hash)
     return Added(episode_id=episode.episode_id, deduplicated=duplicate, chunks=0,
-                 outcome='duplicate' if duplicate else 'accepted')
+                 outcome='duplicate' if duplicate else 'accepted', forget_after=episode.metadata.get(forget_after.KEY))
 
 
 async def write_batch(
-    runtime: IngestionRuntime, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list[Added | _DupOf | None]
+    runtime: IngestionRuntime, space: str, fresh: list["_Pending"], vectors: list[list[float]], results: list[Added | _DupOf | None],
+    reused: Sequence[int] | None = None,
 ) -> None:
+    """``reused`` says, per pending record, how many of its vectors came
+    from the embedding cache; it is written into the record's receipt."""
     written: list[int] = []
     try:
         offset = 0
-        for pending in fresh:
+        for index, pending in enumerate(fresh):
             # The mark outlives a crash; clear_inflight below is the
             # last thing this episode's write does (see recover()).
             await runtime.documents.mark_inflight(space, pending.new.content_hash)
@@ -325,6 +687,10 @@ async def write_batch(
                     for i, ((a, b), text) in enumerate(zip(pending.spans, pending.texts))
                 ]
             )
+            if chunks and runtime.context_lane:
+                from .context_terms import index_episode_context
+
+                await index_episode_context(runtime.documents, space, pending.new, chunks)
             if chunks:
                 await runtime.vectors.upsert([
                     VectorPoint(
@@ -336,7 +702,11 @@ async def write_batch(
                 ])
             offset += len(chunks)
             await runtime.documents.clear_inflight(space, pending.new.content_hash)
-            results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks))
+            results[pending.slot] = Added(episode_id=episode.episode_id, deduplicated=False, chunks=len(chunks),
+                                          embeddings_reused=reused[index] if reused is not None else 0,
+                                          chunking=pending.chunking, structure=pending.structure,
+                                          embedding_context=pending.embedding_context,
+                                          forget_after=pending.new.metadata.get(forget_after.KEY))
     except Exception:
         # Undo the partial batch so a retry starts clean.
         for episode_id in written:
@@ -373,8 +743,15 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
                 await runtime.documents.clear_inflight(space, digest)
                 report.completed += 1
                 continue
+            as_new = NewEpisode(
+                space=space, kind=episode.kind, content=episode.content, content_hash=episode.content_hash,
+                created_at=episode.created_at, ingested_at=episode.ingested_at, source=episode.source,
+                tags=episode.tags, metadata=episode.metadata,
+            )
             if not chunks:
-                spans = await spans_for(runtime, episode.content, episode.source)
+                spans = await spans_for(runtime, episode.content, episode.source, episode.metadata.get("chunking"),
+                                        episode.metadata.get("chunking_profile"), episode=as_new,
+                                        merge_threshold=episode.metadata.get("semantic_merge_threshold"))
                 chunks = await runtime.documents.insert_chunks(
                     [
                         NewChunk(
@@ -390,14 +767,9 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
                     ]
                 )
                 report.rechunked += 1
-            as_new = NewEpisode(
-                space=space, kind=episode.kind, content=episode.content, content_hash=episode.content_hash,
-                created_at=episode.created_at, ingested_at=episode.ingested_at, source=episode.source,
-                tags=episode.tags, metadata=episode.metadata,
-            )
             texts = await embedding_inputs(runtime, as_new, [(c.start, c.end) for c in chunks],
                                            [c.text for c in chunks])
-            vectors = await _embed_chunks(runtime.embedder, texts)
+            vectors = await _embed_chunks(runtime.embedder, texts, cache=runtime.embedding_cache)
             await runtime.vectors.upsert(
                 [
                     VectorPoint(

@@ -4,12 +4,25 @@
 
 Examples below run from `packages/memory/` unless a section names another working directory.
 
+Scone's engine, retrieval pipelines and agent workflows run on native Scone APIs.
+The adapters in this page let other frameworks consume Scone; native execution
+does not import those adapters or require their framework extras. Reference
+projects inform implementation and evaluation without becoming runtime dependencies.
+
 ## LlamaIndex and LangChain workflows
 
 The optional `llamaindex` and `langchain` extras can coexist over one Scone
 engine. `scone_memory.integrations.llamaindex.SconeRetriever` returns scored
-nodes; `scone_memory.integrations.langchain.SconeRetriever` returns documents,
-and `SconeChatMessageHistory` provides explicit session history.
+nodes, and `SconeChatStore` is a LlamaIndex chat store;
+`scone_memory.integrations.langchain.SconeRetriever` returns documents, and
+`SconeChatMessageHistory` provides explicit session history. The chat store,
+the LangChain history and the OpenAI Agents session keep a conversation the
+same way. Plain text messages read with the same speakers through any of
+them: LangChain's `human` and `ai` are LlamaIndex's `user` and `assistant`,
+and the reverse. A structured message is read back exactly by the adapter
+that wrote it. Read through another adapter, LangChain gives it as a
+`ChatMessage` carrying its role and JSON, and the LlamaIndex store refuses it,
+naming its position, rather than guess a speaker or drop its content.
 
 The packaged [composition API](../src/scone_memory/integrations/composition.py) runs
 LlamaIndex retrieval inside a LangChain Runnable workflow while preserving
@@ -23,8 +36,11 @@ Additional package APIs provide [query evidence](../src/scone_memory/retrieval/e
 [structural context](../src/scone_memory/retrieval/structural.py),
 [recorded multi-hop retrieval](../src/scone_memory/retrieval/multihop.py), and
 [encrypted workflow checkpoints](../src/scone_memory/agents/workflow.py).
-The [retrieval workflow builder](../src/scone_memory/agents/retrieval.py) composes
-both frameworks with retained-source checks.
+The native [retrieval workflow builder](../src/scone_memory/agents/retrieval.py)
+calls `MemoryEngine.recall` directly and uses Scone's `WorkflowRunner` for encrypted
+checkpoints and retained-source checks. Install `scone-memory[agents]` for this
+runner; LangChain, LlamaIndex and LangSmith are not needed. The optional composition
+API above is only for applications explicitly combining those frameworks.
 
 `GET /v1/recall?graph_analysis=true` adds bounded community, hub and bridge
 analysis to the scoped query result. Set `evidence_graph=true` as well to receive
@@ -126,6 +142,15 @@ with `--model MODEL_NAME`, `--embedding-cache EXISTING_BGE_CACHE`, and
 retrieval, and offline reranking on the same synthetic cases. It measures passage
 retrieval, not generated-answer accuracy.
 
+## Listwise model reranking
+
+`ListwiseReranker` asks a chat model to order the candidates rather than score
+them, a bounded window at a time, reads its answer strictly, falls back to fused
+order on its own deadline with the reason, and leaves a receipt of its calls and
+moves on `result.rerank.listwise`. `SCONE_RERANKER_LISTWISE=1` selects it on the
+configured chat model. See [listwise reranking](listwise-reranking.md), with the
+LongMemEval-S measurement.
+
 ## Any LangChain VectorStore as the vector index
 
 ```python
@@ -176,6 +201,26 @@ history = SconeChatMessageHistory(memory, "default", session_id="chat-1", extra=
 history.add_messages([...])                              # one episode per message, in order, recallable like any memory
 memory.close()                                          # finish owned loop work before exiting
 ```
+
+LlamaIndex keeps chat in a chat store its memory buffers read and write by key:
+
+```python
+from llama_index.core.memory import ChatMemoryBuffer
+from scone_memory.integrations.llamaindex import SconeChatStore
+
+store = SconeChatStore(memory, "default", extra={"user_id": "mark"})
+buffer = ChatMemoryBuffer.from_defaults(chat_store=store, chat_store_key="chat-1")
+```
+
+A key is a session. Each message is one episode with `session_id`, `role` and
+`seq`, read back in `seq` order (not by time, so writers with skewed clocks
+still agree). A plain text message is stored as its text, so recall over the
+conversation reads well; any other message (tool calls, several blocks, extra
+fields) is stored as its JSON and comes back equal. `set_messages` replaces a
+conversation with positions continuing past the old ones, so no deduplication
+key is reused by a store that keeps a forgotten one. `get_keys` lists the
+space's session ids. The sync methods need a `SyncMemoryEngine`; the async
+ones take either.
 
 Use `SyncMemoryEngine` as a context manager, or call `close()` when finished.
 Closing first rejects new calls, then cancels and drains tasks on its dedicated

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -43,8 +44,12 @@ def _thinking_options(think: bool | None) -> dict[str, str]:
 def _log_finished(
     call_id: str, model: str, mode: str, started: float, outcome: str,
     exception_type: Optional[str] = None, first_token_ms: Optional[float] = None,
+    base_url: str = '',
 ) -> None:
+    from ..observability.turn_performance import observe, provider_name
     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+    observe('generation', elapsed_ms=elapsed_ms, outcome=outcome, model=model,
+            first_text_ms=first_token_ms, provider=provider_name(base_url), mode=mode)
     logger.log(
         logging.INFO if outcome == "completed" else logging.WARNING,
         "model_call.finished call_id=%s mode=%s model=%r outcome=%s elapsed_ms=%.3f "
@@ -170,7 +175,7 @@ class OpenAICompatibleChat:
             outcome, exception_type = "failed", type(error.__cause__ or error).__name__
             raise
         finally:
-            _log_finished(call_id, self.model, mode, started, outcome, exception_type)
+            _log_finished(call_id, self.model, mode, started, outcome, exception_type, base_url=self.base_url)
 
     async def _send(self, body: dict[str, object], *, require_complete: bool = False) -> str:
         httpx = self._httpx
@@ -216,7 +221,15 @@ class OpenAICompatibleTextModel:
         transport: httpx.AsyncBaseTransport | None = None,
         trust_env: bool = True,
         max_output_tokens: int | None = None,
+        first_text_timeout: float | None = None,
+        start_retries: int = 0,
     ) -> None:
+        if first_text_timeout is not None and (type(first_text_timeout) not in (int, float)
+                or not math.isfinite(first_text_timeout) or first_text_timeout <= 0):
+            raise ValueError('first_text_timeout must be positive finite seconds')
+        if type(start_retries) is not int or not 0 <= start_retries <= 1:
+            raise ValueError('start_retries must be 0 or 1')
+        self._first_text_timeout, self._start_retries = first_text_timeout, start_retries
         if max_output_tokens is not None and (type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 32768):
             raise ValueError("max_output_tokens must be an integer from 1 to 32768")
         self._max_output_tokens = max_output_tokens
@@ -240,7 +253,7 @@ class OpenAICompatibleTextModel:
                     call_id, self._chat.model, self._chat.timeout,
                     extra={"event": "model_call.started", "call_id": call_id,
                            "model_name": self._chat.model, "mode": "stream", "timeout_s": self._chat.timeout})
-        events = self._respond(messages)
+        events = self._respond_with_start_deadline(messages)
         try:
             async for event in events:
                 if isinstance(event, TextDelta) and first_token_ms is None:
@@ -264,7 +277,32 @@ class OpenAICompatibleTextModel:
                 await events.aclose()
             finally:
                 _log_finished(call_id, self._chat.model, "stream", started, outcome,
-                              exception_type, first_token_ms)
+                              exception_type, first_token_ms, base_url=self._chat.base_url)
+
+    async def _respond_with_start_deadline(self, messages: list[dict[str, str]]) -> AsyncGenerator[TextDelta | ReplyCompleted, None]:
+        """Retry only an expired start deadline, before publishing any event."""
+        from ..observability.turn_performance import observe, provider_name
+        for attempt in range(self._start_retries + 1):
+            attempt_started = time.perf_counter()
+            events = self._respond(messages)
+            try:
+                try:
+                    async with asyncio.timeout(self._first_text_timeout):
+                        first = await anext(events)
+                except TimeoutError as error:
+                    observe('model_start_timeout', elapsed_ms=(time.perf_counter() - attempt_started) * 1000,
+                            outcome='timeout', model=self._chat.model, provider=provider_name(self._chat.base_url))
+                    if attempt == self._start_retries:
+                        raise ChatError('chat provider did not start a reply before the deadline') from error
+                    logger.warning('model_call.start_retry', extra={'event': 'model_call.start_retry',
+                        'model_name': self._chat.model, 'timeout_s': self._first_text_timeout})
+                    continue
+                yield first
+                async for event in events:
+                    yield event
+                return
+            finally:
+                await events.aclose()
 
     async def _respond(self, messages: list[dict[str, str]]) -> AsyncGenerator[TextDelta | ReplyCompleted, None]:
         from ..realtime.events import ReplyCompleted, TextDelta
@@ -280,10 +318,13 @@ class OpenAICompatibleTextModel:
                     raise ChatError(f"chat server returned {response.status_code}")
                 if not response.headers.get("content-type", "").startswith("text/event-stream"):
                     await response.aread()
-                    text = _content_of(response)
-                    finish = response.json()["choices"][0].get("finish_reason")
+                    try:
+                        finish = response.json()["choices"][0].get("finish_reason")
+                    except (ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
+                        raise ChatError('malformed chat completion') from error
                     if finish not in (None, "stop"):
-                        raise ChatError("chat response did not finish normally")
+                        raise _incomplete_reply(finish)
+                    text = _content_of(response)
                     if text:
                         yield TextDelta(text)
                     yield ReplyCompleted()
@@ -305,7 +346,7 @@ class OpenAICompatibleTextModel:
                         yield TextDelta(chunk_text)
                     finish = choice.get("finish_reason")
                     if finish is not None and finish != "stop":
-                        raise ChatError("chat response did not finish normally")
+                        raise _incomplete_reply(finish)
                     if finish == "stop":
                         completed = True
                         break
@@ -317,6 +358,11 @@ class OpenAICompatibleTextModel:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+def _incomplete_reply(finish: object) -> ChatError:
+    reason = finish if finish in ('length', 'content_filter', 'tool_calls', 'function_call') else 'unknown'
+    return ChatError(f'chat response did not finish normally ({reason})')
 
 
 def _content_of(response: object) -> str:
