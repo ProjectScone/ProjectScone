@@ -1,0 +1,18 @@
+{
+    "transformer_task": "feature-extraction",
+    "modality_config": {
+        "text": {
+            "method": "get_text_features",
+            "method_output_name": "pooler_output"
+        },
+        "image": {
+            "method": "get_image_features",
+            "method_output_name": "pooler_output"
+        },
+        "image+text": {
+            "method": "get_text_features",
+            "method_output_name": "pooler_output"
+        }
+    },
+    "module_output_name": "sentence_embedding"
+}

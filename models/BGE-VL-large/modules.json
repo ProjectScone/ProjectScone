@@ -1,0 +1,14 @@
+[
+  {
+    "idx": 0,
+    "name": "0",
+    "path": "",
+    "type": "bge_vl_clip_transformer.BGEVLCLIPTransformer"
+  },
+  {
+    "idx": 1,
+    "name": "1",
+    "path": "1_Normalize",
+    "type": "sentence_transformers.sentence_transformer.modules.normalize.Normalize"
+  }
+]

@@ -1,0 +1,93 @@
+{
+  "chunk_bytes": 94371840,
+  "models": {
+    "llama-nemotron-rerank-vl-1b-v2": {
+      "source": "https://huggingface.co/nvidia/llama-nemotron-rerank-vl-1b-v2",
+      "revision": "b8a9987b05b75db5ad949c825cbcbf6eb7c48b5a",
+      "license": "NVIDIA Open Model License + Llama 3.2 Community License",
+      "kind": "multimodal reranker (text, image, image+text)",
+      "description": "NVIDIA Eagle VLM: SigLIP 2 vision + Llama 3.2 1B, ~1.7B params",
+      "weights": {
+        "file": "model.safetensors",
+        "bytes": 3356597232,
+        "sha256": "141aed478eb006b7cd3113f71bb5b2965b3fd1e8b1651f1ef635f2eac7d2c669",
+        "chunks": []
+      },
+      "files": [
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+        "__init__.py",
+        "chat_template.jinja",
+        "config.json",
+        "config_sentence_transformers.json",
+        "configuration_llama_nemotron_vl.py",
+        "modeling_llama_nemotron_vl.py",
+        "modules.json",
+        "processing_llama_nemotron_vl.py",
+        "processor_config.json",
+        "sentence_bert_config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ]
+    },
+    "granite-embedding-reranker-english-r2": {
+      "source": "https://huggingface.co/ibm-granite/granite-embedding-reranker-english-r2",
+      "revision": "d09d3d6971b689bf9c23839e45a470874d46e13a",
+      "license": "apache-2.0",
+      "kind": "cross-encoder (text)",
+      "description": "IBM Granite ModernBERT cross-encoder, 149M params, English",
+      "weights": {
+        "file": "model.safetensors",
+        "bytes": 598436708,
+        "sha256": "e72c8f7087dbfbdbfb9d75077f7b7b05b01b459730f735b468cbde71d66090e6",
+        "chunks": []
+      },
+      "files": [
+        "README.md",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ]
+    },
+    "BGE-VL-large": {
+      "source": "https://huggingface.co/BAAI/BGE-VL-large",
+      "revision": "40fb48217f521df22a2a5bf15edd52ed1146ef05",
+      "license": "mit",
+      "kind": "multimodal embedder (retriever, not a reranker)",
+      "description": "BAAI BGE-VL on CLIP ViT-L/14; embeds text, images and composed image+text queries",
+      "files": [
+        "LICENSE",
+        "README.md",
+        "assets/cir_candi_1.png",
+        "assets/cir_candi_2.png",
+        "assets/cir_query.png",
+        "assets/res-ft-mmeb.png",
+        "assets/res-scaling.png",
+        "assets/res-zs-cir.png",
+        "assets/res-zs-mmeb.png",
+        "bge_vl_clip_transformer.py",
+        "config.json",
+        "config_sentence_transformers.json",
+        "merges.txt",
+        "modeling_MMRet_CLIP.py",
+        "modules.json",
+        "preprocessor_config.json",
+        "sentence_bert_config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json"
+      ],
+      "weights": {
+        "file": "model.safetensors",
+        "bytes": 855304818,
+        "sha256": "6d6c5dcd259b71a49a51916e5fd1dc248563ce08b41a713eb00dd296dfd8f5f4",
+        "chunks": []
+      }
+    }
+  }
+}

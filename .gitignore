@@ -1,0 +1,5 @@
+# Joined weight files are rebuilt from models/<name>/parts/ by models/combine.py; only the chunks are committed.
+models/*/model.safetensors
+models/*/*.partial
+__pycache__/
+.venv/
