@@ -325,3 +325,15 @@ async def test_synthesize_can_widen_and_the_record_says_so():
     assert made.widening == {"sessions": 1, "hits": 1, "omitted_bytes": 0, "truncated": False}
     plain = await synthesize(engine, CitingChat(), "s", "groceries", limits=SynthesisLimits(max_passages=1))
     assert plain.passages_given == 1 and plain.widening is None
+
+
+@pytest.mark.parametrize("mode", ["refine", "accumulate", "facts"])
+async def test_a_widened_synthesis_runs_in_the_mode_asked_for(mode):
+    from scone_memory.retrieval.synthesis import synthesize
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), HashEmbedder(), chunk_target=60).open()
+    await engine.remember("s", "We talked about groceries. " * 3 + "I spent around $120 at Walmart last Saturday. " + "Then recipes. " * 4,
+                          source="session-a")
+    made = await synthesize(engine, CitingChat(), "s", "groceries", limits=SynthesisLimits(max_passages=1),
+                            widen_bytes=100_000, mode=mode)
+    assert made.widening is not None and made.mode == mode
