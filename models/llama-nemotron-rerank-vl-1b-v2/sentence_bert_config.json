@@ -1,0 +1,15 @@
+{
+    "transformer_task": "sequence-classification",
+    "modality_config": {
+        "text": {
+            "method": "forward",
+            "method_output_name": "logits"
+        },
+        "message": {
+            "method": "forward",
+            "method_output_name": "logits",
+            "format": "structured"
+        }
+    },
+    "module_output_name": "scores"
+}

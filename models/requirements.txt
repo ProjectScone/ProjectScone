@@ -1,0 +1,6 @@
+# Tested pins are not claimed; these are the model cards' stated minimums.
+torch>=2.4
+transformers>=4.57
+sentence-transformers>=5.1
+pillow
+safetensors

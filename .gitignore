@@ -46,3 +46,8 @@ packages/*/src/*.egg-info/
 packages/memory/examples
 
 **/__pycache__/
+
+# Reranker weights are committed as chunks under models/<name>/parts/; models/combine.py
+# rebuilds the joined files, which stay out of git.
+models/*/model.safetensors
+models/*/*.partial
