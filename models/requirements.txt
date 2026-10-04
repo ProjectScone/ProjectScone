@@ -1,6 +1,10 @@
-# Tested pins are not claimed; these are the model cards' stated minimums.
+# What the three models and rerank_example.py import. Checked on 2026-10-03 by running each model card's own
+# example from this folder, offline, in a fresh Python 3.12 venv: torch 2.14.1, transformers 5.18.0,
+# sentence-transformers 6.1.0.
 torch>=2.4
-transformers>=4.57
+torchvision            # the NVIDIA and BGE-VL modelling code imports it
+transformers>=4.57     # NVIDIA's card asks for >= 4.56
 sentence-transformers>=5.1
 pillow
 safetensors
+requests               # imported by the NVIDIA processor at load time, even for local files
