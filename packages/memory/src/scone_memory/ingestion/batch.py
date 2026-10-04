@@ -6,6 +6,7 @@ owns validation, chunking, deduplication, embedding, write ordering and recovery
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+import asyncio
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -182,10 +183,13 @@ class IngestionRuntime:
     #: gone, and a duplicate of it would go with it at the next sweep. None
     #: leaves such a write a duplicate.
     forget_overdue: Callable[[str, int], Awaitable[ForgetReceipt]] | None = None
+    #: One engine shares this short write lock with retention. It protects
+    #: intent publication/clearing, never awaited embedding work.
+    deferred_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def validated_record(space: str, record: Record, when: str, *, verified_visual: bool = False,
-                     past_schedule: bool = False) -> NewEpisode:
+                     past_schedule: bool = False, _deferred_capture: bool = False) -> NewEpisode:
     """Validate and snapshot caller input before any source can be removed.
 
     A ``forget_after`` already past ``when`` is refused unless ``past_schedule``,
@@ -202,6 +206,14 @@ def validated_record(space: str, record: Record, when: str, *, verified_visual: 
         raise InvalidInput("source must be a string or None")
     clean_tags = normalise_tags(record.tags)
     clean_meta = dict(normalise_metadata(record.metadata or {}))
+    # This operational contract permits deletion during indexing only because
+    # its native writer revalidates every source. Ordinary ingestion does not
+    # have that protocol and cannot adopt it through user/imported metadata.
+    # Archive normalization removes these operational markers before ordinary
+    # ingestion; native restart recovery preserves them directly.
+    if (not _deferred_capture and clean_meta.get('capture_indexing') == 'deferred'
+            and ('capture_schema' in clean_meta or 'capture_key' in clean_meta)):
+        raise InvalidInput('native deferred capture metadata requires the native capture path')
     asked, held = record.chunking, clean_meta.get("chunking")
     if asked is not None and held is not None and asked != held:
         raise InvalidInput(f"metadata says chunking={held!r} but the record asks for {asked!r}")
@@ -734,6 +746,19 @@ async def recover(runtime: IngestionRuntime) -> RecoveryReport:
         if episode is None:
             report.forgotten += 1
         else:
+            from .deferred_text import index as index_deferred, is_deferred
+            if is_deferred(episode):
+                if episode.space != space or episode.content_hash != digest:
+                    raise InvalidInput('deferred recovery source identity does not match its journal')
+                missing_chunks = not await runtime.documents.chunks_of(space, episode.episode_id)
+                if await index_deferred(runtime, space, episode.episode_id, repair=True):
+                    report.completed += 1
+                    report.rechunked += int(missing_chunks)
+                else:
+                    report.forgotten += 1
+                # The safe path owns its mark; a replacement may now own a
+                # different pending source under the same content hash.
+                continue
             chunks = await runtime.documents.chunks_of(space, episode.episode_id)
             if episode.content == '':
                 if runtime.verify_visual is None or chunks:

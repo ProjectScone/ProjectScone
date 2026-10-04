@@ -19,7 +19,7 @@ from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput
 from ..core.models import DEPENDENCY_KINDS, LINK_KINDS, Added, Fact, FactLink
 from ..core.ports import DocumentStore, NewFact, NewFactLink
-from ..core.validation import ORIGINS, STATUSES, normalise_term, normalise_time
+from ..core.validation import ORIGINS, STATUSES, normalise_metadata, normalise_term, normalise_time
 from ..ingestion.records import Record, RetainedVideoRecord, content_hash
 
 
@@ -196,7 +196,7 @@ async def import_records(runtime: ArchiveRuntime, space: str, records: Iterable[
             summary.profile = said or ARCHIVE_PROFILE
             continue
         if kind == "episode":
-            episode = _rederived(Record.from_dict(record), record.get("space"), space)
+            episode = _rederived(_without_capture_indexing(Record.from_dict(record)), record.get("space"), space)
             if episode.content == '' and episode.kind == 'file':
                 if transfer is None:
                     raise InvalidInput('visual-only documents require attachment transfer; this archive profile omits attachments')
@@ -352,6 +352,24 @@ def _fact_identity(fact: Fact | NewFact) -> tuple:
         fact.status, fact.closed_reason, fact.confidence,
         fact.source_episode_id, fact.origin, fact.quote,
     )
+
+
+def _without_capture_indexing(record: Record) -> Record:
+    """Restore a source, not its original process's indexing protocol.
+
+    Archives rebuild vectors through ordinary ingestion, including sources
+    exported while their original indexing was pending. The keyed content hash,
+    source provenance, conversation attribution and retention policy survive;
+    the native deletion exemption must not transfer to an ordinary writer.
+    """
+    metadata = record.metadata
+    if (not isinstance(metadata, Mapping) or metadata.get('capture_indexing') != 'deferred'
+            or metadata.get('capture_schema') != '1'):
+        return record
+    cleaned = dict(normalise_metadata(metadata))
+    for name in ('capture_indexing', 'capture_schema', 'capture_key'):
+        cleaned.pop(name, None)
+    return dataclasses.replace(record, metadata=cleaned)
 
 
 def _rederived(record: Record, source_space: Optional[str], space: str) -> Record:

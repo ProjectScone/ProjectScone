@@ -7,6 +7,11 @@ from __future__ import annotations
 import asyncio
 import sys
 from typing import Optional, TYPE_CHECKING
+from collections.abc import Callable, Sequence
+from fastapi import FastAPI
+from ..memory.engine import MemoryEngine
+from .extensions import HttpExtension
+from .authentication import Authentication
 
 if TYPE_CHECKING:
     from ..runtime.agent_runtime import AgentRuntime
@@ -32,7 +37,14 @@ def document_ocr_identity(settings: Settings) -> str:
     return identity + ':orientation' if settings.document_ocr_orientation else identity
 
 
-def build_app(settings: Settings, engine, *, document_media: DocumentMedia | None = None, document_video: DocumentVideo | None = None):
+def build_app(settings: Settings, engine: MemoryEngine, *, document_media: DocumentMedia | None = None,
+              document_video: DocumentVideo | None = None, extensions: Sequence[HttpExtension] = (), authentication: Authentication | None = None) -> FastAPI:
+    return _build_owned_app(settings, engine, document_media=document_media,
+                            document_video=document_video, extensions=extensions, authentication=authentication)
+
+
+def _build_owned_app(settings: Settings, engine, *, document_media: DocumentMedia | None = None,
+                     document_video: DocumentVideo | None = None, extensions: Sequence[HttpExtension] = (), authentication: Authentication | None = None):
     from ..runtime.agent_runtime import load_agent_runtime
     from ..runtime.document_jobs import load_document_imports
     from ..runtime.directory_sync import load_directory_sync
@@ -57,7 +69,7 @@ def build_app(settings: Settings, engine, *, document_media: DocumentMedia | Non
                 document_ocr=ocr, document_media=document_media, document_video=document_video,
                 ocr_identity=document_ocr_identity(settings))
         app = _build_app(settings, engine, agents, document_ocr=ocr, document_import_service=imports,
-                         document_media=document_media, document_video=document_video, directory_sync_service=directory_sync)
+                         document_media=document_media, document_video=document_video, directory_sync_service=directory_sync, extensions=extensions, authentication=authentication)
         return agents.own(app) if agents is not None else app
     except BaseException:
         try:
@@ -77,12 +89,16 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
                document_ocr: DocumentOcr | None = None,
                document_import_service: DocumentImportService | None = None,
                directory_sync_service: DirectorySyncService | None = None,
-               document_media: DocumentMedia | None = None, document_video: DocumentVideo | None = None):
+               document_media: DocumentMedia | None = None, document_video: DocumentVideo | None = None, extensions: Sequence[HttpExtension] = (), authentication: Authentication | None = None):
     """The app ``serve`` runs: the memory API alone, or the conversation
     service composed over it on the same origin when the settings name a
     journal (SCONE_CONVERSATIONS_JOURNAL). Raises ValueError for a journal
     or model factory the operator got wrong, before anything is served."""
     from ..runtime.diagnostics import install_http_diagnostics
+    from ..speech.dictation import LocalDictation
+    dictation = (LocalDictation(settings.dictation_python, settings.dictation_model, settings.dictation_ffmpeg,
+                                backend=settings.dictation_backend)
+                 if settings.dictation_python and settings.dictation_model and settings.dictation_ffmpeg else None)
     store = None
     model_management = False
     vision_available = None
@@ -105,6 +121,10 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
         worker = build_worker(engine, settings, settings.keys.values())
 
     def finish(app):
+        if settings.mcp_enabled:
+            from .mcp_routes import mount_mcp_routes
+
+            mount_mcp_routes(app, engine, propose_below=settings.mcp_propose_below, authentication=authentication)
         if store is not None:
             from .model_connections import mount_model_connection_routes
             from ..runtime.model_runtime import authorize_local_admin
@@ -118,8 +138,10 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
 
     from ..ingestion.web import WebLimits
     url_import = WebLimits(allow_private=settings.url_import_private) if settings.url_import else None
+    if settings.conversations_capture == "deferred" and not settings.conversations_journal:
+        raise ValueError("deferred capture requires SCONE_CONVERSATIONS_JOURNAL")
     if not settings.conversations_journal:
-        return finish(create_app(engine, settings.keys, worker=worker,
+        return finish(create_app(engine, settings.keys, worker=worker, extensions=extensions, authentication=authentication, dictation=dictation,
                           document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media, document_video=document_video,
                           directory_sync_service=directory_sync_service,
                           agent_catalog=agents.catalog if agents else None,
@@ -136,6 +158,8 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
     from ..runtime.voice_turns import build_voice_turns
     from ..runtime.conversation_tools import build_conversation_tools
 
+    from ..realtime.deferred_capture import DeferredTextCapture
+    deferred_capture = DeferredTextCapture(engine) if settings.conversations_capture == "deferred" else None
     journal = journal_path(settings, settings.conversations_journal)
     answer_review = build_conversation_review(settings)
     adaptive_retriever = build_adaptive_retrieval(settings, engine)
@@ -176,7 +200,7 @@ def _build_app(settings: Settings, engine, agents: AgentRuntime | None = None, *
     return finish(create_conversation_app(engine, settings.keys, journal, None, scoped_runtime_factory=scoped,
                                    public_text_streaming=scoped is not None or catalog is not None,
                                    text_resumption=scoped is not None or catalog is not None,
-                                   worker=worker, catalog=catalog,
+                                   worker=worker, catalog=catalog, extensions=extensions, authentication=authentication, dictation=dictation, deferred_capture=deferred_capture,
                                    document_ocr=document_ocr, document_import_service=document_import_service, document_media=document_media, document_video=document_video,
                                    directory_sync_service=directory_sync_service,
                                    agent_catalog=agents.catalog if agents else None,
@@ -206,7 +230,8 @@ def build_server(settings: Settings, app):
     return uvicorn.Server(uvicorn.Config(app, host=settings.host, port=settings.port, log_level="warning"))
 
 
-def main(settings: Optional[Settings] = None) -> None:
+def main(settings: Optional[Settings] = None, *,
+         application_factory: Callable[[Settings, MemoryEngine], FastAPI] | None = None) -> None:
     settings = settings or Settings.from_env()
     if not settings.keys:
         print("refusing to serve without a key: set SCONE_API_KEY or SCONE_API_KEYS", file=sys.stderr)
@@ -229,7 +254,7 @@ def main(settings: Optional[Settings] = None) -> None:
         app = None
         try:
             try:
-                app = build_app(settings, engine)
+                app = (application_factory or build_app)(settings, engine)
             except (ValueError, OSError, ImportError, AttributeError, TypeError, ModelConnectionError, WorkflowError) as error:
                 print(f"refusing to serve: {error}", file=sys.stderr)
                 sys.exit(2)

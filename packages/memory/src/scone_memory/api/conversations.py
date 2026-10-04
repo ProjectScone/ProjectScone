@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket
 from starlette.websockets import WebSocketDisconnect
+from starlette.requests import HTTPConnection
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -106,9 +107,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             worker=None, catalog=None, ingest_concurrency=4, roles=None,
                             runtime_available=None, model_connections_available=False,
                             vision_available=None, vision_factory=None, answer_review=None, adaptive_retriever=None, tool_retrieval=None,
-                            answer_grounder=None,
+                            answer_grounder=None, deferred_capture=None,
                             agent_catalog=None, agent_plan_store=None, agent_run_service=None, document_ocr=None, document_import_service=None, document_media=None, document_video=None,
-                            directory_sync_service=None, synthesis_factory=None, url_import=None, followup=None,
+                            directory_sync_service=None, synthesis_factory=None, url_import=None, followup=None, extensions=(), authentication=None, dictation=None,
                             semantic_turn=False, voice_keypad="off", voice_idle=None, voice_turn_strategy=None):
     """The caller owns engine lifecycle; service owns journal and runtime tasks.
 
@@ -134,6 +135,9 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     adaptive_retriever and recall_timeout keywords when it is configured.
     tool_retrieval describes the explicit ConversationTools binding installed by
     the host on its text factories. It advertises configuration, not model health.
+    deferred_capture owns background indexing for native text capture. Factories
+    receive its deferred_capture keyword and must honor that contract. The
+    capture_mode capability describes text; voice capture remains inline.
     semantic_turn=True gives each voice session the lexical end-of-turn detector:
     a final transcript that stops mid-clause is held for the rest of the turn.
     voice_keypad (off, append or collect) lets the audio socket take the
@@ -144,6 +148,15 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     """
     from ..realtime.idle import IdlePolicy
     from ..runtime.conversation_tools import ConversationTools
+
+    from ..realtime.deferred_capture import DeferredTextCapture
+    if deferred_capture is not None:
+        if not isinstance(deferred_capture, DeferredTextCapture):
+            raise ValueError("deferred_capture must be a DeferredTextCapture or None")
+        if deferred_capture.memory is not engine:
+            raise ValueError("deferred capture requires the same engine")
+        if tool_retrieval is not None:
+            raise ValueError("deferred capture cannot combine with tool retrieval")
 
     keys = dict(keys)
     if not keys or any(not isinstance(key, str) or not key for key in keys):
@@ -254,6 +267,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                     if not page["has_more"]:
                         break
                     after = page["next_after"]
+            if deferred_capture is not None:
+                deferred_capture.start()
             if worker is not None:
                 worker.start()
             yield
@@ -303,6 +318,11 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             except (Exception, asyncio.CancelledError) as error:
                                 cleanup_errors.append(error)
                 finally:
+                    if deferred_capture is not None:
+                        try:
+                            await deferred_capture.aclose()
+                        except (Exception, asyncio.CancelledError) as error:
+                            cleanup_errors.append(error)
                     try:
                         if journal is not None:
                             journal.close()
@@ -336,6 +356,21 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
     roles = dict(roles or {})
 
     async def space_for(request: Request):
+        if authentication is not None:
+            from ..core.bearer_keys import Unauthorized
+            try:
+                holder = authentication(request)
+                if not permitted(holder.role, request.method, request.url.path):
+                    raise HTTPException(403, "account cannot write")
+                if shutting_down and request.method == "POST":
+                    raise HTTPException(503, "conversation service is shutting down")
+                if await engine.space_deleted(holder.space) is not None:
+                    raise HTTPException(404, "space was deleted")
+                if authentication(request) != holder:
+                    raise Unauthorized("account changed during request")
+                return holder.space
+            except Unauthorized:
+                raise HTTPException(401, "valid session required") from None
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer" and token:
             for key, space in keys.items():
@@ -408,7 +443,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
 
     @app.get("/v1/conversations/capabilities")
     async def capabilities(space=Depends(space_for)):
-        return {"schema_version": 1,
+        return {"schema_version": 1, "capture_mode": "deferred" if deferred_capture is not None else "inline",
                 "text_configured": bare_runtime_available() or bool(catalog and catalog.personas),
                 "tool_retrieval": {"configured": tool_retrieval is not None,
                     "protocol": tool_retrieval.mode if tool_retrieval is not None else "off",
@@ -468,6 +503,8 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         conversation_options: dict[str, object] = dict(answer_review.options()) if answer_review is not None else {}
         if adaptive_retriever is not None:
             conversation_options.update(adaptive_retriever=adaptive_retriever, recall_timeout=adaptive_retriever.limits.timeout_s)
+        if deferred_capture is not None:
+            conversation_options["deferred_capture"] = deferred_capture
         if answer_grounder is not None:
             conversation_options['answer_grounder'] = answer_grounder
         # Follow-up queries (SCONE_FOLLOWUP_QUERIES) reach every text runtime the same way.
@@ -956,6 +993,15 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
         async def events():
             nonlocal after
             while True:
+                if authentication is not None:
+                    from ..core.bearer_keys import Unauthorized
+                    try:
+                        holder = authentication(request)
+                        if holder.space != space or not permitted(holder.role, "GET", request.url.path):
+                            raise Unauthorized("account changed")
+                    except Unauthorized:
+                        yield sse("end", {"request_id": request_id, "reason": "authorization_revoked", "read_receipt": True})
+                        return
                 if shutting_down or journal is None:
                     yield sse("end", {"request_id": request_id, "reason": "service_shutdown", "read_receipt": True})
                     return
@@ -1122,15 +1168,36 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             return
         key = hello.get("key")
         space = keys.get(key) if isinstance(key, str) else None
+        account_role = None
+        account_connection: HTTPConnection = websocket
+        account_holder = None
+        if authentication is not None:
+            from ..core.bearer_keys import Unauthorized
+            if isinstance(key, str) and key:
+                scope = dict(websocket.scope)
+                scope['headers'] = [(name,value) for name,value in websocket.scope['headers'] if name.lower()!=b'authorization'] + [(b'authorization',('Bearer '+key).encode())]
+                account_connection = HTTPConnection(scope)
+            try:
+                account_holder = authentication(account_connection)
+                space, account_role = account_holder.space, account_holder.role
+            except Unauthorized:
+                space = None
         if space is None:
             await refuse("unknown key")
             return
-        if not permitted(roles.get(key, "full"), "POST", "/v1/conversations"):
+        if not permitted(account_role or roles.get(key, "full"), "POST", "/v1/conversations"):
             await refuse(f"key role {roles.get(key)} cannot start a session")
             return
         if await engine.space_deleted(space) is not None:
             await refuse(f"space {space!r} was deleted")
             return
+        if authentication is not None:
+            try:
+                if authentication(account_connection) != account_holder:
+                    raise Unauthorized("account changed during request")
+            except Unauthorized:
+                await refuse("account session is no longer authorized")
+                return
         if shutting_down:
             await refuse("conversation service is shutting down")
             return
@@ -1178,8 +1245,16 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
             return
         owned[(space, sid)] = OwnedSession(session)
         await websocket.send_text(json.dumps({"type": "ready", "session_id": sid}))
+        def assert_audio_authorized():
+            if authentication(account_connection) != account_holder:
+                raise Unauthorized("account changed")
         try:
-            await session.run()
+            if authentication is None:
+                await session.run()
+            else:
+                from .authentication import run_authenticated
+                await run_authenticated(session.run, assert_audio_authorized,
+                                        lambda: websocket.close(code=1008))
         except asyncio.CancelledError:
             # The host closed it (stop or shutdown), which the journal already
             # records; only a cancelled handler task must keep propagating.
@@ -1221,7 +1296,7 @@ def create_conversation_app(engine, keys, journal_path, runtime_factory, *, scop
                             directory_sync_service=directory_sync_service,
                             ingest_concurrency=ingest_concurrency, roles=roles,
                             model_connections_available=model_connections_available, vision_available=vision_available,
-                            vision_factory=vision_factory, synthesis_factory=synthesis_factory, url_import=url_import)
+                            vision_factory=vision_factory, synthesis_factory=synthesis_factory, url_import=url_import, extensions=extensions, authentication=authentication, dictation=dictation)
     app.state.memory_app = memory_app
     app.state.ingest_lane_width = memory_app.state.ingest_lane_width
     app.mount("/", memory_app)

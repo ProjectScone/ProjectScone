@@ -172,6 +172,11 @@ class Settings:
     #: Confidence below which a fact an agent submits over MCP is parked
     #: for a person instead of entering the ledger. Unset means none is.
     mcp_propose_below: Optional[float] = None
+    mcp_enabled: bool = False
+    dictation_python: str | None = None
+    dictation_model: str | None = None
+    dictation_ffmpeg: str | None = None
+    dictation_backend: str = 'mlx'
     mongo_url: Optional[str] = None
     mongo_db: str = "scone"
     postgres_url: Optional[str] = None
@@ -336,6 +341,8 @@ class Settings:
     #: A layout engine that labels a scanned page's regions (see ocr/layout_json.py);
     #: without one the labels are inferred from geometry and text.
     document_layout_executable: Optional[str] = None
+    # Journal presence is checked by the launcher: serve-conversations accepts --journal.
+    conversations_capture: str = "inline"
     conversations_journal: Optional[str] = None
     conversations_model_factory: Optional[str] = None
     conversations_recall_timeout: float = 2.0
@@ -397,6 +404,14 @@ class Settings:
     log_path: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if self.dictation_backend not in ('mlx', 'faster-whisper'):
+            raise InvalidInput('SCONE_DICTATION_BACKEND must be mlx or faster-whisper')
+        dictation_paths = (self.dictation_python, self.dictation_model, self.dictation_ffmpeg)
+        if any(path is not None for path in dictation_paths):
+            if not all(type(path) is str and path.startswith('/') for path in dictation_paths):
+                raise InvalidInput('SCONE_DICTATION_PYTHON, SCONE_DICTATION_MODEL and SCONE_DICTATION_FFMPEG require absolute paths together')
+        if type(self.mcp_enabled) is not bool:
+            raise InvalidInput("mcp_enabled must be a boolean")
         from .conversation_review import validate_review_settings
         from .conversation_followup import validate_followup_settings
         from .conversation_retrieval import validate_adaptive_settings
@@ -407,6 +422,10 @@ class Settings:
         validate_review_settings(self)
         validate_adaptive_settings(self)
         validate_followup_settings(self)
+        if self.conversations_capture not in ("inline", "deferred"):
+            raise InvalidInput("SCONE_CONVERSATIONS_CAPTURE must be inline or deferred")
+        if self.conversations_capture == "deferred" and self.conversations_tool_mode != "off":
+            raise InvalidInput("deferred capture cannot combine with conversation tool mode")
         validate_tool_settings(self)
         if self.chat_first_text_timeout is not None and (type(self.chat_first_text_timeout) not in (int, float)
                 or not math.isfinite(self.chat_first_text_timeout) or self.chat_first_text_timeout <= 0):
@@ -542,6 +561,11 @@ class Settings:
             s3_prefix=env.get("SCONE_S3_PREFIX", "attachments/"),
             mcp_propose_below=(float(env["SCONE_MCP_PROPOSE_BELOW"])
                                if env.get("SCONE_MCP_PROPOSE_BELOW") else None),
+            mcp_enabled=parse_flag("SCONE_MCP_ENABLED", env.get("SCONE_MCP_ENABLED")),
+            dictation_python=env.get("SCONE_DICTATION_PYTHON") or None,
+            dictation_model=env.get("SCONE_DICTATION_MODEL") or None,
+            dictation_ffmpeg=env.get("SCONE_DICTATION_FFMPEG") or None,
+            dictation_backend=env.get("SCONE_DICTATION_BACKEND", "mlx"),
             mongo_url=env.get("SCONE_MONGO_URL"),
             mongo_db=env.get("SCONE_MONGO_DB", "scone"),
             postgres_url=env.get("SCONE_POSTGRES_URL"),
@@ -696,6 +720,7 @@ class Settings:
             document_ocr_dpi=int(env.get('SCONE_DOCUMENT_OCR_DPI', '150')),
             document_ocr_orientation=env.get('SCONE_DOCUMENT_OCR_ORIENTATION') == '1',
             document_layout_executable=env.get('SCONE_DOCUMENT_LAYOUT_EXECUTABLE') or None,
+            conversations_capture=env.get("SCONE_CONVERSATIONS_CAPTURE", "inline"),
             conversations_journal=env.get("SCONE_CONVERSATIONS_JOURNAL") or None,
             conversations_model_factory=env.get("SCONE_CONVERSATIONS_MODEL_FACTORY") or None,
             conversations_recall_timeout=parse_seconds("SCONE_CONVERSATIONS_RECALL_TIMEOUT",

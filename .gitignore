@@ -35,6 +35,7 @@ bench-data/
 bench-runs/
 # Python packages (native engine and HTTP client)
 packages/*/.venv/
+/.venv-dictation/
 packages/**/__pycache__/
 packages/*/*.egg-info/
 packages/*/build/

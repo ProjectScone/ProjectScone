@@ -118,12 +118,18 @@ def main(settings: Settings, *, journal: str, model_factory: str | None = None) 
         # Build database clients on the same loop as the ASGI server.
         engine = await build_engine(settings)
         try:
+            from ..speech.dictation import LocalDictation
+            dictation = (LocalDictation(settings.dictation_python, settings.dictation_model, settings.dictation_ffmpeg,
+                                        backend=settings.dictation_backend)
+                         if settings.dictation_python and settings.dictation_model and settings.dictation_ffmpeg else None)
             scoped = None
             if factory is not None:
                 def scoped(space, sid, scope, **options):
                     return runtime_type(engine, space, sid, factory, **scope.kwargs(), **options)
+            from ..realtime.deferred_capture import DeferredTextCapture
+            deferred_capture = DeferredTextCapture(engine) if settings.conversations_capture == "deferred" else None
             app = create_conversation_app(engine, settings.keys, path, None,
-                                          scoped_runtime_factory=scoped,
+                                          scoped_runtime_factory=scoped, deferred_capture=deferred_capture, dictation=dictation,
                                           public_text_streaming=scoped is not None, text_resumption=scoped is not None, followup=followup)
             server = create_server(app, host=settings.host, port=settings.port)
             await server.serve()
