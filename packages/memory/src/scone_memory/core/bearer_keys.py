@@ -84,10 +84,12 @@ class BearerKeys:
     the role behind it.
     """
 
-    def __init__(self, app, keys: Mapping[str, str], roles: Mapping[str, str]) -> None:
+    def __init__(self, app, keys: Mapping[str, str], roles: Mapping[str, str], *,
+                 authentication: Callable[[Scope], KeyHolder] | None = None) -> None:
         self.app = app
         self.keys = keys
         self.roles = roles
+        self.authentication = authentication
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket"):
@@ -96,7 +98,13 @@ class BearerKeys:
             await self.app(scope, receive, send)
             return
         try:
-            holder = key_holder(self._authorization(scope), self.keys, self.roles)
+            if self.authentication is not None:
+                try:
+                    holder = self.authentication(scope)
+                except Unauthorized:
+                    holder = key_holder(self._authorization(scope), self.keys, self.roles)
+            else:
+                holder = key_holder(self._authorization(scope), self.keys, self.roles)
         except Unauthorized as refused:
             await self._refuse(scope, send, str(refused))
             return

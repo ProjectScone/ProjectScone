@@ -36,6 +36,53 @@ SCONE_CONVERSATIONS_JOURNAL=./conversation-sessions.db scone-memory serve
 SCONE_CONVERSATIONS_JOURNAL=./conversation-sessions.db SCONE_CONVERSATIONS_MODEL_FACTORY=my_models:create scone-memory serve
 ```
 
+### Retain text before vector indexing
+
+`SCONE_CONVERSATIONS_CAPTURE=deferred` opts native text conversations into durable
+capture without waiting for document embeddings. The default is `inline`.
+Use the same explicitly configured local stores and model; this setting does not
+select a provider. Standard `serve` requires `SCONE_CONVERSATIONS_JOURNAL`;
+`serve-conversations` uses its required `--journal` argument. Tool conversation
+mode is incompatible, and voice capture is unchanged.
+Deferred text runtimes accept `max_reply_bytes` up to 128,000, matching the
+retained-capture limit; larger configured replies are refused before execution.
+
+The text and its lexical chunks are retained before capture returns. One owned
+worker then writes vectors and clears the existing ingestion intent. It admits
+up to 128 active/queued sources and makes at most three attempts per source,
+with 100 ms between attempts. Queue overflow, exhausted retries and shutdown
+leave a durable intent for explicit `await engine.recover()` or the next
+`engine.open()`. Run explicit recovery with other writes and indexing stopped.
+Recovery may wait for embeddings at startup. Use persistent document storage for
+process-restart durability; an in-memory store remains ephemeral.
+
+Pending sources are available to text retrieval and source inspection; vector
+retrieval can lag. Forgetting a pending source is supported and indexing checks
+for deletion, expiry and source changes around awaited operations. The host
+cancels and joins indexing before closing the engine. This is not an atomic
+transaction across independent storage clients.
+
+Conversation capabilities advertise `capture_mode` for text. Deferred turn
+receipts add `capture_indexing`, for example
+`{"mode":"deferred","user":"pending","assistant":"pending"}`. Each role's
+status records its capture acknowledgment, not current indexing progress or
+answer accuracy. Completed replies remain retained while indexing is pending.
+
+Native embedding applications can pass a `DeferredTextCapture` from
+`scone_memory.realtime.deferred_capture` as `TextConversation(...,
+deferred_capture=service)`. Bind it to the same engine, call `service.start()`
+before conversations, and `await service.aclose()` after closing conversations
+and before closing the engine. `await service.wait_idle()` waits only for
+admitted jobs, not overflow or failed intents. The `capture_schema` and
+`capture_key` metadata belong to native capture; remove these operational fields
+when explicitly re-ingesting exported text through ordinary `Record` objects.
+
+The controlled local [capture benchmark](../benchmarks/deferred_capture.py)
+compares first text, reply completion and full indexing with identical prompts.
+It uses scripted replies and an artificial embedding delay, and does not measure
+model quality or real provider performance. See the
+[measured results and local-model smoke check](../benchmarks/deferred-capture-v1.results.md).
+
 A composed host can also serve a saved persona catalog. `SCONE_CONVERSATIONS_PERSONAS`
 names a JSON array of Persona documents (`scone_memory.realtime.persona.Persona`,
 schema 1: id, name, instructions, and exact reply/transcription/speech/activity

@@ -26,6 +26,7 @@ from scone_memory.ingestion.entity_mentions import (Mention, MentionRecorder, Sp
 from scone_memory.ingestion.worker import ConsolidationWorker
 from scone_memory.memory.catalog import pending_distillation
 from scone_memory.retrieval.fact_recall import scan_facts_for_query
+from scone_memory.runtime.mcp import pending_episodes
 
 
 WHEN = "2024-03-01T00:00:00Z"
@@ -272,6 +273,7 @@ async def test_mentions_stay_out_of_fact_recall_and_the_distillers_queue():
         await memory.remember("s", NOTE, source="notes/meeting.md", created_at=WHEN)
         await MentionRecorder(memory, FixedRecognizer(LABELS)).record_pending("s")
         assert await pending_distillation(memory.documents, "s") == 1, "still unread by the distiller"
+        assert len(await pending_episodes(memory, "s", 5)) == 1, "still pending for an MCP agent"
         assert await scan_facts_for_query(memory.documents, "s", "Acme Robotics", memory.clock()) == []
     finally:
         await memory.close()

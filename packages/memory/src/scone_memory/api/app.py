@@ -19,7 +19,7 @@ import json
 import re
 
 from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, cast
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -46,8 +46,11 @@ from ..retrieval.window import MAX_WINDOW
 from ..core.models import Attachment, Fact, RecallItem
 from . import chat_imports, file_documents, pdf_documents
 from .responses import LedgerJSONResponse
+from .extensions import HttpExtension, HttpExtensionContext
+from .authentication import Authentication
 
 if TYPE_CHECKING:
+    from ..speech.dictation import LocalDictation
     from ..providers.llm import ChatModel
     from ..providers.vision import VisionModel
     from ..agents.catalog import AgentCatalog
@@ -344,6 +347,9 @@ def create_app(
     vision_factory: Callable[[], VisionModel | None] | None = None,
     synthesis_factory: Callable[[], ChatModel | None] | None = None,
     url_import: WebLimits | None = None,
+    extensions: Sequence[HttpExtension] = (),
+    authentication: Authentication | None = None,
+    dictation: LocalDictation | None = None,
 ) -> FastAPI:
     """Serve the authenticated memory API; the caller owns engine lifecycle.
 
@@ -429,7 +435,8 @@ def create_app(
     app.state.worker = worker
 
     def current_space_for(request: Request) -> str:
-        holder = key_holder(request.headers.get("authorization", ""), app.state.keys, app.state.roles)
+        holder = (authentication(request) if authentication is not None else
+                  key_holder(request.headers.get("authorization", ""), app.state.keys, app.state.roles))
         if not permitted(holder.role, request.method, request.url.path):
             raise Forbidden(f"key role {holder.role} cannot {_refused_verb(request.method, request.url.path)}")
         return holder.space
@@ -1722,6 +1729,12 @@ def create_app(
             "last_distill": last.as_payload() if last else None,
             "retention": dict(getattr(worker, "retention", None) or {}) if worker is not None else {},
         }
+
+    from .dictation import mount_dictation_routes
+    mount_dictation_routes(app, dictation, space_for)
+    context = HttpExtensionContext(app, engine, space_for, assert_current_space)
+    for extension in extensions:
+        extension(context)
 
     return app
 

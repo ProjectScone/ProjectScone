@@ -525,6 +525,9 @@ ENOUGH: dict[str, dict] = {
     "memory_graph_hubs": {},
     "memory_graph_health": {},
     "memory_graph_affected": {"name": "atlas"},
+    "memory_activity": {},
+    "memory_agent_connect": {"session_id": "example-session"},
+    "memory_record_interaction": {"session_id": "example-session", "request_id": "request-1", "role": "user", "public_text": "Public observation"},
 }
 
 SPACE_TEMPLATES = ["scone://{space}/graph/report", "scone://{space}/graph/schema",
