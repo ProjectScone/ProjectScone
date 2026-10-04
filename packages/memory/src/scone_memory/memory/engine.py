@@ -8,6 +8,7 @@ answers, because a thin answer that says it is thin beats a 500.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import hashlib
 import time
@@ -37,6 +38,7 @@ from ..retrieval import fact_recall, fusion
 from ..entities.meanings import RelationMeanings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..ingestion.deferred_text import CapturedText
     from ..ingestion.code_graph import Resolve
     from ..ingestion.embedding_cache import EmbeddingCache
     # Type-only: the vocabulary store needs cryptography, and a base
@@ -445,6 +447,8 @@ class MemoryEngine:
         #: nothing across a restart rather than writing somewhere unasked.
         self.blobs = blobs if blobs is not None else InMemoryBlobStore()
         self._closed = False
+        self._deferred_write_lock = asyncio.Lock()
+        self._deferred_index_lock = asyncio.Lock()
         #: Whether this engine's vectors can be compared with the stored
         #: ones; settled by open(). See memory.vector_identity.
         self.vector_identity: vector_identity.VectorIdentity | None = None
@@ -651,7 +655,8 @@ class MemoryEngine:
         retired, pending = await retention.recover_forgets(self._retention_runtime(), retirement_limit)
         if pending:
             return RecoveryReport(retired=retired, retirements_pending=True, spaces_deleted=spaces)
-        report = await ingestion_batch.recover(self._ingestion_runtime())
+        async with self._deferred_index_lock:
+            report = await ingestion_batch.recover(self._ingestion_runtime())
         report.retired = retired
         report.spaces_deleted = spaces
         return report
@@ -853,6 +858,26 @@ class MemoryEngine:
         check_space(space)
         return await self.blobs.get(space, attachment_id)
 
+    async def capture_text(self, space: str, record: Record) -> "CapturedText":
+        """Retain keyed conversation text and chunks; leave vectors pending.
+
+        An owning service must index the returned source. Interrupted work is
+        also completed by native recover/open. Ordinary remember is unchanged.
+        """
+        from ..ingestion.deferred_text import retain
+        check_space(space)
+        await self._living(space)
+        return await retain(self._ingestion_runtime(), space, record)
+
+    async def index_captured_text(self, space: str, episode_id: int) -> bool:
+        """Index still-retained captured text; false when its source changed."""
+        from ..ingestion.deferred_text import index
+        check_space(space)
+        if type(episode_id) is not int or episode_id < 1:
+            raise InvalidInput('episode_id must be a positive integer')
+        async with self._deferred_index_lock:
+            return await index(self._ingestion_runtime(), space, episode_id)
+
     async def remember_many(self, space: str, records: Iterable[Record], *,
                             embedding_checkpoint: EmbeddingCheckpoint | None = None,
                             partial: bool = False) -> list[Added]:
@@ -924,6 +949,7 @@ class MemoryEngine:
             context_lane=self.context_lane,
             document_outline=partial(document_outline, blobs=self.blobs),
             forget_overdue=self.forget,
+            deferred_write_lock=self._deferred_write_lock,
         )
 
     async def _verify_visual_record(self, space: str, record: Record, episode_id: int | None) -> None:
@@ -997,6 +1023,7 @@ class MemoryEngine:
             self.documents, self.vectors, self.blobs, self.events, self.clock, self._emit,
             self._episode_or_gone, self.impact, self.forget, self._living,
             self.space_deleted, self._space_receipt, self.exclude, image_vectors=self.image_vectors,
+            deferred_write_lock=self._deferred_write_lock,
         )
 
     async def _episode_or_gone(self, space: str, episode_id: int) -> Episode:

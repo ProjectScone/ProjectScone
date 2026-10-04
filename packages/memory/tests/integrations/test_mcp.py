@@ -45,7 +45,10 @@ GRAPH_ARGUMENTS = {
     "memory_graph_health": {"limit", "max_bytes", "space"},
     "memory_graph_affected": {"name", "max_hops", "limit", "max_bytes", "space"},
 }
-TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS}
+TOOL_ARGUMENTS = {**RUST_ARGUMENTS, **GRAPH_ARGUMENTS,
+                  "memory_activity": {"hours", "limit", "project", "session_id", "cursor", "space"},
+                  "memory_agent_connect": {"session_id", "project", "agent_name", "space"},
+                  "memory_record_interaction": {"session_id", "request_id", "role", "public_text", "project", "agent_name", "space"}}
 
 
 @pytest.fixture

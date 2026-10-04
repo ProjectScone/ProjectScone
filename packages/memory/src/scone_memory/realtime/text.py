@@ -17,6 +17,7 @@ from typing import Literal, TYPE_CHECKING
 if TYPE_CHECKING:
     from ..memory.catalog import ProfilePolicy
     from ..memory.profile_buckets import BucketBounds
+    from .deferred_capture import DeferredTextCapture
 from uuid import uuid4
 
 from ..core.models import Episode
@@ -201,8 +202,17 @@ class TextConversation:
                  standing_profile: "ProfilePolicy | None" = None, profile_limit: int = 10,
                  max_profile_bytes: int = 1000, followup_queries: str = "off",
                  followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S,
-                 profile_buckets: "BucketBounds | None" = None):
+                 profile_buckets: "BucketBounds | None" = None,
+                 deferred_capture: "DeferredTextCapture | None" = None):
         check_space(space)
+        if deferred_capture is not None:
+            from .deferred_capture import DeferredTextCapture
+            if not isinstance(deferred_capture, DeferredTextCapture) or deferred_capture.memory is not memory:
+                raise ValueError('deferred capture requires the same memory engine')
+            if tool_model_factory is not None:
+                raise ValueError('deferred capture cannot be combined with tool mode')
+        self._deferred_capture = deferred_capture
+        self._capture_indexing: dict[str, str] = {}
         if answer_grounder is not None and (not callable(getattr(answer_grounder, 'assess', None)) or tool_model_factory is not None):
             raise ValueError('answer_grounder requires a native non-tool text runtime and assess method')
         self._answer_grounder = answer_grounder
@@ -244,6 +254,8 @@ class TextConversation:
         for value in (max_reply_bytes, max_history_bytes):
             if type(value) is not int or not 512 <= value <= 1_000_000:
                 raise ValueError("byte limits must be integers in 512..1000000")
+        if deferred_capture is not None and max_reply_bytes > 128000:
+            raise ValueError('deferred capture requires max_reply_bytes at most 128000')
         if type(review_policy) is not str or review_policy not in ("report", "require_supported"):
             raise ValueError("review_policy must be report or require_supported")
         if answer_reviewer is not None and not callable(getattr(answer_reviewer, "review", None)):
@@ -443,9 +455,16 @@ class TextConversation:
                 metadata['completion_evidence'] = ('source_checked_tool_answer' if tool_source_status == 'retained'
                                                    else 'native_tool_answer')
         try:
-            [added] = await self._memory.remember_many(self._space, [Record(
+            record = Record(
                 text, kind="conversation", source=self._session_id, metadata=metadata,
-                dedup_key=f"scone-text:{self._session_id}:{turn_id}:{role}")])
+                dedup_key=f"scone-text:{self._session_id}:{turn_id}:{role}")
+            if self._deferred_capture is not None:
+                captured = await self._deferred_capture.capture(self._space, record)
+                episode_id = captured.episode_id
+                self._capture_indexing[role] = captured.indexing
+            else:
+                [added] = await self._memory.remember_many(self._space, [record])
+                episode_id = added.episode_id
         except BaseException as error:
             observe('capture_' + role, outcome='cancelled' if isinstance(error, asyncio.CancelledError) else 'failed',
                     elapsed_ms=(time.perf_counter() - started) * 1000)
@@ -455,11 +474,11 @@ class TextConversation:
             raise
         observe('capture_' + role, outcome='completed', elapsed_ms=(time.perf_counter() - started) * 1000)
         logging.getLogger(__name__).info("capture.finished", extra={"event": "capture.finished",
-            "session_id": self._session_id, "role": role, "episode_id": added.episode_id,
+            "session_id": self._session_id, "role": role, "episode_id": episode_id,
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)})
         if asyncio.current_task().cancelling():
             raise asyncio.CancelledError()
-        return added.episode_id
+        return episode_id
 
     def _room(self) -> int:
         """Bytes the system prompt and the turns may hold: the history limit,
@@ -519,6 +538,7 @@ class TextConversation:
     async def _reply(self, messages, turns, evicted, on_text, gone=()):
         token = _OWNER.set(self)
         timing = TurnTiming()
+        self._capture_indexing = {}
 
         async def seen(chunk):
             # The first public text of the answer, provisional or final.
@@ -571,6 +591,8 @@ class TextConversation:
                                      "evicted_turn_ids": list(evicted),
                                      **({"summary": pending.receipt(self._max_summary, self._summary_timeout)}
                                         if self._history_policy == "summary" else {})})
+                if self._deferred_capture is not None:
+                    result['capture_indexing'] = {'mode': 'deferred', **self._capture_indexing}
                 if answer_review is not None:
                     result["answer_review"] = answer_review
                 if evidence_answer is not None:

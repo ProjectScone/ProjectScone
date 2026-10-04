@@ -7,7 +7,8 @@ Source deletion preserves claims as ledger history and invalidates evidence.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Literal, Mapping, Optional
 
 from ..backends.blobs import BlobStore
@@ -40,6 +41,7 @@ class RetentionRuntime:
     exclude: Callable[[str, int, str, Optional[str]], Awaitable[object]]
     #: The image lane's own index, keyed by chunk ids like the text vectors; None without the lane.
     image_vectors: Optional[VectorIndex] = None
+    deferred_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 ClaimPolicy = Literal["keep", "exclude"]
@@ -267,7 +269,8 @@ async def forget(runtime: RetentionRuntime, space: str, episode_id: int,
         await runtime.emit(space, "forget", {"episode_id": episode_id, "error": type(error).__name__, "latency_ms": _ms(started)})
         raise
     episode = await runtime.episode_or_gone(space, episode_id)
-    if (space, episode.content_hash) in await runtime.documents.inflight():
+    from ..ingestion.deferred_text import is_deferred
+    if (space, episode.content_hash) in await runtime.documents.inflight() and not is_deferred(episode):
         raise InvalidInput("source indexing is unfinished; recover before forgetting it")
     chunks = await runtime.documents.chunks_of(space, episode_id)
     pending = await store.record_retirement(Retirement(
@@ -358,9 +361,10 @@ async def _finish_forget(runtime: RetentionRuntime, store: RetirementStore, pend
         raise InvalidInput("retirement identity does not match its tombstone")
     # A later explicit write of the same source key can have its own mark.
     # Do not clear that newer episode's unfinished indexing on this retry.
-    replacement = await runtime.documents.episode_by_hash(space, pending.content_hash)
-    if replacement is None:
-        await runtime.documents.clear_inflight(space, pending.content_hash)
+    async with runtime.deferred_write_lock:
+        replacement = await runtime.documents.episode_by_hash(space, pending.content_hash)
+        if replacement is None:
+            await runtime.documents.clear_inflight(space, pending.content_hash)
     receipt = pending.receipt.model_copy(update={"forgotten_at": stone.forgotten_at})
     await runtime.documents.bump_revision(space)
     payload: dict[str, object] = {
