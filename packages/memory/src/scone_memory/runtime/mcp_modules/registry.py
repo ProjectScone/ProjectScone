@@ -245,5 +245,3 @@ async def fact_ids_by_status(engine: MemoryEngine, space: str) -> dict[int, str]
 
 
 # -- the server ---------------------------------------------------------------
-
-

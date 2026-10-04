@@ -193,4 +193,3 @@ def register_memory_tools(server: MCPServer, engine: MemoryEngine, chosen: Calla
             return tool_error(f"reason must be 1..={MAX_REASON} chars, got {len(reason)}")
         await engine.close_fact(chosen(space), fact_id, reason)
         return ok_text(f"closed fact {fact_id}: {reason}")
-

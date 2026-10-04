@@ -129,4 +129,3 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         print(f"error: {e}", file=sys.stderr)
         return 2
     return 0
-

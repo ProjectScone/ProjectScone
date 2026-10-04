@@ -219,5 +219,3 @@ def http_app(engine: MemoryEngine, space: str = "default", keys: Optional[Mappin
     if transport.anonymous:
         return transport
     return BearerKeys(transport, keys or {}, roles or {})
-
-

@@ -536,4 +536,3 @@ def register_graph_tools(server: MCPServer, engine: MemoryEngine, chosen: Callab
                     description="The knowledge report of one space.")(report_markdown)
     server.resource("scone://{space}/graph/schema", name="space-graph-schema", mime_type="text/plain",
                     description="What one space's graph is made of.")(schema_lines_of)
-
