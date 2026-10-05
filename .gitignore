@@ -10,6 +10,8 @@ reference/
 *.tfvars.json
 *.tfplan
 /terraform/**/*.plan
+/terraform/**/*.plan.json
+/terraform/**/*.tfplan.json
 /terraform/**/crash.log
 **/.terraform.lock.hcl
 **/.env.local
