@@ -187,6 +187,27 @@ def external_entities(projection: EntityProjection) -> frozenset[str]:
 Adjacency = dict[str, dict[str, int]]
 
 
+def partition_associations(nodes: Sequence[str], edges: Sequence[tuple[str, str, int]]) -> tuple[tuple[str, ...], ...]:
+    """Partition caller-supplied associations without constructing ledger facts.
+
+    This bounded generic entry point shares Scone's deterministic weighted
+    community algorithm. It makes no claim about an association's meaning.
+    """
+    if len(nodes) > 256 or len(edges) > 1024 or len(set(nodes)) != len(nodes):
+        raise ValueError('association_topology_limit')
+    if any(not isinstance(node, str) or not 1 <= len(node) <= 128 for node in nodes):
+        raise ValueError('invalid_association_node')
+    graph: Adjacency = {node: {} for node in sorted(nodes)}
+    for left, right, weight in edges:
+        if left not in graph or right not in graph or left == right or type(weight) is not int or not 1 <= weight <= 1000000:
+            raise ValueError('invalid_association_edge')
+        if right in graph[left]:
+            raise ValueError('duplicate_association_edge')
+        graph[left][right] = graph[right][left] = weight
+    groups, _ = _partition(graph, 1.0)
+    return tuple(tuple(group) for group in groups)
+
+
 def _round(value: float) -> float:
     return round(value, 9)
 
