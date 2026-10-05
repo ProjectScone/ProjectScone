@@ -70,11 +70,13 @@ jobs:
       - name: Check deployment helper types
         run: |
           python -m pip install mypy==2.3.1
-          python -m mypy --strict scripts/terraform_env.py terraform/modules/compute/mount_volume.py
+          python -m mypy --strict scripts/terraform_env.py terraform/modules/compute/mount_volume.py terraform/hetzner/check_plan.py
       - name: Test private environment handling
         run: python -m unittest discover -s scripts -p test_terraform_env.py
       - name: Test Qdrant volume identity and mount guards
         run: python -m unittest discover -s terraform/modules/compute/tests -p test_mount_volume.py
+      - name: Test existing-host adoption plan policy
+        run: python -m unittest discover -s terraform/hetzner/tests -p test_check_plan.py
       - name: Check storage foundation with a mock provider
         run: |
           terraform -chdir=terraform init -backend=false -input=false
@@ -86,6 +88,14 @@ jobs:
           terraform -chdir=terraform/modules/compute init -backend=false -input=false
           terraform -chdir=terraform/modules/compute validate
           terraform -chdir=terraform/modules/compute test
+      - name: Check existing Hetzner adoption with a mock provider
+        env:
+          HCLOUD_TOKEN: ""
+          TF_CLI_CONFIG_FILE: /dev/null
+        run: |
+          terraform -chdir=terraform/hetzner init -backend=false -input=false
+          terraform -chdir=terraform/hetzner validate
+          terraform -chdir=terraform/hetzner test
 
   client:
     # The HTTP client is published separately and claims Python 3.9, so it
