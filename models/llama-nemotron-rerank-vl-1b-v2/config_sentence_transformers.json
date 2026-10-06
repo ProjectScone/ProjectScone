@@ -1,6 +1,0 @@
-{
-    "model_type": "CrossEncoder",
-    "activation_fn": "torch.nn.modules.linear.Identity",
-    "prompts": {},
-    "default_prompt_name": null
-}
