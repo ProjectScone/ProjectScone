@@ -33,7 +33,13 @@ memory/raw/
 # Private: the knowledge base and design docs are the proprietary part.
 /memory/
 docs/
-bench-data/
+# bench-data/ holds the committed public datasets; these are what prepare.py unpacks or downloads.
+bench-data/longmemeval_s.json
+bench-data/longmemeval_m_cleaned.json
+bench-data/longmemeval_m_cleaned.jsonl
+bench-data/ner/ontonotes5-*
+bench-data/**/*.partial
+bench-data/*.log
 bench-runs/
 # Python packages (native engine and HTTP client)
 packages/*/.venv/
