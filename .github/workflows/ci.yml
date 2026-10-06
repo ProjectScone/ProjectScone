@@ -11,15 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          # models/ holds ~5 GB of reranker weights that no job needs; fetch only the code.
-          sparse-checkout: |
-            .github
-            deploy
-            packages
-            scripts
-            terraform
-            tests
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -47,15 +38,6 @@ jobs:
       TF_IN_AUTOMATION: "1"
     steps:
       - uses: actions/checkout@v5
-        with:
-          # models/ holds ~5 GB of reranker weights that no job needs; fetch only the code.
-          sparse-checkout: |
-            .github
-            deploy
-            packages
-            scripts
-            terraform
-            tests
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -112,15 +94,6 @@ jobs:
         working-directory: packages/scone-client
     steps:
       - uses: actions/checkout@v5
-        with:
-          # models/ holds ~5 GB of reranker weights that no job needs; fetch only the code.
-          sparse-checkout: |
-            .github
-            deploy
-            packages
-            scripts
-            terraform
-            tests
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -178,15 +151,6 @@ jobs:
           --health-retries 30
     steps:
       - uses: actions/checkout@v5
-        with:
-          # models/ holds ~5 GB of reranker weights that no job needs; fetch only the code.
-          sparse-checkout: |
-            .github
-            deploy
-            packages
-            scripts
-            terraform
-            tests
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -226,15 +190,6 @@ jobs:
           --health-retries 12
     steps:
       - uses: actions/checkout@v5
-        with:
-          # models/ holds ~5 GB of reranker weights that no job needs; fetch only the code.
-          sparse-checkout: |
-            .github
-            deploy
-            packages
-            scripts
-            terraform
-            tests
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
