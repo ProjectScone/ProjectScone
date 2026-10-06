@@ -1,0 +1,3722 @@
+[
+  {
+    "answer": "pier 4",
+    "answer_session_ids": [
+      "syn_0_4"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_0_0",
+      "syn_0_1",
+      "syn_0_2",
+      "syn_0_3",
+      "syn_0_4",
+      "syn_0_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "env[\"SUPERMEMORY_API_KEY\"]",
+          "role": "user"
+        },
+        {
+          "content": "style=for-the-badge&labelColor=f3f4f6)](https://www",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "|\n| `containerTagPrefix`     | `string`   | `\"codex\"`      | Legacy prefix retained when reading containers created by older versions",
+          "role": "user"
+        },
+        {
+          "content": "jsonc`:\n\n```jsonc\n{\n  \"apiKey\": \"sm_",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "|\n| `injectProfile`          | `boolean`  | `true`         | Whether to fetch and inject the user profile",
+          "role": "user"
+        },
+        {
+          "content": "When the API returns a non-success status code (that is, 4xx or 5xx\nresponse), a subclass of `supermemory",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": ")\n\n**`UnsupportedLanguageError`**: Thrown when the file extension is not supported\n\nBoth errors have a `_tag` property for Effect-style error handling",
+          "role": "user"
+        },
+        {
+          "content": "__version__)\n```\n\n## Requirements\n\nPython 3",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "\"\",\n});\n\nasync function run() {\n  const result = await supermemory",
+          "role": "user"
+        },
+        {
+          "content": "json`\n- Copies pre-bundled hook scripts to `~/",
+          "role": "assistant"
+        },
+        {
+          "content": "note that End Error Handling moved to pier 4",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "To stream the response body, use `",
+          "role": "user"
+        },
+        {
+          "content": "env[\"SUPERMEMORY_API_KEY\"]",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "where did End Error Handling move to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_0_lookup",
+    "question_type": "lookup"
+  },
+  {
+    "answer": "pier 4",
+    "answer_session_ids": [
+      "syn_1_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_1_0",
+      "syn_1_1",
+      "syn_1_2",
+      "syn_1_3",
+      "syn_1_4",
+      "syn_1_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "com/mcp/%7B%22name%22%3A%22supermemory-mcp%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fsupermemory-new",
+          "role": "user"
+        },
+        {
+          "content": "thinking) // { enabled: true, budget_tokens: 10000 }\n\n// Convert to Google format with thinking\nconst googleRequest = fromUniversal(\"google\", universal)\n// Includes thinkingConfig: { thinkingBudget: 10000 }\n```\n\n### Structured Output\n\n```typescript\n// OpenAI structured output\nconst openaiRequest = {\n  model: \"gpt-4o\",\n  messages: [{ role: \"user\", content: \"Extract the name and age\" }],\n  response_format: {\n    type: \"json_schema\",\n    json_schema: {\n      name: \"person\",\n      schema: { type: \"object\", properties: { name: { type: \"string\" }, age: { type: \"number\" } } }\n    }\n  }\n}\n\nconst universal = toUniversal(\"openai\", openaiRequest)\n// universal",
+          "role": "assistant"
+        },
+        {
+          "content": "INDEX Wait is assigned to desk 12",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "wtf/r/Clipboard_May_9,_2024_at_12",
+          "role": "user"
+        },
+        {
+          "content": "add({\n    content: \"<value>\",\n  });\n\n  console",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "You can enable this by installing `aiohttp`:\n\n```sh\n# install from PyPI\npip install supermemory[aiohttp]\n```\n\nThen you can enable it by instantiating the client with `http_client=DefaultAioHttpClient()`:\n\n```python\nimport os\nimport asyncio\nfrom supermemory import DefaultAioHttpClient\nfrom supermemory import AsyncSupermemory\n\n\nasync def main() -> None:\n    async with AsyncSupermemory(\n        api_key=os",
+          "role": "user"
+        },
+        {
+          "content": "The following example shows how to:\n- route requests through a proxy server using [undici](https://www",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": ")\n\n**`UnsupportedLanguageError`**: Thrown when the file extension is not supported\n\nBoth errors have a `_tag` property for Effect-style error handling",
+          "role": "user"
+        },
+        {
+          "content": "For example:\n```typescript\nimport { Supermemory } from \"supermemory\";\n\nconst supermemory = new Supermemory({\n  apiKey: process",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "gitignore` if it contains an API key",
+          "role": "user"
+        },
+        {
+          "content": ", `async getUser(id: string): Promise<User>`)\n- Docstring/comments if present\n- Byte and line ranges\n\n### 3",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#suggestbuckets) - Suggest profile buckets\n\n</details>\n<",
+          "role": "user"
+        },
+        {
+          "content": "All that and more, for FREE",
+          "role": "assistant"
+        },
+        {
+          "content": "update: INDEX Wait is now assigned to pier 4",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what is INDEX Wait assigned to now?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_1_knowledge-update",
+    "question_type": "knowledge-update"
+  },
+  {
+    "answer": "the north annex",
+    "answer_session_ids": [
+      "syn_2_2"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_2_0",
+      "syn_2_1",
+      "syn_2_2",
+      "syn_2_3",
+      "syn_2_4",
+      "syn_2_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "**Provider Detection**\n\nAutomatically detect which provider format you're working with:\n\n```typescript\nimport { detectProvider } from 'llm-bridge'\n\ndetectProvider(\"https://api",
+          "role": "user"
+        },
+        {
+          "content": "## Tool Usage\n\nThe `supermemory` tool is available to the agent:\n\n| Mode      | Args                         | Description       |\n| --------- | ---------------------------- | ----------------- |\n| `add`     | `content`, `type",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts', sourceCode)\n\nfor (const c of chunks) {\n  console",
+          "role": "user"
+        },
+        {
+          "content": "- **Auto-Capture** — After every AI turn, the conversation is sent to Supermemory for extraction and long-term storage",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "`userContainerTag` is treated as a legacy personal read",
+          "role": "user"
+        },
+        {
+          "content": "Run this command:\n   ```\n   npx wrangler kv:namespace create md_cache\n   ```\n3",
+          "role": "assistant"
+        },
+        {
+          "content": "on that day Factory.AI's Droid CLI relocated to the north annex",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "-- Start Debugging [debug] -->\n## Debugging\n\nYou can setup your SDK to emit debug logs for SDK requests and responses",
+          "role": "user"
+        },
+        {
+          "content": "com/deeplink/mcp-install-dark",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "|\n| `similarityThreshold`    | `number`   | `0",
+          "role": "user"
+        },
+        {
+          "content": "add({\n    content: \"<value>\",\n  });\n\n  console",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Clone the repo and download dependencies\n\n```\ngit clone https://github",
+          "role": "user"
+        },
+        {
+          "content": "md#delete) - Delete container tag\n- [`containerTagsGet`](docs/sdks/containertags/README",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "in March what did Factory.AI's Droid CLI relocate to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_2_temporal-reasoning",
+    "question_type": "temporal-reasoning"
+  },
+  {
+    "answer": "desk 12",
+    "answer_session_ids": [
+      "syn_3_0",
+      "syn_3_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_3_0",
+      "syn_3_1",
+      "syn_3_2",
+      "syn_3_3",
+      "syn_3_4",
+      "syn_3_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "# Supermemory MCP - Universal Memory across LLMs\n\n> [",
+          "role": "user"
+        },
+        {
+          "content": "## Commands\n\n```\nsmfs login                      one-time auth, stores API key locally\nsmfs whoami                     show current user, org, API endpoint\nsmfs mount <tag>                mount a container tag\nsmfs unmount <tag>              unmount and drain pending pushes\nsmfs list                       show all running mounts\nsmfs status <tag>               daemon health and queue depth\nsmfs logs <tag>                 tail the daemon log\nsmfs sync <tag>                 force a sync cycle now\nsmfs grep \"query\" [path]        semantic search inside a container\nsmfs init                       install the grep shell wrapper\nsmfs install                    self-install the binary to ~/",
+          "role": "assistant"
+        },
+        {
+          "content": "half the plan: Key covers desk 12",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "Two access flows depending on the runtime:\n\n- **Mount it as a directory",
+          "role": "user"
+        },
+        {
+          "content": "md#getbyid) - Get connection (by id)\n- [`connectionsGetByTag`](docs/sdks/connections/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "\",\n\n  // Supermemory API base URL (point at a self-hosted instance, e",
+          "role": "user"
+        },
+        {
+          "content": "\", body) // \"google\"\ndetectProvider(\"https://api",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": ")`\n\nStream batch results as files complete processing",
+          "role": "user"
+        },
+        {
+          "content": "##### _Response Types_\n\nAdd `Content-Type: text/plain` in headers for plain text response",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md) |\n| Project Structure | [src/README",
+          "role": "user"
+        },
+        {
+          "content": "55` |\n| `maxMemories` | Max project memories injected at session start | `10` |\n| `maxProjectMemories` | Max project memories injected at session start | `5` |\n| `injectProfile` | Whether to inject user profile at session start | `true` |\n| `signalExtraction` | Capture only turns containing durable-signal keywords | `false` |\n| `signalKeywords` | Keywords that trigger signal-based capture | `remember`, `architecture`, `decision`, `bug`, `fix` |\n| `signalTurnsBefore` | Number of nearby turns retained around a signal | `3` |\n\nYou can set these via the AI using `supermemory_set_config`, or create/edit the file manually",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "RateLimitError as e:\n    print(\"A 429 status code was received; we should back off a bit",
+          "role": "user"
+        },
+        {
+          "content": "`codex-supermemory` wires Supermemory into Codex CLI's\nhooks system so your coding agent remembers your stack, preferences, prior decisions,\nand the lessons learned across every project — automatically",
+          "role": "assistant"
+        },
+        {
+          "content": "other half: the backup for desk 12 is the amber protocol",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what covers Key's area and what is its backup?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_3_multi-session",
+    "question_type": "multi-session"
+  },
+  {
+    "answer": "nothing recorded links Uses Bun and budget code 7741",
+    "answer_session_ids": [
+      "syn_4_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_4_0",
+      "syn_4_1",
+      "syn_4_2",
+      "syn_4_3",
+      "syn_4_4",
+      "syn_4_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "Note that requests that time out are [retried twice by default](#retries)",
+          "role": "user"
+        },
+        {
+          "content": "com/user-attachments/assets/9b0fa2a0-a954-41ee-ac9e-da6e63fc0881\" />\n</a>\n\nRead a detailed blog about it - https://supermemory",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "|\n| `supermemory_search`  | Search memories by query",
+          "role": "user"
+        },
+        {
+          "content": "json`:\n\n### Options\n\n| Key                           | Type      | Default               | Description                                               |\n| ----------------------------- | --------- | --------------------- | --------------------------------------------------------- |\n| `apiKey`                      | `string`  | —                       | Supermemory API key",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Run `bun run sync` to copy this repository to `~/",
+          "role": "user"
+        },
+        {
+          "content": "-- Start SDK Installation [installation] -->\n## SDK Installation\n\n> [",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "### Privacy\n\n```\nAPI key is <private>sk-abc123</private>\n```\n\nContent in `<private>` tags is never stored",
+          "role": "user"
+        },
+        {
+          "content": "json`:\n\n```json\n{\n  \"enableCustomContainers\": true,\n  \"customContainers\": [\n    { \"tag\": \"personal\", \"description\": \"Personal life — family, health, hobbies, routines\" },\n    { \"tag\": \"work\", \"description\": \"Work-related — projects, deadlines, meetings, colleagues\" },\n    { \"tag\": \"code_style\", \"description\": \"Coding preferences — languages, tools, patterns, conventions\" }\n  ],\n  \"customContainerInstructions\": \"Route coding preferences to code_style",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "You can enable logging by setting the environment variable `SUPERMEMORY_LOG` to `info`",
+          "role": "user"
+        },
+        {
+          "content": "com/org/supermemory-hnj/supermemory)",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "It's like a perplexity / searchGPT clone, but for _you_",
+          "role": "user"
+        },
+        {
+          "content": "You'll need a Supermemory API key",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "what did Uses Bun say about budget code 7741?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_4_abstention",
+    "question_type": "abstention"
+  },
+  {
+    "answer": "budget code 7741",
+    "answer_session_ids": [
+      "syn_5_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_5_0",
+      "syn_5_1",
+      "syn_5_2",
+      "syn_5_3",
+      "syn_5_4",
+      "syn_5_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "md\n```\n\n`smfs mount <container_tag>` mounts the named Supermemory container as a real directory",
+          "role": "user"
+        },
+        {
+          "content": "Changes that we do not expect to impact the vast majority of users in practice",
+          "role": "assistant"
+        },
+        {
+          "content": "note that Error moved to budget code 7741",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": ")`\n\nStream batch results as files complete processing",
+          "role": "user"
+        },
+        {
+          "content": "add({\n    content: \"<value>\",\n  });\n\n  console",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## License\n\nMIT\n\n# codex-supermemory\n\n> Persistent memory for OpenAI Codex CLI — powered by [Supermemory](https://supermemory",
+          "role": "user"
+        },
+        {
+          "content": "<details>\n\n<summary>Available standalone functions</summary>\n\n- [`add`](docs/sdks/supermemory/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "```\n\nWhen an official image is published, the same run flags apply:\n\n```sh\ndocker run --rm -it \\\n  --device /dev/fuse \\\n  --cap-add SYS_ADMIN \\\n  -e SUPERMEMORY_API_KEY=\"$SUPERMEMORY_API_KEY\" \\\n  ghcr",
+          "role": "user"
+        },
+        {
+          "content": "Personal topics to personal",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#list) - List documents\n* [listProcessing](docs/sdks/documents/README",
+          "role": "user"
+        },
+        {
+          "content": "addHook(\"requestError\", (error, request) => {\n  console",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "[Install in VS Code](https://img",
+          "role": "user"
+        },
+        {
+          "content": "com` → `mcp-example-com`)\n- Handles OAuth authentication for remote servers\n\n### Supermemory project support\n\nWhen installing a server hosted on `https://api",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "where did Error move to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_5_lookup",
+    "question_type": "lookup"
+  },
+  {
+    "answer": "the cedar room",
+    "answer_session_ids": [
+      "syn_6_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_6_0",
+      "syn_6_1",
+      "syn_6_2",
+      "syn_6_3",
+      "syn_6_4",
+      "syn_6_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "\" }\n  ],\n  temperature: 0",
+          "role": "user"
+        },
+        {
+          "content": "json`\n\nPer-repo overrides",
+          "role": "assistant"
+        },
+        {
+          "content": "Siblings What is assigned to the amber protocol",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "Explicit `repoContainerTag`/`projectContainerTag` overrides remain the canonical\nwrite destination",
+          "role": "user"
+        },
+        {
+          "content": "[See Error Classes](#error-classes)",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts', sourceCode)\n\nfor (const c of chunks) {\n  console",
+          "role": "user"
+        },
+        {
+          "content": "|\n\n**Incremental capture**: Memories are saved every N turns (default: 3) during the session",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "org/3/library/logging",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `enableCustomContainers`       | `boolean`  | `false`        | Enable AI-driven routing to custom containers",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "output(),\n    context_aggregator",
+          "role": "user"
+        },
+        {
+          "content": "md#import) - Sync connection\n- [`connectionsList`](docs/sdks/connections/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Use the client to authenticate",
+          "role": "user"
+        },
+        {
+          "content": "Get one at [supermemory",
+          "role": "assistant"
+        },
+        {
+          "content": "update: Siblings What is now assigned to the cedar room",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what is Siblings What assigned to now?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_6_knowledge-update",
+    "question_type": "knowledge-update"
+  },
+  {
+    "answer": "pier 4",
+    "answer_session_ids": [
+      "syn_7_3"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_7_0",
+      "syn_7_1",
+      "syn_7_2",
+      "syn_7_3",
+      "syn_7_4",
+      "syn_7_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "Default to project container for ambiguous content",
+          "role": "user"
+        },
+        {
+          "content": "sh/) or [yarn](https://classic",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "- **Plug the virtual bash tool into the agent's tool-set",
+          "role": "user"
+        },
+        {
+          "content": "You'll need a Supermemory API key",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Contents\n\n- [Install](#install)\n- [Quickstart](#quickstart)\n- [Memory generation paths](#memory-generation-paths)\n- [Commands](#commands)\n- [Mount flags](#mount-flags)\n- [Semantic search](#semantic-search)\n- [`bash/` virtual bash tool](#bash-virtual-bash-tool)\n- [Build from source](#build-from-source)\n- [Docker and devcontainers](#docker-and-devcontainers)\n- [License](#license)\n\n## Install\n\n```sh\ncurl -fsSL https://smfs",
+          "role": "user"
+        },
+        {
+          "content": "- 🏷️ **Personal + project routing** — `sm_scope` metadata keeps automatic/personal\n  memories distinguishable from explicit project knowledge in the shared container",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "The hash comes from the normalized Git remote, so clones share memory while\nsame-named repositories do not collide",
+          "role": "user"
+        },
+        {
+          "content": "md#mergestatus) - Get container tag merge status\n- [`containerTagsUpdate`](docs/sdks/containertags/README",
+          "role": "assistant"
+        },
+        {
+          "content": "on that day Stack relocated to pier 4",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "`                     | View user profile |\n| `list`    | `scope",
+          "role": "user"
+        },
+        {
+          "content": "toml`\n- Registers the hooks in `~/",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "entities) // [{ name: 'getUser', type: 'method',",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `/supermemory-save`    | `/supermemory-save [--container <tag>] <content>`           | Save a specific memory explicitly",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "in April what did Stack relocate to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_7_temporal-reasoning",
+    "question_type": "temporal-reasoning"
+  },
+  {
+    "answer": "pier 4",
+    "answer_session_ids": [
+      "syn_8_0",
+      "syn_8_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_8_0",
+      "syn_8_1",
+      "syn_8_2",
+      "syn_8_3",
+      "syn_8_4",
+      "syn_8_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "message`     | `string`   | Error message                                                                           |\n| `error",
+          "role": "user"
+        },
+        {
+          "content": "-- Start Error Handling [errors] -->\n## Error Handling\n\n[`SupermemoryError`](",
+          "role": "assistant"
+        },
+        {
+          "content": "half the plan: Placeholder covers pier 4",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "| Tool                  | Description                                            |\n| --------------------- | ------------------------------------------------------ |\n| `supermemory_store`   | Save information to memory",
+          "role": "user"
+        },
+        {
+          "content": "Unmount when done:\n\n```sh\nsmfs unmount agent_memory\n```\n\n## Memory generation paths\n\nFiles stored in a mount are durable everywhere, but only files under the container's **memory paths** get processed by Supermemory's memory pipeline (the part that extracts structured facts and makes them semantically searchable)",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "log(\"Endpoint:\", `${request",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `/supermemory-profile` | `/supermemory-profile`                                      | Show remembered profile facts",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "** On your first prompt, a browser window will open to\n   authenticate with Supermemory automatically",
+          "role": "user"
+        },
+        {
+          "content": "No local infrastructure required",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#buckets) - Get profile buckets\n- [`search`](docs/sdks/supermemory/README",
+          "role": "user"
+        },
+        {
+          "content": "For example:\n```typescript\nimport { Supermemory } from \"supermemory\";\n\nconst supermemory = new Supermemory({\n  apiKey: process",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "- `sm_scope` metadata preserves optional personal/project filtering",
+          "role": "user"
+        },
+        {
+          "content": "Is the user authenticated, or is `SUPERMEMORY_API_KEY` set",
+          "role": "assistant"
+        },
+        {
+          "content": "other half: the backup for pier 4 is budget code 7741",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what covers Placeholder's area and what is its backup?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_8_multi-session",
+    "question_type": "multi-session"
+  },
+  {
+    "answer": "nothing recorded links Installs and desk 12",
+    "answer_session_ids": [
+      "syn_9_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_9_0",
+      "syn_9_1",
+      "syn_9_2",
+      "syn_9_3",
+      "syn_9_4",
+      "syn_9_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "md) |\n| Add Judge | [src/judges/README",
+          "role": "user"
+        },
+        {
+          "content": "<img width=\"590\" height=\"98\" alt=\"Screenshot 2026-01-15 at 5 49 27 PM\" src=\"https://github",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "com/mcp/%7B%22name%22%3A%22supermemory-mcp%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fsupermemory-new",
+          "role": "user"
+        },
+        {
+          "content": "com/code-yeongyu/oh-my-opencode), disable its built-in auto-compact hook to let supermemory handle context compaction:\n\nAdd to `~/",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Env var `SUPERMEMORY_API_KEY` takes precedence over config file",
+          "role": "user"
+        },
+        {
+          "content": "```py\nimport httpx\n\nresponse = client",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Quick Start\n\n```bash\nbun i && bun run setup:backend\n```\n\n```bash\n# backend/",
+          "role": "user"
+        },
+        {
+          "content": "Timeout`](https://www",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Unmount when done:\n\n```sh\nsmfs unmount agent_memory\n```\n\n## Memory generation paths\n\nFiles stored in a mount are durable everywhere, but only files under the container's **memory paths** get processed by Supermemory's memory pipeline (the part that extracts structured facts and makes them semantically searchable)",
+          "role": "user"
+        },
+        {
+          "content": "env` file\nso that your API Key is not stored in source control",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": ", `work`, `personal`, `bookmarks`)",
+          "role": "user"
+        },
+        {
+          "content": "log(\"Endpoint:\", `${request",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "what did Installs say about desk 12?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_9_abstention",
+    "question_type": "abstention"
+  },
+  {
+    "answer": "channel 6",
+    "answer_session_ids": [
+      "syn_10_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_10_0",
+      "syn_10_1",
+      "syn_10_2",
+      "syn_10_3",
+      "syn_10_4",
+      "syn_10_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "**\n\n## How it works\n\nCodex CLI supports a hooks system that lets external scripts run at specific\nlifecycle events",
+          "role": "user"
+        },
+        {
+          "content": "## Self-hosting\n\nTo self host, get an API key at https://console",
+          "role": "assistant"
+        },
+        {
+          "content": "note that CURSOR_USER_EMAIL moved to channel 6",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "user(),\n    memory,  # Supermemory\n    llm,\n    tts,\n    transport",
+          "role": "user"
+        },
+        {
+          "content": "### How to tell whether `None` means `null` or missing\n\nIn an API response, a field may be explicitly `null`, or missing entirely; in either case, its value is `None` in this library",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "com/supermemoryai/supermemory/tree/main/apps/mcp\n\n[",
+          "role": "user"
+        },
+        {
+          "content": "Examples:\n\n```bash\n# Explicit project\nnpx install-mcp https://api",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "When the AI saves a memory (via `/supermemory-save`), it picks the best matching\n   container based on the descriptions and uses `--container <tag>`",
+          "role": "user"
+        },
+        {
+          "content": "error)\n  } else {\n    await indexChunks(result",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "<img width=\"3584\" height=\"2154\" alt=\"original\" src=\"https://github",
+          "role": "user"
+        },
+        {
+          "content": "universal, \"anthropic\")\nconst googleError = translateError(error",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "jsonc`:\n\n```jsonc\n{\n  // API key (can also use SUPERMEMORY_API_KEY env var)\n  \"apiKey\": \"sm_",
+          "role": "user"
+        },
+        {
+          "content": "Unmount when done:\n\n```sh\nsmfs unmount agent_memory\n```\n\n## Memory generation paths\n\nFiles stored in a mount are durable everywhere, but only files under the container's **memory paths** get processed by Supermemory's memory pipeline (the part that extracts structured facts and makes them semantically searchable)",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "where did CURSOR_USER_EMAIL move to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_10_lookup",
+    "question_type": "lookup"
+  },
+  {
+    "answer": "the amber protocol",
+    "answer_session_ids": [
+      "syn_11_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_11_0",
+      "syn_11_1",
+      "syn_11_2",
+      "syn_11_3",
+      "syn_11_4",
+      "syn_11_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "The following example shows how to:\n- route requests through a proxy server using [undici](https://www",
+          "role": "user"
+        },
+        {
+          "content": "ts', code),\n  (chunk) => Effect",
+          "role": "assistant"
+        },
+        {
+          "content": "Enter is assigned to budget code 7741",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "md#update) - Update document\n- [`documentsUploadFile`](docs/sdks/documents/README",
+          "role": "user"
+        },
+        {
+          "content": "`codex-supermemory` wires Supermemory into Codex CLI's\nhooks system so your coding agent remembers your stack, preferences, prior decisions,\nand the lessons learned across every project — automatically",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Installing MCPs is a huge pain, so I made a CLI tool to make it easier",
+          "role": "user"
+        },
+        {
+          "content": "com/v1/chat/completions\", body)  // \"openai\"\ndetectProvider(\"https://api",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "The SDK can be installed with either [npm](https://www",
+          "role": "user"
+        },
+        {
+          "content": "com)\n- [Cloudflare Pages](https://pages",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "error); // string\n        console",
+          "role": "user"
+        },
+        {
+          "content": "-- End Requirements [requirements] -->\n\n<",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "gitignore` if it contains an API key",
+          "role": "user"
+        },
+        {
+          "content": "md#update) - Update document\n- [`documentsUploadFile`](docs/sdks/documents/README",
+          "role": "assistant"
+        },
+        {
+          "content": "update: Enter is now assigned to the amber protocol",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what is Enter assigned to now?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_11_knowledge-update",
+    "question_type": "knowledge-update"
+  },
+  {
+    "answer": "pier 4",
+    "answer_session_ids": [
+      "syn_12_1"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_12_0",
+      "syn_12_1",
+      "syn_12_2",
+      "syn_12_3",
+      "syn_12_4",
+      "syn_12_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "It has the following properties:\n\n| Property            | Type       | Description                                                                             |\n| ------------------- | ---------- | --------------------------------------------------------------------------------------- |\n| `error",
+          "role": "user"
+        },
+        {
+          "content": "**Provider Detection**\n\nAutomatically detect which provider format you're working with:\n\n```typescript\nimport { detectProvider } from 'llm-bridge'\n\ndetectProvider(\"https://api",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "**Returns:** `string`\n\n---\n\n### `detectLanguage(filepath)`\n\nDetect programming language from file extension",
+          "role": "user"
+        },
+        {
+          "content": "com:8083\",\n    http_client=DefaultHttpxClient(\n        proxy=\"http://my",
+          "role": "assistant"
+        },
+        {
+          "content": "on that day Copies relocated to pier 4",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "log(result);\n}\n\nrun();\n\n```\n<",
+          "role": "user"
+        },
+        {
+          "content": "get(\"SUPERMEMORY_API_KEY\"),  # This is the default and can be omitted\n        http_client=DefaultAioHttpClient(),\n    ) as client:\n        response = await client",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "### Configuring the HTTP client\n\nYou can directly override the [httpx client](https://www",
+          "role": "user"
+        },
+        {
+          "content": "log`\n\n#### Step 5: Initialize codebase memory (optional)\n\nRun `/supermemory-init` to have the agent explore and memorize the codebase",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "**\n\nWhich means you can carry your memories to any MCP client",
+          "role": "user"
+        },
+        {
+          "content": "provider) // \"openai\"\nconsole",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "query('SELECT * FROM users WHERE id =",
+          "role": "user"
+        },
+        {
+          "content": "init, dispatcher } as RequestInit),\n});\n\nhttpClient",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "in February what did Copies relocate to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_12_temporal-reasoning",
+    "question_type": "temporal-reasoning"
+  },
+  {
+    "answer": "desk 12",
+    "answer_session_ids": [
+      "syn_13_0",
+      "syn_13_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_13_0",
+      "syn_13_1",
+      "syn_13_2",
+      "syn_13_3",
+      "syn_13_4",
+      "syn_13_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "##### _OPTIONAL PARAMETERS_\n\n`enableDetailedResponse` (boolean: false) -> Toggle for detailed response with full HTML content",
+          "role": "user"
+        },
+        {
+          "content": "/src/models/errors/http-client-errors",
+          "role": "assistant"
+        },
+        {
+          "content": "half the plan: Authorization Bearer covers desk 12",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "## License\n\nMIT\n\n# Cursor Supermemory\n\nPersistent AI memory for Cursor — powered by [Supermemory](https://supermemory",
+          "role": "user"
+        },
+        {
+          "content": "jsonc`\n- Create the `/supermemory-init` command\n\n#### Step 2: Verify the config\n\n```bash\ncat ~/",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "**Returns:** `Language | null`\n\n---\n\n### ChunkOptions\n\n| Option | Type | Default | Description |\n|--------|------|---------|-------------|\n| `maxChunkSize` | `number` | `1500` | Maximum chunk size in bytes |\n| `contextMode` | `'none' \\| 'minimal' \\| 'full'` | `'full'` | How much context to include |\n| `siblingDetail` | `'none' \\| 'names' \\| 'signatures'` | `'signatures'` | Level of sibling detail |\n| `filterImports` | `boolean` | `false` | Filter out import statements |\n| `language` | `Language` | auto | Override language detection |\n| `overlapLines` | `number` | `10` | Lines from previous chunk to include in `contextualizedText` |\n\n### BatchOptions\n\nExtends `ChunkOptions` with:\n\n| Option | Type | Default | Description |\n|--------|------|---------|-------------|\n| `concurrency` | `number` | `10` | Maximum files to process concurrently |\n| `onProgress` | `function` | - | Callback `(completed, total, filepath, success) => void` |\n\n---\n\n### Supported Languages\n\n| Language | Extensions |\n|----------|------------|\n| TypeScript | `",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `signalTurnsBefore`      | `number`   | `3`            | Include N turns before a signal for context",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "0),\n)\n\n# Override per-request:\nclient",
+          "role": "user"
+        },
+        {
+          "content": "md#list) - List documents\n- [`documentsListProcessing`](docs/sdks/documents/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "The library includes type definitions for all request params and response fields,\nand offers both synchronous and asynchronous clients powered by [httpx](https://github",
+          "role": "user"
+        },
+        {
+          "content": "Is the user authenticated, or is `SUPERMEMORY_API_KEY` set",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "> While this repo is maintained and still active, the code for it will be maintained in this moonorepo here https://github",
+          "role": "user"
+        },
+        {
+          "content": "Effect<BatchResult[], never>`\n\n---\n\n### `chunkBatchStreamEffect(files, options",
+          "role": "assistant"
+        },
+        {
+          "content": "other half: the backup for desk 12 is the cedar room",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what covers Authorization Bearer's area and what is its backup?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_13_multi-session",
+    "question_type": "multi-session"
+  },
+  {
+    "answer": "nothing recorded links Bring and desk 12",
+    "answer_session_ids": [
+      "syn_14_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_14_0",
+      "syn_14_1",
+      "syn_14_2",
+      "syn_14_3",
+      "syn_14_4",
+      "syn_14_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": ") │    │  Mem0, Zep) │    │  Claude",
+          "role": "user"
+        },
+        {
+          "content": "**Inherit from [`SupermemoryError`](",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Clone the repo and download dependencies\n\n```\ngit clone https://github",
+          "role": "user"
+        },
+        {
+          "content": "ai\",\n  apiKey: process",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts) is the base class for all HTTP error responses",
+          "role": "user"
+        },
+        {
+          "content": "⭐\n\n# MemoryBench\n\nA pluggable benchmarking framework for evaluating memory and context systems",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "chunks)\n  }\n}\n```\n\n### Effect Integration\n\nFor Effect-based pipelines:\n\n```typescript\nimport { chunkStreamEffect } from 'code-chunk'\nimport { Effect, Stream } from 'effect'\n\nconst program = Stream",
+          "role": "user"
+        },
+        {
+          "content": "md#listdocuments) - List documents\n* [import](docs/sdks/connections/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ai\",\n\n  // Min similarity for memory retrieval (0-1)\n  \"similarityThreshold\": 0",
+          "role": "user"
+        },
+        {
+          "content": "Follow the README in that directory\n3",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#listdocuments) - List documents\n- [`connectionsResources`](docs/sdks/connections/README",
+          "role": "user"
+        },
+        {
+          "content": "com/server --client claude-desktop\n```\n\nThe tool automatically:\n\n- Converts simple package names to `npx package-name`\n- Preserves full commands as-is\n- Infers server names from package names or URLs (e",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "what did Bring say about desk 12?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_14_abstention",
+    "question_type": "abstention"
+  },
+  {
+    "answer": "route 9",
+    "answer_session_ids": [
+      "syn_15_4"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_15_0",
+      "syn_15_1",
+      "syn_15_2",
+      "syn_15_3",
+      "syn_15_4",
+      "syn_15_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "org/project/python-dotenv/)\nto add `SUPERMEMORY_API_KEY=\"My API Key\"` to your `",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `customContainers`            | `array`   | `[]`                  | Custom containers with `tag` and `description`",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Quick Start\n\n```bash\nbun i && bun run setup:backend\n```\n\n```bash\n# backend/",
+          "role": "user"
+        },
+        {
+          "content": ", `async getUser(id: string): Promise<User>`)\n- Docstring/comments if present\n- Byte and line ranges\n\n### 3",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Searching only when needed also keeps more usage on your plan\n- **supermemory-search** — Ask about past work or previous sessions, Claude searches your memories\n- **supermemory-save** — Ask to save something important, Claude saves it for the team\n\n### Shared Agents memory\n\nClaude Code, Codex, and OpenCode use one container for a repository:\n\n- `repo_<project-name>__<remote-hash>` stores automatic capture and every explicit save",
+          "role": "user"
+        },
+        {
+          "content": "env` file\nso that your API Key is not stored in source control",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "log(reconstructed === original) // Perfect equality",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `signalTurnsBefore`      | `number`   | `3`            | Include N turns before a signal for context",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "/agent_memory/\nls agent_memory/\ncat agent_memory/memory/notes",
+          "role": "user"
+        },
+        {
+          "content": "groupEnd();\n});\n\nconst sdk = new Supermemory({ httpClient: httpClient });\n```\n<",
+          "role": "assistant"
+        },
+        {
+          "content": "note that GPT-4o moved to route 9",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "md#getbytag) - Get connection (by provider)\n* [listDocuments](docs/sdks/connections/README",
+          "role": "user"
+        },
+        {
+          "content": "**Universal Format Translation**\n\nLLM Bridge converts between provider-specific formats through a universal intermediate format:\n\n```\nOpenAI Chat ←→ Universal ←→ Anthropic\n     ↕                        ↕\nOpenAI Responses ←→ Universal ←→ Google\n```\n\n### 2",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "where did GPT-4o move to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_15_lookup",
+    "question_type": "lookup"
+  },
+  {
+    "answer": "pier 4",
+    "answer_session_ids": [
+      "syn_16_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_16_0",
+      "syn_16_1",
+      "syn_16_2",
+      "syn_16_3",
+      "syn_16_4",
+      "syn_16_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "com/supermemoryai/python-sdk/tree/main/src/supermemory/_response",
+          "role": "user"
+        },
+        {
+          "content": "ai)**\n\n# Markdowner ⚡📝\n\nA fast tool to convert any website into LLM-ready markdown data",
+          "role": "assistant"
+        },
+        {
+          "content": "Git is assigned to pier 4",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "log(reconstructed === original) // Perfect equality",
+          "role": "user"
+        },
+        {
+          "content": "Useful for large files",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "55` |\n| `maxMemories` | Max project memories injected at session start | `10` |\n| `maxProjectMemories` | Max project memories injected at session start | `5` |\n| `injectProfile` | Whether to inject user profile at session start | `true` |\n| `signalExtraction` | Capture only turns containing durable-signal keywords | `false` |\n| `signalKeywords` | Keywords that trigger signal-based capture | `remember`, `architecture`, `decision`, `bug`, `fix` |\n| `signalTurnsBefore` | Number of nearby turns retained around a signal | `3` |\n\nYou can set these via the AI using `supermemory_set_config`, or create/edit the file manually",
+          "role": "user"
+        },
+        {
+          "content": "org/3/reference/datamodel",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Effect<BatchResult[], never>`\n\n---\n\n### `chunkBatchStreamEffect(files, options",
+          "role": "user"
+        },
+        {
+          "content": "However, this is a difficult challenge, as I wrote in this blog post: [The API layer for using intelligence is completely broken",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts', code),\n  (chunk) => Effect",
+          "role": "user"
+        },
+        {
+          "content": "**Streaming Support**\n\nParse and emit Server-Sent Events (SSE) streams for all providers:\n\n- **Parsers**: Convert provider SSE streams → universal stream events\n- **Emitters**: Convert universal stream events → provider SSE streams\n- **Handler**: Full stream translation pipeline with optional transforms\n\n### 4",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": ")`\n\nChunk source code into semantic pieces with context",
+          "role": "user"
+        },
+        {
+          "content": "`         | Delete memory     |\n\n**Scopes:** `user` (personal memories for the current project), `project` (default)\n\n**Types:** `project-config`, `architecture`, `error-solution`, `preference`, `learned-pattern`, `conversation`\n\nOpenCode sends the same shared coding-agent entity context as Claude Code and\nCodex",
+          "role": "assistant"
+        },
+        {
+          "content": "update: Git is now assigned to pier 4",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what is Git assigned to now?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_16_knowledge-update",
+    "question_type": "knowledge-update"
+  },
+  {
+    "answer": "the cedar room",
+    "answer_session_ids": [
+      "syn_17_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_17_0",
+      "syn_17_1",
+      "syn_17_2",
+      "syn_17_3",
+      "syn_17_4",
+      "syn_17_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "html#fsopenasblobpath-options)",
+          "role": "user"
+        },
+        {
+          "content": "md)\n\n* [list](docs/sdks/containertags/README",
+          "role": "assistant"
+        },
+        {
+          "content": "on that day Supermemory Docs](https://supermemory.ai/docs relocated to the cedar room",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "add(\n    content=\"content\",\n)\nprint(response",
+          "role": "user"
+        },
+        {
+          "content": "groupEnd();\n});\n\nconst sdk = new Supermemory({ httpClient: httpClient });\n```\n<",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "You can pass a logger that matches `console`'s interface as an SDK option",
+          "role": "user"
+        },
+        {
+          "content": "<img width=\"3584\" height=\"2154\" alt=\"original\" src=\"https://github",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "html) conventions, though certain backwards-incompatible changes may be released as minor versions:\n\n1",
+          "role": "user"
+        },
+        {
+          "content": "env\nOPENAI_API_KEY=\nSUPERMEMORY_API_KEY=\n```\n\n```bash\nbun run dev:backend\nbun run dev\n```\n\n## Pipecat Memory Integration\n\nAdd persistent memory to your Pipecat voice AI agent",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "|\n| `customContainers`            | `array`   | `[]`                  | Custom containers with `tag` and `description`",
+          "role": "user"
+        },
+        {
+          "content": "org/en-US/docs/Web/API/File) when reading the value from an `<input type=\"file\">` element",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Repositories without a remote fall back to\na local path identity",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `enableCustomContainers`       | `boolean`  | `false`        | Enable AI-driven routing to custom containers",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "in January what did Supermemory Docs](https://supermemory.ai/docs relocate to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_17_temporal-reasoning",
+    "question_type": "temporal-reasoning"
+  },
+  {
+    "answer": "route 9",
+    "answer_session_ids": [
+      "syn_18_0",
+      "syn_18_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_18_0",
+      "syn_18_1",
+      "syn_18_2",
+      "syn_18_3",
+      "syn_18_4",
+      "syn_18_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "md](src/benchmarks/README",
+          "role": "user"
+        },
+        {
+          "content": "headers)\n\nThe \"raw\" Response object can be accessed by prefixing `",
+          "role": "assistant"
+        },
+        {
+          "content": "half the plan: Next.js Tailwind E2B SDK covers route 9",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": ")\n- Text and JSON responses\n- Easy to self-host\n-",
+          "role": "user"
+        },
+        {
+          "content": "universal, \"anthropic\")\nconst googleError = translateError(error",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "temporal_context)\n```\n\n## File uploads\n\nRequest parameters that correspond to file uploads can be passed as `bytes`, or a [`PathLike`](https://docs",
+          "role": "user"
+        },
+        {
+          "content": "config/opencode/supermemory",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md\n```\n\n### For LLM Agents\n\n<details>\n<summary>Instructions for LLM Agents (click to expand)</summary>\n\nIf you're an LLM agent helping set up opencode-supermemory, follow these steps:\n\n#### Step 1: Run the installer\n\n```bash\nbunx opencode-supermemory@latest install --no-tui\n```\n\nThis will:\n\n- Register the plugin in `~/",
+          "role": "user"
+        },
+        {
+          "content": "')\n```\n\n### Accessing raw response data (e",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Slash Commands\n\n| Command            | Description                             |\n| ------------------ | --------------------------------------- |\n| `/remember <text>` | Manually save something to memory",
+          "role": "user"
+        },
+        {
+          "content": "** A real local folder for editors, scripts, and any tool that reads files",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "```\n\n## 🎯 Core Features\n\n### 1",
+          "role": "user"
+        },
+        {
+          "content": "- 💾 **Automatic capture** — conversations are stored incrementally (every N turns) and\n  at session end via the `Stop` hook",
+          "role": "assistant"
+        },
+        {
+          "content": "other half: the backup for route 9 is budget code 7741",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what covers Next.js Tailwind E2B SDK's area and what is its backup?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_18_multi-session",
+    "question_type": "multi-session"
+  },
+  {
+    "answer": "nothing recorded links With and the cedar room",
+    "answer_session_ids": [
+      "syn_19_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_19_0",
+      "syn_19_1",
+      "syn_19_2",
+      "syn_19_3",
+      "syn_19_4",
+      "syn_19_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "com/user-attachments/assets/7fe49b7e-ed0b-4861-92a5-fa5d199cfc72\" />\n\n\n## Features\n\n- 🔌 Interoperable: mix and match any provider with any benchmark\n- 🧩 Bring your own benchmarks: plug in custom datasets and tasks\n- ♻️ Checkpointed runs: resume from any pipeline stage (ingest → index → search → answer → evaluate)\n- 🆚 Multi‑provider comparison: run the same benchmark across providers side‑by‑side\n- 🧪 Judge‑agnostic: swap GPT‑4o, Claude, Gemini, etc",
+          "role": "user"
+        },
+        {
+          "content": "- **Plug the virtual bash tool into the agent's tool-set",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "text)\n)\n\nawait Effect",
+          "role": "user"
+        },
+        {
+          "content": "Delete this section before > publishing to a package manager",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#listdocuments) - List documents\n* [import](docs/sdks/connections/README",
+          "role": "user"
+        },
+        {
+          "content": "add(\n    content=\"content\",\n) as response:\n    print(response",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "To change the default retry strategy for a single API call, simply provide a retryConfig object to the call:\n```typescript\nimport { Supermemory } from \"supermemory\";\n\nconst supermemory = new Supermemory({\n  apiKey: process",
+          "role": "user"
+        },
+        {
+          "content": "The plugin continues reading the former Cursor `cursor_user_*` and\n`cursor_project_*` tags, along with legacy tags from the other supported\nagents",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "0,\n)\n\n# More granular control:\nclient = Supermemory(\n    timeout=httpx",
+          "role": "user"
+        },
+        {
+          "content": "ts run -p zep -b longmemeval -j sonnet-4 -m gemini-2",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#update) - Update container tag settings\n- [`conversationsAdd`](docs/sdks/conversations/README",
+          "role": "user"
+        },
+        {
+          "content": "status_code)\n    print(e",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "what did With say about the cedar room?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_19_abstention",
+    "question_type": "abstention"
+  },
+  {
+    "answer": "pier 4",
+    "answer_session_ids": [
+      "syn_20_4"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_20_0",
+      "syn_20_1",
+      "syn_20_2",
+      "syn_20_3",
+      "syn_20_4",
+      "syn_20_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "Without a remote,\nthe Git common directory is used as the fallback identity",
+          "role": "user"
+        },
+        {
+          "content": "js, Tailwind, Vercel AI SDK | `@supermemory/bash` (TypeScript) | Upload documents and chat with an AI that can search and cite them |\n| [Knowledge Base](",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "- The value is injected as a header alongside any `--header` flags",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `flush`           | `Stop`                 | Captures any remaining turns at session end so the final conversation turns are never lost",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "close()` method if desired, or with a context manager that closes when exiting",
+          "role": "user"
+        },
+        {
+          "content": "Use it to compare providers side-by-side on the same benchmark:\n\n```bash\nbun run src/index",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "html#fsopenasblobpath-options)",
+          "role": "user"
+        },
+        {
+          "content": "Inside a mount, flagless `grep` is semantic and flagged `grep` is literal: that split is the whole UX",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": ")`\n\nCreate a reusable chunker instance with default options",
+          "role": "user"
+        },
+        {
+          "content": "1,\n        maxElapsedTime: 100,\n      },\n      retryConnectionErrors: false,\n    },\n  });\n\n  console",
+          "role": "assistant"
+        },
+        {
+          "content": "note that Start Codex CLI moved to pier 4",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "**Provider Detection**\n\nAutomatically detect which provider format you're working with:\n\n```typescript\nimport { detectProvider } from 'llm-bridge'\n\ndetectProvider(\"https://api",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `containerTagPrefix`     | `string`   | `\"codex\"`      | Legacy prefix retained when reading containers created by older versions",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "where did Start Codex CLI move to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_20_lookup",
+    "question_type": "lookup"
+  },
+  {
+    "answer": "pier 4",
+    "answer_session_ids": [
+      "syn_21_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_21_0",
+      "syn_21_1",
+      "syn_21_2",
+      "syn_21_3",
+      "syn_21_4",
+      "syn_21_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "Triggers OpenCode's summarization\n2",
+          "role": "user"
+        },
+        {
+          "content": "**Streaming Support**\n\nParse and emit Server-Sent Events (SSE) streams for all providers:\n\n- **Parsers**: Convert provider SSE streams → universal stream events\n- **Emitters**: Convert universal stream events → provider SSE streams\n- **Handler**: Full stream translation pipeline with optional transforms\n\n### 4",
+          "role": "assistant"
+        },
+        {
+          "content": "SUPERMEMORY_LOG=info is assigned to budget code 7741",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "Inside the mount, files behave like any other folder: edit them, `cat` them, `grep` them, point your editor at them",
+          "role": "user"
+        },
+        {
+          "content": "### Signal extraction (optional)\n\nWhen `signalExtraction` is enabled, only conversation turns containing signal keywords\n(like \"prefer\", \"decided\", \"remember\", \"bug\", \"fix\") are captured",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "json`:\n\n```json\n{\n  \"disabled_hooks\": [\"anthropic-context-window-limit-recovery\"]\n}\n```\n\n## Development\n\n```bash\nbun install\nbun run build\nbun run typecheck\n```\n\nLocal install:\n\n```jsonc\n{\n  \"plugin\": [\"file:///path/to/opencode-supermemory\"],\n}\n```\n\n## Logs\n\n```bash\ntail -f ~/",
+          "role": "user"
+        },
+        {
+          "content": "md#delete) - Delete document by ID or customId\n- [`documentsDeleteBulk`](docs/sdks/documents/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "content)\n}\n```\n\n### Batch Processing\n\nProcess multiple files concurrently with error handling per file:\n\n```typescript\nimport { chunkBatch } from 'code-chunk'\n\nconst files = [\n  { filepath: 'src/user",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `/supermemory-logout`  | `/supermemory-logout`                                       | Remove saved local credentials",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "### Signal extraction (optional)\n\nWhen `signalExtraction` is enabled, only conversation turns containing signal keywords\n(like \"prefer\", \"decided\", \"remember\", \"bug\", \"fix\") are captured",
+          "role": "user"
+        },
+        {
+          "content": "You can still override\nthe unified write container with `projectContainerTag`:\n\n```jsonc\n{\n  // Continue reading a personal container made by an older version\n  \"userContainerTag\": \"my-team-workspace\",\n\n  // Override the unified container used for new writes\n  \"projectContainerTag\": \"my-awesome-project\",\n}\n```\n\nThis is useful when you want to:\n\n- Preserve a legacy personal memory container\n- Sync memories between different machines for the same project\n- Organize memories using your own naming scheme\n- Integrate with existing Supermemory container tags from other tools\n\n## Usage with Oh My OpenCode\n\nIf you're using [Oh My OpenCode](https://github",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "com/user-attachments/assets/e68fe07d-bc1f-49a1-a40c-3560f1a079b2\" />\n\nLong-term memory for OpenClaw",
+          "role": "user"
+        },
+        {
+          "content": "# supermemory\n\nDeveloper-friendly & type-safe Typescript SDK specifically catered to leverage *supermemory* API",
+          "role": "assistant"
+        },
+        {
+          "content": "update: SUPERMEMORY_LOG=info is now assigned to pier 4",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what is SUPERMEMORY_LOG=info assigned to now?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_21_knowledge-update",
+    "question_type": "knowledge-update"
+  },
+  {
+    "answer": "the north annex",
+    "answer_session_ids": [
+      "syn_22_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_22_0",
+      "syn_22_1",
+      "syn_22_2",
+      "syn_22_3",
+      "syn_22_4",
+      "syn_22_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": ")`\n\nEffect-native streaming batch processing",
+          "role": "user"
+        },
+        {
+          "content": "## Configuration\n\n### Environment variables\n\n| Variable                       | Purpose                                                |\n| ------------------------------ | ------------------------------------------------------ |\n| `SUPERMEMORY_CODEX_API_KEY`    | Your Supermemory API key (browser auth is preferred)",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "com/user-attachments/assets/6dd38f8e-a849-425e-a0cf-610586743b92\" />\n\n\n### Powered by\n\n- [Supermemory](https://supermemory",
+          "role": "user"
+        },
+        {
+          "content": "/src/models/errors/http-client-errors",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#add) - Create memories directly\n* [forget](docs/sdks/memories/README",
+          "role": "user"
+        },
+        {
+          "content": "However, this is a difficult challenge, as I wrote in this blog post: [The API layer for using intelligence is completely broken",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "`codex-supermemory` registers two hooks:\n\n| Hook              | Event                  | What it does                                                        |\n| ----------------- | ---------------------- | ------------------------------------------------------------------- |\n| `recall`          | `UserPromptSubmit`     | Captures new turns (every N prompts), then searches Supermemory for relevant memories and your profile, injecting them into the prompt as `additionalContext`",
+          "role": "user"
+        },
+        {
+          "content": "message);\n      console",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts show-failures -r my-test\n```\n\n## Pipeline\n\n```\n1",
+          "role": "user"
+        },
+        {
+          "content": "js, Tailwind, E2B SDK | E2B + SMFS mount | Write and run code in a cloud sandbox with persistent AI memory |\n\n## Quick Start\n\n1",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md) |\n| Add Benchmark | [src/benchmarks/README",
+          "role": "user"
+        },
+        {
+          "content": "config/cursor/supermemory",
+          "role": "assistant"
+        },
+        {
+          "content": "on that day Therefore relocated to the north annex",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "in June what did Therefore relocate to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_22_temporal-reasoning",
+    "question_type": "temporal-reasoning"
+  },
+  {
+    "answer": "channel 6",
+    "answer_session_ids": [
+      "syn_23_0",
+      "syn_23_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_23_0",
+      "syn_23_1",
+      "syn_23_2",
+      "syn_23_3",
+      "syn_23_4",
+      "syn_23_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "APIStatusError as e:\n    print(\"Another non-200-range status code was received\")\n    print(e",
+          "role": "user"
+        },
+        {
+          "content": "md)\n\n* [buckets](docs/sdks/profiles/README",
+          "role": "assistant"
+        },
+        {
+          "content": "half the plan: Conversations](docs/sdks/conversations/README.md covers channel 6",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "fetcher: (input, init) =>\n    // 'dispatcher' is specific to undici and not part of the standard Fetch API",
+          "role": "user"
+        },
+        {
+          "content": "}]\n}\n```\n\n### Using Contextualized Text for Embeddings\n\nUse `contextualizedText` for better embedding quality in RAG systems:\n\n```typescript\nfor (const c of chunks) {\n  const embedding = await embed(c",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Uses tree-sitter to split source code at semantic boundaries (functions, classes, methods) rather than arbitrary character limits",
+          "role": "user"
+        },
+        {
+          "content": "universal, \"google\")\n```\n\n### 7",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#chunks) - Get document chunks\n* [fileUrl](docs/sdks/documents/README",
+          "role": "user"
+        },
+        {
+          "content": "addHook(\"beforeRequest\", (request) => {\n  const nextRequest = new Request(request, {\n    signal: request",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Chunk\n\nCode is split at semantic boundaries while respecting the `maxChunkSize` limit",
+          "role": "user"
+        },
+        {
+          "content": "6,\n\n  // Max memories injected per request\n  \"maxMemories\": 5,\n\n  // Max project memories listed\n  \"maxProjectMemories\": 10,\n\n  // Max profile facts injected\n  \"maxProfileItems\": 5,\n\n  // Include user profile in context\n  \"injectProfile\": true,\n\n  // Legacy prefix retained when reading containers made by older versions\n  \"containerTagPrefix\": \"opencode\",\n\n  // Optional legacy personal container to keep reading\n  \"userContainerTag\": \"my-custom-user-tag\",\n\n  // Optional: Set exact project container tag (overrides auto-generated tag)\n  \"projectContainerTag\": \"my-project-tag\",\n\n  // Extra keyword patterns for memory detection (regex)\n  \"keywordPatterns\": [\"log\\\\s+this\", \"write\\\\s+down\"],\n\n  // Context usage ratio that triggers compaction (0-1)\n  \"compactionThreshold\": 0",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Demo (Click on the image for video",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `customContainerInstructions`  | `string`   | `\"\"`           | Free-text instructions for the AI on how to route memories to containers",
+          "role": "assistant"
+        },
+        {
+          "content": "other half: the backup for channel 6 is the cedar room",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what covers Conversations](docs/sdks/conversations/README.md's area and what is its backup?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_23_multi-session",
+    "question_type": "multi-session"
+  },
+  {
+    "answer": "nothing recorded links Convert and budget code 7741",
+    "answer_session_ids": [
+      "syn_24_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_24_0",
+      "syn_24_1",
+      "syn_24_2",
+      "syn_24_3",
+      "syn_24_4",
+      "syn_24_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "To test in a different project, add the `supermemory` entry from `",
+          "role": "user"
+        },
+        {
+          "content": "Alternatively, authenticate manually:\n   - Use `$supermemory-login` inside Codex\n   - Or set `export SUPERMEMORY_CODEX_API_KEY=\"sm_",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "\")\nexcept supermemory",
+          "role": "user"
+        },
+        {
+          "content": "Writes upload to Supermemory in the background; remote changes pull in every 30 seconds",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Container tags\n\nCursor, Claude Code, Codex, and OpenCode use the same repository tag:\n\n```text\nrepo_<project_name>__<project_id>\n```\n\nThe project ID is a stable hash of the normalized Git remote",
+          "role": "user"
+        },
+        {
+          "content": "Disabled by default — all turns are captured",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Installation\n\n> Requires [Node",
+          "role": "user"
+        },
+        {
+          "content": "ai), extremely fast and scalable",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "|\n| `userContainerTag`       | `string`   | auto           | Legacy personal container retained for backward-compatible reads",
+          "role": "user"
+        },
+        {
+          "content": "Personal and project memories are distinguished with `sm_scope`\nmetadata inside the shared repository container",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "- Values must not contain spaces",
+          "role": "user"
+        },
+        {
+          "content": "The search runs automatically (no permission prompt), just like auto-capture",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "what did Convert say about budget code 7741?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_24_abstention",
+    "question_type": "abstention"
+  },
+  {
+    "answer": "route 9",
+    "answer_session_ids": [
+      "syn_25_1"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_25_0",
+      "syn_25_1",
+      "syn_25_2",
+      "syn_25_3",
+      "syn_25_4",
+      "syn_25_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "Run `npm run deploy`\n5",
+          "role": "user"
+        },
+        {
+          "content": "## Contributing\n\nSee [the contributing documentation](",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## MemScore\n\nMemScore is a composite metric that captures three dimensions of provider performance in a single line:\n\n```\naccuracy% / latencyMs / contextTokens\n```\n\n| Component | What it measures |\n|-----------|-----------------|\n| **Quality** | Answer accuracy — `(correct / total) * 100` from judge evaluations |\n| **Latency** | Average search response time in milliseconds |\n| **Tokens** | Average context tokens sent to the answering model (counted client-side) |\n\nAfter a run completes, MemScore appears in the CLI summary:\n\n```\nSummary:\n  Total Questions: 50\n  Correct: 43\n  Accuracy: 86",
+          "role": "user"
+        },
+        {
+          "content": "APIConnectionError` is raised",
+          "role": "assistant"
+        },
+        {
+          "content": "note that CURSOR_PLUGIN_ROOT}/dist/cli.js moved to route 9",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "##### _OPTIONAL PARAMETERS_\n\n`enableDetailedResponse` (boolean: false) -> Toggle for detailed response with full HTML content",
+          "role": "user"
+        },
+        {
+          "content": "html#fsopenasblobpath-options)",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts)**:\n* [`ResponseValidationError`](",
+          "role": "user"
+        },
+        {
+          "content": "## Async usage\n\nSimply import `AsyncSupermemory` instead of `Supermemory` and use `await` with each API call:\n\n```python\nimport os\nimport asyncio\nfrom supermemory import AsyncSupermemory\n\nclient = AsyncSupermemory(\n    api_key=os",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md) |\n| Project Structure | [src/README",
+          "role": "user"
+        },
+        {
+          "content": "json`:\n\n```json\n{\n  \"enableCustomContainers\": true,\n  \"customContainers\": [\n    { \"tag\": \"personal\", \"description\": \"Personal life — family, health, hobbies, routines\" },\n    { \"tag\": \"work\", \"description\": \"Work-related — projects, deadlines, meetings, colleagues\" },\n    { \"tag\": \"code_style\", \"description\": \"Coding preferences — languages, tools, patterns, conventions\" }\n  ],\n  \"customContainerInstructions\": \"Route coding preferences to code_style",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Universal Memory MCP makes your memories available to every single LLM",
+          "role": "user"
+        },
+        {
+          "content": "\"\",\n});\n\nasync function run() {\n  const result = await supermemory",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "where did CURSOR_PLUGIN_ROOT}/dist/cli.js move to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_25_lookup",
+    "question_type": "lookup"
+  },
+  {
+    "answer": "desk 12",
+    "answer_session_ids": [
+      "syn_26_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_26_0",
+      "syn_26_1",
+      "syn_26_2",
+      "syn_26_3",
+      "syn_26_4",
+      "syn_26_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "```bash\n/plugin marketplace add supermemoryai/claude-supermemory\n/plugin install supermemory\n```\n\n> **Already have the old `claude-supermemory` plugin installed",
+          "role": "user"
+        },
+        {
+          "content": "ai), so you can view and manage\nmemories organized by category",
+          "role": "assistant"
+        },
+        {
+          "content": "Requires Supermemory Pro is assigned to pier 4",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "log(result);\n}\n\nrun();\n\n```\n<",
+          "role": "user"
+        },
+        {
+          "content": "-- End Error Handling [errors] -->\n\n<",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "-- End Server Selection [server] -->\n\n<",
+          "role": "user"
+        },
+        {
+          "content": "chunks)\n  }\n}\n```\n\n### Effect Integration\n\nFor Effect-based pipelines:\n\n```typescript\nimport { chunkStreamEffect } from 'code-chunk'\nimport { Effect, Stream } from 'effect'\n\nconst program = Stream",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "codex/skills/`\n\nThe hooks are tolerant: if Supermemory is unreachable, the API key is missing, or\nanything else fails, they exit cleanly without breaking your Codex session",
+          "role": "user"
+        },
+        {
+          "content": "md#list) - List memory entries with history\n- [`memoriesUpdateMemory`](docs/sdks/memories/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Mount flags\n\n```\n--path <DIR>             override the mount path (default:",
+          "role": "user"
+        },
+        {
+          "content": "md#forgetmatching) - Forget memories matching a prompt/query\n- [`memoriesList`](docs/sdks/memories/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#update) - Update container tag settings\n- [`conversationsAdd`](docs/sdks/conversations/README",
+          "role": "user"
+        },
+        {
+          "content": "js, Tailwind, Vercel AI SDK | `@supermemory/bash` (TypeScript) | Upload documents and chat with an AI that can search and cite them |\n| [Knowledge Base](",
+          "role": "assistant"
+        },
+        {
+          "content": "update: Requires Supermemory Pro is now assigned to desk 12",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what is Requires Supermemory Pro assigned to now?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_26_knowledge-update",
+    "question_type": "knowledge-update"
+  },
+  {
+    "answer": "channel 6",
+    "answer_session_ids": [
+      "syn_27_3"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_27_0",
+      "syn_27_1",
+      "syn_27_2",
+      "syn_27_3",
+      "syn_27_4",
+      "syn_27_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "ai/smfs/providers/e2b)\n\n# Supermemory Chat\n# Install MCP CLI\n\n### A CLI tool to install and manage MCP servers",
+          "role": "user"
+        },
+        {
+          "content": "PathLike) instance, the file contents will be read asynchronously automatically",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "universal, \"anthropic\")\nconst googleError = translateError(error",
+          "role": "user"
+        },
+        {
+          "content": "supermemory-claude/settings",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "TIP]\n> To finish publishing your SDK to npm and others you must [run your first generation action](https://www",
+          "role": "user"
+        },
+        {
+          "content": ", `work`, `personal`,\n  `code_style`)",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "```\n\nIf the server doesn't use OAuth (you answer no), the installation proceeds directly without authentication",
+          "role": "user"
+        },
+        {
+          "content": "com/org/supermemory-hnj/supermemory)",
+          "role": "assistant"
+        },
+        {
+          "content": "on that day Debug relocated to channel 6",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "ts', code: userCode },\n  { filepath: 'src/auth",
+          "role": "user"
+        },
+        {
+          "content": "com/supermemoryai/python-sdk/tree/main/src/supermemory/_response",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "```typescript\nimport { openAsBlob } from \"node:fs\";\nimport { Supermemory } from \"supermemory\";\n\nconst supermemory = new Supermemory({\n  apiKey: process",
+          "role": "user"
+        },
+        {
+          "content": "my_field is None:\n  if 'my_field' not in response",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "in April what did Debug relocate to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_27_temporal-reasoning",
+    "question_type": "temporal-reasoning"
+  },
+  {
+    "answer": "desk 12",
+    "answer_session_ids": [
+      "syn_28_0",
+      "syn_28_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_28_0",
+      "syn_28_1",
+      "syn_28_2",
+      "syn_28_3",
+      "syn_28_4",
+      "syn_28_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "## Installation\n\n```sh\n# install from PyPI\npip install supermemory\n```\n\n## Usage\n\nThe full API of this library can be found in [api",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `enableCustomContainerTags`   | `boolean` | `false`               | Enable custom container routing",
+          "role": "assistant"
+        },
+        {
+          "content": "half the plan: Optional Set covers desk 12",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "_(Please open a GitHub issue to let us know if you are relying on such internals",
+          "role": "user"
+        },
+        {
+          "content": "}`\n- `options`: Batch options (extends ChunkOptions with `concurrency` and `onProgress`)\n\n**Returns:** `Promise<BatchResult[]>` where each result has `{ filepath, chunks, error }`\n\n---\n\n### `chunkBatchStream(files, options",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md)\n\n* [add](docs/sdks/memories/README",
+          "role": "user"
+        },
+        {
+          "content": "Changes to library internals which are technically public but not intended or documented for external use",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Configuration\n\n### Environment variables\n\n| Variable | Description |\n|---|---|\n| `SUPERMEMORY_API_KEY` | API key (overrides all other sources) |\n| `SUPERMEMORY_API_URL` | Override the Supermemory API base URL |\n| `SUPERMEMORY_REPO_TAG` | Override the unified repository container tag |\n| `SUPERMEMORY_USER_TAG` | Legacy Cursor personal container to continue reading |\n| `SUPERMEMORY_PROJECT_TAG` | Legacy Cursor project container to continue reading |\n| `CURSOR_USER_EMAIL` | Used only to find legacy Cursor personal memories |\n\n### Global config — `~/",
+          "role": "user"
+        },
+        {
+          "content": "com)\n\n## Learn More\n\n- [SMFS Documentation](https://docs",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Alternatively, authenticate manually:\n   - Use `$supermemory-login` inside Codex\n   - Or set `export SUPERMEMORY_CODEX_API_KEY=\"sm_",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `debug`                       | `boolean` | `false`               | Verbose debug logs",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "index}`,\n    embedding,\n    metadata: { filepath, lines: c",
+          "role": "user"
+        },
+        {
+          "content": "sh/docs/api/file-io#reading-files-bun-file) function produces a file handle that can be used for streaming file uploads",
+          "role": "assistant"
+        },
+        {
+          "content": "other half: the backup for desk 12 is desk 12",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what covers Optional Set's area and what is its backup?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_28_multi-session",
+    "question_type": "multi-session"
+  },
+  {
+    "answer": "nothing recorded links Errors ChunkingError Thrown and route 9",
+    "answer_session_ids": [
+      "syn_29_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_29_0",
+      "syn_29_1",
+      "syn_29_2",
+      "syn_29_3",
+      "syn_29_4",
+      "syn_29_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "**Parameters:**\n- `filepath`: File path (used for language detection)\n- `code`: Source code string\n- `options`: Optional configuration\n\n**Returns:** `Promise<Chunk[]>`\n\n**Throws:** `ChunkingError`, `UnsupportedLanguageError`\n\n---\n\n### `chunkStream(filepath, code, options",
+          "role": "user"
+        },
+        {
+          "content": "With custom container tags enabled, all tools support a `containerTag` parameter for routing to specific containers",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "io/badge/_-Add_to_VS_Code-blue",
+          "role": "user"
+        },
+        {
+          "content": "temporal_context)\n```\n\n## File uploads\n\nRequest parameters that correspond to file uploads can be passed as `bytes`, or a [`PathLike`](https://docs",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "com/user-attachments/assets/81aa246b-a1c9-489e-a643-0db0c875fa0a\" />\n\n\n# smfs\n\nYour Supermemory container, exposed as a filesystem",
+          "role": "user"
+        },
+        {
+          "content": "message`     | `string`   | Error message                                                                           |\n| `error",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "However, the default retry strategy can be overridden on a per-operation basis, or across the entire SDK",
+          "role": "user"
+        },
+        {
+          "content": "If you use the SDK without any configuration, it will fall back to the default retry strategy provided by the API",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "When the AI saves a memory (via `/supermemory-save`), it picks the best matching\n   container based on the descriptions and uses `--container <tag>`",
+          "role": "user"
+        },
+        {
+          "content": "ts run -p supermemory -b locomo\n```\n\n## Configuration\n\n```bash\n# Providers (at least one)\nSUPERMEMORY_API_KEY=\nMEM0_API_KEY=\nZEP_API_KEY=\n\n# Judges (at least one)\nOPENAI_API_KEY=\nANTHROPIC_API_KEY=\nGOOGLE_API_KEY=\n```\n\n## Commands\n\n| Command | Description |\n|---------|-------------|\n| `run` | Full pipeline: ingest → index → search → answer → evaluate → report |\n| `compare` | Run benchmark across multiple providers simultaneously |\n| `ingest` | Ingest benchmark data into provider |\n| `search` | Run search phase only |\n| `test` | Test single question |\n| `status` | Check run progress |\n| `list-questions` | Browse benchmark questions |\n| `show-failures` | Debug failed questions |\n| `serve` | Start web UI |\n| `help` | Show help (`help providers`, `help models`, `help benchmarks`) |\n\n## Options\n\n```\n-p, --provider         Memory provider (supermemory, mem0, zep)\n-b, --benchmark        Benchmark (locomo, longmemeval, convomem)\n-j, --judge            Judge model (gpt-4o, sonnet-4, gemini-2",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Migrate with:\n>\n> ```bash\n> /plugin marketplace update supermemory-plugins\n> /plugin install supermemory@supermemory-plugins\n> ```\n>\n> Then, **only if you still have the old plugin**, remove it:\n>\n> ```bash\n> /plugin uninstall claude-supermemory@supermemory-plugins\n> ```\n\nSet your API key (get one at [app",
+          "role": "user"
+        },
+        {
+          "content": "iter_lines():\n        print(line)\n```\n\nThe context manager is required so that the response will reliably be closed",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "what did Errors ChunkingError Thrown say about route 9?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_29_abstention",
+    "question_type": "abstention"
+  },
+  {
+    "answer": "channel 6",
+    "answer_session_ids": [
+      "syn_30_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_30_0",
+      "syn_30_1",
+      "syn_30_2",
+      "syn_30_3",
+      "syn_30_4",
+      "syn_30_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "\" }\n  ],\n  temperature: 0",
+          "role": "user"
+        },
+        {
+          "content": "com/user/llm-bridge/issues)\n- 💬 [Discussions](https://github",
+          "role": "assistant"
+        },
+        {
+          "content": "note that Description moved to channel 6",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "ts): HTTP request was aborted by the client",
+          "role": "user"
+        },
+        {
+          "content": "com/supermemoryai/python-sdk/tree/main/src/supermemory/_response",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#import) - Sync connection\n- [`connectionsList`](docs/sdks/connections/README",
+          "role": "user"
+        },
+        {
+          "content": "com/) - A set of completely unstyled, fully accessible UI components, designed to integrate beautifully with Tailwind CSS\n- [Cobe](https://github",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#batchadd) - Batch add documents\n* [update](docs/sdks/documents/README",
+          "role": "user"
+        },
+        {
+          "content": "md#search) - Search documents\n- [`documentsUpdate`](docs/sdks/documents/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Override with `--path /somewhere/else`",
+          "role": "user"
+        },
+        {
+          "content": "ai\",\n  apiKey: process",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "com/docs/github-setup#step-by-step-guide)",
+          "role": "user"
+        },
+        {
+          "content": "### Setup\n\nAdd these fields to `~/",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "where did Description move to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_30_lookup",
+    "question_type": "lookup"
+  },
+  {
+    "answer": "desk 12",
+    "answer_session_ids": [
+      "syn_31_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_31_0",
+      "syn_31_1",
+      "syn_31_2",
+      "syn_31_3",
+      "syn_31_4",
+      "syn_31_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "FUSE needs access to `/dev/fuse` and the `SYS_ADMIN` capability:\n\n```sh\n--device /dev/fuse --cap-add SYS_ADMIN\n```\n\nIf your Docker environment does not expose `/dev/fuse`, use a Linux host or a\ncontainer runtime that supports FUSE devices",
+          "role": "user"
+        },
+        {
+          "content": "> - **Browsers:** All supported browsers return an instance to a [`File`](https://developer",
+          "role": "assistant"
+        },
+        {
+          "content": "Configuration Create is assigned to route 9",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "typeCheckingMode` to `basic`",
+          "role": "user"
+        },
+        {
+          "content": "To test in a different project, add the `supermemory` entry from `",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ai, and follow the instructions on the page",
+          "role": "user"
+        },
+        {
+          "content": "supermemory-claude/settings",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#profile) - Get user profile\n* [search](docs/sdks/supermemory/README",
+          "role": "user"
+        },
+        {
+          "content": "dev/latest/api/base_model/#pydantic",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Run `bun run sync` to copy this repository to `~/",
+          "role": "user"
+        },
+        {
+          "content": "-- Start Standalone functions [standalone-funcs] -->\n## Standalone functions\n\nAll the methods listed above are available as standalone functions",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "response)\n```\n\nError codes are as follows:\n\n| Status Code | Error Type                 |\n| ----------- | -------------------------- |\n| 400         | `BadRequestError`          |\n| 401         | `AuthenticationError`      |\n| 403         | `PermissionDeniedError`    |\n| 404         | `NotFoundError`            |\n| 422         | `UnprocessableEntityError` |\n| 429         | `RateLimitError`           |\n| >=500       | `InternalServerError`      |\n| N/A         | `APIConnectionError`       |\n\n### Retries\n\nCertain errors are automatically retried 2 times by default, with a short exponential backoff",
+          "role": "user"
+        },
+        {
+          "content": "```typescript\nimport { Supermemory } from \"supermemory\";\n\nconst sdk = new Supermemory({ debugLogger: console });\n```\n\nYou can also enable a default debug logger by setting an environment variable `SUPERMEMORY_DEBUG` to true",
+          "role": "assistant"
+        },
+        {
+          "content": "update: Configuration Create is now assigned to desk 12",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what is Configuration Create assigned to now?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_31_knowledge-update",
+    "question_type": "knowledge-update"
+  },
+  {
+    "answer": "pier 4",
+    "answer_session_ids": [
+      "syn_32_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_32_0",
+      "syn_32_1",
+      "syn_32_2",
+      "syn_32_3",
+      "syn_32_4",
+      "syn_32_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "[See Error Classes](#error-classes)",
+          "role": "user"
+        },
+        {
+          "content": "After that, `grep` inside any mount routes through Supermemory's semantic index automatically when called without flags",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#create) - Create connection\n- [`connectionsDeleteByID`](docs/sdks/connections/README",
+          "role": "user"
+        },
+        {
+          "content": "name=supermemory-mcp&config=eyJuYW1lIjoic3VwZXJtZW1vcnktbWNwIiwidHJhbnNwb3J0IjoiaHR0cCIsInVybCI6Imh0dHBzOi8vc3VwZXJtZW1vcnktbmV3LnN0bG1jcC5jb20iLCJoZWFkZXJzIjp7Ingtc3VwZXJtZW1vcnktYXBpLWtleSI6Ik15IEFQSSBLZXkifX0)\n[",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "RateLimitError as e:\n    print(\"A 429 status code was received; we should back off a bit",
+          "role": "user"
+        },
+        {
+          "content": "-- Start Error Handling [errors] -->\n## Error Handling\n\n[`SupermemoryError`](",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "|\n| `signalExtraction`       | `boolean`  | `false`        | Enable signal-based filtering (only capture turns with keywords like \"prefer\", \"decided\")",
+          "role": "user"
+        },
+        {
+          "content": "8,\n\n  // Save completed conversation batches every N turns (0 = session end only)\n  \"captureEveryNTurns\": 3,\n\n  // Override the reasoned-recall directive shown to the agent each turn\n  // (null or unset = built-in default)\n  \"recallDirective\": null,\n}\n```\n\nAll fields optional",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "`userContainerTag` is treated as a legacy personal read",
+          "role": "user"
+        },
+        {
+          "content": "You\ncan also get all the extra fields on the Pydantic model as a dict with\n[`response",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "other plugins\n  ],\n}\n```\n\n**JSON:**\n\n```json\n{\n  \"plugin\": [\"opencode-supermemory\"]\n}\n```\n\n#### Step 3: Authenticate\n\nRun the browser authentication flow:\n\n```bash\nbunx opencode-supermemory@latest login\n```\n\nFor headless environments, users can still set `SUPERMEMORY_API_KEY` manually or create `~/",
+          "role": "user"
+        },
+        {
+          "content": "It's like a perplexity / searchGPT clone, but for _you_",
+          "role": "assistant"
+        },
+        {
+          "content": "on that day Raw HTTP relocated to pier 4",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "in June what did Raw HTTP relocate to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_32_temporal-reasoning",
+    "question_type": "temporal-reasoning"
+  },
+  {
+    "answer": "route 9",
+    "answer_session_ids": [
+      "syn_33_0",
+      "syn_33_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_33_0",
+      "syn_33_1",
+      "syn_33_2",
+      "syn_33_3",
+      "syn_33_4",
+      "syn_33_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "It's like a perplexity / searchGPT clone, but for _you_",
+          "role": "user"
+        },
+        {
+          "content": "md#get) - Get settings\n* [update](docs/sdks/settings/README",
+          "role": "assistant"
+        },
+        {
+          "content": "half the plan: Error Handling covers route 9",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "Pressing Enter uses `default`",
+          "role": "user"
+        },
+        {
+          "content": "The devcontainer builds the root `Dockerfile`, passes through `SUPERMEMORY_API_KEY`\nand `SUPERMEMORY_API_URL`, and starts with `smfs` on `PATH`",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "The library includes type definitions for all request params and response fields,\nand offers both synchronous and asynchronous clients powered by [httpx](https://github",
+          "role": "user"
+        },
+        {
+          "content": "Use the client to authenticate",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts', code: authCode },\n  { filepath: 'lib/utils",
+          "role": "user"
+        },
+        {
+          "content": "md#resources) - Fetch resources\n* [configure](docs/sdks/connections/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "-- Start Summary [summary] -->\n## Summary\n\nsupermemory API: The Memory API for the AI era",
+          "role": "user"
+        },
+        {
+          "content": "**Provider Detection**\n\nAutomatically detect which provider format you're working with:\n\n```typescript\nimport { detectProvider } from 'llm-bridge'\n\ndetectProvider(\"https://api",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "com/v1/messages\", body)       // \"anthropic\"\ndetectProvider(\"https://generativelanguage",
+          "role": "user"
+        },
+        {
+          "content": "md#delete) - Delete container tag\n- [`containerTagsGet`](docs/sdks/containertags/README",
+          "role": "assistant"
+        },
+        {
+          "content": "other half: the backup for route 9 is the amber protocol",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what covers Error Handling's area and what is its backup?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_33_multi-session",
+    "question_type": "multi-session"
+  },
+  {
+    "answer": "nothing recorded links Mem0 Zep and the north annex",
+    "answer_session_ids": [
+      "syn_34_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_34_0",
+      "syn_34_1",
+      "syn_34_2",
+      "syn_34_3",
+      "syn_34_4",
+      "syn_34_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "com/vercel/ai) - A framework for building AI applications\n- [Next",
+          "role": "user"
+        },
+        {
+          "content": "env[\"SUPERMEMORY_API_KEY\"]",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "\"\",\n});\n\nasync function run() {\n  const result = await supermemory",
+          "role": "user"
+        },
+        {
+          "content": "\"\",\n});\n\nasync function run() {\n  const result = await supermemory",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "To stream the response body, use `",
+          "role": "user"
+        },
+        {
+          "content": "Set to a self-hosted / local URL to point at your own instance; leave blank for the cloud",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "-- End Debugging [debug] -->\n\n<",
+          "role": "user"
+        },
+        {
+          "content": "js\" login\n```\n\nIf `CURSOR_PLUGIN_ROOT` is unset, run `node dist/cli",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "parse()  # get the object that `add()` would have returned\nprint(client",
+          "role": "user"
+        },
+        {
+          "content": "### Container Tag Selection\n\nBy default, new writes use:\n\n- Repository tag: `repo_{project-name}__{hash(normalized-origin-remote)}`\n- No origin remote: `repo_{project-name}__{hash(real-repository-path)}`\n\nOlder `{prefix}_user_*` and `{prefix}_project_*` containers remain readable",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "The SDK can be installed with either [npm](https://www",
+          "role": "user"
+        },
+        {
+          "content": "env\nOPENAI_API_KEY=\nSUPERMEMORY_API_KEY=\n```\n\n```bash\nbun run dev:backend\nbun run dev\n```\n\n## Pipecat Memory Integration\n\nAdd persistent memory to your Pipecat voice AI agent",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "what did Mem0 Zep say about the north annex?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_34_abstention",
+    "question_type": "abstention"
+  },
+  {
+    "answer": "budget code 7741",
+    "answer_session_ids": [
+      "syn_35_1"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_35_0",
+      "syn_35_1",
+      "syn_35_2",
+      "syn_35_3",
+      "syn_35_4",
+      "syn_35_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "The full API of this library can be found in [api",
+          "role": "user"
+        },
+        {
+          "content": "## Self-hosting\n\nTo self host, get an API key at https://console",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#list) - List connections\n* [create](docs/sdks/connections/README",
+          "role": "user"
+        },
+        {
+          "content": "md#configure) - Configure connection\n* [getByID](docs/sdks/connections/README",
+          "role": "assistant"
+        },
+        {
+          "content": "note that Raw HTTP moved to budget code 7741",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "<img width=\"3584\" height=\"2154\" alt=\"original\" src=\"https://github",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `containerTagPrefix`     | `string`   | `\"codex\"`      | Legacy prefix retained when reading containers created by older versions",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "The following example demonstrates how to attach a file stream to a request",
+          "role": "user"
+        },
+        {
+          "content": "** It was renamed to `supermemory`, so it won't update in place",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Container tags\n\nCursor, Claude Code, Codex, and OpenCode use the same repository tag:\n\n```text\nrepo_<project_name>__<project_id>\n```\n\nThe project ID is a stable hash of the normalized Git remote",
+          "role": "user"
+        },
+        {
+          "content": "md\n```\n\n### For LLM Agents\n\n<details>\n<summary>Instructions for LLM Agents (click to expand)</summary>\n\nIf you're an LLM agent helping set up opencode-supermemory, follow these steps:\n\n#### Step 1: Run the installer\n\n```bash\nbunx opencode-supermemory@latest install --no-tui\n```\n\nThis will:\n\n- Register the plugin in `~/",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Codex also reads the previous `user_project_*`,\n`repo_<project-name>`, `codex_user_*`, `codex_project_*`,\n`claudecode_project_*`, `opencode_user_*`, and `opencode_project_*`\ncontainers, so existing memories remain searchable without duplicating or\nmigrating them",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `maxProfileItems`        | `number`   | `5`            | Max profile items considered",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "where did Raw HTTP move to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_35_lookup",
+    "question_type": "lookup"
+  },
+  {
+    "answer": "the amber protocol",
+    "answer_session_ids": [
+      "syn_36_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_36_0",
+      "syn_36_1",
+      "syn_36_2",
+      "syn_36_3",
+      "syn_36_4",
+      "syn_36_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "- 🪶 **No runtime deps in hooks** — the hook scripts are pre-bundled with esbuild for\n  fast cold starts",
+          "role": "user"
+        },
+        {
+          "content": "post_id=954861&theme=neutral&period=daily&t=1749339045428)](https://www",
+          "role": "assistant"
+        },
+        {
+          "content": "Both is assigned to route 9",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "ai` | Supermemory API base URL (`SUPERMEMORY_API_URL`/`SUPERMEMORY_BASE_URL` env vars take precedence)",
+          "role": "user"
+        },
+        {
+          "content": "org/en-US/docs/Web/API/File) when reading the value from an `<input type=\"file\">` element",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts test -r my-test -q question_42\n\n# Debug\nbun run src/index",
+          "role": "user"
+        },
+        {
+          "content": "Repositories without a remote fall back to\na local path identity",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "Each example is a self-contained project you can clone and run locally",
+          "role": "user"
+        },
+        {
+          "content": "You define containers with a `tag` (identifier) and a `description` (plain English\n   explaining what belongs there)",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ai/*`, you can pass a project name via `--project`",
+          "role": "user"
+        },
+        {
+          "content": "Chunk\n\nCode is split at semantic boundaries while respecting the `maxChunkSize` limit",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "WARNING]\n> Beware that debug logging will reveal secrets, like API tokens in headers, in log messages printed to a console or files",
+          "role": "user"
+        },
+        {
+          "content": "**Multimodal Content Support**\n\nHandle images and documents seamlessly across providers:\n\n```typescript\n// OpenAI format with image\nconst openaiMultimodal = {\n  model: \"gpt-4o\",\n  messages: [{\n    role: \"user\",\n    content: [\n      { type: \"text\", text: \"What's in this image",
+          "role": "assistant"
+        },
+        {
+          "content": "update: Both is now assigned to the amber protocol",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what is Both assigned to now?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_36_knowledge-update",
+    "question_type": "knowledge-update"
+  },
+  {
+    "answer": "desk 12",
+    "answer_session_ids": [
+      "syn_37_1"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_37_0",
+      "syn_37_1",
+      "syn_37_2",
+      "syn_37_3",
+      "syn_37_4",
+      "syn_37_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "Personal and project memories are distinguished with `sm_scope`\nmetadata inside the shared repository container",
+          "role": "user"
+        },
+        {
+          "content": "- 🔒 **Privacy-aware** — anything wrapped in `<private>",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "md#list) - List all container tags\n* [get](docs/sdks/containertags/README",
+          "role": "user"
+        },
+        {
+          "content": "This means memories from earlier in your session are immediately available for recall\nin the same session",
+          "role": "assistant"
+        },
+        {
+          "content": "on that day None relocated to desk 12",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "\" } }\n    ]\n  }]\n}\n\n// Translate to Anthropic (base64 source) or Google (inlineData)\nconst anthropicRequest = translateBetweenProviders(\"openai\", \"anthropic\", openaiMultimodal)\nconst googleRequest = translateBetweenProviders(\"openai\", \"google\", openaiMultimodal)\n```\n\n### 5",
+          "role": "user"
+        },
+        {
+          "content": "Extract\n\nWe traverse the AST to extract semantic entities: functions, methods, classes, interfaces, types, and imports",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts', sourceCode)\n\nfor (const c of chunks) {\n  console",
+          "role": "user"
+        },
+        {
+          "content": "However, for improved concurrency performance you may also use `aiohttp` as the HTTP backend",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "-- Start Server Selection [server] -->\n## Server Selection\n\n### Override Server URL Per-Client\n\nThe default server can be overridden globally by passing a URL to the `serverURL: string` optional parameter when initializing the SDK client instance",
+          "role": "user"
+        },
+        {
+          "content": "getenv(\"SUPERMEMORY_API_KEY\"),\n    user_id=\"user_123\",\n    params=InputParams(mode=\"full\", search_limit=10),\n)\n```\n\n**Modes:** `profile` (user facts) | `query` (search) | `full` (both)\n\n### Pipeline Integration\n\n```python\npipeline = Pipeline([\n    transport",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": ")`\n\nEffect-native batch processing",
+          "role": "user"
+        },
+        {
+          "content": "js, Tailwind, E2B SDK | E2B + SMFS mount | Write and run code in a cloud sandbox with persistent AI memory |\n\n## Quick Start\n\n1",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "in February what did None relocate to?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_37_temporal-reasoning",
+    "question_type": "temporal-reasoning"
+  },
+  {
+    "answer": "desk 12",
+    "answer_session_ids": [
+      "syn_38_0",
+      "syn_38_5"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_38_0",
+      "syn_38_1",
+      "syn_38_2",
+      "syn_38_3",
+      "syn_38_4",
+      "syn_38_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "|\n\nSkills are fallback commands — the hooks handle most use cases automatically",
+          "role": "user"
+        },
+        {
+          "content": "-- End SDK Example Usage [usage] -->\n\n<",
+          "role": "assistant"
+        },
+        {
+          "content": "half the plan: Everything covers desk 12",
+          "role": "user"
+        }
+      ],
+      [
+        {
+          "content": "All that and more, for FREE",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `customContainers`            | `array`   | `[]`                  | Custom containers with `tag` and `description`",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "ts compare -p supermemory,mem0,zep -b locomo -j gpt-4o\n```\n\nThe `report",
+          "role": "user"
+        },
+        {
+          "content": "md#batchadd) - Batch add documents\n* [update](docs/sdks/documents/README",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "* [`RequestAbortedError`](",
+          "role": "user"
+        },
+        {
+          "content": "```\n\n## 🎯 Core Features\n\n### 1",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "|\n| `profileFrequency`            | `number`  | `50`                  | Inject full profile every N turns",
+          "role": "user"
+        },
+        {
+          "content": "`codex-supermemory` wires Supermemory into Codex CLI's\nhooks system so your coding agent remembers your stack, preferences, prior decisions,\nand the lessons learned across every project — automatically",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "io/badge/_-Add_to_VS_Code-blue",
+          "role": "user"
+        },
+        {
+          "content": "com/mcp --client claude-desktop --oauth yes\n\n# Skip OAuth authentication entirely\nnpx install-mcp https://api",
+          "role": "assistant"
+        },
+        {
+          "content": "other half: the backup for desk 12 is budget code 7741",
+          "role": "user"
+        }
+      ]
+    ],
+    "question": "what covers Everything's area and what is its backup?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_38_multi-session",
+    "question_type": "multi-session"
+  },
+  {
+    "answer": "nothing recorded links OpenAI Anthropic Google and route 9",
+    "answer_session_ids": [
+      "syn_39_0"
+    ],
+    "haystack_dates": [
+      "2024/01/10 (Mon) 09:00",
+      "2024/02/11 (Mon) 09:00",
+      "2024/03/12 (Mon) 09:00",
+      "2024/04/13 (Mon) 09:00",
+      "2024/05/14 (Mon) 09:00",
+      "2024/06/15 (Mon) 09:00"
+    ],
+    "haystack_session_ids": [
+      "syn_39_0",
+      "syn_39_1",
+      "syn_39_2",
+      "syn_39_3",
+      "syn_39_4",
+      "syn_39_5"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "content": "add(\n    content=\"content\",\n)\nprint(response",
+          "role": "user"
+        },
+        {
+          "content": ")`\n\nFormat chunk text with semantic context prepended",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "js login` from the installed plugin directory",
+          "role": "user"
+        },
+        {
+          "content": "</private>` is replaced with `[REDACTED]` before\nbeing sent to Supermemory",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "## Quickstart\n\n```sh\nsmfs login                  # one-time, stores your API key\nsmfs mount agent_memory     # mounts the container tag at",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `containerTag`                | `string`  | `openclaw_{hostname}` | Root memory namespace",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "close()` method if desired, or with a context manager that closes when exiting",
+          "role": "user"
+        },
+        {
+          "content": "|\n| `customContainers`            | `array`   | `[]`                  | Custom containers with `tag` and `description`",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": "config/opencode/oh-my-opencode",
+          "role": "user"
+        },
+        {
+          "content": "Set\n`SUPERMEMORY_ISOLATE_WORKTREES=true` to use the worktree path instead of the\nremote identity",
+          "role": "assistant"
+        }
+      ],
+      [
+        {
+          "content": ", `work`,\n`personal`, `code_style`)",
+          "role": "user"
+        },
+        {
+          "content": ")`\n\nEffect-native streaming API for composable pipelines",
+          "role": "assistant"
+        }
+      ]
+    ],
+    "question": "what did OpenAI Anthropic Google say about route 9?",
+    "question_date": "2024/09/01 (Sun) 12:00",
+    "question_id": "syn_39_abstention",
+    "question_type": "abstention"
+  }
+]

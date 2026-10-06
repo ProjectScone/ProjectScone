@@ -1,0 +1,116 @@
+{
+  "files": {
+    "longmemeval_s.json.gz": {
+      "what": "LongMemEval-S, gzipped",
+      "source": "https://huggingface.co/datasets/xiaowu0162/longmemeval (longmemeval_s)",
+      "license": "MIT",
+      "bytes": 77675249,
+      "sha256": "1281375c44e022287961ee65bf167a5bda859a21b8bbdee2ebba129a7a3afd9b"
+    },
+    "longmemeval_oracle.json": {
+      "what": "LongMemEval oracle sessions",
+      "source": "https://huggingface.co/datasets/xiaowu0162/longmemeval (longmemeval_oracle)",
+      "license": "MIT",
+      "bytes": 15388478,
+      "sha256": "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c"
+    },
+    "temporal-40.json": {
+      "what": "40 temporal-reasoning questions drawn from LongMemEval",
+      "source": "subset of LongMemEval",
+      "license": "MIT",
+      "bytes": 20613573,
+      "sha256": "506d10b0d6f5b3840d13488fe2487cc76d8dd2ae850da3006dfd4213b50b3daf"
+    },
+    "preference-30.json": {
+      "what": "30 preference questions drawn from LongMemEval",
+      "source": "subset of LongMemEval",
+      "license": "MIT",
+      "bytes": 15515730,
+      "sha256": "92df3dd4f5a76f9f9c472544760c239d28a3bd76a07e4f2f114fcd5abd311645"
+    },
+    "preference-10.json": {
+      "what": "10 preference questions drawn from LongMemEval",
+      "source": "subset of LongMemEval",
+      "license": "MIT",
+      "bytes": 5171376,
+      "sha256": "d7aee4eab2bdb3562578f7705c3c85a2c19f9cb209e4361f3982741ab2fe32c0"
+    },
+    "syn-7.json": {
+      "what": "40 small questions in LongMemEval format, used for smoke tests",
+      "source": "built for Scone in LongMemEval format",
+      "license": "MIT",
+      "bytes": 127876,
+      "sha256": "ff68138166cf3d12fe03b7a941f25dabb255a2da79acf086cf746ef7da22eb0d"
+    },
+    "public-qa/hotpot_dev_distractor_v1.json": {
+      "what": "HotpotQA dev, distractor setting",
+      "source": "http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json",
+      "license": "CC BY-SA 4.0",
+      "bytes": 61065698,
+      "sha256": "e3da074df24e8369009918aa5cdbdd254dadcde4c63f7569d36afd6f2268caa8"
+    },
+    "public-qa/hotpot_evaluate_v1.py": {
+      "what": "HotpotQA official evaluation script",
+      "source": "https://github.com/hotpotqa/hotpot",
+      "license": "Apache-2.0",
+      "bytes": 4257,
+      "sha256": "d35fc91a6db21d791dbdda11daf3856e9359f5701d54e3eefba20d88fecc02c0"
+    },
+    "public-qa/squad_dev_v1.1.json": {
+      "what": "SQuAD v1.1 dev",
+      "source": "https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v1.1.json",
+      "license": "CC BY-SA 4.0",
+      "bytes": 4854279,
+      "sha256": "95aa6a52d5d6a735563366753ca50492a658031da74f301ac5238b03966972c9"
+    },
+    "qasper/qasper-test-v0.3.json": {
+      "what": "QASPER v0.3 test",
+      "source": "https://allenai.org/data/qasper",
+      "license": "CC BY 4.0",
+      "bytes": 18078957,
+      "sha256": "6e29ad410e6e39aa1936017fb965b30a20eb2e7751997f55b97c9d281aa884e5"
+    },
+    "qasper/qasper_evaluator.py": {
+      "what": "QASPER official evaluator",
+      "source": "https://github.com/allenai/qasper-led-baseline",
+      "license": "Apache-2.0",
+      "bytes": 6345,
+      "sha256": "781aba7cd8e524bef4f0a1b4bf3504e5b02cb1d8d5bf32a8f0a89dfa83e86bfe"
+    },
+    "ner/fewnerd-supervised-test.parquet": {
+      "what": "Few-NERD supervised test split",
+      "source": "https://huggingface.co/datasets/DFKI-SLT/few-nerd",
+      "license": "CC BY-SA 4.0",
+      "bytes": 4823735,
+      "sha256": "b7ad746fcbeb68fcc235ba7142d7c3723ea2dc39930089e947284defecf300c6"
+    },
+    "ner/fewnerd-labels.json": {
+      "what": "Few-NERD label names",
+      "source": "https://huggingface.co/datasets/DFKI-SLT/few-nerd",
+      "license": "CC BY-SA 4.0",
+      "bytes": 1660,
+      "sha256": "d1e859957612d66f9472e7dbee64f3d7ba58e09af5f74baa95ba874bce0a3e5d"
+    },
+    "ner/fewnerd-labels.txt": {
+      "what": "Few-NERD label names",
+      "source": "https://huggingface.co/datasets/DFKI-SLT/few-nerd",
+      "license": "CC BY-SA 4.0",
+      "bytes": 134,
+      "sha256": "c36e5430ae0976e122b85012e57d502d201402a500f5d85e019881db8a6e930f"
+    },
+    "memoryagentbench/Conflict_Resolution.parquet": {
+      "what": "MemoryAgentBench conflict-resolution split",
+      "source": "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench",
+      "license": "MIT",
+      "bytes": 1491588,
+      "sha256": "24d5c3f09ce0ce15625cb9f8a98f44f0d864ca6c94d7b4ad04eb697ca3a5ff45"
+    }
+  },
+  "generated": {
+    "longmemeval_s.json": {
+      "from": "longmemeval_s.json.gz",
+      "bytes": 278025796,
+      "sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894"
+    }
+  }
+}
