@@ -1,8 +1,9 @@
 """The proprietary trees stay out of the repository.
 
 The knowledge base, the design docs, the capability ledger, the vendor
-references and the benchmark corpora are the private part of this
-project. `.gitignore` keeps them out, and an ignore rule is a promise
+references and the benchmark run artefacts are the private part of this
+project. The public benchmark datasets in `bench-data` are the exception,
+and only those its manifest lists with a licence. `.gitignore` keeps them out, and an ignore rule is a promise
 that holds right up until somebody runs `git add -f`, or adds a path the
 rule does not quite cover, or commits from a tool with its own idea of
 what is staged.
@@ -31,9 +32,13 @@ PRIVATE = (
     "supermemory",     # vendored upstream reference, never redistributed
     "pipecat",         # the same
     "reference",       # every upstream reference tree
-    "bench-data",      # licensed benchmark corpora
     "bench-runs",      # run artefacts, which can hold sampled corpus text
 )
+
+#: `bench-data` is public since 2026-10-06, by the owner's decision: it holds only datasets whose licences allow
+#: redistribution, each listed with its source and licence in the manifest. Anything else there stays out.
+BENCH_DATA = "bench-data"
+BENCH_DATA_OWN_FILES = {"MANIFEST.json", "README.md", "prepare.py"}
 
 
 def git(*args: str) -> str:
@@ -60,6 +65,22 @@ def test_a_private_tree_has_never_been_committed(path):
     whether it was ever there at all."""
     touched = [line for line in git("log", "--oneline", "--all", "--", f"{path}").splitlines() if line.strip()]
     assert touched == [], f"{path} appears in history: {touched[:3]}"
+
+
+def test_bench_data_tracks_only_the_datasets_its_manifest_licenses():
+    """A corpus without a recorded licence must not ride in beside the ones that have one: OntoNotes 5, for one,
+    may not be redistributed, and `prepare.py` downloads it instead."""
+    import json
+
+    manifest = REPO / BENCH_DATA / "MANIFEST.json"
+    if not manifest.exists():
+        pytest.skip("no bench-data in this checkout")
+    listed = json.loads(manifest.read_text())["files"]
+    tracked = {line.removeprefix(BENCH_DATA + "/") for line in git("ls-files", "--", BENCH_DATA).splitlines() if line.strip()}
+    assert tracked - BENCH_DATA_OWN_FILES <= set(listed), \
+        f"tracked in bench-data without a manifest entry: {sorted(tracked - BENCH_DATA_OWN_FILES - set(listed))}"
+    assert all(entry.get("license") and entry.get("source") for entry in listed.values()), \
+        "every bench-data file needs a licence and a source in MANIFEST.json"
 
 
 def test_the_ignore_rules_still_cover_them():
