@@ -34,13 +34,39 @@ from ..core.retirement import (
 )
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import DeletedSpace, DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
-from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
+from ..core.ports import (DeletedSpace, DuplicateEvent, Event, LEDGER_STATUSES, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink,
+                          NewTombstone, SpaceCounts, TextFilter, VectorPoint)
+from ..core.timeutil import canonical_floor, epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
 #: Shared spec 3.6. Pre-release: a database another build wrote is
 #: refused, not migrated.
 SCHEMA_VERSION = 6
+
+#: The shape ``format_rfc3339`` writes (``core.timeutil.is_canonical``), as a regular expression without braces
+#: (the DDL is a format string) or backslashes. Timestamps of this shape sort as text exactly as they sort as
+#: instants; no other shape does.
+_CANONICAL = "'^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9][.][0-9][0-9][0-9]Z$'"
+#: A fact's start and end as index keys: the text when it is canonical, else NULL, compared byte by byte.
+#: Postgres keeps an index on an expression itself, whoever writes the row, so the keys cannot fall out of
+#: step with the text. A NULL key means "compare this row as an instant": ``facts_placing`` returns those rows.
+_STARTS = f'((CASE WHEN valid_from ~ {_CANONICAL} THEN valid_from END) COLLATE "C")'
+_ENDS = f'((CASE WHEN valid_until ~ {_CANONICAL} THEN valid_until END) COLLATE "C")'
+#: The slot as one indexed value. Postgres has no index hints, and without fresh statistics its planner reads a
+#: subject's whole history through another index and filters. ``facts_placing`` therefore names the slot only
+#: through this expression, which the slot indexes alone can answer. The key is a 64-bit hash, so an index
+#: entry stays small however long the subject or the object is; ``facts_placing`` drops the rows of any other
+#: slot whose key hashes alike.
+_SLOT = "hashtextextended(space || chr(31) || subject || chr(31) || predicate, 0)"
+#: The same for one object of the slot: a predicate that holds many objects at once is placed among the facts
+#: of its own object, and the slot's other objects are never read.
+_SLOT_OBJECT = "hashtextextended(space || chr(31) || subject || chr(31) || predicate || chr(31) || object, 0)"
+#: How many rows that start next ``facts_placing`` reads at a time. The first in the ledger is the one wanted,
+#: and is nearly always the first row; rows out of the ledger (proposed, declined) are read past.
+_STARTS_NEXT_PAGE = 4
+#: The start key with '' for a start in another shape. '' sorts before every key, so "had begun by then, or
+#: must be compared as an instant" is one range the index answers without reading the row.
+_BEGAN = f"""(COALESCE(CASE WHEN valid_from ~ {_CANONICAL} THEN valid_from END, '') COLLATE "C")"""
 
 
 class SchemaMismatch(SconeError):
@@ -178,6 +204,10 @@ class PostgresDocumentStore:
     CREATE INDEX IF NOT EXISTS facts_subject_id ON {s}.facts (space, subject, id);
     CREATE INDEX IF NOT EXISTS facts_space_id ON {s}.facts (space, id);
     CREATE INDEX IF NOT EXISTS facts_source_id ON {s}.facts (space, source_episode_id, id);
+    CREATE INDEX IF NOT EXISTS facts_placing_starts ON {s}.facts (""" + _SLOT + """, """ + _STARTS + """, id);
+    CREATE INDEX IF NOT EXISTS facts_placing_ends ON {s}.facts (""" + _SLOT + """, """ + _ENDS + """, """ + _BEGAN + """);
+    CREATE INDEX IF NOT EXISTS facts_placing_object_starts ON {s}.facts (""" + _SLOT_OBJECT + """, """ + _STARTS + """, id);
+    CREATE INDEX IF NOT EXISTS facts_placing_object_ends ON {s}.facts (""" + _SLOT_OBJECT + """, """ + _ENDS + """, """ + _BEGAN + """);
     CREATE TABLE IF NOT EXISTS {s}.fact_links (
         id BIGSERIAL PRIMARY KEY, space TEXT NOT NULL, from_fact BIGINT NOT NULL, to_fact BIGINT NOT NULL, kind TEXT NOT NULL,
         created_at TEXT NOT NULL, source_episode_id BIGINT, quote TEXT, UNIQUE (space, from_fact, to_fact, kind));
@@ -509,6 +539,73 @@ class PostgresDocumentStore:
             f"SELECT * FROM {self.schema}.facts WHERE space = %s AND subject = %s AND predicate = %s ORDER BY id", (space, subject, predicate)
         )
         return [_fact(r) for r in rows]
+
+    async def facts_placing(self, space: str, subject: str, predicate: str, start: str, *,
+                            object: Optional[str] = None, exclude_id: Optional[int] = None) -> list[Fact]:
+        """``FactPlacementIndex``, from the two slot indexes, or the two that also name the object when the
+        caller does, in one round trip.
+
+        ``floor`` is ``start`` cut to the millisecond in the canonical shape. For a canonical key ``k``,
+        ``k > floor`` holds exactly when ``k`` is after ``start``, and ``k <= floor`` exactly when it is at or
+        before it, so canonical rows are chosen by comparing text byte by byte. A start or an end stored in
+        another shape has no key, and such a row is returned whenever its canonical side allows it to matter,
+        for the engine to compare as an instant. That covers the row that starts next as well: a fact that
+        starts after ``start`` also ends after it or never (no writer stores a fact that ends before it
+        starts), so the two queries on the end key return it even when its start has no key.
+
+        A start at the end of the slot's history reads the facts with no end and nothing else. A start dated
+        in the past also walks the index entries of the facts that end after it, without reading their rows.
+
+        Postgres has no index hints, so the statement is written to leave its planner nothing to weigh. Every
+        condition is one an index answers. What an index cannot answer is checked here: that a row is of this
+        slot and not of another whose key hashes alike, and that the row starting next is in the ledger. A
+        condition the planner cannot estimate makes it expect one row, and then it fetches every later fact
+        and sorts them to find the first."""
+        names: tuple[str, ...] = (space, subject, predicate) if object is None else (space, subject, predicate, object)
+
+        def ours(row: Mapping) -> bool:
+            return (row["space"], row["subject"], row["predicate"], row["object"])[:3 if object is None else 4] == names
+
+        rows = await self._rows(*self._placing_query(names, canonical_floor(start), exclude_id))
+        found = {row["id"]: row for row in rows if not row["starts_next"] and ours(row)}
+        page = [row for row in rows if row["starts_next"]]
+        while page:
+            rival = next((row for row in page if ours(row) and row["status"] in LEDGER_STATUSES), None)
+            if rival is not None:
+                found[rival["id"]] = rival
+                break
+            if len(page) < _STARTS_NEXT_PAGE:
+                break
+            # Every row of the page is out of the ledger: read on from the last, in the index's order.
+            page = await self._rows(*self._starts_next_query(names, exclude_id, after=(page[-1]["starts_key"], page[-1]["id"])))
+        return [_fact(found[fact_id]) for fact_id in sorted(found)]
+
+    def _placing_query(self, names: tuple[str, ...], floor: str, exclude_id: Optional[int]) -> tuple[str, tuple]:
+        """The statement ``facts_placing`` runs first, with its values."""
+        key = _SLOT if len(names) == 3 else _SLOT_OBJECT
+        table = (f"SELECT *, false AS starts_next, NULL::text AS starts_key FROM {self.schema}.facts"
+                 f" WHERE {key} = hashtextextended(%s::text, 0)")
+        slot = chr(31).join(names)
+        starts_next, values = self._starts_next_query(names, exclude_id, floor=floor)
+        return (
+            # Ends after ``start``, and had begun by then.
+            f"({table} AND {_ENDS} > %s AND {_BEGAN} <= %s)"
+            # No end, or an end in another shape, and had begun by then.
+            f" UNION ALL ({table} AND {_ENDS} IS NULL AND {_BEGAN} <= %s)"
+            # The rows with a start key that start soonest after ``start``.
+            f" UNION ALL ({starts_next})",
+            (slot, floor, floor, slot, floor, *values))
+
+    def _starts_next_query(self, names: tuple[str, ...], exclude_id: Optional[int], *, floor: Optional[str] = None,
+                           after: Optional[tuple[str, int]] = None) -> tuple[str, tuple]:
+        """A page of the slot's rows in the order they start: those after ``floor``, or those after the row
+        ``after`` names."""
+        key = _SLOT if len(names) == 3 else _SLOT_OBJECT
+        where, values = (f"{_STARTS} > %s", (floor,)) if after is None else (f"({_STARTS}, id) > (%s, %s)", after)
+        return (f"SELECT *, true AS starts_next, {_STARTS} AS starts_key FROM {self.schema}.facts"
+                f" WHERE {key} = hashtextextended(%s::text, 0) AND {where} AND id IS DISTINCT FROM %s"
+                f" ORDER BY {_STARTS}, id LIMIT {_STARTS_NEXT_PAGE}",
+                (chr(31).join(names), *values, exclude_id))
 
     async def facts_by_subject(self, space: str, subject: str, limit: int) -> list[Fact]:
         rows = await self._rows(
