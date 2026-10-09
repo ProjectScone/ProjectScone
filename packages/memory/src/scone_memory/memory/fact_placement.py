@@ -14,7 +14,7 @@ from typing import AsyncIterator, Awaitable, Callable, Optional, Sequence, cast
 from ..core.affirmations import Affirmation, NewAffirmation, affirmation_store
 from ..core.errors import InvalidInput, NotFound
 from ..core.models import Fact
-from ..core.ports import DocumentStore, NewFact, NewFactLink
+from ..core.ports import DocumentStore, FactPlacementIndex, NewFact, NewFactLink
 from ..core.timeutil import parse_rfc3339
 from ..core.validation import ORIGINS, check_space, normalise_term, normalise_time
 
@@ -190,8 +190,15 @@ async def place(documents: DocumentStore, space: str, subject: str, predicate: s
     (active or closed) holding its slot: the same subject and predicate,
     and for a many-valued predicate the same object too."""
     start_dt = parse_rfc3339(start)
+    # A store that indexes its slots returns the few facts that can matter; any other returns the slot's whole
+    # history. The rule below is the same for both, so the two can only differ in what they cost.
+    if isinstance(documents, FactPlacementIndex):
+        found = await documents.facts_placing(space, subject, predicate, start,
+                                              object=object if many_valued else None, exclude_id=exclude_id)
+    else:
+        found = await documents.facts_for(space, subject, predicate)
     rivals = [
-        r for r in await documents.facts_for(space, subject, predicate)
+        r for r in found
         if r.in_ledger and r.fact_id != exclude_id and (not many_valued or r.object == object)
     ]
     covering = [r for r in rivals if _covers(r, start_dt)]

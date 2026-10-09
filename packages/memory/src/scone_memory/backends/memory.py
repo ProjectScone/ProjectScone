@@ -22,8 +22,9 @@ if TYPE_CHECKING:
 
 from ..retrieval.lexical import Bm25
 from ..core.models import IngestJob, Chunk, Episode, Fact, FactLink, Tombstone, LINK_KINDS
-from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
-from ..core.timeutil import is_before_or_at
+from ..core.ports import (DeletedSpace, LEDGER_STATUSES, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone,
+                          SpaceCounts, TextFilter, VectorPoint)
+from ..core.timeutil import epoch_micros, is_before_or_at
 from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .validation import validate_vector
 from ..core.chunk_window import validate_chunk_window
@@ -35,6 +36,32 @@ from ..core.retirement import (
     Retirement, RetirementCursor, decode_retirement, encode_retirement, retirement_key, retirement_page,
 )
 from ..core.affirmations import Affirmation, NewAffirmation
+
+
+class _FactSlot:
+    """The facts of one subject and predicate, or of one subject, predicate and object: ``(start, fact_id)`` and
+    ``(end, fact_id)`` in order, as microseconds since the epoch, and the ids of the facts with no end."""
+
+    __slots__ = ("starts", "ends", "open")
+
+    def __init__(self) -> None:
+        self.starts: list[tuple[int, int]] = []
+        self.ends: list[tuple[int, int]] = []
+        self.open: set[int] = set()
+
+    def add(self, fact_id: int, start: int, end: int | None) -> None:
+        insort(self.starts, (start, fact_id))
+        if end is None:
+            self.open.add(fact_id)
+        else:
+            insort(self.ends, (end, fact_id))
+
+    def remove(self, fact_id: int, start: int, end: int | None) -> None:
+        del self.starts[bisect_left(self.starts, (start, fact_id))]
+        if end is None:
+            self.open.discard(fact_id)
+        else:
+            del self.ends[bisect_left(self.ends, (end, fact_id))]
 
 
 class InMemoryDocumentStore:
@@ -57,6 +84,10 @@ class InMemoryDocumentStore:
         self._facts_by_space: dict[str, list[int]] = defaultdict(list)
         self._facts_by_source: dict[tuple[str, int], list[int]] = defaultdict(list)
         self._fact_graph_keys: dict[int, tuple[str, int | None]] = {}
+        #: Keyed by (space, subject, predicate) and again by (space, subject, predicate, object): a predicate
+        #: that holds many objects at once is placed among the facts of its own object only.
+        self._fact_slots: dict[tuple[str, ...], _FactSlot] = {}
+        self._fact_slot_entries: dict[int, tuple[tuple[tuple[str, ...], tuple[str, ...]], int, int | None]] = {}
         self._tombstones: dict[tuple[str, int], Tombstone] = {}
         self._affirmations: dict[int, Affirmation] = {}
         self._affirmation_keys: dict[tuple[str, int, str], int] = {}
@@ -112,6 +143,9 @@ class InMemoryDocumentStore:
             del self._facts[fact_id]
             self._fact_subject_keys.pop(fact_id, None)
             self._fact_graph_keys.pop(fact_id, None)
+            self._fact_slot_entries.pop(fact_id, None)
+        for slot_key in [key for key in self._fact_slots if key[0] == space]:
+            del self._fact_slots[slot_key]
         self._facts_by_space.pop(space, None)
         for key in [key for key in self._facts_by_source if key[0] == space]:
             del self._facts_by_source[key]
@@ -352,6 +386,7 @@ class InMemoryDocumentStore:
         self._facts_by_subject[key].append(fact.fact_id)
         self._fact_subject_keys[fact.fact_id] = key
         self._index_graph_fact(fact)
+        self._index_slot_fact(fact)
         return fact
 
     async def update_fact(self, fact: Fact) -> None:
@@ -371,6 +406,46 @@ class InMemoryDocumentStore:
         self._fact_writes[fact.space] += 1
 
         self._index_graph_fact(fact)
+        self._index_slot_fact(fact)
+
+    def _index_slot_fact(self, fact: Fact) -> None:
+        """Keep the fact's two slots ordered by its start and its end, whatever status it has."""
+        slot_key = (fact.space, fact.subject, fact.predicate)
+        entry = ((slot_key, (*slot_key, fact.object)), epoch_micros(fact.valid_from),
+                 None if fact.valid_until is None else epoch_micros(fact.valid_until))
+        old = self._fact_slot_entries.get(fact.fact_id)
+        if old == entry:
+            return
+        if old is not None:
+            for key in old[0]:
+                slot = self._fact_slots[key]
+                slot.remove(fact.fact_id, old[1], old[2])
+                if not slot.starts:
+                    del self._fact_slots[key]
+        for key in entry[0]:
+            self._fact_slots.setdefault(key, _FactSlot()).add(fact.fact_id, entry[1], entry[2])
+        self._fact_slot_entries[fact.fact_id] = entry
+
+    async def facts_placing(self, space: str, subject: str, predicate: str, start: str, *,
+                            object: Optional[str] = None, exclude_id: Optional[int] = None) -> list[Fact]:
+        """``FactPlacementIndex``: the open facts, the facts that end after ``start``, and the first rival that
+        starts after it, found by position in the slot's two orderings. With an ``object``, the slot is that
+        object's alone."""
+        slot = self._fact_slots.get((space, subject, predicate) if object is None else (space, subject, predicate, object))
+        if slot is None:
+            return []
+        at = epoch_micros(start)
+        # Facts with no end, and facts that end after ``start``: none of the second kind when ``start`` is at
+        # the end of the slot's history, and as many as end later when it is dated in the past. Of both, only
+        # those that had begun by ``start`` cover it.
+        unended = [*slot.open, *(fact_id for _, fact_id in slot.ends[bisect_right(slot.ends, (at, math.inf)):])]
+        found = {fact_id for fact_id in unended if self._fact_slot_entries[fact_id][1] <= at}
+        for _, fact_id in slot.starts[bisect_right(slot.starts, (at, math.inf)):]:
+            fact = self._facts[fact_id]
+            if fact.status in LEDGER_STATUSES and fact_id != exclude_id:
+                found.add(fact_id)
+                break
+        return [self._facts[fact_id] for fact_id in sorted(found)]
 
     def _index_graph_fact(self, fact: Fact) -> None:
         key = (fact.space, fact.source_episode_id)
