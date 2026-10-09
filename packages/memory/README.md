@@ -110,7 +110,7 @@ storage ports, source validation and resource ownership.
 | Resume interrupted source deletion across stores | [Source cleanup and recovery](docs/retirement-catalog.md) |
 | Schedule a memory to be forgotten at a time, withheld from recall from then | [Scheduled forgetting](docs/scheduled-forgetting.md) |
 | Ingest PDFs, scans and page provenance | [PDF ingestion](docs/pdf-ingestion.md), [PDF OCR](docs/pdf-ocr.md) |
-| Preserve images and search attributed context | [Attachments](docs/attachments.md), [image context and entities](docs/image-context.md), [image embedding lane](docs/image-embedding-lane.md) |
+| Preserve images and search attributed context | [Attachments](docs/attachments.md), [image context and entities](docs/image-context.md), [image embedding lane](docs/image-embedding-lane.md), [observation streams](docs/observation-streams.md) |
 | Review duplicate documents without discarding originals | [Document duplicate review](docs/document-deduplication.md) |
 | Compose LlamaIndex, LangChain and reranking | [Framework integrations](docs/integrations.md) |
 | Give agents scoped search, trace and read tools | [Agent tools](docs/agent-tools.md), [tool-based conversations](docs/conversation-tools.md) |

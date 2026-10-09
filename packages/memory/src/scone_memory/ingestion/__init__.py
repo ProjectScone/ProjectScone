@@ -14,6 +14,9 @@ __all__ += ["ImageAttribute", "ImageContext", "ImageEntity", "ImageIngested", "I
 from .image_html import HtmlImageContext, image_contexts_from_html
 __all__ += ["HtmlImageContext", "image_contexts_from_html"]
 
+from .observations import ObservationStream, Observed, Sighting, Sightings, sightings
+__all__ += ["ObservationStream", "Observed", "Sighting", "Sightings", "sightings"]
+
 from .files import DocumentIngested, DocumentProvenance, document_provenance, ingest_document
 from .chat_exports import ChatImported, ChatMessage, Transcript, import_transcript, ingest_chat_export, read_transcript
 from .document_source import DocumentSource
