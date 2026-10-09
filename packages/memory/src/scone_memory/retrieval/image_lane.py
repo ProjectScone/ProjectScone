@@ -41,6 +41,7 @@ instead ranks them with the other lanes, so one ordering answers the query.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import TYPE_CHECKING, Mapping, Optional, Protocol, Sequence, cast
 from uuid import uuid4
 
@@ -115,9 +116,21 @@ class _ConditionNarrowing(Protocol):
                      conditions: object = None) -> list[tuple[int, float]]: ...
 
 
+def check_image_vector(embedder: ImageEmbedder, vector: Sequence[float]) -> list[float]:
+    """A vector the caller made with ``embedder`` for one image: its width, every value a finite number."""
+    values = list(vector) if isinstance(vector, Sequence) and not isinstance(vector, (str, bytes)) else None
+    if (values is None or len(values) != embedder.dim
+            or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values)):
+        raise InvalidInput(f"an image vector must be {embedder.dim} finite numbers from the engine's image embedder")
+    return [float(v) for v in values]
+
+
 async def index_image(documents: DocumentStore, embedder: ImageEmbedder, vectors: VectorIndex, space: str,
-                      episode: Episode, data: bytes) -> int:
+                      episode: Episode, data: bytes, *, vector: Sequence[float] | None = None) -> int:
     """Write one vector for the image ``data`` that ``episode`` carries; return the chunk id it is keyed by.
+
+    ``vector`` is the image's vector when the caller has already embedded these bytes with ``embedder``
+    (a stream that compared the frame before keeping it); the image is then not embedded again.
 
     Written again for the same episode it replaces the one before, so an
     exact retry repairs a vector a failed write left out. When the episode is
@@ -130,13 +143,13 @@ async def index_image(documents: DocumentStore, embedder: ImageEmbedder, vectors
     if not chunks:
         raise await _forgotten(documents, space, episode)
     chunk_id = chunks[0].chunk_id
-    [vector] = await embedder.embed_images([data])
+    [made] = [check_image_vector(embedder, vector)] if vector is not None else await embedder.embed_images([data])
     # Read the record as late as possible: another process may have written since this engine opened.
     blocked = await writer_block(vectors, embedder.id, writing=True)
     if blocked is not None:
         raise VectorsNotComparable(blocked)
     await vectors.upsert([VectorPoint(chunk_id=chunk_id, space=space, episode_id=episode.episode_id,
-                                      created_at=episode.created_at, vector=vector, tags=episode.tags,
+                                      created_at=episode.created_at, vector=made, tags=episode.tags,
                                       metadata={**episode.metadata, IMAGE_WRITER: embedder.id,
                                                 IMAGE_WIDTH: str(embedder.dim)})])
     # Forgetting deletes the chunks before it deletes the image vectors. A

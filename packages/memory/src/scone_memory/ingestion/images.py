@@ -1,6 +1,7 @@
 """Index attributed image occurrences and resolve search hits to retained images."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -16,7 +17,7 @@ from ..core.vector_writers import VectorsNotComparable
 from ..core.validation import check_space
 from ..providers.vision import SUPPORTED_IMAGE_TYPES
 from ..ocr.process import python_worker, run_bounded
-from ..retrieval.image_lane import index_image
+from ..retrieval.image_lane import check_image_vector, index_image
 from .image_context import ImageAttribute, ImageContext, ImageEntity, context_text
 
 __all__ = ['ImageAttribute', 'ImageContext', 'ImageEntity', 'ImageIngested', 'ImageProvenance',
@@ -97,8 +98,17 @@ def _entity_tag(entity_id: str) -> str:
 
 async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_type: Literal['image/png', 'image/jpeg', 'image/webp'],
                        context: ImageContext, filename: str | None = None,
-                       forget_after: str | schedule.Resolved | None = None) -> ImageIngested:
+                       forget_after: str | schedule.Resolved | None = None,
+                       observed_at: str | None = None, tags: Sequence[str] = (),
+                       image_vector: Sequence[float] | None = None) -> ImageIngested:
     """Retain original + context manifest, then index attribution without inference.
+
+    ``observed_at`` dates the episode at the instant the image was seen (a camera frame, a screenshot)
+    instead of the instant it was stored; recency, ``since`` and ``as_of`` then read that time. ``tags``
+    are added to the entity tags. ``image_vector`` is this image's vector when the caller has already
+    embedded these bytes with the engine's image embedder, so the image lane does not embed them again;
+    it is refused on an engine without the lane, and before anything is stored when it is not that
+    embedder's width.
 
     Writes use existing primitives, not a transaction. Exact retries repair links.
     Same bytes in different source occurrences share a blob, not their descriptions.
@@ -120,6 +130,10 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
     if media_type not in SUPPORTED_IMAGE_TYPES:
         raise InvalidInput('image context supports still PNG, JPEG and WebP images')
     when = schedule.asked(forget_after, memory.clock())
+    if image_vector is not None:
+        if memory.image_vectors is None or memory.image_embedder is None:
+            raise InvalidInput('an image vector needs an engine with the image lane configured')
+        image_vector = check_image_vector(memory.image_embedder, image_vector)
     context = ImageContext.model_validate_json(context.model_dump_json())
     output = await run_bounded(python_worker('scone_memory.ingestion._image_worker', media_type),
         data, timeout=15., max_output=4096)
@@ -140,7 +154,7 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
     if retained.media_type != 'application/json':
         raise InvalidInput('retained image context has an incompatible media type')
     added = await memory.remember(space, text, kind='file', source=context.source,
-        tags=tuple(_entity_tag(entity.entity_id) for entity in context.entities),
+        tags=(*(_entity_tag(entity.entity_id) for entity in context.entities), *tags), created_at=observed_at,
         attachment_ids=(image.attachment_id, retained.attachment_id),
         dedup_key=f'image-v1:{image.attachment_id}:{retained.attachment_id}',
         metadata={'document_format': 'image', 'evidence_origin': 'image_context',
@@ -153,7 +167,7 @@ async def ingest_image(memory: MemoryEngine, space: str, data: bytes, *, media_t
     episode = await memory._episode_or_gone(space, added.episode_id)
     try:
         await index_image(memory.documents, cast(ImageEmbedder, memory.image_embedder), memory.image_vectors,
-                          space, episode, data)
+                          space, episode, data, vector=image_vector)
     except VectorsNotComparable as blocked:
         # The episode and its attachments are stored; only the image's vector is not.
         return ImageIngested(added, image, retained, 'blocked', str(blocked))
