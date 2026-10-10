@@ -216,3 +216,43 @@ async def test_a_reading_dated_before_the_last_one_is_recorded_as_late_and_moves
     not_due = await stream.observe(90.0, observed_at=at(159))
     assert not_due.kept is False, 'the heartbeat still runs from second 100, not from the late reading'
     assert [e.reason for e in (await sensor_events(memory, 'plant', reason='late')).items] == ['late']
+
+
+async def test_a_stream_that_starts_past_a_limit_says_so_and_is_found_by_its_band():
+    memory = await engine()
+    hot = SensorStream(memory, 'plant', 'pump-3-temperature', unit='°C', deadband=1, high=90)
+    cold = SensorStream(memory, 'plant', 'freezer', unit='°C', deadband=1, low=-20)
+    fine = SensorStream(memory, 'plant', 'office', unit='°C', deadband=1, low=10, high=30)
+    first = await hot.observe(92.4, observed_at=at(0))
+    await cold.observe(-25, observed_at=at(1))
+    await fine.observe(21, observed_at=at(2))
+    assert (first.reason, first.band) == ('first', 'above_high'), 'nothing was crossed: there was no reading before'
+    texts = {event.sensor: event.text for event in (await sensor_events(memory, 'plant')).items}
+    assert texts['pump-3-temperature'].endswith('It was above the high limit of 90 °C.')
+    assert texts['freezer'].endswith('It was below the low limit of -20 °C.')
+    assert 'limit' not in texts['office']
+    assert (await sensor_events(memory, 'plant', reason='limit_crossed')).items == ()
+    assert [event.sensor for event in (await sensor_events(memory, 'plant', band='above_high')).items] == ['pump-3-temperature']
+    assert [event.sensor for event in (await sensor_events(memory, 'plant', band='below_low')).items] == ['freezer']
+    assert [event.sensor for event in (await sensor_events(memory, 'plant', band='in_range')).items] == ['office']
+    with pytest.raises(InvalidInput, match='band must be one of'):
+        await sensor_events(memory, 'plant', band='hot')  # type: ignore[arg-type]
+
+
+async def test_a_reading_exactly_at_a_limit_is_within_it():
+    stream = SensorStream(await engine(), 'plant', 'pump-3-temperature', deadband=100, low=10, high=90)
+    assert (await stream.observe(50, observed_at=at(0))).band == 'in_range'
+    for second, value in ((1, 90), (2, 10)):
+        exact = await stream.observe(value, observed_at=at(second))
+        assert (exact.kept, exact.band) == (False, 'in_range'), 'the limits themselves are allowed values'
+    assert (await stream.observe(90.5, observed_at=at(3))).reason == 'limit_crossed'
+
+
+async def test_a_late_reading_does_not_become_the_time_later_readings_are_judged_against():
+    stream = SensorStream(await engine(), 'plant', 'counter')
+    await stream.observe(1, observed_at=at(10))
+    assert (await stream.observe(2, observed_at=at(2))).reason == 'late'
+    still_late = await stream.observe(3, observed_at=at(5))
+    assert still_late.reason == 'late' and still_late.fact is None, 'second 5 is before second 10, the last reading in order'
+    assert stream.late == 2
+    assert (await sensor_state(stream.engine, 'plant', 'counter')).value == '1'

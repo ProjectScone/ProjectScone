@@ -58,6 +58,7 @@ PREDICATE = 'reads'
 Value = float | int | str | bool
 Reason = Literal['first', 'limit_crossed', 'state_changed', 'changed', 'heartbeat', 'late', 'steady']
 Band = Literal['below_low', 'in_range', 'above_high']
+BANDS: tuple[Band, ...] = ('below_low', 'in_range', 'above_high')
 REASONS: tuple[Reason, ...] = ('first', 'limit_crossed', 'state_changed', 'changed', 'heartbeat', 'late')
 
 
@@ -229,7 +230,12 @@ class SensorStream:
         unit = '' if self.unit is None else f' {self.unit}'
         where = '' if self.place is None else f' at {self.place}'
         text = f'{self.sensor} read {shown}{unit}{where} on {stamp}.'
-        if reason == 'limit_crossed':
+        if reason == 'first' and band == 'above_high':
+            # A stream that starts past a limit crossed nothing, but the record should still say where it stands.
+            text += f' It was above the high limit of {_shown(cast(float, self.high))}{unit}.'
+        elif reason == 'first' and band == 'below_low':
+            text += f' It was below the low limit of {_shown(cast(float, self.low))}{unit}.'
+        elif reason == 'limit_crossed':
             if band == 'above_high':
                 text += f' It rose above the high limit of {_shown(cast(float, self.high))}{unit}.'
             elif band == 'below_low':
@@ -314,9 +320,12 @@ async def sensor_state(engine: MemoryEngine, space: str, sensor: str, *, as_of: 
 
 
 async def sensor_events(engine: MemoryEngine, space: str, *, sensor: str | None = None, place: str | None = None,
-                        reason: Reason | None = None, since: str | None = None, until: str | None = None,
-                        limit: int = EVENT_LIMIT) -> SensorEvents:
-    """Kept readings, newest first, narrowed by sensor, place, reason and time (both ends included).
+                        reason: Reason | None = None, band: Band | None = None, since: str | None = None,
+                        until: str | None = None, limit: int = EVENT_LIMIT) -> SensorEvents:
+    """Kept readings, newest first, narrowed by sensor, place, reason, band and time (both ends included).
+
+    ``reason='limit_crossed'`` finds the moments a sensor went past a limit or came back; ``band`` finds every
+    kept reading taken past one, including the first reading of a stream that started there.
 
     This walks the space's episodes, as ``MemoryEngine.episodes`` does: it is a listing, not an index."""
     check_space(space)
@@ -330,6 +339,10 @@ async def sensor_events(engine: MemoryEngine, space: str, *, sensor: str | None 
             where[key] = _name(item, what)
     if reason is not None:
         where['sensor_event'] = reason
+    if band is not None:
+        if band not in BANDS:
+            raise InvalidInput(f'band must be one of {", ".join(BANDS)}')
+        where['sensor_band'] = band
     start = None if since is None else _instant(since, 'since')
     end = None if until is None else _instant(until, 'until')
     if start is not None and end is not None and start > end:
