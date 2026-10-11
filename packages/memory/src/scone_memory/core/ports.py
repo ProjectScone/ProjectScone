@@ -173,6 +173,36 @@ class EpisodeInventory(Protocol):
                             kind: Optional[str]) -> list[Episode]: ...
 
 
+#: The statuses that hold a place in a slot's partition of time (``Fact.in_ledger``).
+LEDGER_STATUSES = ("active", "closed")
+
+
+@runtime_checkable
+class FactPlacementIndex(Protocol):
+    """A document store that can find where a new fact sits in its slot without reading the slot's history.
+
+    Optional. A store without it is asked for ``facts_for`` and the engine scans the result, which costs time
+    in proportion to how many facts the subject and predicate have ever held."""
+
+    async def facts_placing(self, space: str, subject: str, predicate: str, start: str, *,
+                            object: Optional[str] = None, exclude_id: Optional[int] = None) -> list[Fact]:
+        """Candidates for placing a fact that starts at ``start`` among the slot's rivals.
+
+        The rivals are the facts with this space, subject and predicate whose status is one of
+        ``LEDGER_STATUSES``, leaving out ``exclude_id``, and, when ``object`` is given, holding that object.
+        The result must contain:
+
+        - every rival whose interval covers ``start``: it starts at or before ``start`` and has no end, or an
+          end after ``start``;
+        - the rival that starts soonest after ``start``, the lowest ``fact_id`` among those starting at that
+          same instant.
+
+        It may contain other facts of the slot. The engine applies the exact rule to whatever comes back, so a
+        larger answer costs time and a smaller one is a wrong placement. Instants are compared as instants:
+        ``2024-01-05T00:00:00+02:00`` and ``2024-01-04T22:00:00Z`` are the same one."""
+        ...
+
+
 @runtime_checkable
 class ArchiveLinkInventory(Protocol):
     async def space_fact_links(self, space: str) -> list[FactLink]:

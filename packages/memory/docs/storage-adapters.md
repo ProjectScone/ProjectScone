@@ -72,6 +72,102 @@ Redis Stack adapter. ElastiCache vector search is documented for Valkey 8.2
 node-based clusters; do not assume Redis OSS, Memcached or other deployment modes
 support those commands.
 
+## Fact placement index
+
+Asserting a fact places it in its slot: the facts that share its space, subject
+and predicate. Placing needs two things from the slot's history: the facts that
+cover the new fact's start, and the first fact that starts after it. A document
+store that only offers `facts_for` hands the engine the slot's whole history on
+every assert, so filling a slot with N facts reads on the order of N² rows.
+
+A document store can implement the optional `FactPlacementIndex` port
+(`core/ports.py`) and answer that question from an index:
+
+```python
+async def facts_placing(space, subject, predicate, start, *, object=None, exclude_id=None) -> list[Fact]
+```
+
+The contract is a superset. The result must contain every ledger fact that
+covers `start` and the earliest ledger fact that starts after it; it may contain
+more, and the engine applies its exact rule to what comes back. The engine
+passes `object` for a predicate that holds many objects at once, and the store
+then returns that object's facts only. A store without the port is still
+scanned, so a third-party store keeps working unchanged.
+
+All five bundled document stores implement the port.
+
+| Store | How the lookup is indexed |
+|---|---|
+| In-memory | Per slot, and per slot and object, two sorted lists (starts, ends) searched by bisection. |
+| SQLite | Four expression indexes on the canonical start and end text; every statement names its index with `INDEXED BY`. The database maintains them, so rows written by another program on the same file are indexed too. |
+| PostgreSQL | Four expression indexes keyed by a 64-bit hash of the slot (or slot and object). The statement contains only conditions an index answers; rows of another slot with the same hash and rows outside the ledger are dropped by the adapter. |
+| MongoDB | Stored integer keys (`valid_from_us`, `valid_until_us`, microseconds since the epoch) with four compound indexes; every find names its index with `hint`. |
+| Elasticsearch | The same two stored integer keys, queried with range filters. |
+
+A timestamp is indexed as text only when it has the exact shape Scone writes
+(`YYYY-MM-DDTHH:MM:SS.mmmZ`), because only that shape sorts as text the way it
+sorts in time. A fact stored with another shape (a custom clock, an import) has
+no key and is always returned as a candidate for the engine to compare as an
+instant. MongoDB and Elasticsearch key existing facts when the store is opened;
+until a fact is keyed it is returned as a candidate, never skipped.
+
+### Measured
+
+One slot, values asserted in time order through `MemoryEngine.assert_fact`, on a
+laptop with the servers in local containers. "Before" is the scan.
+
+| Case | Before | After |
+|---|---:|---:|
+| In-memory, 4,000 asserts | 6.93 s | 0.11 s |
+| In-memory, 20,000 asserts | not run | 0.59 s (0.03 s per thousand throughout) |
+| SQLite, 4,000 asserts | 37.79 s | 1.00 s |
+| SQLite, 20,000 asserts | not run | 5.09 s (0.22–0.28 s per thousand throughout) |
+| SQLite, one predicate holding 6,000 open objects | 69.65 s | 1.16 s |
+| In-memory, one predicate holding 6,000 open objects | 2.92 s | 0.12 s |
+| MongoDB, per 500 asserts | 2.5 s rising to 4.9 s by 3,000 | 3.2 s, flat to 5,000 |
+| Elasticsearch, per 500 asserts | rising | 8.9–9.6 s to 1,500 |
+| SQLite, one fact dated into the middle of 8,000 | 44.98 ms | 0.47 ms |
+| In-memory, one fact dated into the middle of 8,000 | 7.58 ms | 0.22 ms |
+
+The lookup alone, on a slot loaded in bulk:
+
+| Facts in the slot | PostgreSQL, at the end | PostgreSQL, mid-history | MongoDB, at the end | MongoDB, mid-history |
+|---:|---:|---:|---:|---:|
+| 2,000 | 0.35 ms | 1.60 ms | 0.74 ms | 1.61 ms |
+| 20,000 | 0.49 ms | 0.68 ms | 0.75 ms | 8.70 ms |
+| 200,000 | 0.60 ms | 3.75 ms | 0.79 ms | 82.37 ms |
+
+### Limits
+
+- **A fact dated in the past is not logarithmic.** Appending reads the open
+  fact and nothing else. A fact dated before existing facts also walks the
+  index entries of the facts that end after it, without reading their rows:
+  100,000 later facts cost 3.75 ms on PostgreSQL and 82 ms on MongoDB above. A
+  reading that arrives a few facts late costs a few entries.
+- **Writes maintain four more indexes.** On SQLite an append takes about a
+  quarter longer with four placement indexes than with two.
+- **PostgreSQL has no index hints.** Its plan is checked by a test on a slot of
+  30,000 facts, with and without table statistics, that fails if the statement
+  sorts or reads more than six rows. An earlier form of the statement returned
+  the right facts while reading 9,999 rows to find one.
+- **PostgreSQL asserts end to end were not flat.** Over 10,000 asserts in one
+  slot the time per assert rose by about half (3.87 s for the first 2,500,
+  6.01 s for the last). Timed per statement, every statement slowed by a
+  similar factor, including single-row reads of tables that stayed empty, so
+  the growth is not in the placement lookup (0.19 ms rising to 0.27 ms). The
+  update that closes the previous fact slowed most, 0.22 ms to 0.49 ms; the
+  run left 9,737 dead rows in `facts`. The cause has not been established.
+- **Opening an existing store builds the indexes.** SQLite and PostgreSQL
+  create them on open; MongoDB and Elasticsearch also write the keys into
+  every existing fact. On a large store the first open after upgrading takes
+  correspondingly long.
+- **Elasticsearch is dominated by its refresh.** Each assert waits for the
+  index to refresh; the placement lookup is a small part of the 18 ms.
+- **The scan path on Elasticsearch reads at most 10,000 facts per slot.**
+  `facts_for` there has a fixed size. The engine no longer uses it for
+  placement, but other callers of `facts_for` on a longer slot get a truncated
+  history without being told.
+
 ## Performance evidence and outstanding work
 
 See [scaling validation](scaling-validation.md) for measured Qdrant payload-filter

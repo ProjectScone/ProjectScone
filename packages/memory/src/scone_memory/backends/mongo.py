@@ -9,6 +9,7 @@ ranking agrees with the reference implementation in every contract test.
 
 from __future__ import annotations
 
+import builtins
 import re
 from typing import Mapping, Optional, Sequence
 
@@ -22,7 +23,9 @@ from ..core.retirement import (
 )
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import DeletedSpace, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter
+from ..core.ports import (DeletedSpace, LEDGER_STATUSES, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts,
+                          TextFilter)
+from ..core.timeutil import epoch_micros
 
 #: Shared spec 3.6. Pre-release: a database another build wrote is
 #: refused, not migrated.
@@ -69,6 +72,23 @@ def _tombstone(doc: Mapping) -> Tombstone:
 def _fact_link(doc: Mapping) -> FactLink:
     return FactLink(link_id=int(doc["_id"]), space=doc["space"], from_fact=int(doc["from_fact"]), to_fact=int(doc["to_fact"]),
                     kind=doc["kind"], created_at=doc["created_at"], source_episode_id=doc.get("source_episode_id"), quote=doc.get("quote"))
+
+
+#: A fact's start and end as whole microseconds since the epoch, stored beside the text they are made from.
+#: MongoDB cannot index an expression, so the store writes these itself on every insert and update.
+_STARTS, _ENDS = "valid_from_us", "valid_until_us"
+
+
+_SLOT_STARTS = [("space", 1), ("subject", 1), ("predicate", 1), (_STARTS, 1), ("_id", 1)]
+_SLOT_ENDS = [("space", 1), ("subject", 1), ("predicate", 1), (_ENDS, 1), (_STARTS, 1)]
+#: The same pair for one object of the slot: a predicate that holds many objects at once is placed among the
+#: facts of its own object, and the slot's other objects are never read.
+_SLOT_OBJECT_STARTS = [*_SLOT_STARTS[:3], ("object", 1), *_SLOT_STARTS[3:]]
+_SLOT_OBJECT_ENDS = [*_SLOT_ENDS[:3], ("object", 1), *_SLOT_ENDS[3:]]
+
+
+def _time_keys(valid_from: str, valid_until: Optional[str]) -> dict[str, Optional[int]]:
+    return {_STARTS: epoch_micros(valid_from), _ENDS: None if valid_until is None else epoch_micros(valid_until)}
 
 
 def _fact(doc: Mapping) -> Fact:
@@ -125,6 +145,12 @@ class MongoDocumentStore:
         await self.facts.create_index([("space", 1), ("subject", 1), ("_id", 1)])
         await self.facts.create_index([("space", 1), ("_id", 1)])
         await self.facts.create_index([("space", 1), ("source_episode_id", 1), ("_id", 1)])
+        await self.facts.create_index(_SLOT_STARTS, name="facts_slot_starts")
+        await self.facts.create_index(_SLOT_ENDS, name="facts_slot_ends")
+        await self.facts.create_index(_SLOT_OBJECT_STARTS, name="facts_slot_object_starts")
+        await self.facts.create_index(_SLOT_OBJECT_ENDS, name="facts_slot_object_ends")
+        await self.facts.create_index([(_STARTS, 1)])
+        await self._key_fact_times()
         await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("to_fact", 1), ("kind", 1)], unique=True)
         await self._fact_links.create_index([("space", 1), ("to_fact", 1)])
         await self._fact_links.create_index([("space", 1), ("from_fact", 1), ("_id", 1)])
@@ -356,9 +382,61 @@ class MongoDocumentStore:
 
     async def insert_fact(self, new: NewFact) -> Fact:
         fact_id = await self._next_id("facts")
-        doc = {"_id": fact_id, **new.__dict__}
+        doc = {"_id": fact_id, **new.__dict__, **_time_keys(new.valid_from, new.valid_until)}
         await self.facts.insert_one(doc)
         return _fact(doc)
+
+    async def _key_fact_times(self) -> int:
+        """Give the time keys to facts stored without them (by a build before the keys, or by one still running).
+        Found through the index on the start key, so a store with nothing to key reads nothing. Until a fact is
+        keyed, ``facts_placing`` returns it for the engine to compare as an instant, so a missing key costs
+        time and never a wrong placement."""
+        keyed = 0
+        async for doc in self.facts.find({_STARTS: None}, {"valid_from": 1, "valid_until": 1}):
+            await self.facts.update_one({"_id": doc["_id"], "valid_from": doc["valid_from"],
+                                         "valid_until": doc.get("valid_until")},
+                                        {"$set": _time_keys(doc["valid_from"], doc.get("valid_until"))})
+            keyed += 1
+        return keyed
+
+    async def facts_placing(self, space: str, subject: str, predicate: str, start: str, *,
+                            object: Optional[str] = None, exclude_id: Optional[int] = None) -> list[Fact]:
+        """``FactPlacementIndex``, from the two slot indexes on the stored time keys.
+
+        The keys are whole microseconds since the epoch, so they compare exactly as the instants do. A fact
+        with no start key was stored without keys and is returned for the engine to compare as an instant; a
+        fact with no end key either has no end or was stored without keys, and is returned when it had begun.
+
+        A start at the end of the slot's history reads the facts with no end and nothing else. A start dated
+        in the past also walks the index entries of the facts that end after it."""
+        found: dict[int, Mapping] = {}
+        for cursor in self._placing_finds(space, subject, predicate, start, object, exclude_id):
+            async for doc in cursor:
+                found[doc["_id"]] = doc
+        return [_fact(found[fact_id]) for fact_id in sorted(found)]
+
+    def _placing_finds(self, space: str, subject: str, predicate: str, start: str, object: Optional[str],
+                       exclude_id: Optional[int]) -> list:
+        """The two finds ``facts_placing`` runs. Each names its index: MongoDB otherwise picks one by trial,
+        and may settle on the plain slot index and read the slot's history."""
+        at = epoch_micros(start)
+        # ``object`` is a parameter here, so the annotations spell the builtin by its module.
+        slot: dict[str, builtins.object] = {"space": space, "subject": subject, "predicate": predicate}
+        ends, starts = "facts_slot_ends", "facts_slot_starts"
+        if object is not None:
+            slot["object"] = object
+            ends, starts = "facts_slot_object_ends", "facts_slot_object_starts"
+        # Three ranges of the ends index, each bounded on the start key as well, so entries are passed over
+        # without their documents being read: ends after ``start`` and had begun; no end and had begun; and no
+        # keys at all (the two are written together, so a fact has both or neither).
+        covering = {"$or": [{**slot, _ENDS: {"$gt": at}, _STARTS: {"$lte": at}},
+                            {**slot, _ENDS: None, _STARTS: {"$lte": at}},
+                            {**slot, _ENDS: None, _STARTS: None}]}
+        rival: dict[str, builtins.object] = {**slot, _STARTS: {"$gt": at}, "status": {"$in": list(LEDGER_STATUSES)}}
+        if exclude_id is not None:
+            rival["_id"] = {"$ne": exclude_id}
+        return [self.facts.find(covering).hint(ends),
+                self.facts.find(rival).sort([(_STARTS, 1), ("_id", 1)]).limit(1).hint(starts)]
 
     async def update_fact(self, fact: Fact) -> None:
         result = await self.facts.update_one(
@@ -369,6 +447,7 @@ class MongoDocumentStore:
                     "confidence": fact.confidence,
                     "valid_from": fact.valid_from,
                     "valid_until": fact.valid_until,
+                    **_time_keys(fact.valid_from, fact.valid_until),
                     "status": fact.status,
                     "closed_reason": fact.closed_reason,
                     "origin": fact.origin,

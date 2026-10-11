@@ -29,7 +29,9 @@ from ..core.affirmations import Affirmation, NewAffirmation, read_links, stored_
 from ..core.errors import SconeError
 from ..retrieval.lexical import tokenize
 from ..core.models import IngestJob, JobItem, Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import DeletedSpace, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
+from ..core.ports import (DeletedSpace, LEDGER_STATUSES, NewJob, NewChunk, NewEpisode, NewFact, NewFactLink, NewTombstone,
+                          SpaceCounts, TextFilter, VectorPoint)
+from ..core.timeutil import canonical_floor
 from ..core.vector_writers import VectorsNotComparable, after_write, vouches
 from .location import local_identity
 from .validation import validate_vector
@@ -134,6 +136,36 @@ CREATE INDEX IF NOT EXISTS ingest_items_episode ON ingest_items(space, episode_i
 }
 
 
+#: The shape ``format_rfc3339`` writes (``core.timeutil.is_canonical``), as a GLOB. Timestamps of this shape
+#: sort as text exactly as they sort as instants; no other shape does.
+_CANONICAL = "'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'"
+#: A fact's start and end as index keys: the text when it is canonical, else NULL. SQLite keeps an index on
+#: an expression itself, whoever writes the row, so the keys cannot fall out of step with the text. A NULL
+#: key means "compare this row as an instant": ``facts_placing`` always returns those rows.
+_STARTS = f"(CASE WHEN valid_from GLOB {_CANONICAL} THEN valid_from END)"
+_ENDS = f"(CASE WHEN valid_until GLOB {_CANONICAL} THEN valid_until END)"
+
+
+def _placing_queries(space: str, subject: str, predicate: str, start: str, object: Optional[str],
+                     exclude_id: Optional[int]) -> list[tuple[str, tuple]]:
+    """The three statements ``facts_placing`` runs, each with its values."""
+    floor = canonical_floor(start)
+    named: tuple[str, ...] = (space, subject, predicate)
+    slot, ends, starts = "space = ? AND subject = ? AND predicate = ?", "facts_slot_ends", "facts_slot_starts"
+    if object is not None:  # the object's own pair of indexes: the slot's other objects are never read
+        slot, named, ends, starts = f"{slot} AND object = ?", (*named, object), "facts_slot_object_ends", "facts_slot_object_starts"
+    begun = f"({_STARTS} IS NULL OR {_STARTS} <= ?)"
+    return [(query, (*named, *extra)) for query, extra in (
+        # Ends after ``start``, and had begun by then.
+        (f"SELECT * FROM facts INDEXED BY {ends} WHERE {slot} AND {_ENDS} > ? AND {begun}", (floor, floor)),
+        # No end, or an end in another shape, and had begun by then.
+        (f"SELECT * FROM facts INDEXED BY {ends} WHERE {slot} AND {_ENDS} IS NULL AND {begun}", (floor,)),
+        # The canonical rival that starts soonest after ``start``.
+        (f"SELECT * FROM facts INDEXED BY {starts} WHERE {slot} AND {_STARTS} > ? AND status IN (?, ?) AND id IS NOT ?"
+         f" ORDER BY {_STARTS}, id LIMIT 1", (floor, *LEDGER_STATUSES, exclude_id)),
+    )]
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     if str(path) != ":memory:":
         Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +199,10 @@ CREATE INDEX IF NOT EXISTS chunks_window ON chunks(space, episode_id, ordinal, i
 CREATE INDEX IF NOT EXISTS facts_subject_id ON facts(space, subject, id);
 CREATE INDEX IF NOT EXISTS facts_space_id ON facts(space, id);
 CREATE INDEX IF NOT EXISTS facts_source_id ON facts(space, source_episode_id, id);
+CREATE INDEX IF NOT EXISTS facts_slot_starts ON facts(space, subject, predicate, """ + _STARTS + """, id);
+CREATE INDEX IF NOT EXISTS facts_slot_ends ON facts(space, subject, predicate, """ + _ENDS + """, """ + _STARTS + """);
+CREATE INDEX IF NOT EXISTS facts_slot_object_starts ON facts(space, subject, predicate, object, """ + _STARTS + """, id);
+CREATE INDEX IF NOT EXISTS facts_slot_object_ends ON facts(space, subject, predicate, object, """ + _ENDS + """, """ + _STARTS + """);
 CREATE INDEX IF NOT EXISTS fact_links_from_id ON fact_links(space, from_fact, id);
 CREATE INDEX IF NOT EXISTS fact_links_to_id ON fact_links(space, to_fact, id);
 CREATE TABLE IF NOT EXISTS fact_writes (space TEXT PRIMARY KEY, writes INTEGER NOT NULL);
@@ -779,6 +815,26 @@ class SqliteDocumentStore:
             (space, subject, predicate),
         )
         return [_fact(r) for r in rows]
+
+    async def facts_placing(self, space: str, subject: str, predicate: str, start: str, *,
+                            object: Optional[str] = None, exclude_id: Optional[int] = None) -> list[Fact]:
+        """``FactPlacementIndex``, from the two slot indexes, or the two that also name the object when the
+        caller does.
+
+        ``floor`` is ``start`` cut to the millisecond in the canonical shape. For a canonical key ``k``,
+        ``k > floor`` holds exactly when ``k`` is after ``start``, and ``k <= floor`` exactly when it is at or
+        before it, so canonical rows are chosen by comparing text. A start or an end stored in another shape
+        has a NULL key, and such a row is returned whenever its canonical side allows it to matter, for the
+        engine to compare as an instant. That covers the row that starts next as well: a fact that starts after
+        ``start`` also ends after it or never (no writer stores a fact that ends before it starts), so the two
+        queries on the end key return it even when its start has no key.
+
+        A start at the end of the slot's history reads the facts with no end and nothing else. A start dated
+        in the past also walks the index entries of the facts that end after it. Each query names its index
+        (``INDEXED BY``), so the plan does not depend on statistics or on which other indexes exist."""
+        rows = {row["id"]: row for query, values in _placing_queries(space, subject, predicate, start, object, exclude_id)
+                for row in self.conn.execute(query, values)}
+        return [_fact(rows[fact_id]) for fact_id in sorted(rows)]
 
     async def facts_by_subject(self, space: str, subject: str, limit: int) -> list[Fact]:
         """Indexed exact subject candidates; the caller verifies source scope."""
