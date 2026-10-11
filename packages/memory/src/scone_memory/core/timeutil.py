@@ -10,6 +10,7 @@ instant and sort differently as text.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 
 RFC3339 = "%Y-%m-%dT%H:%M:%S.%fZ"
 
@@ -52,6 +53,33 @@ def parse_rfc3339(text: str) -> datetime:
 def epoch_seconds(text: str) -> float:
     """For stores that range-filter on numbers, not strings (Qdrant)."""
     return parse_rfc3339(text).timestamp()
+
+
+#: The one shape ``format_rfc3339`` writes: millisecond UTC with a ``Z``. Two timestamps of this shape sort as
+#: text exactly as they sort as instants, so a store may index them as text. Any other shape may not be
+#: compared as text.
+_CANONICAL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z")
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def is_canonical(text: str) -> bool:
+    """Whether ``text`` has the shape ``format_rfc3339`` writes. The shape alone: it is not checked as a date."""
+    return _CANONICAL.fullmatch(text) is not None
+
+
+def canonical_floor(text: str) -> str:
+    """``text``'s instant in the canonical shape, cut down to the millisecond.
+
+    For any canonical timestamp ``c``: ``c`` is after ``text`` exactly when ``c > canonical_floor(text)`` as text.
+    That is what lets a store answer "which canonical rows start after this instant" by comparing text."""
+    return format_rfc3339(parse_rfc3339(text))
+
+
+def epoch_micros(text: str) -> int:
+    """Whole microseconds since the Unix epoch, exactly: the resolution timestamps are compared at. Two
+    timestamps order as their ``epoch_micros`` do, so a store may index instants as these integers."""
+    delta = parse_rfc3339(text) - _EPOCH
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
 def is_before_or_at(candidate: str, boundary: str) -> bool:

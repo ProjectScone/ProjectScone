@@ -35,8 +35,9 @@ from ..core.retirement import (
 )
 from ..retrieval.lexical import tokenize
 from ..core.models import Chunk, Episode, Fact, FactLink, Tombstone
-from ..core.ports import DeletedSpace, DuplicateEvent, Event, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink, NewTombstone, SpaceCounts, TextFilter, VectorPoint
-from ..core.timeutil import epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
+from ..core.ports import (DeletedSpace, DuplicateEvent, Event, LEDGER_STATUSES, NewChunk, NewEpisode, NewEvent, NewFact, NewFactLink,
+                          NewTombstone, SpaceCounts, TextFilter, VectorPoint)
+from ..core.timeutil import epoch_micros, epoch_seconds, format_rfc3339, now_rfc3339, parse_rfc3339
 from .validation import validate_vector
 
 #: Shared spec 3.6. Pre-release: an index set another build wrote is
@@ -97,6 +98,10 @@ class Shared:
         self.users = max(0, self.users - 1)
         if self.users == 0:
             await self.client.close()
+
+
+def _fact_time_keys(valid_from: str, valid_until: Optional[str]) -> dict[str, Optional[int]]:
+    return {FACT_STARTS: epoch_micros(valid_from), FACT_ENDS: None if valid_until is None else epoch_micros(valid_until)}
 
 
 def _episode(doc: Mapping) -> Episode:
@@ -172,9 +177,13 @@ CHUNK_MAPPINGS = {"properties": {
     "chunk_id": LONG, "episode_id": LONG, "space": KEYWORD, "ordinal": LONG, "start": LONG, "end": LONG,
     "text": {"type": "text"}, "created_at": KEYWORD, "tags": KEYWORD, "meta": {"type": "flattened"},
 }}
+#: A fact's start and end as whole microseconds since the epoch, stored beside the text they are made from.
+#: Elasticsearch cannot index an expression, so the store writes these itself on every insert and update.
+FACT_STARTS, FACT_ENDS = "valid_from_us", "valid_until_us"
+FACT_TIME_KEYS = {FACT_STARTS: LONG, FACT_ENDS: LONG}
 FACT_MAPPINGS = {"properties": {
     "fact_id": LONG, "space": KEYWORD, "subject": KEYWORD, "predicate": KEYWORD, "object": KEYWORD, "confidence": {"type": "double"},
-    "valid_from": KEYWORD, "valid_until": KEYWORD, "status": KEYWORD, "closed_reason": {"type": "text", "index": False},
+    "valid_from": KEYWORD, "valid_until": KEYWORD, **FACT_TIME_KEYS, "status": KEYWORD, "closed_reason": {"type": "text", "index": False},
     "source_episode_id": LONG, "origin": KEYWORD, "superseded_by": LONG, "excluded_reason": {"type": "text", "index": False},
     "quote": {"type": "text", "index": False},
 }}
@@ -224,6 +233,9 @@ class ElasticsearchDocumentStore:
         await self.shared.ensure_index("episodes", EPISODE_MAPPINGS)
         await self.shared.ensure_index("chunks", CHUNK_MAPPINGS)
         await self.shared.ensure_index("facts", FACT_MAPPINGS)
+        # An index made by a build before the time keys gains their mappings; adding a field is always allowed.
+        await self.client.indices.put_mapping(index=self._idx("facts"), properties=FACT_TIME_KEYS)
+        await self._key_fact_times()
         await self.shared.ensure_index("fact_links", FACT_LINK_MAPPINGS)
         await self.shared.ensure_index("fact_affirmations", AFFIRMATION_MAPPINGS)
         await self.shared.ensure_index("tombstones", TOMBSTONE_MAPPINGS)
@@ -484,9 +496,63 @@ class ElasticsearchDocumentStore:
 
     async def insert_fact(self, new: NewFact) -> Fact:
         fact_id = await self.shared.next_id("facts")
-        doc = {"fact_id": fact_id, **new.__dict__}
+        doc = {"fact_id": fact_id, **new.__dict__, **_fact_time_keys(new.valid_from, new.valid_until)}
         await self.client.index(index=self._idx("facts"), id=str(fact_id), document=doc, refresh=self.shared.refresh)
         return _fact(doc)
+
+    async def _fact_rows(self, query: dict) -> list[dict]:
+        """Every fact matching ``query``, by ascending id, a page at a time: a search alone stops at the
+        10,000-hit window and would leave facts out without saying so."""
+        found: list[dict] = []
+        after = 0
+        while True:
+            page = await self._search("facts", query={"bool": {"filter": [query, {"range": {"fact_id": {"gt": after}}}]}},
+                                      size=self.PAGE, sort=[{"fact_id": "asc"}])
+            found.extend(page)
+            if len(page) < self.PAGE:
+                return found
+            after = page[-1]["fact_id"]
+
+    async def _key_fact_times(self) -> int:
+        """Give the time keys to facts stored without them (by a build before the keys, or by one still running).
+        Until a fact is keyed, ``facts_placing`` returns it for the engine to compare as an instant, so a missing
+        key costs time and never a wrong placement."""
+        await self.client.indices.refresh(index=self._idx("facts"))
+        unkeyed = await self._fact_rows({"bool": {"must_not": {"exists": {"field": FACT_STARTS}}}})
+        for row in unkeyed:
+            await self.client.update(index=self._idx("facts"), id=str(row["fact_id"]), refresh=self.shared.refresh,
+                                     doc=_fact_time_keys(row["valid_from"], row.get("valid_until")))
+        return len(unkeyed)
+
+    async def facts_placing(self, space: str, subject: str, predicate: str, start: str, *,
+                            object: Optional[str] = None, exclude_id: Optional[int] = None) -> list[Fact]:
+        """``FactPlacementIndex``, by range filters on the stored time keys.
+
+        The keys are whole microseconds since the epoch, so they compare exactly as the instants do. A fact
+        with no start key was stored without keys and is returned for the engine to compare as an instant; a
+        fact with no end key either has no end or was stored without keys, and is returned when it had begun.
+
+        A start at the end of the slot's history reads the facts with no end and nothing else. A start dated
+        in the past also examines the facts that end after it."""
+        at = epoch_micros(start)
+        slot = [{"term": {"space": space}}, {"term": {"subject": subject}}, {"term": {"predicate": predicate}}]
+        if object is not None:  # the object's own facts: the slot's other objects are never returned
+            slot.append({"term": {"object": object}})
+
+        def missing_or(field: str, bound: dict) -> dict:
+            return {"bool": {"should": [{"bool": {"must_not": {"exists": {"field": field}}}}, {"range": {field: bound}}],
+                             "minimum_should_match": 1}}
+
+        # No end or an end after ``start``, and had begun by then. A fact without keys matches both halves.
+        found = {row["fact_id"]: row for row in await self._fact_rows(
+            {"bool": {"filter": [*slot, missing_or(FACT_ENDS, {"gt": at}), missing_or(FACT_STARTS, {"lte": at})]}})}
+        rival: dict = {"filter": [*slot, {"range": {FACT_STARTS: {"gt": at}}}, {"terms": {"status": list(LEDGER_STATUSES)}}]}
+        if exclude_id is not None:
+            rival["must_not"] = {"term": {"fact_id": exclude_id}}
+        for row in await self._search("facts", query={"bool": rival}, size=1,
+                                      sort=[{FACT_STARTS: "asc"}, {"fact_id": "asc"}]):
+            found[row["fact_id"]] = row
+        return [_fact(found[fact_id]) for fact_id in sorted(found)]
 
     async def update_fact(self, fact: Fact) -> None:
         if await self.get_fact(fact.space, fact.fact_id) is None:
@@ -495,6 +561,7 @@ class ElasticsearchDocumentStore:
             index=self._idx("facts"), id=str(fact.fact_id), refresh=self.shared.refresh,
             doc={
                 "object": fact.object, "confidence": fact.confidence, "valid_from": fact.valid_from, "valid_until": fact.valid_until,
+                **_fact_time_keys(fact.valid_from, fact.valid_until),
                 "status": fact.status, "closed_reason": fact.closed_reason, "origin": fact.origin, "excluded_reason": fact.excluded_reason,
                 "superseded_by": fact.superseded_by,
             },
