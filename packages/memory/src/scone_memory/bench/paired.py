@@ -11,11 +11,16 @@ wins and losses. The sign test needs nothing but the counts: it asks how
 surprising this split would be if each item were a fair coin. Ties carry
 no direction and are left out of it, which is the test's own definition,
 not a choice made here.
+
+The sign test says whether the direction is credible; it says nothing
+about size. ``bootstrap_mean_delta`` gives the size a range: a seeded
+percentile bootstrap over the paired items.
 """
 
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -77,3 +82,61 @@ def paired_outcome(baseline: Sequence[float], candidate: Sequence[float], *,
         mean_delta=math.fsum(deltas) / len(deltas) if deltas else None,
         sign_test_p=sign_test(wins, losses),
     )
+
+
+MAX_RESAMPLES = 1_000_000
+
+
+@dataclass(frozen=True)
+class Interval:
+    """A percentile bootstrap interval around a paired mean delta."""
+
+    estimate: float
+    low: float
+    high: float
+    confidence: float
+    resamples: int
+    seed: int
+
+    @property
+    def excludes_zero(self) -> bool:
+        """Whether every plausible mean delta points the same way."""
+        return self.low > 0 or self.high < 0
+
+
+def bootstrap_mean_delta(baseline: Sequence[float], candidate: Sequence[float], *,
+                         resamples: int = 10_000, confidence: float = 0.95, seed: int = 0) -> Optional[Interval]:
+    """Percentile bootstrap interval for the mean of candidate minus baseline.
+
+    The items are resampled as pairs, so an item hard for both runs stays
+    hard for both in every resample; resampling each run on its own would
+    throw that pairing away and widen the interval for no reason. The seed
+    is part of the result, so a reported interval can be reproduced.
+    ``None`` when there are no items to resample.
+    """
+    if len(baseline) != len(candidate):
+        raise ValueError(f"the runs score different numbers of items: {len(baseline)} and {len(candidate)}")
+    if type(resamples) is not int or not 1 <= resamples <= MAX_RESAMPLES:
+        raise ValueError(f"resamples must be an integer from 1 to {MAX_RESAMPLES}")
+    if not 0 < confidence < 1:
+        raise ValueError("confidence must lie strictly between 0 and 1")
+    _finite(baseline, "baseline")
+    _finite(candidate, "candidate")
+    deltas = [after - before for before, after in zip(baseline, candidate)]
+    if not deltas:
+        return None
+    rng = random.Random(seed)
+    means = sorted(math.fsum(rng.choices(deltas, k=len(deltas))) / len(deltas) for _ in range(resamples))
+    tail = (1 - confidence) / 2
+    return Interval(
+        estimate=math.fsum(deltas) / len(deltas),
+        low=_nearest_rank(means, tail),
+        high=_nearest_rank(means, 1 - tail),
+        confidence=confidence,
+        resamples=resamples,
+        seed=seed,
+    )
+
+
+def _nearest_rank(ordered: Sequence[float], q: float) -> float:
+    return ordered[min(len(ordered), max(1, math.ceil(q * len(ordered)))) - 1]

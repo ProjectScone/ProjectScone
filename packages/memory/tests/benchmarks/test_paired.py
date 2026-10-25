@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from scone_memory.bench.paired import paired_outcome, sign_test
+from scone_memory.bench.paired import MAX_RESAMPLES, bootstrap_mean_delta, paired_outcome, sign_test
 
 
 def test_counts_wins_losses_and_ties_item_by_item():
@@ -77,3 +77,53 @@ def test_refuses_runs_that_cannot_be_paired(baseline, candidate):
 def test_sign_test_refuses_counts_that_are_not_counts(wins, losses):
     with pytest.raises(ValueError):
         sign_test(wins, losses)
+
+
+def test_bootstrap_keeps_items_paired():
+    """Items vary from easy to hard, and the candidate gains exactly 0.01
+    on every one. Resampled as pairs, every resample's mean delta is 0.01;
+    resampling each run on its own would mix easy and hard items and
+    report a wide interval that crosses zero."""
+    baseline = [0.05, 0.9, 0.2, 0.75, 0.4, 0.1, 0.6]
+    interval = bootstrap_mean_delta(baseline, [score + 0.01 for score in baseline])
+    assert interval is not None
+    assert interval.low == pytest.approx(0.01)
+    assert interval.high == pytest.approx(0.01)
+    assert interval.excludes_zero
+
+
+def test_bootstrap_interval_brackets_the_estimate_and_widens_with_confidence():
+    baseline = [0.2, 0.5, 0.4, 0.8, 0.3, 0.6, 0.1, 0.7, 0.5, 0.4]
+    candidate = [0.3, 0.4, 0.6, 0.8, 0.35, 0.9, 0.0, 0.75, 0.6, 0.45]
+    narrow = bootstrap_mean_delta(baseline, candidate, confidence=0.5, resamples=4000)
+    wide = bootstrap_mean_delta(baseline, candidate, confidence=0.99, resamples=4000)
+    assert narrow is not None and wide is not None
+    assert narrow.low <= narrow.estimate <= narrow.high
+    assert wide.low <= narrow.low and narrow.high <= wide.high
+    assert wide.high - wide.low > narrow.high - narrow.low
+
+
+def test_bootstrap_is_reproducible_from_its_seed():
+    baseline, candidate = [0.1, 0.5, 0.9, 0.3], [0.4, 0.2, 0.95, 0.6]
+    first = bootstrap_mean_delta(baseline, candidate, resamples=500, seed=7)
+    again = bootstrap_mean_delta(baseline, candidate, resamples=500, seed=7)
+    assert first == again
+    assert first is not None and first.seed == 7 and first.resamples == 500
+
+
+def test_an_interval_that_crosses_zero_does_not_exclude_it():
+    interval = bootstrap_mean_delta([0.5] * 6, [0.9, 0.1, 0.8, 0.2, 0.7, 0.3], resamples=2000)
+    assert interval is not None
+    assert interval.low < 0 < interval.high
+    assert not interval.excludes_zero
+
+
+def test_bootstrap_of_nothing_is_none():
+    assert bootstrap_mean_delta([], []) is None
+
+
+@pytest.mark.parametrize("options", [{"resamples": 0}, {"resamples": 2.5}, {"resamples": MAX_RESAMPLES + 1},
+                                     {"confidence": 0.0}, {"confidence": 1.0}])
+def test_bootstrap_refuses_settings_it_cannot_honour(options):
+    with pytest.raises(ValueError):
+        bootstrap_mean_delta([0.1, 0.2], [0.2, 0.3], **options)
