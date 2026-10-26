@@ -10,7 +10,7 @@ import math
 
 import pytest
 
-from scone_memory.bench.neighbours import exact_top_k
+from scone_memory.bench.neighbours import exact_top_k, neighbour_recall
 
 VECTORS = {
     "east": [1.0, 0.0],
@@ -62,3 +62,39 @@ def test_refuses_queries_it_cannot_rank_against(query, k):
 def test_refuses_a_vector_of_another_dimension():
     with pytest.raises(ValueError, match="3 dimensions"):
         exact_top_k([1.0, 0.0], {"odd": [1.0, 0.0, 0.0]}, 1)
+
+
+def test_recall_counts_the_true_neighbours_returned():
+    result = neighbour_recall(["east", "west"], [1.0, 0.0], VECTORS, 2)
+    assert (result.found, result.expected, result.recall) == (1, 2, 0.5)
+
+
+def test_a_document_tied_at_the_boundary_is_a_true_neighbour():
+    """``a``, ``b`` and ``c`` point the same way; the exact top two are
+    ``a`` and ``b`` by id, but an index returning ``c`` has returned a true
+    second neighbour and must not be marked wrong for it."""
+    tied = {"a": [1.0, 0.0], "b": [2.0, 0.0], "c": [3.0, 0.0], "d": [0.0, 1.0]}
+    assert neighbour_recall(["a", "c"], [1.0, 0.0], tied, 2).recall == 1.0
+    assert neighbour_recall(["a", "d"], [1.0, 0.0], tied, 2).recall == 0.5
+
+
+def test_a_filtered_document_is_a_leak_not_a_hit():
+    """``east`` is the best match, but the caller may not see it."""
+    result = neighbour_recall(["east", "north-east"], [1.0, 0.0], VECTORS, 2,
+                              allowed=lambda document: document != "east")
+    assert result.outside_filter == 1
+    assert result.found == 1
+
+
+def test_duplicates_and_unknown_ids_are_reported_and_never_counted():
+    result = neighbour_recall(["east", "east", "ghost"], [1.0, 0.0], VECTORS, 3)
+    assert (result.found, result.duplicates, result.unknown) == (1, 1, 1)
+
+
+def test_only_the_first_k_returned_are_read():
+    assert neighbour_recall(["west", "north", "east"], [1.0, 0.0], VECTORS, 2).found == 0
+
+
+def test_recall_with_nothing_to_find_is_none_not_zero():
+    result = neighbour_recall(["east"], [1.0, 0.0], VECTORS, 2, allowed=lambda document: False)
+    assert result.recall is None and result.expected == 0
