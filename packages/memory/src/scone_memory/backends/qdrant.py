@@ -171,6 +171,24 @@ class QdrantVectorIndex:
         ranked.sort(key=lambda pair: (-pair[1], pair[0]))
         return ranked
 
+    async def vectors_of(self, space: str, chunk_ids: Sequence[int]) -> dict[int, list[float]]:
+        """The stored vectors of these chunks in the space; a chunk without one is absent.
+
+        A cosine collection keeps each vector at unit length, so these may
+        differ from what was written by a scale; every cosine between them
+        is the same."""
+        found: dict[int, list[float]] = {}
+        ids = [int(chunk_id) for chunk_id in chunk_ids]
+        for start in range(0, len(ids), 500):
+            points = await self.client.retrieve(self.collection, ids=ids[start:start + 500], with_payload=["space"],
+                                                with_vectors=True)
+            for point in points:
+                vector = point.vector
+                if (point.payload or {}).get("space") != space or not isinstance(vector, list):
+                    continue
+                found[int(point.id)] = [float(value) for value in vector if isinstance(value, (int, float))]
+        return found
+
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         from qdrant_client import models
 
