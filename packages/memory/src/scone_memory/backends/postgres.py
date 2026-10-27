@@ -878,6 +878,23 @@ class PostgresVectorIndex:
         ranked.sort(key=lambda pair: (-pair[1], pair[0]))
         return ranked
 
+    async def vectors_of(self, space: str, chunk_ids: Sequence[int]) -> dict[int, list[float]]:
+        """The stored vectors of these chunks in the space; a chunk without one is absent."""
+        from pgvector import Vector
+
+        found: dict[int, list[float]] = {}
+        ids = [int(chunk_id) for chunk_id in chunk_ids]
+        async with self.pool.connection() as conn:
+            for start in range(0, len(ids), 500):
+                rows = await (await conn.execute(
+                    f"SELECT chunk_id, embedding FROM {self.schema}.vectors WHERE space = %s AND chunk_id = ANY(%s)",
+                    (space, ids[start:start + 500]))).fetchall()
+                for chunk_id, embedding in rows:
+                    # pgvector's loader gives a Vector, or a numpy array in older releases
+                    values = embedding.to_list() if isinstance(embedding, Vector) else embedding
+                    found[int(chunk_id)] = [float(value) for value in values]
+        return found
+
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         if not chunk_ids:
             return

@@ -133,3 +133,22 @@ async def test_postgres_from_the_environment(schema):
         build_vectors(Settings.from_env({"SCONE_VECTORS": "postgres"}))
     with pytest.raises(InvalidInput, match="SCONE_POSTGRES_URL"):
         build_events(Settings.from_env({"SCONE_EVENTS": "postgres"}))
+
+
+async def test_vectors_come_back_by_space_so_diversity_need_not_embed_again(schema):
+    from scone_memory.backends import PostgresVectorIndex
+    from scone_memory.core.ports import VectorPoint
+
+    index = PostgresVectorIndex(URL, schema)
+    await index.ensure(3)
+    written = {1: [3.0, 4.0, 0.0], 2: [0.0, 2.0, 2.0], 3: [1.0, 0.0, 0.0]}
+    await index.upsert([VectorPoint(chunk_id=chunk_id, space="alpha" if chunk_id < 3 else "beta", episode_id=chunk_id,
+                                    created_at="2026-10-01T00:00:00Z", vector=vector)
+                        for chunk_id, vector in written.items()])
+    try:
+        alpha = await index.vectors_of("alpha", [1, 2, 3, 99])
+        beta = await index.vectors_of("beta", [1, 2, 3])
+        nothing = await index.vectors_of("alpha", [])
+    finally:
+        await index.close()
+    assert alpha == {1: written[1], 2: written[2]} and beta == {3: written[3]} and nothing == {}
