@@ -524,7 +524,7 @@ def create_app(
             # Both of these were reachable from the CLI only, which made
             # them features the HTTP consumer did not have.
             "recall.window": True, "recall.sentence_window": True, "recall.compress": True, "recall.merge": True, "recall.code_context": True,
-            "recall.highlights": True, "recall.lanes": True, "recall.phrases": True, "recall.diversity": True,
+            "recall.highlights": True, "recall.lanes": True, "recall.phrases": True, "recall.diversity": True, "recall.cutoff": True,
             "recall.multi_hop": all(callable(getattr(engine.documents, name, None))
                                     for name in ("fact_links_from", "facts_by_subject")),
             "facts.close": True, "facts.exclude": True, "facts.include": True, "facts.links": True,
@@ -1151,6 +1151,11 @@ def create_app(
                                            description="Fill the answer's places by relevance less likeness to "
                                                        "passages already placed, weighted from 0 to 1, so "
                                                        "near-copies do not take several. Unmeasured."),
+        cutoff: bool = Query(default=False,
+                             description="End the answer at the largest relative fall in the vector "
+                                         "scores, if one is wide enough, instead of always filling "
+                                         "the limit. Vector lane only, no reranker; the answer's "
+                                         "cutoff says where it cut and why."),
         lanes: Optional[str] = Query(default=None,
                                      description="The lanes to run, comma separated: vector, text, or both "
                                                  "(the default). A lane not named is not run; the answer's "
@@ -1255,7 +1260,7 @@ def create_app(
             candidate_limit=candidate_limit, rerank=rerank, graph_boost=graph_boost, fusion=fusion,
             lessons=lessons, expand_summaries=expand_summaries, expand_max_chunks=expand_max_chunks,
             lanes=[lane.strip() for lane in lanes.split(",") if lane.strip()] if lanes is not None else LANES,
-            require=require, exclude=exclude, diversity=diversity,
+            require=require, exclude=exclude, diversity=diversity, cutoff=cutoff,
         )
         opened = None
         retrieved = list(result.items)
@@ -1316,6 +1321,7 @@ def create_app(
             "lanes": result.lanes,
             **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
             **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
+            **({"cutoff": result.cutoff.model_dump(mode="json")} if result.cutoff is not None else {}),
             "returned_bytes": result.returned_bytes,
             "space_bytes": result.space_bytes,
             "context_reduction": round(result.context_reduction, 6),

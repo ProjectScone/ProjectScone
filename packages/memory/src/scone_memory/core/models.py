@@ -642,6 +642,25 @@ class DiversityTrace(BaseModel):
     why: str = ""
 
 
+class CutoffTrace(BaseModel):
+    """Where ``cutoff`` cut one recall, read from the vector lane's scores."""
+
+    #: ``gap`` (the scores fell, and the passages below were dropped),
+    #: ``no-boundary`` (no drop stood out; nothing dropped), ``short``
+    #: (too few scores to read; nothing dropped), ``unreadable`` (a score
+    #: was not a number; nothing dropped).
+    rule: str
+    #: Vector results above the cut, of those the lane returned.
+    keep: int = 0
+    #: The lowest similarity kept; None unless ``gap``.
+    threshold: Optional[float] = None
+    #: The drop over the spread of the scores read; None unless ``gap``.
+    relative_gap: Optional[float] = None
+    #: Passages the answer would otherwise have held.
+    dropped: int = 0
+    why: str = ""
+
+
 class RecallResult(BaseModel):
     #: Id of the evidence event recorded for this recall, when an event
     #: log is attached; feedback refers to it.
@@ -680,6 +699,8 @@ class RecallResult(BaseModel):
     phrases: Optional[PhraseTrace] = None
     #: With ``diversity``: how the order was changed. None otherwise.
     diversity: Optional[DiversityTrace] = None
+    #: With ``cutoff``: where the scores were cut. None otherwise.
+    cutoff: Optional[CutoffTrace] = None
     #: With ``graph_boost``: the entities the entity lane searched for.
     entities: list[QueryEntity] = Field(default_factory=list)
     returned_bytes: int = 0

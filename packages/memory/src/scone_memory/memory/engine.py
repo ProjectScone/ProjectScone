@@ -1289,6 +1289,7 @@ class MemoryEngine:
         expand_summaries: Optional[str] = None,
         expand_max_chunks: Optional[int] = None,
         image_lane: bool = False,
+        cutoff: bool = False,
     ) -> RecallResult:
         """``image_lane`` adds the image lane: stored images nearest the query
         in the image embedder's space, fused by rank (``retrieval.image_lane``).
@@ -1342,6 +1343,12 @@ class MemoryEngine:
         ``diversity``, a weight from 0 to 1, fills the answer's places by
         maximal marginal relevance, so near-copies do not take several;
         ``diversity`` on the result says how.
+
+        ``cutoff`` returns fewer than ``limit`` passages when the vector
+        lane's scores fall away after the first few (``retrieval.cutoff``),
+        and ``cutoff`` on the result says where. Measured, it helps
+        questions with one answer passage and hurts two-hop ones; it needs
+        ``lanes=["vector"]`` and no reranker, the setting it was measured in.
 
         ``graph_boost`` adds the entity lane: passages naming the question's
         entities or their neighbours in the knowledge graph. The projection
@@ -1414,7 +1421,7 @@ class MemoryEngine:
                             entity_unavailable=unavailable,
                             entity_notes=notes, lanes=lanes,
                             require=require, exclude=exclude, diversity=diversity, summaries=summaries,
-                            image_lane=image_lane)
+                            image_lane=image_lane, cutoff=cutoff)
         if lessons:
             from ..retrieval.lessons import MAX_FEEDBACK_EVENTS, read_lessons, read_summary
 
