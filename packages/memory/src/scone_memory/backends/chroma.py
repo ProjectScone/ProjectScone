@@ -144,6 +144,20 @@ class ChromaVectorIndex:
         ranked.sort(key=lambda pair: (-pair[1], pair[0]))
         return ranked
 
+    async def vectors_of(self, space: str, chunk_ids: Sequence[int]) -> dict[int, list[float]]:
+        """The stored vectors of these chunks in the space; a chunk without one is absent."""
+        found: dict[int, list[float]] = {}
+        ids = [str(int(chunk_id)) for chunk_id in chunk_ids]
+        for start in range(0, len(ids), 500):
+            response = await asyncio.to_thread(self._ready_collection().get, ids=ids[start:start + 500],
+                                               where={"space": space}, include=["embeddings"])
+            embeddings = response["embeddings"]
+            if embeddings is None:
+                raise RuntimeError("Chroma get omitted the requested embeddings")
+            for key, vector in zip(response["ids"], embeddings):
+                found[int(key)] = [float(value) for value in vector]
+        return found
+
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         if not chunk_ids:
             return

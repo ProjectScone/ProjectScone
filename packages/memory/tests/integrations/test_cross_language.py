@@ -102,7 +102,7 @@ async def test_real_episode_transfer_both_directions(engine, rust_roundtrip, sta
     assert imported.episodes == 3
     repeat = await engine.import_records("destination", from_rust)
     assert (repeat.episodes, repeat.deduplicated) == (0, 3)
-    destination = [r async for r in engine.export("destination")]
+    destination = [r async for r in engine.export("destination") if r.get("type") != "archive"]
     assert len(destination) == 4
     assert_evidence([r for r in destination if r["content"] != "unrelated destination record"])
     assert_evidence([r async for r in engine.export("source")])
@@ -213,14 +213,15 @@ async def test_real_keyed_turns_are_refused_not_merged(engine, rust_roundtrip):
         Record("ok", dedup_key="conversation#1", created_at="2024-01-02T03:04:05.006Z"),
         Record("ok", dedup_key="conversation#2", created_at="2024-01-02T03:04:05.006Z"),
     ])
-    exported = [r async for r in engine.export("source")]
+    # The header says what the archive is; the probe takes the episodes.
+    exported = [r async for r in engine.export("source") if r.get("type") != "archive"]
     assert len(exported) == 2
     assert len({r["content_hash"] for r in exported}) == 2
     result = rust_roundtrip(exported, check=False)
     assert result.returncode != 0
     assert result.stdout == ""
     assert "refused-identity" in result.stderr
-    assert len([r async for r in engine.export("source")]) == 2
+    assert len([r async for r in engine.export("source") if r.get("type") != "archive"]) == 2
 
 
 def test_probe_refuses_merging_spaces(rust_roundtrip):

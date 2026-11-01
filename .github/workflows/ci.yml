@@ -158,6 +158,12 @@ jobs:
         run: |
           python -m pip install -q -e '.[test,code-graph,documents,qdrant,mongo,postgres,redis,elasticsearch,milvus-lite,chroma,lancedb,langchain,llamaindex,openai-agents]'
           python -m pip install -q faiss-cpu langchain-community  # a real third-party store for the LangChain bridge's contract run
+      - name: Keep llama_index's bundled NLTK data private
+        # NLTK 3.10.4 will not read data from a directory other accounts can
+        # write, and the runner's tool cache, where llama_index ships its
+        # stopwords, is writable by them.
+        run: |
+          chmod -R go-w "$(python -c 'import llama_index.core, pathlib; print(pathlib.Path(llama_index.core.__file__).parent / "_static" / "nltk_cache")')"
       - name: Tests
         env:
           SCONE_TEST_POSTGRES_URL: postgresql://scone:scone@localhost:5432/scone

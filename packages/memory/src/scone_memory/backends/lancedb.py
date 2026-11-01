@@ -138,6 +138,21 @@ class LanceDBVectorIndex:
         ranked.sort(key=lambda pair: (-pair[1], pair[0]))
         return ranked
 
+    async def vectors_of(self, space: str, chunk_ids: Sequence[int]) -> dict[int, list[float]]:
+        """The stored vectors of these chunks in the space; a chunk without one is absent."""
+        found: dict[int, list[float]] = {}
+        ids = [int(chunk_id) for chunk_id in chunk_ids]
+
+        def _read(batch: list[int]) -> list[dict]:
+            listed = ", ".join(map(str, batch))
+            query = self._ready_table().search().where(f"space = {quote(space)} AND chunk_id IN ({listed})")
+            return query.select(["chunk_id", "vector"]).limit(len(batch)).to_list()
+
+        for start in range(0, len(ids), 500):
+            for row in await asyncio.to_thread(_read, ids[start:start + 500]):
+                found[int(row["chunk_id"])] = [float(value) for value in row["vector"]]
+        return found
+
     async def delete(self, chunk_ids: Sequence[int]) -> None:
         if not chunk_ids:
             return

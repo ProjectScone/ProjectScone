@@ -17,7 +17,7 @@ from ..core.errors import InvalidInput
 from ..core.timeutil import parse_rfc3339
 from ..ingestion.code import code_language, declaration_at, line_span
 from ..ingestion.embedding_cache import EmbeddingCache, cache_key
-from ..core.models import Chunk, DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
+from ..core.models import Chunk, CutoffTrace, DiversityTrace, Episode, PhraseTrace, QueryEntity, RecallItem, RecallResult, RerankTrace, Narrowing
 from ..core.ports import DocumentStore, Embedder, Event, VectorIndex, TextFilter, context_index, prefix_search, question_index
 from ..core.validation import (KINDS, MAX_LIMIT, MAX_QUERY, MAX_SOURCE,
     check_space, normalise_metadata, normalise_tags, normalise_time)
@@ -202,6 +202,33 @@ async def _diversified(runtime: "RecallRuntime", space: str, items: list, chunks
                                    vectors=source, replaced=replaced, why=why)
 
 
+def _cut(items: list, vector_lane: Sequence[tuple[int, float]], limit: int) -> tuple[list, CutoffTrace]:
+    """``items`` without the passages below the drop in the vector lane's scores.
+
+    The drop is read from the lane's own best-first cosines, which is
+    what ``retrieval.cutoff`` was measured on, not from the fused order,
+    which recency and restatement can reorder. Only a ``gap`` drops
+    anything: with no boundary the answer is left as it was. An
+    approximate index may hand back near-ties out of order, so the
+    scores are sorted; one that is not a number leaves nothing to read."""
+    from .cutoff import gap_cutoff
+
+    if not vector_lane:
+        return items, CutoffTrace(rule="short", why="the vector lane returned nothing to cut")
+    if not all(math.isfinite(score) for _, score in vector_lane):
+        return items, CutoffTrace(rule="unreadable", why="the vector lane returned a score that is not a "
+                                                          "number, so there is no drop to read; nothing was cut")
+    scores = sorted((score for _, score in vector_lane), reverse=True)
+    cut = gap_cutoff(scores, min_keep=1, max_keep=max(1, min(limit, len(scores))))
+    if cut.rule != "gap":
+        return items, CutoffTrace(rule=cut.rule, keep=cut.keep, why=cut.why)
+    threshold = scores[cut.keep - 1]
+    kept = [item for item in items if item.similarity is not None and item.similarity >= threshold]
+    dropped = len(items) - len(kept)
+    return kept, CutoffTrace(rule="gap", keep=cut.keep, threshold=threshold, relative_gap=cut.relative_gap,
+                             dropped=dropped, why=f"{cut.why}; {dropped} passage(s) below it were dropped")
+
+
 def _unit(vector: Sequence[float]) -> list[float]:
     norm = math.sqrt(sum(x * x for x in vector))
     return [x / norm for x in vector] if norm else [0.0 for _ in vector]
@@ -254,6 +281,7 @@ async def recall(
     diversity: Optional[float] = None,
     summaries: Optional[SummaryExpander] = None,
     image_lane: bool = False,
+    cutoff: bool = False,
 ) -> RecallResult:
     """``history`` (research experiment 3) also returns, for every
     subject and predicate among the matched facts, the closed facts that
@@ -307,6 +335,16 @@ async def recall(
         if active_reranker is not None:
             raise InvalidInput("diversity and a reranker both set the order, and the reranker would undo the "
                                "diversity; ask for rerank=false with it")
+    if type(cutoff) is not bool:
+        raise InvalidInput("cutoff must be a boolean")
+    if cutoff:
+        # Measured on cosines alone (retrieval.cutoff): a fused or reranked
+        # order is a different list, and a text-only passage has no cosine.
+        if tuple(lanes) != ("vector",):
+            raise InvalidInput("cutoff reads where the vector lane's scores fall; ask for lanes=['vector'] with it")
+        if active_reranker is not None:
+            raise InvalidInput("cutoff reads the vector lane's order, which a reranker replaces; "
+                               "ask for rerank=false with it")
     if active_reranker is not None:
         validate_rerank_options(runtime.rerank_limit, runtime.rerank_max_bytes, runtime.rerank_timeout)
     boundary = normalise_time(as_of) if as_of else None
@@ -713,6 +751,9 @@ async def recall(
         )
     normalization_base = items[0].score if items else 0.0
     items = fusion.normalise(items)
+    cutoff_trace: CutoffTrace | None = None
+    if cutoff:
+        items, cutoff_trace = _cut(items, vector_lane, limit)
     rerank_scores: dict[int, float] = {}
     rerank_trace: RerankTrace | None = None
     if active_reranker is not None:
@@ -843,6 +884,7 @@ async def recall(
         fusion=cast(Literal["rank", "score", "distribution"], fusion_mode),
         lanes=answered,
         diversity=diversity_trace,
+        cutoff=cutoff_trace,
         # What the lanes returned: a summary's chunks do not fill a place the phrases emptied.
         phrases=_finished(phrase_trace, retrieved, limit,
                           window_full=(len(vector_lane) >= vector_depth or len(text_lane) >= depth
@@ -892,6 +934,7 @@ async def recall(
         "space_bytes": result.space_bytes,
         **({"phrases": result.phrases.model_dump(mode="json")} if result.phrases is not None else {}),
         **({"diversity": result.diversity.model_dump(mode="json")} if result.diversity is not None else {}),
+        **({"cutoff": result.cutoff.model_dump(mode="json")} if result.cutoff is not None else {}),
         **({"expanded": result.expanded} if result.expanded is not None else {}),
         **({"feedback_prior": result.feedback_prior} if result.feedback_prior is not None else {}),
     })
