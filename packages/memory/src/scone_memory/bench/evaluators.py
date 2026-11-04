@@ -18,6 +18,15 @@ judge, and says which is which.
   judge that prefers the first it reads is caught rather than believed.
 - ``semantic_similarity``: how close an answer's embedding is to a
   reference's, which needs no judge and says nothing about truth.
+
+With a reference answer, the judgments RAGAS reports by these names:
+
+- ``context_precision``: whether the contexts that help are ranked first.
+- ``context_recall``: the share of the reference the contexts support.
+- ``factual_correctness``: the answer's claims against the reference's,
+  as precision, recall and F1.
+- ``noise_sensitivity``: the share of the answer's claims that are wrong
+  and came from a context, with every wrong claim no context states named.
 """
 
 from __future__ import annotations
@@ -285,3 +294,210 @@ async def semantic_similarity(embedder: Embedder, *, answer: str, reference: str
     cosine = max(0.0, min(1.0, dot / norms))
     return Judgment(kind, cosine, cosine >= passing_similarity,
                     (f"cosine {cosine:.3f} under embedder {embedder.id}; similarity is not correctness",), True, 0)
+
+
+# The reference-based judgments RAGAS reports, asked our way: one call each,
+# a strict verdict, and every claim that fails named in the reasons.
+
+
+def _bounded(kind: str, contexts: Sequence[str], *texts: str) -> Optional[Judgment]:
+    if len(contexts) > MAX_CONTEXTS:
+        return _unverified(kind, f"{len(contexts)} contexts exceed the bound of {MAX_CONTEXTS}; refused rather than cut")
+    over = _over_bound(*texts, *contexts)
+    return _unverified(kind, over) if over else None
+
+
+def _context_flags(verdict: dict[str, object], flag: str, count: int) -> tuple[Optional[dict[int, bool]], str]:
+    """One boolean per numbered context, or why the verdict does not give exactly that."""
+    rows = verdict.get("contexts")
+    if not isinstance(rows, list):
+        return None, "judge verdict lacks a contexts list"
+    seen: dict[int, bool] = {}
+    for item in rows:
+        if (not isinstance(item, dict) or type(item.get("index")) is not int or not isinstance(item.get(flag), bool)
+                or not 0 <= item["index"] < count):
+            return None, f"judge verdict has a context row without an index and a boolean '{flag}'"
+        seen[item["index"]] = item[flag]
+    if len(seen) != count:
+        return None, f"judge verdict covers {len(seen)} of {count} contexts"
+    return seen, ""
+
+
+def _claims(verdict: dict[str, object], key: str, flag: str) -> tuple[Optional[list[tuple[str, bool]]], str]:
+    """Each claim in the verdict's list with its boolean, or why the list cannot be read."""
+    rows = verdict.get(key)
+    if not isinstance(rows, list):
+        return None, f"judge verdict lacks a {key} list"
+    claims: list[tuple[str, bool]] = []
+    for item in rows:
+        if not isinstance(item, dict) or not isinstance(item.get("claim"), str) or not isinstance(item.get(flag), bool):
+            return None, f"judge verdict has a {key} entry without a claim and a boolean '{flag}'"
+        claims.append((item["claim"], item[flag]))
+    return claims, ""
+
+
+async def context_precision(judge: ChatModel, *, question: str, reference: str, contexts: Sequence[str]) -> Judgment:
+    """Whether the contexts that help reach the reference answer are ranked
+    first (RAGAS's context precision with a reference): the mean, over the
+    rank of each useful context, of the precision down to that rank. A
+    useful context at rank 3 behind two useless ones is worth a third.
+    ``passing`` when at least one helps and none that helps ranks below
+    one that does not."""
+    kind = "context_precision"
+    refused = _bounded(kind, contexts, question, reference)
+    if refused:
+        return refused
+    if not contexts:
+        return Judgment(kind, 0.0, False, ("no contexts",), True, 0)
+    system = ("You judge which of the numbered contexts, given best ranked first, help arrive at the reference answer "
+              "to the question. Give a verdict for every index. Reply with exactly one JSON object: "
+              '{"contexts": [{"index": <integer>, "useful": true|false}]}.')
+    user = f"Question:\n{question}\n\nReference answer:\n{reference}\n\nContexts, best ranked first:\n{_numbered(contexts)}"
+    verdict, failure = await _ask(judge, kind, system, user)
+    if failure:
+        return failure
+    assert verdict is not None
+    flags, problem = _context_flags(verdict, "useful", len(contexts))
+    if flags is None:
+        return _unverified(kind, problem, 1)
+    useful, total = 0, 0.0
+    for rank in range(len(contexts)):
+        if flags[rank]:
+            useful += 1
+            total += useful / (rank + 1)
+    if not useful:
+        return Judgment(kind, 0.0, False, ("no context helps reach the reference",), True, 1)
+    score = total / useful
+    reasons = tuple(f"context {rank} does not help" for rank in range(len(contexts)) if not flags[rank])
+    return Judgment(kind, score, score == 1.0, reasons, True, 1)
+
+
+async def context_recall(judge: ChatModel, *, question: str, reference: str, contexts: Sequence[str]) -> Judgment:
+    """The share of the reference answer's statements that the contexts
+    support (RAGAS's context recall): how much of what a right answer
+    needs the retrieval found. ``passing`` when all of it."""
+    kind = "context_recall"
+    refused = _bounded(kind, contexts, question, reference)
+    if refused:
+        return refused
+    if not contexts:
+        return Judgment(kind, 0.0, False, ("no contexts",), True, 0)
+    system = ("Split the reference answer to the question into its separate factual statements. For each, say whether "
+              "the numbered contexts support it. Reply with exactly one JSON object: "
+              '{"statements": [{"claim": "...", "supported": true|false}]}. Use only the contexts; do not use '
+              "outside knowledge.")
+    user = f"Question:\n{question}\n\nContexts:\n{_numbered(contexts)}\n\nReference answer:\n{reference}"
+    verdict, failure = await _ask(judge, kind, system, user)
+    if failure:
+        return failure
+    assert verdict is not None
+    statements, problem = _claims(verdict, "statements", "supported")
+    if statements is None:
+        return _unverified(kind, problem, 1)
+    if not statements:
+        return Judgment(kind, None, None, ("the reference makes no statement to find",), True, 1)
+    found = sum(flag for _, flag in statements)
+    reasons = tuple(f"not in the contexts: {claim}" for claim, flag in statements if not flag)
+    return Judgment(kind, found / len(statements), found == len(statements), reasons, True, 1)
+
+
+async def factual_correctness(judge: ChatModel, *, answer: str, reference: str) -> Judgment:
+    """The answer against a reference, claim by claim (RAGAS's factual
+    correctness): precision is the share of the answer's claims the
+    reference supports, recall the share of the reference's claims the
+    answer makes, and ``score`` their F1. The first reason gives both; the
+    rest name each claim the reference does not support and each the
+    answer misses. An answer that makes no claim scores 0. ``passing``
+    when every claim on both sides is matched."""
+    kind = "factual_correctness"
+    over = _over_bound(answer, reference)
+    if over:
+        return _unverified(kind, over)
+    system = ("You compare an answer with a reference answer, claim by claim. Split the answer into its separate factual "
+              "claims and say for each whether the reference supports it. Split the reference into its separate factual "
+              "claims and say for each whether the answer makes it. Reply with exactly one JSON object: "
+              '{"answer_claims": [{"claim": "...", "supported": true|false}], '
+              '"reference_claims": [{"claim": "...", "covered": true|false}]}.')
+    user = f"Reference answer:\n{reference}\n\nAnswer:\n{answer}"
+    verdict, failure = await _ask(judge, kind, system, user)
+    if failure:
+        return failure
+    assert verdict is not None
+    made, problem = _claims(verdict, "answer_claims", "supported")
+    if made is None:
+        return _unverified(kind, problem, 1)
+    needed, problem = _claims(verdict, "reference_claims", "covered")
+    if needed is None:
+        return _unverified(kind, problem, 1)
+    if not made and not needed:
+        return Judgment(kind, None, None, ("neither the answer nor the reference makes a claim",), True, 1)
+    precision = sum(flag for _, flag in made) / len(made) if made else 0.0
+    recall = sum(flag for _, flag in needed) / len(needed) if needed else 0.0
+    score = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    reasons = (f"precision {precision:.3f}, recall {recall:.3f}",
+               *(f"not in the reference: {claim}" for claim, flag in made if not flag),
+               *(f"missing: {claim}" for claim, flag in needed if not flag))
+    passing = bool(made) and bool(needed) and all(flag for _, flag in made) and all(flag for _, flag in needed)
+    return Judgment(kind, score, passing, reasons, True, 1)
+
+
+NOISE_FOCUS = ("relevant", "irrelevant")
+
+
+async def noise_sensitivity(judge: ChatModel, *, question: str, answer: str, reference: str, contexts: Sequence[str],
+                            focus: str = "relevant") -> Judgment:
+    """The share of the answer's claims that are wrong and that a context
+    supports (RAGAS's noise sensitivity): how much of the answer's error
+    the retrieval handed it. ``focus`` "relevant" counts wrong claims
+    drawn from contexts that bear on the reference; "irrelevant" those
+    drawn from contexts that do not. **Lower is better**, unlike every
+    other score here, and ``passing`` is no such claim.
+
+    A wrong claim that no context supports is in neither count: the
+    answer invented it. Each is named in the reasons, because that, not
+    noise, is the hallucination a grounded system must not make."""
+    kind = "noise_sensitivity"
+    if focus not in NOISE_FOCUS:
+        raise ValueError(f"focus must be one of {NOISE_FOCUS}")
+    refused = _bounded(kind, contexts, question, answer, reference)
+    if refused:
+        return refused
+    system = ("You check an answer's claims against a reference answer and against numbered contexts. Split the answer "
+              "into its separate factual claims. For each, say whether the reference supports it (correct) and list the "
+              "indexes of the contexts that state it. Then, for every context, say whether it bears on the reference "
+              'answer (relevant). Reply with exactly one JSON object: {"claims": [{"claim": "...", "correct": '
+              'true|false, "contexts": [<integer index>, ...]}], "contexts": [{"index": <integer>, "relevant": '
+              "true|false}]}.")
+    user = (f"Question:\n{question}\n\nReference answer:\n{reference}\n\nContexts:\n{_numbered(contexts)}\n\n"
+            f"Answer:\n{answer}")
+    verdict, failure = await _ask(judge, kind, system, user)
+    if failure:
+        return failure
+    assert verdict is not None
+    relevant, problem = _context_flags(verdict, "relevant", len(contexts))
+    if relevant is None:
+        return _unverified(kind, problem, 1)
+    claims, problem = _claims(verdict, "claims", "correct")
+    if claims is None:
+        return _unverified(kind, problem, 1)
+    rows = verdict["claims"]
+    assert isinstance(rows, list)
+    sources: list[list[int]] = []
+    for item in rows:
+        found = item.get("contexts")
+        if not isinstance(found, list) or not all(type(i) is int and 0 <= i < len(contexts) for i in found):
+            return _unverified(kind, "judge verdict has a claim whose contexts are not a list of context indexes", 1)
+        sources.append(found)
+    if not claims:
+        return Judgment(kind, None, None, ("no claims to judge",), True, 1)
+    wanted = focus == "relevant"
+    noisy, reasons = 0, []
+    for (claim, correct), found in zip(claims, sources):
+        if correct:
+            continue
+        if any(relevant[i] == wanted for i in found):
+            noisy += 1
+            reasons.append(f"wrong, from {'a relevant' if wanted else 'an irrelevant'} context: {claim}")
+        elif not found:
+            reasons.append(f"wrong, and in no context: {claim}")
+    return Judgment(kind, noisy / len(claims), noisy == 0, tuple(reasons), True, 1)
