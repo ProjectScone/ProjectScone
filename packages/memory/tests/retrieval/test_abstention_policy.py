@@ -127,9 +127,10 @@ async def test_an_embedder_whose_width_is_not_known_yet_is_not_refused():
             self.id, self.dim = "remote:some-model", 0
 
         async def embed(self, texts):
-            vectors = await super().embed(texts)
+            # Its reply carries the width, as a remote one's does; the
+            # engine now asks for one when it opens.
             self.dim = 256
-            return vectors
+            return await super().embed(texts)
 
     policy = AbstentionPolicy(floor=0.4, embedder_id="remote:some-model", dim=256, measured={})
     engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), NotYet(),

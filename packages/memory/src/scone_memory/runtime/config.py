@@ -1483,6 +1483,4 @@ async def build_engine(settings: Settings) -> MemoryEngine:
         profile_bucket_rules=build_profile_bucket_rules(settings),
         blobs=blobs,
     )
-    if settings.embedder == "remote" and engine.embedder.dim == 0:
-        await engine.embedder.embed(["warm up"])
     return await engine.open()
