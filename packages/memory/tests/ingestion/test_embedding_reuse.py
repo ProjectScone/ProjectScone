@@ -311,6 +311,48 @@ async def test_an_embedder_of_undeclared_width_bypasses_the_cache():
     assert vectors == [[1.0, 2.0], [1.0, 2.0]] and flags == [False, False] and cache.record()["entries"] == 0
 
 
+class LearnsItsWidth:
+    """Declares no width and learns it from its first reply, as
+    `RemoteEmbedder` does."""
+
+    id, dim = "learns-its-width", 0
+
+    async def embed(self, texts):
+        self.dim = 3
+        return [[1.0, float(i + 1), 0.5] for i in range(len(texts))]
+
+    async def embed_queries(self, texts):
+        return await self.embed(texts)
+
+
+async def test_an_engine_learns_an_undeclared_width_before_binding_its_index():
+    # The server once warmed the embedder itself; every other caller of
+    # open() bound the index to width 0 and could store nothing.
+    from scone_memory.ingestion.batch import EMBED_BATCH
+
+    embedder = LearnsItsWidth()
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), embedder).open()
+    assert embedder.dim == 3
+    records = [Record(content=f"note number {i} about the harbour", kind="note", source=f"n{i}") for i in range(EMBED_BATCH + 6)]
+    await engine.remember_many("s", records)
+    pack = await engine.recall("s", "harbour", limit=3)
+    assert len(pack.items) == 3
+    await engine.close()
+
+
+async def test_an_engine_with_a_declared_width_does_not_call_its_embedder_to_open():
+    class Counting(HashEmbedder):
+        calls = 0
+
+        async def embed(self, texts):
+            Counting.calls += 1
+            return await super().embed(texts)
+
+    engine = await MemoryEngine(InMemoryDocumentStore(), InMemoryVectorIndex(), Counting()).open()
+    assert Counting.calls == 0
+    await engine.close()
+
+
 async def test_a_rebuild_of_the_stored_vectors_clears_the_cache():
     cache = InMemoryEmbeddingCache()
     memory = await open_memory(cache)
