@@ -150,8 +150,11 @@ async def test_answers_are_scored_per_category_and_the_reader_sees_dated_turns(t
 async def test_a_judge_is_reported_with_its_false_accept_rate(tmp_path):
     rows = conversation()
     rows["qa"].append({"question": "What did Ana grow?", "answer": "red tulips", "evidence": ["D2:2"], "category": 4})
+    # LoCoMo has two adversarial rows that also carry an answer; the phrase test scores them, not the judge.
+    rows["qa"].append({"question": "Did Ben plant the tulips?", "adversarial_answer": "Yes", "answer": "No",
+                       "evidence": ["D2:2"], "category": 5})
     conversations = load_locomo(write(tmp_path, [rows]))
-    reader = FakeChat(["Lisbon", "cello", "2 June 2023", "Not mentioned.", "tulips"])
+    reader = FakeChat(["Lisbon", "cello", "2 June 2023", "Not mentioned.", "tulips", "Not mentioned."])
     # Per question with an answer: the reader's answer, then its decoy if it
     # has one (calls: q0, q0 decoy, q1, q1 decoy, q2, q4, q4 decoy). This
     # judge accepts every answer it can be read on, decoys included; its
@@ -163,7 +166,9 @@ async def test_a_judge_is_reported_with_its_false_accept_rate(tmp_path):
     assert report.results[2].decoy is None  # the only temporal question has no decoy
     assert report.judge_audited == 2 and report.judge_false_accept == 1.0
     assert report.judge_unreadable == 1
-    assert all(r.judged_correct is None for r in report.results if r.category == 5)
+    assert all(r.judged_correct is None and r.decoy is None for r in report.results if r.category == 5)
+    assert len(judge.calls) == 7 and report.errors == 0
+    assert report.scores["adversarial"]["judged_correct"] is None and report.scores["adversarial"]["score"] == 1.0
     assert report.as_dict(with_items=False)["judge"] == "lenient" and "results" not in report.as_dict(with_items=False)
 
 

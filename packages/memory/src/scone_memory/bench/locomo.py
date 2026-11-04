@@ -384,7 +384,9 @@ async def run_locomo(
                 try:
                     result.prediction = (await reader.complete(READER_SYSTEM, f"Turns:\n{listing}\n\nQuestion: {item.question}")).strip()
                     result.score = round(official_score(item.category, result.prediction, item.answer, stem), 4)
-                    if judge is not None and item.answer is not None:
+                    # Adversarial questions are scored by the phrase test alone, as
+                    # LoCoMo's scorer does, even the two whose rows carry an answer.
+                    if judge is not None and item.answer is not None and item.category != 5:
                         result.judged_correct = await judge_answer(judge, item.question, item.answer, result.prediction)
                         result.decoy = decoy_for(conversation.questions, conversation.questions.index(item), stem)
                         if result.decoy is not None:
@@ -412,7 +414,8 @@ async def run_locomo(
                 except Exception:  # noqa: BLE001
                     pass
     audited = [r for r in results if r.decoy is not None and r.decoy_accepted is not None]
-    judged_rows = [r for r in results if judge is not None and r.answer is not None and r.prediction is not None]
+    judged_rows = [r for r in results
+                   if judge is not None and r.answer is not None and r.category != 5 and r.prediction is not None]
     return LocomoReport(
         conversations=len(conversations), questions=len(results), k=k,
         reader=reader_name if reader is not None else None, judge=judge_name if judge is not None else None,
