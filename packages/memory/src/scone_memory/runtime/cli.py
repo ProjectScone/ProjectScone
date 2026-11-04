@@ -702,6 +702,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--derive", action="store_true", help="E36: after --distill, one derivation pass; bridges stay proposed")
     p.add_argument("--derive-approve", action="store_true", help="E36: approve the derivation pass's bridges to measure the ceiling")
     p.add_argument("--out", help="write every item's report with per-question results to this JSON file")
+    p = sub.add_parser("bench-beam",
+                       help="BEAM: evidence retrieval per memory ability, rubric scores with a reader and an audited judge")
+    p.add_argument("dataset", help="a BEAM split as parquet (needs pyarrow) or JSON rows (CC BY-SA 4.0; fetched separately)")
+    p.add_argument("--k", type=int, default=10, help="recall limit and the k of the retrieval numbers (default 10)")
+    p.add_argument("--conversations", help="comma-separated conversation ids to run (default all)")
+    p.add_argument("--abilities", help="comma-separated abilities to ask, e.g. knowledge_update,abstention (default all)")
+    p.add_argument("--questions", type=int, help="only the first N questions of each conversation")
+    p.add_argument("--reader", action="store_true",
+                   help="answer with the configured chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL); without it only retrieval is measured")
+    p.add_argument("--judge", action="store_true",
+                   help="also score answers on their rubrics, with the judge's credit for known-wrong answers beside it")
+    p.add_argument("--judge-model", help="the judge's model at the same SCONE_CHAT_URL (default the reader's)")
+    p.add_argument("--concurrency", type=int, default=1,
+                   help="questions of a conversation in flight at once, for model latency (default 1)")
+    p.add_argument("--out", help="write the report with per-question results to this JSON file")
     # The hook's own flags are parsed by agent_hook; this subparser accepts
     # anything after its name and hands it over untouched. parse_known_args
     # is used at the call site because REMAINDER does not capture a flag
@@ -1543,6 +1558,68 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
                       f"derived_gold@{report.k} {(report.derived_gold_at_k or 0) * 100:5.1f}%", file=out)
     if args.out:
         pathlib.Path(args.out).write_text(json.dumps([r.as_dict(with_items=True) for r in reports], indent=1), encoding="utf-8")
+    return 0
+
+
+async def beam_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """BEAM: in-process stores per conversation, the configured store untouched."""
+    import dataclasses
+
+    from ..bench.beam import ABILITIES, load_beam, run_beam
+    from .config import build_chat, build_embedder, build_in_process_engine
+
+    def refuse(message: str) -> int:
+        print(f"error: {message}", file=sys.stderr)
+        return 2
+
+    if args.k < 1 or args.concurrency < 1 or (args.questions is not None and args.questions < 1):
+        return refuse("--k, --questions and --concurrency take a number of at least 1")
+    abilities = {a.strip() for a in args.abilities.split(",") if a.strip()} if args.abilities else None
+    if abilities and not abilities <= set(ABILITIES):
+        return refuse(f"--abilities takes names from {', '.join(ABILITIES)}")
+    conversations = loaded = load_beam(args.dataset)
+    if args.conversations:
+        wanted = {s.strip() for s in args.conversations.split(",") if s.strip()}
+        unknown = wanted - {c.conversation_id for c in conversations}
+        if unknown:
+            return refuse(f"no conversation {', '.join(sorted(unknown))} in {args.dataset}")
+        conversations = [c for c in conversations if c.conversation_id in wanted]
+    embedder = build_embedder(settings)
+    reader = build_chat(settings) if args.reader or args.judge else None
+    if (args.reader or args.judge) and reader is None:
+        return refuse("--reader and --judge need SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+    judge_settings = dataclasses.replace(settings, chat_model=args.judge_model) if args.judge_model else settings
+    judge = build_chat(judge_settings) if args.judge else None
+    name = lambda s: f"{s.chat_model} at {s.chat_url}"  # noqa: E731
+
+    async def make():
+        return await build_in_process_engine(settings, embedder)
+
+    def progress(n, total):
+        print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+
+    report = await run_beam(make, conversations, reader=reader, reader_name=name(settings) if reader else None,
+                            judge=judge, judge_name=name(judge_settings) if judge else None, k=args.k,
+                            questions=args.questions, abilities=abilities, progress=progress,
+                            concurrency=args.concurrency, decoys_from=loaded)
+    print("", file=sys.stderr)
+    if args.json:
+        print(json.dumps(report.as_dict(with_items=False), ensure_ascii=False), file=out)
+    else:
+        print(f"BEAM: {report.conversations} conversation(s), {report.questions} question(s), k={report.k}, "
+              f"embedder {report.embedder}, reader {report.reader or 'none'}, judge {report.judge or 'none'}", file=out)
+        print(f"  {'ability':<26} {'n':>4} {'evid@k':>7} {'all@k':>7} {'stale':>7} {'score':>7} {'tau-b':>7}", file=out)
+        pct = lambda v: "    n/a" if v is None else f"{v * 100:6.1f}%"  # noqa: E731
+        tau = lambda v: "    n/a" if v is None else f"{v:7.3f}"  # noqa: E731
+        for label, row in report.scores.items():
+            print(f"  {label:<26} {int(row['n'] or 0):>4} {pct(row['evidence_recall'])} {pct(row['all_evidence'])} "
+                  f"{pct(row['stale_only'])} {pct(row['score'])} {tau(row['tau_b'])}", file=out)
+        print(f"  source ids naming no message: {report.evidence_unreadable}; errors: {report.errors}", file=out)
+        if report.judge is not None:
+            print(f"  judge gave known-wrong answers {pct(report.judge_decoy_score).strip()} credit over "
+                  f"{report.judge_audited}; {report.judge_unreadable} grading(s) unreadable", file=out)
+    if args.out:
+        pathlib.Path(args.out).write_text(json.dumps(report.as_dict(with_items=True), indent=1), encoding="utf-8")
     return 0
 
 
@@ -2886,9 +2963,9 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         serve(settings)  # same SQLite default as the other commands
         return 0
-    if args.command in ("bench", "bench-conflicts", "bench-temporal", "bench-code", "bench-route",
+    if args.command in ("bench", "bench-conflicts", "bench-beam", "bench-temporal", "bench-code", "bench-route",
                         "bench-parts", "bench-questions", "bench-beir", "calibrate", "tune"):
-        command = {"bench": bench_command, "bench-conflicts": conflicts_command,
+        command = {"bench": bench_command, "bench-conflicts": conflicts_command, "bench-beam": beam_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
                    "bench-questions": bench_questions_command,
                    "bench-route": route_command, "bench-parts": parts_command, "bench-beir": beir_command,
