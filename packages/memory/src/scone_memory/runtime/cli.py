@@ -714,6 +714,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--judge", action="store_true",
                    help="also grade answers CORRECT/WRONG, with the judge's false-accept rate on known-wrong answers beside it")
     p.add_argument("--judge-model", help="the judge's model at the same SCONE_CHAT_URL (default the reader's)")
+    p.add_argument("--concurrency", type=int, default=1,
+                   help="questions of a conversation in flight at once, for model latency (default 1)")
     p.add_argument("--out", help="write the report with per-question results to this JSON file")
     # The hook's own flags are parsed by agent_hook; this subparser accepts
     # anything after its name and hands it over untouched. parse_known_args
@@ -1570,8 +1572,8 @@ async def locomo_command(args: argparse.Namespace, settings: Settings, out) -> i
         print(f"error: {message}", file=sys.stderr)
         return 2
 
-    if args.k < 1 or (args.questions is not None and args.questions < 1):
-        return refuse("--k and --questions take a number of at least 1")
+    if args.k < 1 or args.concurrency < 1 or (args.questions is not None and args.questions < 1):
+        return refuse("--k, --questions and --concurrency take a number of at least 1")
     conversations = load_locomo(args.dataset)
     if args.conversations:
         wanted = {s.strip() for s in args.conversations.split(",") if s.strip()}
@@ -1601,7 +1603,8 @@ async def locomo_command(args: argparse.Namespace, settings: Settings, out) -> i
 
     report = await run_locomo(make, conversations, reader=reader, reader_name=name(settings) if reader else None,
                               judge=judge, judge_name=name(judge_settings) if judge else None, k=args.k,
-                              questions=args.questions, categories=categories, progress=progress)
+                              questions=args.questions, categories=categories, progress=progress,
+                              concurrency=args.concurrency)
     print("", file=sys.stderr)
     if args.json:
         print(json.dumps(report.as_dict(with_items=False), ensure_ascii=False), file=out)

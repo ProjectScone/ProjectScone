@@ -326,12 +326,19 @@ async def run_locomo(
     questions: Optional[int] = None,
     categories: Optional[set[int]] = None,
     progress: Optional[Callable[[int, int], None]] = None,
+    concurrency: int = 1,
 ) -> LocomoReport:
     """Every conversation in its own engine: all turns remembered, then each
     question recalled at limit k, answered from the top k in time order when
-    a reader is given, and judged with an audit when a judge is given."""
+    a reader is given, and judged with an audit when a judge is given.
+
+    Up to `concurrency` questions of a conversation are in flight at once;
+    results keep the questions' order whatever order they finish in. Above 1,
+    a question's recall_ms includes waiting on the others."""
     if judge is not None and reader is None:
         raise ValueError("a judge grades a reader's answers; give a reader too")
+    if concurrency < 1:
+        raise ValueError("concurrency is a number of questions in flight, at least 1")
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     stem = _stemmer() if reader is not None else None
     results: list[QuestionResult] = []
@@ -355,8 +362,9 @@ async def run_locomo(
                    created_at=turn.when.isoformat().replace("+00:00", "Z"))
             for turn in conversation.turns
         ])
-        for item in chosen[conversation.sample_id]:
-            done += 1
+        # Every question of this conversation finishes before the loop moves
+        # on, so the closure sees this conversation's engine and turns.
+        async def ask(item: Question) -> QuestionResult:
             t0 = time.perf_counter()
             pack = await engine.recall(space, item.question, limit=k)
             ms = round((time.perf_counter() - t0) * 1000, 3)
@@ -383,9 +391,20 @@ async def run_locomo(
                             result.decoy_accepted = await judge_answer(judge, item.question, item.answer, result.decoy)
                 except Exception as error:  # noqa: BLE001 - one failed call is counted, not fatal
                     result.error = f"{type(error).__name__}: {error}"
-            results.append(result)
+            return result
+
+        gate = asyncio.Semaphore(concurrency)
+
+        async def bounded(item: Question) -> QuestionResult:
+            nonlocal done
+            async with gate:
+                result = await ask(item)
+            done += 1
             if progress:
                 progress(done, total)
+            return result
+
+        results.extend(await asyncio.gather(*(bounded(item) for item in chosen[conversation.sample_id])))
         for store in (engine.documents, engine.vectors, engine.events):
             if store is not None and hasattr(store, "close"):
                 try:

@@ -5,6 +5,7 @@ CC BY-NC and never ships here."""
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 
@@ -166,6 +167,31 @@ async def test_a_judge_is_reported_with_its_false_accept_rate(tmp_path):
     assert report.as_dict(with_items=False)["judge"] == "lenient" and "results" not in report.as_dict(with_items=False)
 
 
+@needs_nltk
+async def test_questions_run_concurrently_up_to_the_limit_and_keep_their_order(tmp_path):
+    answers = {"Which city did Ana run the charity marathon in?": "Lisbon", "What instrument is Ben learning?": "cello",
+               "When did Ben adopt the beagle puppy?": "2 June 2023", "Which city did Ben run the charity marathon in?": "Not mentioned."}
+
+    class Slow:
+        active = peak = 0
+
+        async def complete(self, system, user):
+            Slow.active += 1
+            Slow.peak = max(Slow.peak, Slow.active)
+            question = user.rsplit("Question: ", 1)[1]
+            # Earlier questions take longer, so they finish in reverse order.
+            await asyncio.sleep(0.01 * (4 - list(answers).index(question)))
+            Slow.active -= 1
+            return answers[question]
+
+    conversations = load_locomo(write(tmp_path, [conversation()]))
+    report = await run_locomo(engine, conversations, reader=Slow(), reader_name="slow", k=4, concurrency=3)
+    assert Slow.peak == 3
+    assert [r.question for r in report.results] == list(answers) and [r.score for r in report.results] == [1.0] * 4
+    with pytest.raises(ValueError):
+        await run_locomo(engine, conversations, concurrency=0)
+
+
 async def test_a_judge_needs_a_reader(tmp_path):
     conversations = load_locomo(write(tmp_path, [conversation()]))
     with pytest.raises(ValueError):
@@ -191,5 +217,5 @@ def test_the_command_scores_retrieval_and_leaves_the_configured_store_alone(tmp_
     assert saved["questions"] == 3 and saved["evidence_unreadable"] == 0
     assert not untouched.exists()
     for bad in (["--reader"], ["--categories", "4,6"], ["--categories", "x"], ["--conversations", "conv-1,conv-9"],
-                ["--k", "0"], ["--questions", "0"]):
+                ["--k", "0"], ["--questions", "0"], ["--concurrency", "0"]):
         assert cli.main(["bench-locomo", str(path), *bad], env=env, stdin=io.StringIO(), out=io.StringIO()) == 2, bad
