@@ -718,8 +718,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="questions of a conversation in flight at once, for model latency (default 1)")
     p.add_argument("--directives", action="store_true",
                    help="read user messages for standing directives and show their block above the recalled messages")
-    p.add_argument("--directive-bytes", type=int, default=2000,
-                   help="the directive block's byte bound, 200 to 16000 (default 2000)")
+    from ..memory.directives import DEFAULT_BLOCK_BYTES, MAX_BLOCK_BYTES, MIN_BLOCK_BYTES
+
+    p.add_argument("--directive-bytes", type=int, default=DEFAULT_BLOCK_BYTES,
+                   help=f"the directive block's byte bound, {MIN_BLOCK_BYTES} to {MAX_BLOCK_BYTES} "
+                        f"(default {DEFAULT_BLOCK_BYTES})")
     p.add_argument("--out", help="write the report with per-question results to this JSON file")
     # The hook's own flags are parsed by agent_hook; this subparser accepts
     # anything after its name and hands it over untouched. parse_known_args

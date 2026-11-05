@@ -23,6 +23,7 @@ from scone_memory.bench.beam import (
     run_beam,
     source_ids,
 )
+from scone_memory.memory.directives import DEFAULT_BLOCK_BYTES, MIN_BLOCK_BYTES
 from scone_memory.providers.llm import FakeChat
 
 
@@ -321,7 +322,8 @@ async def test_directives_reach_the_reader_whatever_recall_found(tmp_path):
     assert report.directives["c1"] == {"read": 4, "added": 1, "restated": 0, "cut": 0, "clipped": 0, "text_cut": 0,
                                        "held": 1, "shown": 1, "omitted": 0,
                                        "bytes": report.directives["c1"]["bytes"]}
-    assert report.directive_bytes == 2000 and 0 < report.directives["c1"]["bytes"] <= 2000
+    assert report.directive_bytes == DEFAULT_BLOCK_BYTES
+    assert 0 < report.directives["c1"]["bytes"] <= DEFAULT_BLOCK_BYTES
     bullets = next(r for r in report.results if r.ability == "instruction_following")
     # Recall at k=1 misses the instruction; the block carries it anyway.
     assert 6 not in bullets.top_sources and bullets.evidence_recall == 0.0 and bullets.in_context == 1.0
@@ -345,7 +347,7 @@ async def test_arguments_that_cannot_be_honoured_are_refused(tmp_path):
     with pytest.raises(ValueError):
         await run_beam(engine, conversations, abilities={"mind_reading"})
     with pytest.raises(ValueError):
-        await run_beam(engine, conversations, directives=True, directive_bytes=100)
+        await run_beam(engine, conversations, directives=True, directive_bytes=MIN_BLOCK_BYTES - 1)
 
 
 def test_the_command_scores_retrieval_and_leaves_the_configured_store_alone(tmp_path):
@@ -368,8 +370,10 @@ def test_the_command_scores_retrieval_and_leaves_the_configured_store_alone(tmp_
     assert cli.main(["bench-beam", str(path), "--k", "1", "--conversations", "c1", "--abilities", "instruction_following",
                      "--directives"], env=env, stdin=io.StringIO(), out=out) == 0
     assert "in-ctx" in out.getvalue() and "directives: 1 recorded" in out.getvalue()
+    assert cli.build_parser().parse_args(["bench-beam", str(path)]).directive_bytes == DEFAULT_BLOCK_BYTES
     for bad in (["--reader"], ["--judge"], ["--abilities", "abstention,mind_reading"], ["--conversations", "c1,c9"],
-                ["--k", "0"], ["--questions", "0"], ["--concurrency", "0"], ["--directive-bytes", "100"]):
+                ["--k", "0"], ["--questions", "0"], ["--concurrency", "0"],
+                ["--directive-bytes", str(MIN_BLOCK_BYTES - 1)]):
         assert cli.main(["bench-beam", str(path), *bad], env=env, stdin=io.StringIO(), out=io.StringIO()) == 2, bad
 
 

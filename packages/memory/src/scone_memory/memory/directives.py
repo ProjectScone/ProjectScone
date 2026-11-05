@@ -86,7 +86,10 @@ MAX_DIRECTIVES = 8
 MAX_DIRECTIVE_CHARS = 400
 #: The block's default byte bound and the most a host may choose; the
 #: least, ``MIN_BLOCK_BYTES``, is measured below from the block itself.
-DEFAULT_BLOCK_BYTES = 2000
+#: A directive runs to a few hundred bytes, so the default holds about a
+#: dozen; a longer conversation gathers more, and the block then drops the
+#: oldest and counts them.
+DEFAULT_BLOCK_BYTES = 4000
 MAX_BLOCK_BYTES = 16_000
 #: Directives one block may hold.
 MAX_BLOCK_LIMIT = 50
