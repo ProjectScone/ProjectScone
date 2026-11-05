@@ -32,7 +32,7 @@ from ..providers.llm import ChatModel
 from .answer_requirements import AnswerRequirements, validated_requirements
 from .answer_review import AnswerReviewer, AnswerReviewLimits, ReviewedAnswer, review_answer, require_contextual_reviewer
 from .context import ContextReceipt, MemoryContext
-from ..memory.directives import DEFAULT_BLOCK_BYTES, record_directives
+from ..memory.directives import DEFAULT_BLOCK_BYTES, MAX_BLOCK_LIMIT, record_directives
 from .evidence_answer import EvidenceAnswerError, EvidenceSelector, construct_evidence_answer, _ABSTENTION
 from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
@@ -210,7 +210,7 @@ class TextConversation:
                  followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S,
                  profile_buckets: "BucketBounds | None" = None,
                  deferred_capture: "DeferredTextCapture | None" = None,
-                 standing_directives: bool = False, directive_limit: int = 20,
+                 standing_directives: bool = False, directive_limit: int = MAX_BLOCK_LIMIT,
                  max_directive_bytes: int = DEFAULT_BLOCK_BYTES):
         check_space(space)
         if deferred_capture is not None:

@@ -18,6 +18,7 @@ import json
 import pytest
 
 from scone_memory.memory.directives import DIRECTIVE_PREFIX, INSTRUCTS, MIN_BLOCK_BYTES, PREFERS
+from scone_memory.realtime.context import MemoryContext
 from scone_memory.realtime.deferred_capture import DeferredTextCapture
 from scone_memory.realtime.text import TextConversation
 
@@ -76,6 +77,25 @@ async def test_without_standing_directives_nothing_is_read_or_shown(engine):
     assert "directives" not in result and "directive_status" not in result["memory_context"]
     assert directive_block(model.requests[-1]) is None
     await conversation.close()
+
+
+async def test_the_defaults_show_a_long_conversations_directives(engine):
+    """A long conversation gathers dozens of directives. The defaults of
+    the conversation and of the context, count and bytes, show two dozen
+    of ordinary length whole."""
+    model = ScriptedModel()
+    conversation = TextConversation(engine, "alpha", "long", lambda: model, standing_directives=True)
+    for first in range(0, 24, 6):
+        said = " ".join(f"Always check step {n:02d} twice, " + "reading every line of it slowly " * 5
+                        + "then stop." for n in range(first, first + 6))
+        result = await conversation.reply(said)
+        assert result["directives"]["added"] == 6
+    context = result["memory_context"]
+    assert (len(context["directive_fact_ids"]), context["directive_omitted_count"]) == (24, 0)
+    await conversation.close()
+    _, receipt = await MemoryContext(engine, "alpha", "other", standing_directives=True).prepare(
+        [{"role": "user", "content": "What next?"}])
+    assert (len(receipt["directive_fact_ids"]), receipt["directive_omitted_count"]) == (24, 0)
 
 
 async def test_the_block_is_bounded_and_says_what_it_left_out(engine):

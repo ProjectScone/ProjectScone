@@ -238,7 +238,7 @@ class MemoryContext:
                  profile_limit: int = 10, max_profile_bytes: int = 1000,
                  followup_queries: str = "off", followup_model: ChatModel | None = None,
                  followup_timeout: float = REWRITE_TIMEOUT_S, profile_buckets: "BucketBounds | None" = None,
-                 standing_directives: bool = False, directive_limit: int = 20,
+                 standing_directives: bool = False, directive_limit: int = MAX_BLOCK_LIMIT,
                  max_directive_bytes: int = DEFAULT_BLOCK_BYTES) -> None:
         check_space(space)
         if type(standing_directives) is not bool:

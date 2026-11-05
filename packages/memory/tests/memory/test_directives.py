@@ -202,6 +202,19 @@ async def test_the_byte_bound_keeps_the_newest_and_counts_the_rest(engine):
     assert [r["said"] for r in block_rows(limited.text)["directives"]] == ["2024-03-18", "2024-03-19"]
 
 
+ORDINARY = "reading every line of it slowly " * 5
+
+
+async def test_the_default_block_holds_two_dozen_ordinary_directives(engine):
+    """A long conversation gathers dozens of directives; the default
+    count and bytes show two dozen of ordinary length whole."""
+    for day in range(1, 25):
+        said = f"Always check step {day:02d} twice, {ORDINARY}then stop."
+        await record_directives(engine, "s", await turn(engine, said, when=f"2024-03-{day:02d}T10:00:00Z"))
+    block = await standing_directives(engine, "s")
+    assert (block.held, block.omitted, len(block.fact_ids)) == (24, 0, 24)
+
+
 async def test_the_least_bound_holds_the_widest_directive(engine):
     """The longest directive recorded, every character three bytes wide,
     still fits the least bound a host may choose."""

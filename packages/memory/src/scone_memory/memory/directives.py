@@ -87,12 +87,14 @@ MAX_DIRECTIVES = 8
 MAX_DIRECTIVE_CHARS = 400
 #: The block's default byte bound and the most a host may choose; the
 #: least, ``MIN_BLOCK_BYTES``, is measured below from the block itself.
-#: A directive runs to a few hundred bytes, so the default holds about a
-#: dozen; a longer conversation gathers more, and the block then drops the
-#: oldest and counts them.
-DEFAULT_BLOCK_BYTES = 4000
+#: A directive runs to one or two hundred bytes, so the default holds about
+#: forty. A conversation thousands of turns long gathers dozens, and a
+#: block that cannot hold them drops the oldest, often the one a later
+#: question tests. Past the bound the block drops the oldest and counts them.
+DEFAULT_BLOCK_BYTES = 8000
 MAX_BLOCK_BYTES = 16_000
-#: Directives one block may hold.
+#: Directives one block may hold. It is also the default count, so the
+#: byte bound decides what a block shows.
 MAX_BLOCK_LIMIT = 50
 
 # "Later wins" is said of directives only, and directives are said to settle
@@ -292,7 +294,7 @@ def _render(shown: list["Fact"], held: int) -> str:
 
 
 async def standing_directives(engine: "MemoryEngine", space: str, *, subject: str = SUBJECT,
-                              limit: int = 20, max_bytes: int = DEFAULT_BLOCK_BYTES,
+                              limit: int = MAX_BLOCK_LIMIT, max_bytes: int = DEFAULT_BLOCK_BYTES,
                               at: Optional[str] = None) -> DirectiveBlock:
     """The directives of ``subject`` that hold ``at`` (now by default), as
     one block: the newest that fit ``limit`` and ``max_bytes``, listed
