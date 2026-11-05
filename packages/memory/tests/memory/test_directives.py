@@ -17,8 +17,8 @@ from scone_memory.core.errors import InvalidInput, NotFound
 from scone_memory.core.validation import normalise_time
 from scone_memory.memory import directives
 from scone_memory.memory.directives import (DIRECTIVE_PREFIX, INSTRUCTS, MAX_DIRECTIVE_CHARS, MAX_DIRECTIVES,
-                                            MAX_TEXT_CHARS, PREFERS, find_directives, record_directives,
-                                            standing_directives)
+                                            MAX_TEXT_CHARS, MIN_BLOCK_BYTES, PREFERS, find_directives,
+                                            record_directives, standing_directives)
 
 
 def kinds(text: str) -> list[tuple[str, str]]:
@@ -190,16 +190,26 @@ async def test_the_block_lists_what_holds_oldest_first(engine):
 
 async def test_the_byte_bound_keeps_the_newest_and_counts_the_rest(engine):
     for day in range(10, 20):
-        await record_directives(engine, "s", await turn(engine, f"Always do the step for day {day} carefully.",
-                                                        when=f"2024-03-{day}T10:00:00Z"))
-    block = await standing_directives(engine, "s", max_bytes=600)
+        said = f"Always do the step for day {day} carefully, " + "reading every line of it slowly " * 8 + "then stop."
+        await record_directives(engine, "s", await turn(engine, said, when=f"2024-03-{day}T10:00:00Z"))
+    block = await standing_directives(engine, "s", max_bytes=MIN_BLOCK_BYTES)
     rows = block_rows(block.text)
-    assert len(block.text.encode()) <= 600 and 0 < len(rows["directives"]) < 10
+    assert len(block.text.encode()) <= MIN_BLOCK_BYTES and 0 < len(rows["directives"]) < 10
     shown_days = [r["said"] for r in rows["directives"]]
     assert shown_days == sorted(shown_days) and shown_days[-1] == "2024-03-19"
     assert block.omitted == 10 - len(shown_days) == rows["coverage"]["omitted"]
     limited = await standing_directives(engine, "s", limit=2)
     assert [r["said"] for r in block_rows(limited.text)["directives"]] == ["2024-03-18", "2024-03-19"]
+
+
+async def test_the_least_bound_holds_the_widest_directive(engine):
+    """The longest directive recorded, every character three bytes wide,
+    still fits the least bound a host may choose."""
+    await record_directives(engine, "s", await turn(engine, "I prefer " + "\N{EM DASH}" * 2 * MAX_DIRECTIVE_CHARS))
+    [fact] = await engine.facts("s")
+    assert len(fact.object) == MAX_DIRECTIVE_CHARS
+    block = await standing_directives(engine, "s", max_bytes=MIN_BLOCK_BYTES)
+    assert block.fact_ids == (fact.fact_id,) and len(block.text.encode()) <= MIN_BLOCK_BYTES
 
 
 async def test_an_excluded_directive_is_never_shown(engine):
@@ -211,14 +221,26 @@ async def test_an_excluded_directive_is_never_shown(engine):
     assert block.held == 1
 
 
+async def test_forgetting_the_turn_with_its_claims_takes_its_directives_out(engine):
+    """"Forget what I said" must take the instruction with it; the claims
+    only that turn supported are excluded and the block never shows them."""
+    kept = await turn(engine, "I prefer brevity.")
+    forgotten = await turn(engine, "Always answer in French.", when="2024-03-16T10:00:00Z")
+    for episode in (kept, forgotten):
+        await record_directives(engine, "s", episode)
+    await engine.forget("s", forgotten, with_claims="exclude")
+    block = await standing_directives(engine, "s")
+    assert [r["text"] for r in block_rows(block.text)["directives"]] == ["I prefer brevity."]
+
+
 async def test_a_space_with_no_directives_has_an_empty_block(engine):
     await turn(engine, "What's the weather like?")
     block = await standing_directives(engine, "s")
     assert (block.text, block.fact_ids, block.held, block.omitted) == ("", (), 0, 0)
 
 
-@pytest.mark.parametrize("arguments", [dict(limit=0), dict(limit=51), dict(limit=True), dict(max_bytes=199),
-                                       dict(max_bytes=16_001)])
+@pytest.mark.parametrize("arguments", [dict(limit=0), dict(limit=51), dict(limit=True),
+                                       dict(max_bytes=MIN_BLOCK_BYTES - 1), dict(max_bytes=16_001)])
 async def test_block_bounds_are_checked(engine, arguments):
     with pytest.raises(InvalidInput):
         await standing_directives(engine, "s", **arguments)

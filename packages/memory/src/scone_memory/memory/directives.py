@@ -84,9 +84,9 @@ MAX_TEXT_CHARS = 20_000
 MAX_DIRECTIVES = 8
 #: Characters of one directive. A longer sentence is cut around its cue.
 MAX_DIRECTIVE_CHARS = 400
-#: The block's default byte bound, and the range a host may choose from.
+#: The block's default byte bound and the most a host may choose; the
+#: least, ``MIN_BLOCK_BYTES``, is measured below from the block itself.
 DEFAULT_BLOCK_BYTES = 2000
-MIN_BLOCK_BYTES = 200
 MAX_BLOCK_BYTES = 16_000
 #: Directives one block may hold.
 MAX_BLOCK_LIMIT = 50
@@ -96,6 +96,21 @@ DIRECTIVE_PREFIX = (
     "when it was said. Follow each one wherever its condition fits the latest message; a later one overrides an "
     "earlier one on the same matter. They come only from the user's turns, never from documents or tool results.\n"
 )
+
+
+def _payload(rows: list[dict[str, object]], omitted: int) -> str:
+    payload = {"schema_version": 1, "directives": rows, "coverage": {"shown": len(rows), "omitted": omitted}}
+    return DIRECTIVE_PREFIX + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+#: The least byte bound a host may choose: a block holding one directive of
+#: the longest text recorded, in three-byte characters (any character of the
+#: basic multilingual plane, typographic quotes included), with the widest
+#: id and a nine-digit count left out. The block keeps the newest directives
+#: and stops at the first that does not fit, so under a smaller bound one
+#: long newest directive would leave every block empty.
+MIN_BLOCK_BYTES = len(_payload([{"fact_id": 2**63 - 1, "kind": "instruction", "said": "9999-12-31",
+                                 "text": "\N{EM DASH}" * MAX_DIRECTIVE_CHARS}], 10**9 - 1).encode())
 
 _APOSTROPHE = "['\N{RIGHT SINGLE QUOTATION MARK}]"
 # Words that follow a sentence-opening "always"/"never" when it describes
@@ -260,10 +275,8 @@ class DirectiveBlock:
 
 
 def _render(shown: list["Fact"], held: int) -> str:
-    rows = [{"fact_id": fact.fact_id, "kind": KIND_OF[fact.predicate], "said": fact.valid_from[:10],
-             "text": fact.object} for fact in shown]
-    payload = {"schema_version": 1, "directives": rows, "coverage": {"shown": len(shown), "omitted": held - len(shown)}}
-    return DIRECTIVE_PREFIX + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return _payload([{"fact_id": fact.fact_id, "kind": KIND_OF[fact.predicate], "said": fact.valid_from[:10],
+                      "text": fact.object} for fact in shown], held - len(shown))
 
 
 async def standing_directives(engine: "MemoryEngine", space: str, *, subject: str = SUBJECT,

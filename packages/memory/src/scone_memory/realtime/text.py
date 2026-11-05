@@ -32,6 +32,7 @@ from ..providers.llm import ChatModel
 from .answer_requirements import AnswerRequirements, validated_requirements
 from .answer_review import AnswerReviewer, AnswerReviewLimits, ReviewedAnswer, review_answer, require_contextual_reviewer
 from .context import ContextReceipt, MemoryContext
+from ..memory.directives import DEFAULT_BLOCK_BYTES, record_directives
 from .evidence_answer import EvidenceAnswerError, EvidenceSelector, construct_evidence_answer, _ABSTENTION
 from .events import TextDelta, ReplyCompleted, TextModel
 from .lifecycle import cancel_once, settle
@@ -154,6 +155,11 @@ class TextConversation:
     checks retained sources before publication and again before capture, and
     returns transient evidence packets plus cacheable identifiers/fingerprints.
     ToolModel adapters own and close resources within each complete() call.
+    ``standing_directives`` reads each of the person's turns, once stored,
+    for explicit instructions and preferences (``memory.directives``) and
+    shows those that hold in a block before every ordinary turn; the turn's
+    result says what reading its message did. Tool mode prepares no context
+    and refuses it.
     """
 
     _memory: MemoryEngine
@@ -203,7 +209,9 @@ class TextConversation:
                  max_profile_bytes: int = 1000, followup_queries: str = "off",
                  followup_model: ChatModel | None = None, followup_timeout: float = REWRITE_TIMEOUT_S,
                  profile_buckets: "BucketBounds | None" = None,
-                 deferred_capture: "DeferredTextCapture | None" = None):
+                 deferred_capture: "DeferredTextCapture | None" = None,
+                 standing_directives: bool = False, directive_limit: int = 20,
+                 max_directive_bytes: int = DEFAULT_BLOCK_BYTES):
         check_space(space)
         if deferred_capture is not None:
             from .deferred_capture import DeferredTextCapture
@@ -236,6 +244,8 @@ class TextConversation:
             raise ValueError("tool mode cannot combine independent retrieval or extractive evidence")
         if tool_model_factory is not None and followup_queries != "off":
             raise ValueError("followup_queries is for ordinary search; tool mode chooses its own searches")
+        if tool_model_factory is not None and standing_directives is not False:
+            raise ValueError("standing_directives prepares ordinary turns; tool mode builds no context to show them in")
         if tool_model_factory is not None and neighbor_chunks != 0:
             raise ValueError("neighbor_chunks is for ordinary search; tool mode uses read_memory")
         if type(tool_compute) is not bool or (tool_compute and tool_model_factory is None):
@@ -325,7 +335,11 @@ class TextConversation:
                                       standing_profile=standing_profile,
                                       profile_limit=profile_limit, max_profile_bytes=max_profile_bytes,
                                       followup_queries=followup_queries, followup_model=followup_model,
-                                      followup_timeout=followup_timeout, profile_buckets=profile_buckets)
+                                      followup_timeout=followup_timeout, profile_buckets=profile_buckets,
+                                      standing_directives=standing_directives, directive_limit=directive_limit,
+                                      max_directive_bytes=max_directive_bytes)
+        self._standing_directives: bool = standing_directives
+        self._directive_timeout: float = float(recall_timeout)
         self._timeout, self._max_reply, self._max_history = turn_timeout, max_reply_bytes, max_history_bytes
         self._active: asyncio.Task[dict] | None = None
         self._closed = False
@@ -556,6 +570,7 @@ class TextConversation:
                                    self._summary.bytes)
                 messages = await self._fold(messages, list(gone), list(evicted), pending)
                 user_id = await self._record(turn_id, "user", messages[-1]["content"])
+                directives = await self._read_directives(user_id) if self._standing_directives else None
                 text, receipt, answer_review, evidence_answer = await self._execute(
                     messages, seen if on_text is not None else None, budget.when(), timing=timing,
                     admitted=frozenset(self._evicted_turns | set(evicted)))
@@ -597,12 +612,33 @@ class TextConversation:
                     result["answer_review"] = answer_review
                 if evidence_answer is not None:
                     result["evidence_answer"] = evidence_answer
+                if directives is not None:
+                    result["directives"] = directives
             # The turn is done and in memory; its timing is noted outside the
             # turn's deadline, so a slow log cannot undo a turn that stands.
             await self._note_turn(turn_id, timing)
             return result
         finally:
             _OWNER.reset(token)
+
+    async def _read_directives(self, episode_id: int) -> dict[str, object]:
+        """Record the directives in the person's turn just stored, before the
+        turn's context is prepared, so the block shows them from this turn on.
+        A turn whose message cannot be read still runs; the receipt says so,
+        without the error's text."""
+        try:
+            async with asyncio.timeout(self._directive_timeout):
+                outcome = await record_directives(self._memory, self._space, episode_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logging.getLogger(__name__).warning("directives.failed", extra={
+                "event": "directives.failed", "session_id": self._session_id, "episode_id": episode_id,
+                "exception_type": type(error).__name__})
+            return {"status": "timeout" if isinstance(error, TimeoutError) else "failed"}
+        return {"status": "read" if outcome.read else "not_read", "added": outcome.added,
+                "restated": outcome.restated, "cut": outcome.cut, "clipped": outcome.clipped,
+                "text_cut": outcome.text_cut}
 
     async def _note_turn(self, turn_id, timing):
         # The turn is done; its timing is evidence about it, and a log that
