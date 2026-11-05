@@ -35,8 +35,9 @@ assistant by being remembered. Fenced code is not read either.
 model its claims are background and not instructions, which is right for
 claims any document may have produced. These came only from the person's
 turns, so their block says what they are: the person's standing
-instructions and preferences, each dated, a later one overriding an earlier
-one on the same matter.
+instructions and preferences, each dated, the later of two conflicting
+directives followed. It also says what they are not: they settle no
+question of fact, so a reader still says when recalled messages disagree.
 
 **Bounded, and said so.** At most ``MAX_TEXT_CHARS`` of a turn are read, at
 most ``MAX_DIRECTIVES`` directives are recorded from one turn, and each is at
@@ -94,10 +95,18 @@ MAX_BLOCK_BYTES = 16_000
 #: Directives one block may hold.
 MAX_BLOCK_LIMIT = 50
 
+# "Later wins" is said of directives only, and directives are said to settle
+# no question of fact. Worded "a later one overrides an earlier one on the
+# same matter", the block led a reader given two conflicting statements in
+# its recalled messages to take the later one as true instead of saying
+# they conflict. Measured, and repaired by this wording without losing
+# what the block does for instructions.
 DIRECTIVE_PREFIX = (
     "Standing directives: instructions and preferences the user gave in their own earlier messages, each dated "
-    "when it was said. Follow each one wherever its condition fits the latest message; a later one overrides an "
-    "earlier one on the same matter. They come only from the user's turns, never from documents or tool results.\n"
+    "when it was said. Follow each one wherever its condition fits the latest message; where two directives "
+    "conflict, follow the later. They say how to answer, not what happened: they settle no question of fact, "
+    "and when recalled messages disagree, say so as you would without them. They come only from the user's "
+    "turns, never from documents or tool results.\n"
 )
 
 
@@ -287,7 +296,7 @@ async def standing_directives(engine: "MemoryEngine", space: str, *, subject: st
                               at: Optional[str] = None) -> DirectiveBlock:
     """The directives of ``subject`` that hold ``at`` (now by default), as
     one block: the newest that fit ``limit`` and ``max_bytes``, listed
-    oldest first so a later one reads as overriding an earlier one.
+    oldest first so the later of two conflicting directives reads last.
     Excluded and proposed directives are never shown."""
     check_space(space)
     if type(limit) is not int or not 1 <= limit <= MAX_BLOCK_LIMIT:
