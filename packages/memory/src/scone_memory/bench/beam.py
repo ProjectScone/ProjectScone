@@ -39,6 +39,12 @@ What Scone reports:
   same-ability question from another conversation, about another user's
   life, scored against its rubric. A judge that gives that credit makes
   every score above it worth less, so the two are reported together.
+- With ``directives``, each user message is read for standing directives
+  (``memory.directives``) once the conversation is remembered, and the
+  reader sees their block above the recalled messages, as a conversation
+  would on every turn. **In context** is then the share of a question's
+  evidence messages that reached the reader by either path, beside
+  evidence recall, which stays retrieval's alone.
 """
 
 from __future__ import annotations
@@ -55,6 +61,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Coroutine, Iterator, Optional, Sequence
 
 from ..ingestion.records import Record
+from ..memory.directives import (DEFAULT_BLOCK_BYTES, MAX_BLOCK_BYTES, MAX_BLOCK_LIMIT, MIN_BLOCK_BYTES,
+                                 record_directives, standing_directives)
 from ..providers.llm import ChatModel
 from .evaluators import _verdict
 
@@ -341,6 +349,9 @@ class ProbeResult:
     decoy: Optional[str] = None
     decoy_score: Optional[float] = None
     error: Optional[str] = None
+    #: With directives: the share of evidence messages the reader saw,
+    #: recalled or in the directive block.
+    in_context: Optional[float] = None
 
 
 @dataclass
@@ -361,6 +372,10 @@ class BeamReport:
     judge_audited: int = 0
     judge_unreadable: int = 0
     errors: int = 0
+    #: With directives: the block's byte bound, and per conversation what
+    #: reading its user messages recorded and what the block showed.
+    directive_bytes: Optional[int] = None
+    directives: dict[str, dict[str, int]] = field(default_factory=dict)
     results: list[ProbeResult] = field(default_factory=list)
 
     def as_dict(self, with_items: bool = True) -> dict:
@@ -388,6 +403,7 @@ def summarize(results: Sequence[ProbeResult]) -> dict[str, dict[str, Optional[fl
             "evidenced": float(len(retrieved)),
             "evidence_recall": _mean([r.evidence_recall for r in retrieved if r.evidence_recall is not None]),
             "all_evidence": _mean([1.0 if r.all_evidence else 0.0 for r in retrieved]),
+            "in_context": _mean([r.in_context for r in retrieved if r.in_context is not None]),
             "stale_only": _mean([1.0 if r.stale_only else 0.0 for r in updates]),
             "score": _mean([r.score for r in rows if r.score is not None]),
             "scored": float(sum(1 for r in rows if r.score is not None)),
@@ -417,6 +433,8 @@ async def run_beam(
     progress: Optional[Callable[[int, int], None]] = None,
     concurrency: int = 1,
     decoys_from: Sequence[BeamConversation] = (),
+    directives: bool = False,
+    directive_bytes: int = DEFAULT_BLOCK_BYTES,
 ) -> BeamReport:
     """Every conversation in its own engine: all messages remembered, then
     each question recalled at limit k, answered from the top k in time
@@ -428,11 +446,17 @@ async def run_beam(
     includes waiting on the others.
 
     Decoys come from the conversations run and from `decoys_from`, so a run
-    of one conversation can still audit its judge against the others."""
+    of one conversation can still audit its judge against the others.
+
+    With `directives`, every question of a conversation is asked after all
+    of it, so one directive block, bounded by `directive_bytes`, serves
+    them all."""
     if judge is not None and reader is None:
         raise ValueError("a judge scores a reader's answers; give a reader too")
     if concurrency < 1:
         raise ValueError("concurrency is a number of questions in flight, at least 1")
+    if directives and (type(directive_bytes) is not int or not MIN_BLOCK_BYTES <= directive_bytes <= MAX_BLOCK_BYTES):
+        raise ValueError(f"directive_bytes is from {MIN_BLOCK_BYTES} to {MAX_BLOCK_BYTES}")
     if abilities and not abilities <= set(ABILITIES):
         raise ValueError(f"abilities are among {ABILITIES}")
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -446,6 +470,7 @@ async def run_beam(
     total = sum(len(asked) for asked in chosen.values())
     results: list[ProbeResult] = []
     unread = 0
+    directive_report: dict[str, dict[str, int]] = {}
     done = 0
     embedder_id = ""
     for conversation in conversations:
@@ -455,11 +480,31 @@ async def run_beam(
         embedder_id = engine.embedder.id
         space = conversation.conversation_id
         messages = {message.id: message for message in conversation.messages}
-        await engine.remember_many(space, [
+        added = await engine.remember_many(space, [
             Record(content=m.text, kind="conversation", source=str(m.id), dedup_key=str(m.id),
-                   created_at=m.when.isoformat().replace("+00:00", "Z"))
+                   metadata={"role": m.role}, created_at=m.when.isoformat().replace("+00:00", "Z"))
             for m in conversation.messages
         ])
+        block_text, shown_ids = "", frozenset[int]()
+        if directives:
+            if len(added) != len(conversation.messages):
+                raise RuntimeError(f"{len(conversation.messages)} messages remembered as {len(added)} records")
+            message_of = {receipt.episode_id: m.id for receipt, m in zip(added, conversation.messages)}
+            tally = dict.fromkeys(("read", "added", "restated", "cut", "clipped", "text_cut"), 0)
+            # Every message is offered; only those stored as the user's are read.
+            for receipt in added:
+                outcome = await record_directives(engine, space, receipt.episode_id)
+                tally["read"] += outcome.read
+                tally["added"] += outcome.added
+                tally["restated"] += outcome.restated
+                tally["cut"] += outcome.cut
+                tally["clipped"] += outcome.clipped
+                tally["text_cut"] += outcome.text_cut
+            block = await standing_directives(engine, space, limit=MAX_BLOCK_LIMIT, max_bytes=directive_bytes)
+            block_text = block.text
+            shown_ids = frozenset(message_of[e] for e in block.episode_ids if e in message_of)
+            directive_report[space] = {**tally, "held": block.held, "shown": len(block.fact_ids),
+                                       "omitted": block.omitted, "bytes": len(block.text.encode())}
 
         # Every question of this conversation finishes before the loop moves
         # on, so the closure sees this conversation's engine and messages.
@@ -476,12 +521,16 @@ async def run_beam(
             result = ProbeResult(conversation.conversation_id, probe.ability, probe.question, list(probe.evidence), top,
                                  round(hits / len(probe.evidence), 4) if probe.evidence else None,
                                  hits == len(probe.evidence) if probe.evidence else None, _stale_only(probe, top), ms)
+            if directives and probe.evidence:
+                seen = shown_ids | set(top)
+                result.in_context = round(sum(1 for i in probe.evidence if i in seen) / len(probe.evidence), 4)
             if reader is None:
                 return result
             ordered = sorted((messages[i] for i in top if i in messages), key=lambda m: (m.when, m.id))
             listing = "\n".join(f"[{m.when.day} {m.when:%B %Y}] {m.text}" for m in ordered) or "(nothing remembered matches)"
+            standing = f"{block_text}\n\n" if block_text else ""
             try:
-                result.prediction = (await reader.complete(READER_SYSTEM, f"Recalled messages:\n{listing}\n\n"
+                result.prediction = (await reader.complete(READER_SYSTEM, f"{standing}Recalled messages:\n{listing}\n\n"
                                                                           f"User: {probe.question}")).strip()
                 if judge is None:
                     return result
@@ -538,5 +587,6 @@ async def run_beam(
         finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         scores=summarize(results), evidence_unreadable=unreadable,
         judge_decoy_score=_mean(audited) if judge is not None else None, judge_audited=len(audited),
-        judge_unreadable=unread, errors=sum(1 for r in results if r.error), results=results,
+        judge_unreadable=unread, errors=sum(1 for r in results if r.error),
+        directive_bytes=directive_bytes if directives else None, directives=directive_report, results=results,
     )

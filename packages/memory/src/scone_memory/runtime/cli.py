@@ -716,6 +716,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--judge-model", help="the judge's model at the same SCONE_CHAT_URL (default the reader's)")
     p.add_argument("--concurrency", type=int, default=1,
                    help="questions of a conversation in flight at once, for model latency (default 1)")
+    p.add_argument("--directives", action="store_true",
+                   help="read user messages for standing directives and show their block above the recalled messages")
+    p.add_argument("--directive-bytes", type=int, default=2000,
+                   help="the directive block's byte bound, 200 to 16000 (default 2000)")
     p.add_argument("--out", help="write the report with per-question results to this JSON file")
     # The hook's own flags are parsed by agent_hook; this subparser accepts
     # anything after its name and hands it over untouched. parse_known_args
@@ -1566,6 +1570,7 @@ async def beam_command(args: argparse.Namespace, settings: Settings, out) -> int
     import dataclasses
 
     from ..bench.beam import ABILITIES, load_beam, run_beam
+    from ..memory.directives import MAX_BLOCK_BYTES, MIN_BLOCK_BYTES
     from .config import build_chat, build_embedder, build_in_process_engine
 
     def refuse(message: str) -> int:
@@ -1574,6 +1579,8 @@ async def beam_command(args: argparse.Namespace, settings: Settings, out) -> int
 
     if args.k < 1 or args.concurrency < 1 or (args.questions is not None and args.questions < 1):
         return refuse("--k, --questions and --concurrency take a number of at least 1")
+    if not MIN_BLOCK_BYTES <= args.directive_bytes <= MAX_BLOCK_BYTES:
+        return refuse(f"--directive-bytes takes {MIN_BLOCK_BYTES} to {MAX_BLOCK_BYTES}")
     abilities = {a.strip() for a in args.abilities.split(",") if a.strip()} if args.abilities else None
     if abilities and not abilities <= set(ABILITIES):
         return refuse(f"--abilities takes names from {', '.join(ABILITIES)}")
@@ -1601,19 +1608,30 @@ async def beam_command(args: argparse.Namespace, settings: Settings, out) -> int
     report = await run_beam(make, conversations, reader=reader, reader_name=name(settings) if reader else None,
                             judge=judge, judge_name=name(judge_settings) if judge else None, k=args.k,
                             questions=args.questions, abilities=abilities, progress=progress,
-                            concurrency=args.concurrency, decoys_from=loaded)
+                            concurrency=args.concurrency, decoys_from=loaded, directives=args.directives,
+                            directive_bytes=args.directive_bytes)
     print("", file=sys.stderr)
     if args.json:
         print(json.dumps(report.as_dict(with_items=False), ensure_ascii=False), file=out)
     else:
         print(f"BEAM: {report.conversations} conversation(s), {report.questions} question(s), k={report.k}, "
               f"embedder {report.embedder}, reader {report.reader or 'none'}, judge {report.judge or 'none'}", file=out)
-        print(f"  {'ability':<26} {'n':>4} {'evid@k':>7} {'all@k':>7} {'stale':>7} {'score':>7} {'tau-b':>7}", file=out)
+        extra = f" {'in-ctx':>7}" if args.directives else ""
+        print(f"  {'ability':<26} {'n':>4} {'evid@k':>7} {'all@k':>7}{extra} {'stale':>7} {'score':>7} {'tau-b':>7}",
+              file=out)
         pct = lambda v: "    n/a" if v is None else f"{v * 100:6.1f}%"  # noqa: E731
         tau = lambda v: "    n/a" if v is None else f"{v:7.3f}"  # noqa: E731
         for label, row in report.scores.items():
-            print(f"  {label:<26} {int(row['n'] or 0):>4} {pct(row['evidence_recall'])} {pct(row['all_evidence'])} "
-                  f"{pct(row['stale_only'])} {pct(row['score'])} {tau(row['tau_b'])}", file=out)
+            seen = f" {pct(row['in_context'])}" if args.directives else ""
+            print(f"  {label:<26} {int(row['n'] or 0):>4} {pct(row['evidence_recall'])} {pct(row['all_evidence'])}"
+                  f"{seen} {pct(row['stale_only'])} {pct(row['score'])} {tau(row['tau_b'])}", file=out)
+        if args.directives:
+            totals = {key: sum(row[key] for row in report.directives.values())
+                      for key in ("added", "cut", "clipped", "text_cut", "shown", "omitted")}
+            print(f"  directives: {totals['added']} recorded ({totals['cut']} past the per-message cap, "
+                  f"{totals['clipped']} cut around their cue, {totals['text_cut']} message(s) read in part); "
+                  f"{totals['shown']} shown, {totals['omitted']} left out by the {report.directive_bytes}-byte block",
+                  file=out)
         print(f"  source ids naming no message: {report.evidence_unreadable}; errors: {report.errors}", file=out)
         if report.judge is not None:
             print(f"  judge gave known-wrong answers {pct(report.judge_decoy_score).strip()} credit over "

@@ -78,7 +78,10 @@ async def test_every_predicate_the_framework_extracts_is_declared_many_valued():
     from scone_memory.entities.mentions import RECOGNIZED_KINDS, mention_predicate
 
     from_recognizers = {mention_predicate(kind) for kind in (None, *RECOGNIZED_KINDS)}
-    assert from_code | from_manifests | from_mcp_configs | from_recognizers == set(MANY_VALUED)
+    from scone_memory.memory.directives import PREDICATES
+
+    from_directives = set(PREDICATES.values())
+    assert from_code | from_manifests | from_mcp_configs | from_recognizers | from_directives == set(MANY_VALUED)
 
 
 async def test_a_stated_predicate_still_holds_one_value_at_a_time():
