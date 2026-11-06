@@ -57,3 +57,55 @@ given.
 On the collection it was measured on there were no hubs to correct, and
 every weight tried lowered ranking quality slightly, so recall does not
 use it.
+
+## Predicting a result list's quality
+
+A recall cannot see whether what it found is relevant, but it can see the
+shape of what it found. Query performance prediction reads that shape.
+[`retrieval/qpp.py`](../src/scone_memory/retrieval/qpp.py) computes the
+usual predictors for one result list.
+
+```python
+from scone_memory.retrieval.geometry import centre_of
+from scone_memory.retrieval.qpp import predict
+
+scores = [0.82, 0.80, 0.61, 0.58, 0.57, 0.55, 0.54, 0.52, 0.51, 0.50, 0.49, 0.47]
+top = [[0.6, 0.6, 0.5], [0.9, 0.1, 0.2], [0.2, 0.9, 0.1]]   # the top results' vectors
+prediction = predict(scores, k=10, vectors=top)
+# Prediction(dispersion=0.109..., nqc=0.189..., wig=0.02..., gap=0.32..., coherence=0.626...,
+#            k=10, depth=12, coherence_over=3)
+
+# Coherence measured from the collection's centre rather than the origin.
+centre = centre_of(sample_of_stored_vectors)
+predict(scores, k=10, vectors=top, centre=centre).coherence
+```
+
+`scores` are best first and as deep as the recall read them; the reference
+mean is taken over all of them. From the top `k`:
+
+- `dispersion` is the spread (standard deviation) of the top scores.
+- `nqc` is that spread over the reference mean. NQC divides by a corpus
+  score; a dense index has none to give, so the mean of the list read
+  stands in for it.
+- `wig` is how far the top scores stand above the reference mean, without
+  the query-length term, which belongs to term-matching scores.
+- `gap` is the top score less the `k`-th (or the last, with fewer).
+- `coherence` is the mean cosine between the top results' own vectors:
+  results that agree with one another are about one thing, results
+  scattered over the space found nothing in particular. In an anisotropic
+  space any two vectors have a high cosine, so a `Centre`
+  ([`retrieval/geometry.py`](../src/scone_memory/retrieval/geometry.py))
+  can be given to measure agreement from the collection's centre.
+
+A signal is `None` where there was too little to read: fewer than two
+scores for the score signals, fewer than two vectors with a direction for
+`coherence`, and a zero reference mean for `nqc`. `k` must be at least 2,
+and scores that are not finite or not best first are refused.
+`coherence_over` says how many vectors the coherence was measured over.
+
+Classical predictors transfer poorly to dense retrieval, so none of these
+is trusted here. On the collection measured, the score signals ordered
+queries by quality about equally well, and better than coherence, centred
+or not; but the agreement was moderate. That is enough to report beside
+an answer, not enough to act on alone: gating query feedback on them did
+not help ([`retrieval/feedback.py`](../src/scone_memory/retrieval/feedback.py)).
