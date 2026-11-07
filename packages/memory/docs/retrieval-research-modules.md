@@ -108,4 +108,48 @@ is trusted here. On the collection measured, the score signals ordered
 queries by quality about equally well, and better than coherence, centred
 or not; but the agreement was moderate. That is enough to report beside
 an answer, not enough to act on alone: gating query feedback on them did
-not help ([`retrieval/feedback.py`](../src/scone_memory/retrieval/feedback.py)).
+not help ([below](#dense-pseudo-relevance-feedback)).
+
+## Dense pseudo-relevance feedback
+
+Rocchio's rule moves the query towards what it found: the new query is the
+old one plus `beta` times the mean of the top results. Over dense vectors
+it needs no terms and no training, and a second search with the moved
+query can reach passages the first one only nearly found.
+[`retrieval/feedback.py`](../src/scone_memory/retrieval/feedback.py)
+computes the moved query; the second search is the caller's.
+
+```python
+from scone_memory.retrieval.feedback import gated_rocchio, rocchio
+
+query = [1.0, 0.0, 0.0]
+found = [[0.8, 0.6, 0.0], [0.7, 0.7, 0.1], [0.0, 0.0, 0.0]]   # the first search's top vectors
+moved = rocchio(query, found, beta=0.5, depth=5)
+# Feedback(vector=(0.97..., 0.23..., 0.017...), expanded=True, used=2,
+#          why='moved towards the mean of 2 results with beta 0.5')
+
+# Only when the first list's predicted quality reaches a gate.
+gated_rocchio(query, found, signal=prediction.nqc, gate=0.1)
+```
+
+Every vector is taken at unit length first, so a long passage vector does
+not pull harder than a short one, and the moved query is returned at unit
+length. Zero vectors are skipped, and only the first `depth` are read. The
+query is returned unchanged, with `expanded=False` and the reason in
+`why`, when `beta` is zero, when no feedback vector has a direction, or
+when the feedback points exactly away from the query. A feedback vector
+with a different dimension from the query is refused.
+
+It fails in a known way: when the top results are wrong, the query moves
+towards the wrong thing, and the second search finds more of it.
+`gated_rocchio` holds feedback back unless a predictor of the first list's
+quality (any `Prediction` field from [the section above](#predicting-a-result-lists-quality))
+reaches `gate`. A missing signal is not evidence of quality, so it holds
+feedback back too, and `why` says which reason applied.
+
+Measured, neither form gave a gain to rely on, and gating on any of the
+quality signals did not help either: the side of the gate chosen from the
+data mostly went against the reasoning above. Choosing per query, with
+hindsight, between feedback and none would have gained, so the gain is
+there to have; a first list's shape does not say which queries hold it.
+Recall does not use it.
