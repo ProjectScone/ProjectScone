@@ -16,8 +16,9 @@ import json
 
 import pytest
 
-from scone_memory.bench.evaluators import (MAX_CONTEXTS, answer_relevancy, context_relevancy, correctness,
-                                           faithfulness)
+from scone_memory.bench.evaluators import (MAX_CONTEXTS, answer_relevancy, context_precision, context_recall,
+                                           context_relevancy, correctness, factual_correctness, faithfulness,
+                                           noise_sensitivity)
 from scone_memory.bench.metrics import recall_at
 from scone_memory.providers.llm import ChatError, FakeChat
 
@@ -174,3 +175,126 @@ async def test_semantic_similarity_needs_no_judge_and_says_what_it_is_not():
     corrupt = await semantic_similarity(NotANumber(), answer="a", reference="b")
     assert corrupt.verified is False and corrupt.passing is None and "non-finite" in corrupt.reasons[0], \
         "a NaN would clamp to a perfect match; it is unverified instead"
+
+
+# The reference-based judgments RAGAS reports.
+
+REFERENCE = "Person-1 works at Brightlake as a principal engineer."
+RANKED = ["Person-1 works at Brightlake.", "Person-2 likes sailing.", "Person-1 is a principal engineer."]
+
+
+def useful(*flags):
+    return json.dumps({"contexts": [{"index": i, "useful": flag} for i, flag in enumerate(flags)]})
+
+
+async def test_context_precision_weights_each_useful_context_by_its_rank():
+    judge = FakeChat([useful(True, False, True)])
+    judged = await context_precision(judge, question=QUESTION, reference=REFERENCE, contexts=RANKED)
+    # Precision 1/1 at rank 0 and 2/3 at rank 2, averaged over the two useful contexts.
+    assert judged.score == pytest.approx(5 / 6) and judged.passing is False and judged.verified
+    assert judged.reasons == ("context 1 does not help",)
+    system, user = judge.calls[0]
+    assert REFERENCE in user and user.index(RANKED[0]) < user.index(RANKED[1]) < user.index(RANKED[2])
+
+
+async def test_context_precision_passes_only_when_the_useful_contexts_lead():
+    led = await context_precision(FakeChat([useful(True, True, False)]), question=QUESTION, reference=REFERENCE, contexts=RANKED)
+    assert led.score == 1.0 and led.passing is True
+    none = await context_precision(FakeChat([useful(False, False, False)]), question=QUESTION, reference=REFERENCE, contexts=RANKED)
+    assert none.score == 0.0 and none.passing is False
+    judge = FakeChat([])
+    empty = await context_precision(judge, question=QUESTION, reference=REFERENCE, contexts=[])
+    assert empty.score == 0.0 and empty.judge_calls == 0 and not judge.calls
+
+
+async def test_context_recall_names_the_reference_statements_the_contexts_lack():
+    judge = FakeChat([json.dumps({"statements": [{"claim": "Person-1 works at Brightlake.", "supported": True},
+                                                 {"claim": "Person-1 is a principal engineer.", "supported": False}]})])
+    judged = await context_recall(judge, question=QUESTION, reference=REFERENCE, contexts=CONTEXTS[1:])
+    assert judged.score == 0.5 and judged.passing is False and judged.verified
+    assert judged.reasons == ("not in the contexts: Person-1 is a principal engineer.",)
+    whole = await context_recall(FakeChat([json.dumps({"statements": [{"claim": "x", "supported": True}]})]),
+                                 question=QUESTION, reference=REFERENCE, contexts=CONTEXTS)
+    assert whole.score == 1.0 and whole.passing is True
+
+
+def compared(made, needed):
+    return json.dumps({"answer_claims": [{"claim": c, "supported": f} for c, f in made],
+                       "reference_claims": [{"claim": c, "covered": f} for c, f in needed]})
+
+
+async def test_factual_correctness_is_the_f1_of_claim_precision_and_recall():
+    judge = FakeChat([compared([("works at Brightlake", True), ("started in 2019", False)],
+                               [("works at Brightlake", True), ("principal engineer", True), ("leads the platform team", False)])])
+    judged = await factual_correctness(judge, answer="Works at Brightlake since 2019.", reference=REFERENCE)
+    precision, recall = 1 / 2, 2 / 3
+    assert judged.score == pytest.approx(2 * precision * recall / (precision + recall)) and judged.passing is False
+    assert judged.reasons == ("precision 0.500, recall 0.667", "not in the reference: started in 2019",
+                              "missing: leads the platform team")
+
+
+async def test_factual_correctness_passes_only_a_full_match_and_scores_an_empty_answer_zero():
+    matched = await factual_correctness(FakeChat([compared([("a", True)], [("a", True)])]), answer="a", reference="a")
+    assert matched.score == 1.0 and matched.passing is True
+    silent = await factual_correctness(FakeChat([compared([], [("a", True)])]), answer="I cannot say.", reference="a")
+    assert silent.score == 0.0 and silent.passing is False
+    neither = await factual_correctness(FakeChat([compared([], [])]), answer="-", reference="-")
+    assert neither.score is None and neither.passing is None and neither.verified
+
+
+def noise(relevant, claims):
+    return json.dumps({"claims": [{"claim": c, "correct": ok, "contexts": found} for c, ok, found in claims],
+                       "contexts": [{"index": i, "relevant": flag} for i, flag in enumerate(relevant)]})
+
+
+NOISY = noise([True, False], [("works at Brightlake", True, [0]), ("works there since 2019", False, [0]),
+                              ("likes sailing", False, [1]), ("sails on weekends", False, [1]),
+                              ("owns a boat", False, [])])
+
+
+async def test_noise_sensitivity_counts_wrong_claims_by_the_kind_of_context_they_came_from():
+    kwargs = dict(question=QUESTION, answer="...", reference=REFERENCE, contexts=["c0", "c1"])
+    relevant = await noise_sensitivity(FakeChat([NOISY]), **kwargs)
+    irrelevant = await noise_sensitivity(FakeChat([NOISY]), focus="irrelevant", **kwargs)
+    assert relevant.score == pytest.approx(1 / 5) and irrelevant.score == pytest.approx(2 / 5)
+    assert relevant.passing is False and irrelevant.passing is False
+    # The claim no context states is the answer's own invention, named under either focus.
+    assert relevant.reasons == ("wrong, from a relevant context: works there since 2019",
+                                "wrong, and in no context: owns a boat")
+    assert irrelevant.reasons == ("wrong, from an irrelevant context: likes sailing",
+                                  "wrong, from an irrelevant context: sails on weekends",
+                                  "wrong, and in no context: owns a boat")
+    clean = await noise_sensitivity(FakeChat([noise([True], [("works at Brightlake", True, [0])])]),
+                                    question=QUESTION, answer="...", reference=REFERENCE, contexts=["c0"])
+    assert clean.score == 0.0 and clean.passing is True
+    with pytest.raises(ValueError):
+        await noise_sensitivity(FakeChat([]), focus="all", **kwargs)
+
+
+REFERENCE_JUDGMENTS = [
+    (context_precision, dict(question=QUESTION, reference=REFERENCE, contexts=RANKED),
+     [useful(True, False), json.dumps({"contexts": [{"index": 9, "useful": True}]})]),
+    (context_recall, dict(question=QUESTION, reference=REFERENCE, contexts=CONTEXTS),
+     [json.dumps({"statements": [{"claim": "x", "supported": "yes"}]})]),
+    (factual_correctness, dict(answer=ANSWER, reference=REFERENCE),
+     [json.dumps({"answer_claims": []}), compared([("a", True)], [("b", None)])]),
+    (noise_sensitivity, dict(question=QUESTION, answer=ANSWER, reference=REFERENCE, contexts=["c0"]),
+     [noise([True], [("a", False, [3])]), noise([True], [("a", False, "0")]), noise([], [("a", False, [])])]),
+]
+
+
+@pytest.mark.parametrize("metric,kwargs,replies", REFERENCE_JUDGMENTS, ids=lambda v: getattr(v, "__name__", ""))
+async def test_a_reference_judgment_that_cannot_be_read_is_unverified(metric, kwargs, replies):
+    for reply in ["not json", json.dumps({}), *replies]:
+        judged = await metric(FakeChat([reply]), **kwargs)
+        assert judged.verified is False and judged.passing is None and judged.score is None, reply
+
+
+@pytest.mark.parametrize("metric", [context_precision, context_recall, noise_sensitivity])
+async def test_a_reference_judgment_over_the_context_bound_is_refused_without_a_call(metric):
+    judge = FakeChat([])
+    kwargs = dict(question=QUESTION, reference=REFERENCE, contexts=["c"] * (MAX_CONTEXTS + 1))
+    if metric is noise_sensitivity:
+        kwargs["answer"] = ANSWER
+    judged = await metric(judge, **kwargs)
+    assert judged.verified is False and not judge.calls and "refused" in judged.reasons[0]
