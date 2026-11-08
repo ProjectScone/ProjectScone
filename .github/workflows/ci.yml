@@ -80,15 +80,17 @@ jobs:
           terraform -chdir=terraform/hetzner test
 
   client:
-    # The HTTP client is published separately and claims Python 3.9, so it
-    # is built and tested on the oldest version it claims as well as 3.14.
+    # The HTTP client is published separately and claims Python 3.9, but
+    # setup-python has no 3.9 build for Ubuntu 26.04 and 3.10 is past its
+    # end of life, so it is built and tested on 3.11, the oldest CPython
+    # still supported, and on 3.14. Python 3.9 and 3.10 are not exercised.
     # Nothing here needs a production server: the tests run
     # against a stub, and the integration ones skip when no binary exists.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.14"]
+        python: ["3.11", "3.14"]
     defaults:
       run:
         working-directory: packages/scone-client
