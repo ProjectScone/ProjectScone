@@ -17,6 +17,15 @@ month" is the calendar one. Nothing ahead of the moment asked is read
 Words that are dates only in context are read only in it: "May" after a
 word that sets a date ("in May", "since May"), so "I may go" is left
 alone, and a year after one too ("in 2021"), so "room 2021" is a room.
+
+The same readings resolve what a remembered message meant by its own
+relative dates. ``relative_dates`` reads "yesterday" or "last Friday" in a
+message against the day it was said, and ``date_note`` puts the days
+beside the words for a model, which otherwise has to do the calendar
+itself and often lands a few days out. A message is not a question: it
+can plan ahead, and a week back is two different weeks to different
+people, so only readings that name past days without doubt are used
+there.
 """
 
 from __future__ import annotations
@@ -177,3 +186,95 @@ def date_windows(question: str, *, now: str | datetime) -> list[DateWindow]:
             words = match.group("m")
         windows.append(DateWindow(days[0], days[1], words))
     return windows
+
+
+@dataclass(frozen=True)
+class RelativeDate:
+    """A past-relative expression in a text and the whole days it means:
+    ``words`` as written, ``at`` their offset in the text, ``start`` the
+    first day in and ``end`` the first day out."""
+
+    words: str
+    at: int
+    start: date
+    end: date
+
+    def days(self) -> str:
+        """The days in words: one day with its weekday, a whole calendar
+        month or year by name, any other span by its first and last day."""
+        return describe_days(self.start, self.end)
+
+
+def describe_days(start: date, end: date) -> str:
+    """Whole days ``start`` (in) to ``end`` (out) in words."""
+    if end - start == timedelta(days=1):
+        return f"{start:%A} {start.day} {start:%B %Y}"
+    if (start.month, start.day) == (1, 1) and end == date(start.year + 1, 1, 1):
+        return str(start.year)
+    if start.day == 1 and end == _month(start.year, start.month)[1]:
+        return f"{start:%B %Y}"
+    last = end - timedelta(days=1)
+    return f"{start:%A} {start.day} {start:%B %Y} to {last:%A} {last.day} {last:%B %Y}"
+
+
+def _certain_past(match: re.Match[str]) -> bool:
+    """Whether a reading in a message names past days without doubt.
+
+    A bare weekday is not: "on Friday" in a question is the Friday gone,
+    but a message can plan ahead ("I'm going on Friday"). "Last week" and
+    "two weeks ago" are not either: people mean the calendar week before
+    or the seven days before, and either range would claim more than the
+    words do. "Today" and "this month" say nothing the message's own date
+    does not.
+    """
+    kind = match.lastgroup
+    if kind == "ago":
+        return match.group("unit") != "week"
+    if kind in ("past", "past_one"):
+        return True
+    if kind == "next_to":
+        return match.group("nx") == "yesterday"
+    if kind == "calendar":
+        return match.group("which") == "last" and match.group("cunit") != "week"
+    if kind == "weekday":
+        return bool(match.group("wlast"))
+    return False
+
+
+def _day_of(said: str | datetime | date) -> date:
+    if isinstance(said, str):
+        return parse_rfc3339(said).date()
+    if isinstance(said, datetime):
+        return said.date()
+    return said
+
+
+def relative_dates(text: str, *, said: str | datetime | date) -> tuple[RelativeDate, ...]:
+    """Each past-relative expression in a message, in order, with the days
+    it means when said on ``said`` (an RFC 3339 moment, a datetime or a
+    date): "yesterday", "N days/months/years ago", "last <weekday>", "last
+    month/year", "the past N ..."."""
+    day = _day_of(said)
+    # Fold one character at a time and keep any that fold to more than one
+    # ("ß" to "ss"), so offsets in the folded text are offsets in the text.
+    folded = "".join(f if len(f := c.casefold()) == 1 else c for c in text)
+    found = []
+    for match in _READINGS.finditer(folded):
+        if not _certain_past(match):
+            continue
+        days = _read(match, folded, day)
+        if days is None:
+            continue
+        found.append(RelativeDate(text[match.start():match.end()], match.start(), days[0], days[1]))
+    return tuple(found)
+
+
+def date_note(text: str, *, said: str | datetime | date) -> str | None:
+    """The days a message's relative dates mean, beside the words, for a
+    model reading it: '"last Friday" = Friday 14 July 2023; "yesterday" =
+    ...'. None when it has none. The message itself is left as it is, so
+    quotes taken from it still match it."""
+    found = relative_dates(text, said=said)
+    if not found:
+        return None
+    return "; ".join(f'"{item.words}" = {item.days()}' for item in found)
