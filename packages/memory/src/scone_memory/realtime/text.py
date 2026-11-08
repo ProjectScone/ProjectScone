@@ -193,7 +193,7 @@ class TextConversation:
                  max_reply_bytes=64000, max_history_bytes=128000,
                  adaptive_retriever: AdaptiveRetriever | None = None, recall_timeout: float = 2.0,
                  answer_grounder: AnswerGrounder | None = None,
-                 neighbor_chunks: int = 0,
+                 neighbor_chunks: int = 0, session_turns: int = 0,
                  reading_order: str = "ranked",
                  answer_reviewer: AnswerReviewer | None = None, review_limits: AnswerReviewLimits | None = None,
                  review_policy: Literal["report", "require_supported"] = "report",
@@ -248,6 +248,8 @@ class TextConversation:
             raise ValueError("standing_directives prepares ordinary turns; tool mode builds no context to show them in")
         if tool_model_factory is not None and neighbor_chunks != 0:
             raise ValueError("neighbor_chunks is for ordinary search; tool mode uses read_memory")
+        if tool_model_factory is not None and session_turns != 0:
+            raise ValueError("session_turns is for ordinary search; tool mode chooses what it reads")
         if type(tool_compute) is not bool or (tool_compute and tool_model_factory is None):
             raise ValueError("tool_compute requires a boolean and a tool model")
         if type(tool_tables) is not bool or (tool_tables and tool_model_factory is None):
@@ -331,7 +333,8 @@ class TextConversation:
         self._scope = scope
         self._context = MemoryContext(memory, space, session_id, **scope.kwargs(),
                                       adaptive_retriever=adaptive_retriever, recall_timeout=recall_timeout,
-                                      neighbor_chunks=neighbor_chunks, reading_order=reading_order,
+                                      neighbor_chunks=neighbor_chunks, session_turns=session_turns,
+                                      reading_order=reading_order,
                                       standing_profile=standing_profile,
                                       profile_limit=profile_limit, max_profile_bytes=max_profile_bytes,
                                       followup_queries=followup_queries, followup_model=followup_model,

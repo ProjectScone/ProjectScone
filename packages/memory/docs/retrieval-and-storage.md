@@ -2479,6 +2479,68 @@ request, and nothing is re-embedded.
 
 Advertised as `recall.window` and `recall.sentence_window`.
 
+## The turns around a recalled turn
+
+A window widens a hit inside its own record. A conversation is remembered
+one turn per record, so the line that says why, or when, or what was
+asked, is a record of its own and a window cannot reach it. A search
+finds the turn whose words match the question; the turns either side of
+it name nothing the question asks for, and rank nowhere.
+`retrieval.session_turns.add_session_turns` brings them: up to `radius`
+turns either side of each recalled turn, from the same session, placed
+right after it in the order they were said.
+
+```python
+from scone_memory.retrieval.session_turns import add_session_turns
+
+found = await engine.recall("chat", "When is the harbour launch?", limit=10)
+widened, trace = await add_session_turns(found, engine.documents, "chat", radius=1)
+trace.record()   # seeds, found, added, moved, not_looked, no_session, short, shortened, skipped
+```
+
+In a conversation it is one option, on `MemoryContext` and on
+`TextConversation`: `session_turns=1` (0 to 4, off by default).
+
+- **Neighbours are read, not ranked.** They are episodes of the turn's
+  kind whose ids lie within `reach` (32 by default, at most 100) of its
+  id, since ids are the order the store received its records, and whose
+  `session_id` metadata (or the field named) holds the same value. A
+  conversation written in order, at once or turn by turn, keeps its turns
+  in that order; another session's turns written in between are passed
+  over. Every document store pages its episodes by id, so this works on
+  each of them; a store that cannot says so in `skipped`.
+- **A turn the search ranked below its neighbour moves up to follow it**,
+  with its own score, counted in `moved`. One it ranked above stays where
+  it ranked. A brought turn the search had not returned scores 0.0, since
+  it was read rather than ranked, and is counted in `added`.
+- **A turn the caller may not see keeps its place.** A neighbour outside
+  the scope, in an excluded session, or dated after `now` is left out, and
+  the turn beyond it is not brought in its stead, so no turn shown is
+  presented as following on from one it did not follow.
+- **What a bound stopped is counted.** `short` counts sides that found
+  fewer turns than `radius`: the session's first or last turn, or a
+  neighbour past `reach`; the count does not say which. `not_looked`
+  counts recalled turns past the first 20. `no_session` counts recalled
+  turns with no session field. `shortened` counts neighbours longer than
+  two chunks, of which the first two are brought.
+- **A store that fails leaves the result whole.** The failure is in
+  `degraded` and in `skipped`.
+
+In a `MemoryContext` the brought turns come after the `limit` ranked
+passages are chosen, and do not count against `limit`. They are checked
+like every passage before they are shown, and share the 24 passages the
+check verifies: the first ranked turns' neighbours come first, and the
+receipt's `session_turns` counts the rest in `cut` and the ones that
+reached the block in `shown`. They take only the bytes the ranked
+passages leave, so a long neighbour never pushes out a ranked turn; what
+fits is shown in place after its own turn. A same-session turn the
+context would leave out (still in the model's window) is not shown and
+takes no room. The option is for ordinary search: an adaptive retriever
+or tool mode chooses its own passages and refuses it, and a reading
+order other than ranked, which would part a turn from its own, refuses it
+too. If the evidence check fails, the brought turns are dropped and the
+ranked ones stand.
+
 ## Cutting a window back to what bears on the question
 
 A window of sentences either side of a hit holds the answer more often

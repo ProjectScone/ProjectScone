@@ -10,7 +10,7 @@ import logging
 import time
 from dataclasses import replace
 from uuid import uuid4
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import NotRequired, TYPE_CHECKING, TypedDict, cast
 
 if TYPE_CHECKING:
@@ -29,11 +29,12 @@ from ..providers.llm import ChatModel
 from ..retrieval.overview import OverviewResult
 from ..core.models import Fact, RecallItem, RecallResult
 from ..core.ports import TextFilter
-from ..retrieval.evidence_graph import MAX_FACTS, MAX_LINKS, QueryEvidenceGraph, build_query_evidence_graph
+from ..retrieval.evidence_graph import MAX_CHUNKS, MAX_FACTS, MAX_LINKS, QueryEvidenceGraph, build_query_evidence_graph
 from ..retrieval.evidence_records import EvidenceRecord, EvidenceRecords, canonical_evidence, fingerprint, restrict_graph
 from ..retrieval.multihop import MultiHopLimits, MultiHopResult, expand_multihop
 from ..retrieval.path_evidence import ordered_evidence_paths, path_records
 from ..retrieval.reading_order import READING_ORDERS, ReadingOrder, arranged
+from ..retrieval.session_turns import MAX_RADIUS as MAX_SESSION_TURNS, SessionTurns, add_session_turns
 from .passage_windows import PassageWindows, passage_windows
 
 _PROFILE_PREFIX = (
@@ -113,6 +114,30 @@ def _source_block(sources: list[dict[str, object]], coverage: dict[str, object],
     return prefix + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _turns_record(turns: SessionTurns, *, cut: int = 0) -> dict[str, object]:
+    return {**turns.record(), "cut": cut, "shown": 0}
+
+
+def _capped(widened: list[RecallItem], kept: set[int], room: int,
+            hidden: Callable[[RecallItem], bool]) -> tuple[list[RecallItem], int]:
+    """``widened`` keeping every passage in ``kept`` and, in order, the first
+    ``room`` brought passages that are not ``hidden``; and how many more
+    there were. A hidden one is left out uncounted, as scope leaves it."""
+    placed: list[RecallItem] = []
+    cut = 0
+    for item in widened:
+        if item.chunk_id in kept:
+            placed.append(item)
+        elif hidden(item):
+            continue
+        elif room > 0:
+            placed.append(item)
+            room -= 1
+        else:
+            cut += 1
+    return placed, cut
+
+
 def _overview_coverage(considered: int, has_more: bool) -> dict[str, object]:
     return {"mode": "recent_overview", "order": "recently_stored", "records_considered": considered,
             "has_more": has_more, "complete_history": False}
@@ -171,6 +196,10 @@ class ContextReceipt(TypedDict):
     passage_window_candidate_count: NotRequired[int]
     passage_window_retained_count: NotRequired[int]
     passage_window_anchors: NotRequired[dict[str, list[int]]]
+    #: With session turns on: what ``retrieval.session_turns`` looked at and
+    #: brought, ``cut`` for those past the verified-passage cap, and
+    #: ``shown`` for those that reached the block.
+    session_turns: NotRequired[dict[str, object]]
     profile_status: NotRequired[str]
     profile_fact_ids: NotRequired[list[int]]
     profile_bytes: NotRequired[int]
@@ -213,6 +242,14 @@ class MemoryContext:
     ``neighbor_chunks`` (0..4, default off) adds verified adjacent chunks after
     the ``limit`` ranked anchors, up to 24 total sources within the same byte
     budget. It applies only to ordinary search; adaptive selection is unchanged.
+    ``session_turns`` (0..4, default off) shows that many turns either side
+    of each ranked turn, read from the turn's own session in the order said
+    (``retrieval.session_turns``), right after it and beyond ``limit``. They
+    share the verified-passage cap (``MAX_CHUNKS``), the first ranked turns'
+    first, and the receipt counts the rest as cut; and they take only the
+    bytes the ranked passages leave.
+    It applies to ordinary search only, so it refuses an adaptive retriever,
+    and to the ranked reading order, which keeps a turn beside its own.
     ``followup_queries`` ("off", "carry", or "rewrite" with ``followup_model``)
     also searches a follow-up message with what earlier user turns named,
     fused by rank with the message and inside the same scope; see
@@ -233,7 +270,7 @@ class MemoryContext:
                  limit: int = 5, max_context_bytes: int = 8000, recall_timeout: float = 2.0,
                  structured_paths: bool = True, path_quotes: bool = False,
                  adaptive_retriever: AdaptiveRetriever | None = None,
-                 neighbor_chunks: int = 0, reading_order: str = "ranked",
+                 neighbor_chunks: int = 0, session_turns: int = 0, reading_order: str = "ranked",
                  standing_profile: "ProfilePolicy | None" = None,
                  profile_limit: int = 10, max_profile_bytes: int = 1000,
                  followup_queries: str = "off", followup_model: ChatModel | None = None,
@@ -295,6 +332,12 @@ class MemoryContext:
             raise ValueError("neighbor_chunks must be an integer from 0 to 4")
         if reading_order not in READING_ORDERS:
             raise ValueError(f"reading_order must be one of {', '.join(READING_ORDERS)}")
+        if type(session_turns) is not int or not 0 <= session_turns <= MAX_SESSION_TURNS:
+            raise ValueError(f"session_turns must be an integer from 0 to {MAX_SESSION_TURNS}")
+        if session_turns and adaptive_retriever is not None:
+            raise ValueError("adaptive retrieval selects its own passages; session_turns must be 0 with it")
+        if session_turns and reading_order != "ranked":
+            raise ValueError("session_turns shows each turn beside its own; reading_order must be ranked with it")
         #: Passages are chosen in rank order and rendered in this order;
         #: "ends" puts the best at both ends of the block for a model that
         #: attends least to the middle. The receipt names the order, and
@@ -316,6 +359,7 @@ class MemoryContext:
         self._path_quotes = path_quotes
         self._adaptive_retriever = adaptive_retriever
         self._neighbor_chunks = neighbor_chunks
+        self._session_turns = session_turns
 
     async def _overview(self, admit: frozenset[str] = frozenset()) -> OverviewResult:
         items: list[RecallItem] = []
@@ -694,6 +738,28 @@ class MemoryContext:
                         receipt["passage_window_status"] = "timeout" if isinstance(window_error, TimeoutError) else "unavailable"
                         logger.warning("passage_windows.failed", extra={"event": "passage_windows.failed",
                             "session_id": self._session_id, "exception_type": type(window_error).__name__})
+                turns_shown: set[int] = set()
+                if self._session_turns:
+                    receipt["session_turns"] = _turns_record(SessionTurns(
+                        skipped="nothing was ranked" if plan.mode == "search" else "an overview is not a search"))
+                if self._session_turns and plan.mode == "search" and ranked_items:
+                    try:
+                        async with asyncio.timeout(min(self._timeout, 1.0)):
+                            widened, turns = await add_session_turns(
+                                RecallResult(items=provisional_items), self._memory.documents, self._space,
+                                radius=self._session_turns, scope=TextFilter(**self._scope.kwargs()),
+                                now=self._memory.clock())
+                        kept = {item.chunk_id for item in provisional_items}
+                        provisional_items, cut = _capped(widened.items, kept, MAX_CHUNKS - len(kept),
+                                                         lambda item: self._excluded(item, admit))
+                        turns_shown = {item.chunk_id for item in provisional_items} - kept
+                        candidate_count += len(turns_shown - {item.chunk_id for item in items})
+                        receipt["session_turns"] = _turns_record(turns, cut=cut)
+                    except Exception as turns_error:
+                        reason = "timeout" if isinstance(turns_error, TimeoutError) else f"failed: {type(turns_error).__name__}"
+                        receipt["session_turns"] = _turns_record(SessionTurns(skipped=reason))
+                        logger.warning("session_turns.failed", extra={"event": "session_turns.failed",
+                            "session_id": self._session_id, "exception_type": type(turns_error).__name__})
                 # One bounded verification pass serves inference and inspection.
                 # A failed optional graph read still leaves ordinary passages usable
                 # unless the revision guard confirms that the read became stale.
@@ -733,8 +799,9 @@ class MemoryContext:
                         if found_paths.truncated:
                             coverage["paths_bounded"] = True
                 except Exception as graph_error:
-                    if windows is not None:
+                    if windows is not None or turns_shown:
                         provisional_items = ranked_items
+                    if windows is not None:
                         receipt["passage_window_status"] = "unavailable"
                     receipt["evidence_graph_status"] = "unavailable"
                     logger.warning("evidence_graph.failed", extra={"event": "evidence_graph.failed",
@@ -779,14 +846,22 @@ class MemoryContext:
                     candidate_text = _source_block(sources, coverage, claims, [*relations, relation], paths)
                     if len(candidate_text.encode()) <= self._max_bytes:
                         relations.append(relation)
-                for item in eligible:
-                    if item in selected_items or (len(sources) >= self._limit and (windows is None or item.chunk_id not in windows.anchors)):
+                # Ranked passages take the bytes first and alone count to the
+                # limit; what was read beside them fills what is left, and
+                # session turns are then shown in place after their own.
+                beyond_limit = turns_shown | (set(windows.anchors) if windows is not None else set())
+                for item in sorted(eligible, key=lambda item: item.chunk_id in beyond_limit):
+                    if item in selected_items or (item.chunk_id not in beyond_limit and len(sources) >= self._limit):
                         continue
                     candidate = _source(item)
                     text = _source_block([*sources, candidate], coverage, claims, relations, paths)
                     if len(text.encode()) <= self._max_bytes:
                         sources.append(candidate)
                         selected_items.append(item)
+                if turns_shown:
+                    placed = {item.chunk_id: n for n, item in enumerate(eligible)}
+                    selected_items.sort(key=lambda item: placed[item.chunk_id])
+                    sources = [_source(item) for item in selected_items]
                 if adaptive_groups:
                     supplied_ids = ({f"chunk:{item.chunk_id}" for item in selected_items}
                                     | {f"fact:{claim['fact_id']}" for claim in claims})
@@ -830,6 +905,8 @@ class MemoryContext:
                 receipt["same_session_items"] = sum(
                     1 for item in selected_items
                     if item.metadata.get("session_id") == self._session_id or item.source == self._session_id)
+                if "session_turns" in receipt:
+                    receipt["session_turns"]["shown"] = sum(item.chunk_id in turns_shown for item in selected_items)
                 if windows is not None:
                     retained_windows = {str(item.chunk_id): windows.anchors[item.chunk_id]
                         for item in selected_items if item.chunk_id in windows.anchors}
