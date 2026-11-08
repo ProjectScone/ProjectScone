@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import re
 
 import pytest
 
@@ -147,6 +148,25 @@ async def test_answers_are_scored_per_category_and_the_reader_sees_dated_turns(t
 
 
 @needs_nltk
+async def test_date_notes_give_the_reader_the_days_a_turn_s_relative_dates_mean(tmp_path):
+    conversations = load_locomo(write(tmp_path, [conversation()]))
+    answers = ["Lisbon", "the cello", "2 June 2023", "Not mentioned."]
+    reader = FakeChat(answers)
+    report = await run_locomo(engine, conversations, reader=reader, reader_name="fake", k=4, date_notes=True)
+    _, user = reader.calls[2]
+    assert ('[3 June 2023] Ben: I adopted a beagle puppy called Biscuit yesterday. '
+            '[dates: "yesterday" = Friday 2 June 2023]') in user
+    # Which days "last weekend" covers is not certain, so it gets no note.
+    assert "[8 May 2023] Ana: I ran the charity marathon in Lisbon last weekend.\n" in user
+    assert report.date_notes and report.as_dict(with_items=False)["date_notes"] is True
+    plain = FakeChat(answers)
+    without = await run_locomo(engine, conversations, reader=plain, reader_name="fake", k=4)
+    assert without.date_notes is False and "[dates:" not in plain.calls[2][1]
+    # A note is only ever added after a turn; the turns themselves read the same.
+    assert [re.sub(r" \[dates: [^\]]*\]$", "", line) for line in user.split("\n")] == plain.calls[2][1].split("\n")
+
+
+@needs_nltk
 async def test_a_judge_is_reported_with_its_false_accept_rate(tmp_path):
     rows = conversation()
     rows["qa"].append({"question": "What did Ana grow?", "answer": "red tulips", "evidence": ["D2:2"], "category": 4})
@@ -197,10 +217,12 @@ async def test_questions_run_concurrently_up_to_the_limit_and_keep_their_order(t
         await run_locomo(engine, conversations, concurrency=0)
 
 
-async def test_a_judge_needs_a_reader(tmp_path):
+async def test_a_judge_and_date_notes_need_a_reader(tmp_path):
     conversations = load_locomo(write(tmp_path, [conversation()]))
     with pytest.raises(ValueError):
         await run_locomo(engine, conversations, judge=FakeChat([]))
+    with pytest.raises(ValueError, match="date notes"):
+        await run_locomo(engine, conversations, date_notes=True)
 
 
 def test_the_command_scores_retrieval_and_leaves_the_configured_store_alone(tmp_path):
@@ -222,5 +244,5 @@ def test_the_command_scores_retrieval_and_leaves_the_configured_store_alone(tmp_
     assert saved["questions"] == 3 and saved["evidence_unreadable"] == 0
     assert not untouched.exists()
     for bad in (["--reader"], ["--categories", "4,6"], ["--categories", "x"], ["--conversations", "conv-1,conv-9"],
-                ["--k", "0"], ["--questions", "0"], ["--concurrency", "0"]):
+                ["--k", "0"], ["--questions", "0"], ["--concurrency", "0"], ["--date-notes"]):
         assert cli.main(["bench-locomo", str(path), *bad], env=env, stdin=io.StringIO(), out=io.StringIO()) == 2, bad

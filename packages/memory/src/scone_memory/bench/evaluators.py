@@ -32,12 +32,14 @@ With a reference answer, the judgments RAGAS reports by these names:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import json
 import math
 from typing import Optional, Sequence
 
 from ..core.ports import Embedder
 from ..providers.llm import ChatModel
+from ..retrieval.dates import date_note
 
 #: Contexts one judgment may weigh; more is refused, not cut.
 MAX_CONTEXTS = 20
@@ -501,3 +503,12 @@ async def noise_sensitivity(judge: ChatModel, *, question: str, answer: str, ref
         elif not found:
             reasons.append(f"wrong, and in no context: {claim}")
     return Judgment(kind, noisy / len(claims), noisy == 0, tuple(reasons), True, 1)
+
+
+def dated_line(when: datetime, text: str, date_notes: bool = False) -> str:
+    """One remembered message as a reader sees it: "[8 May 2023] text", and
+    with `date_notes` the days its relative dates mean after it, resolved
+    against its own date: ' [dates: "last Friday" = Friday 5 May 2023]'.
+    The text itself is unchanged, so a quote from it still matches."""
+    note = date_note(text, said=when) if date_notes else None
+    return f"[{when.day} {when:%B %Y}] {text}" + (f" [dates: {note}]" if note else "")

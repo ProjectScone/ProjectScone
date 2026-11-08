@@ -59,7 +59,7 @@ from typing import Callable, Coroutine, Optional, Sequence
 
 from ..memory.engine import MemoryEngine, Record
 from ..providers.llm import ChatModel
-from .evaluators import _verdict
+from .evaluators import _verdict, dated_line
 
 CATEGORIES = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-hop", 5: "adversarial"}
 #: What the original scorer looks for in a reply to an adversarial question.
@@ -281,6 +281,8 @@ class LocomoReport:
     judge_audited: int = 0
     judge_unreadable: int = 0
     errors: int = 0
+    #: Whether each turn shown to the reader carried its relative dates resolved.
+    date_notes: bool = False
     results: list[QuestionResult] = field(default_factory=list)
 
     def as_dict(self, with_items: bool = True) -> dict:
@@ -327,6 +329,7 @@ async def run_locomo(
     categories: Optional[set[int]] = None,
     progress: Optional[Callable[[int, int], None]] = None,
     concurrency: int = 1,
+    date_notes: bool = False,
 ) -> LocomoReport:
     """Every conversation in its own engine: all turns remembered, then each
     question recalled at limit k, answered from the top k in time order when
@@ -334,9 +337,15 @@ async def run_locomo(
 
     Up to `concurrency` questions of a conversation are in flight at once;
     results keep the questions' order whatever order they finish in. Above 1,
-    a question's recall_ms includes waiting on the others."""
+    a question's recall_ms includes waiting on the others.
+
+    With `date_notes`, each turn shown to the reader is followed by the days
+    its relative dates mean, resolved against its session date
+    (`retrieval.dates.date_note`); the turn's own text is unchanged."""
     if judge is not None and reader is None:
         raise ValueError("a judge grades a reader's answers; give a reader too")
+    if date_notes and reader is None:
+        raise ValueError("date notes are for a reader; give a reader too")
     if concurrency < 1:
         raise ValueError("concurrency is a number of questions in flight, at least 1")
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -379,7 +388,7 @@ async def run_locomo(
                 hits == len(item.evidence) if item.evidence else None, ms)
             if reader is not None:
                 ordered = sorted((turns[s] for s in top if s in turns), key=lambda turn: turn.when)
-                listing = "\n".join(f"[{turn.when.day} {turn.when:%B %Y}] {turn.text}" for turn in ordered) \
+                listing = "\n".join(dated_line(turn.when, turn.text, date_notes) for turn in ordered) \
                     or "(nothing remembered matches)"
                 try:
                     result.prediction = (await reader.complete(READER_SYSTEM, f"Turns:\n{listing}\n\nQuestion: {item.question}")).strip()
@@ -427,5 +436,5 @@ async def run_locomo(
         judge_audited=len(audited),
         judge_unreadable=sum(1 for r in judged_rows if r.judged_correct is None)
         + sum(1 for r in judged_rows if r.decoy is not None and r.decoy_accepted is None),
-        errors=sum(1 for r in results if r.error), results=results,
+        errors=sum(1 for r in results if r.error), date_notes=date_notes, results=results,
     )

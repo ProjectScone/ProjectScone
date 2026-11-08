@@ -338,6 +338,24 @@ async def test_directives_reach_the_reader_whatever_recall_found(tmp_path):
     assert without.scores["instruction_following"]["in_context"] is None
 
 
+async def test_date_notes_give_the_reader_the_days_a_message_s_relative_dates_mean(tmp_path):
+    row = cello()
+    row["chat"][0][0]["content"] = "I started learning the cello last week, and bought a bow two days ago."
+    conversations = load_beam(write(tmp_path, [row]))
+    reader = FakeChat(["answer"] * 2)
+    report = await run_beam(engine, conversations, reader=reader, reader_name="fake", k=8, date_notes=True)
+    _, user = reader.calls[0]
+    # Said on Wednesday 1 May 2024; which days "last week" means is not certain.
+    assert ('[1 May 2024] user: I started learning the cello last week, and bought a bow two days ago. '
+            '[dates: "two days ago" = Monday 29 April 2024]') in user
+    assert user.count("[dates:") == 1
+    assert report.date_notes and report.as_dict(with_items=False)["date_notes"] is True
+    plain = FakeChat(["answer"] * 2)
+    without = await run_beam(engine, conversations, reader=plain, reader_name="fake", k=8)
+    assert without.date_notes is False and "[dates:" not in plain.calls[0][1]
+    assert user.replace(' [dates: "two days ago" = Monday 29 April 2024]', "") == plain.calls[0][1]
+
+
 async def test_arguments_that_cannot_be_honoured_are_refused(tmp_path):
     conversations = load_beam(write(tmp_path, [trip()]))
     with pytest.raises(ValueError):
@@ -348,6 +366,8 @@ async def test_arguments_that_cannot_be_honoured_are_refused(tmp_path):
         await run_beam(engine, conversations, abilities={"mind_reading"})
     with pytest.raises(ValueError):
         await run_beam(engine, conversations, directives=True, directive_bytes=MIN_BLOCK_BYTES - 1)
+    with pytest.raises(ValueError, match="date notes"):
+        await run_beam(engine, conversations, date_notes=True)
 
 
 def test_the_command_scores_retrieval_and_leaves_the_configured_store_alone(tmp_path):
@@ -373,7 +393,7 @@ def test_the_command_scores_retrieval_and_leaves_the_configured_store_alone(tmp_
     assert cli.build_parser().parse_args(["bench-beam", str(path)]).directive_bytes == DEFAULT_BLOCK_BYTES
     for bad in (["--reader"], ["--judge"], ["--abilities", "abstention,mind_reading"], ["--conversations", "c1,c9"],
                 ["--k", "0"], ["--questions", "0"], ["--concurrency", "0"],
-                ["--directive-bytes", str(MIN_BLOCK_BYTES - 1)]):
+                ["--directive-bytes", str(MIN_BLOCK_BYTES - 1)], ["--date-notes"]):
         assert cli.main(["bench-beam", str(path), *bad], env=env, stdin=io.StringIO(), out=io.StringIO()) == 2, bad
 
 
