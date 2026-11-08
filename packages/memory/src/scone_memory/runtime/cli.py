@@ -702,6 +702,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--derive", action="store_true", help="E36: after --distill, one derivation pass; bridges stay proposed")
     p.add_argument("--derive-approve", action="store_true", help="E36: approve the derivation pass's bridges to measure the ceiling")
     p.add_argument("--out", help="write every item's report with per-question results to this JSON file")
+    p = sub.add_parser("bench-locomo",
+                       help="LoCoMo: evidence retrieval per question, the original answer F1 with a reader, and an audited judge")
+    p.add_argument("dataset", help="LoCoMo's locomo10.json (CC BY-NC 4.0; fetched separately, never shipped)")
+    p.add_argument("--k", type=int, default=10, help="recall limit and the k of the retrieval numbers (default 10)")
+    p.add_argument("--conversations", help="comma-separated sample ids to run, e.g. conv-26 (default all)")
+    p.add_argument("--categories", help="comma-separated category numbers to ask, 1-5 (default all)")
+    p.add_argument("--questions", type=int, help="only the first N questions of each conversation")
+    p.add_argument("--reader", action="store_true",
+                   help="answer with the configured chat model (SCONE_CHAT_URL, SCONE_CHAT_MODEL); without it only retrieval is measured")
+    p.add_argument("--judge", action="store_true",
+                   help="also grade answers CORRECT/WRONG, with the judge's false-accept rate on known-wrong answers beside it")
+    p.add_argument("--judge-model", help="the judge's model at the same SCONE_CHAT_URL (default the reader's)")
+    p.add_argument("--concurrency", type=int, default=1,
+                   help="questions of a conversation in flight at once, for model latency (default 1)")
+    p.add_argument("--out", help="write the report with per-question results to this JSON file")
     p = sub.add_parser("bench-beam",
                        help="BEAM: evidence retrieval per memory ability, rubric scores with a reader and an audited judge")
     p.add_argument("dataset", help="a BEAM split as parquet (needs pyarrow) or JSON rows (CC BY-SA 4.0; fetched separately)")
@@ -1565,6 +1580,71 @@ async def conflicts_command(args: argparse.Namespace, settings: Settings, out) -
                       f"derived_gold@{report.k} {(report.derived_gold_at_k or 0) * 100:5.1f}%", file=out)
     if args.out:
         pathlib.Path(args.out).write_text(json.dumps([r.as_dict(with_items=True) for r in reports], indent=1), encoding="utf-8")
+    return 0
+
+
+async def locomo_command(args: argparse.Namespace, settings: Settings, out) -> int:
+    """LoCoMo: in-process stores per conversation, the configured store untouched."""
+    import dataclasses
+
+    from ..bench.locomo import CATEGORIES, load_locomo, run_locomo
+    from .config import build_chat, build_embedder, build_in_process_engine
+
+    def refuse(message: str) -> int:
+        print(f"error: {message}", file=sys.stderr)
+        return 2
+
+    if args.k < 1 or args.concurrency < 1 or (args.questions is not None and args.questions < 1):
+        return refuse("--k, --questions and --concurrency take a number of at least 1")
+    conversations = load_locomo(args.dataset)
+    if args.conversations:
+        wanted = {s.strip() for s in args.conversations.split(",") if s.strip()}
+        unknown = wanted - {c.sample_id for c in conversations}
+        if unknown:
+            return refuse(f"no conversation {', '.join(sorted(unknown))} in {args.dataset}")
+        conversations = [c for c in conversations if c.sample_id in wanted]
+    try:
+        categories = {int(c) for c in args.categories.split(",") if c.strip()} if args.categories else None
+    except ValueError:
+        categories = {0}
+    if categories and not categories <= set(CATEGORIES):
+        return refuse(f"--categories takes numbers from {sorted(CATEGORIES)}")
+    embedder = build_embedder(settings)
+    reader = build_chat(settings) if args.reader or args.judge else None
+    if (args.reader or args.judge) and reader is None:
+        return refuse("--reader and --judge need SCONE_CHAT_URL and SCONE_CHAT_MODEL")
+    judge_settings = dataclasses.replace(settings, chat_model=args.judge_model) if args.judge_model else settings
+    judge = build_chat(judge_settings) if args.judge else None
+    name = lambda s: f"{s.chat_model} at {s.chat_url}"  # noqa: E731
+
+    async def make():
+        return await build_in_process_engine(settings, embedder)
+
+    def progress(n, total):
+        print(f"\r{n}/{total}", end="", file=sys.stderr, flush=True)
+
+    report = await run_locomo(make, conversations, reader=reader, reader_name=name(settings) if reader else None,
+                              judge=judge, judge_name=name(judge_settings) if judge else None, k=args.k,
+                              questions=args.questions, categories=categories, progress=progress,
+                              concurrency=args.concurrency)
+    print("", file=sys.stderr)
+    if args.json:
+        print(json.dumps(report.as_dict(with_items=False), ensure_ascii=False), file=out)
+    else:
+        print(f"LoCoMo: {report.conversations} conversation(s), {report.questions} question(s), k={report.k}, "
+              f"embedder {report.embedder}, reader {report.reader or 'none'}, judge {report.judge or 'none'}", file=out)
+        print(f"  {'category':<20} {'n':>5} {'evid@k':>7} {'all@k':>7} {'F1':>7} {'judged':>7}", file=out)
+        pct = lambda v: "    n/a" if v is None else f"{v * 100:6.1f}%"  # noqa: E731
+        for label, row in report.scores.items():
+            print(f"  {label:<20} {int(row['n'] or 0):>5} {pct(row['evidence_recall'])} {pct(row['all_evidence'])} "
+                  f"{pct(row['score'])} {pct(row['judged_correct'])}", file=out)
+        print(f"  evidence entries naming no turn: {report.evidence_unreadable}; questions with none readable: "
+              f"{report.no_readable_evidence}; errors: {report.errors}", file=out)
+        if report.judge is not None:
+            print(f"  judge accepted {pct(report.judge_false_accept).strip()} of {report.judge_audited} known-wrong answers; "
+                  f"{report.judge_unreadable} verdict(s) unreadable", file=out)
+    if args.out:
+        pathlib.Path(args.out).write_text(json.dumps(report.as_dict(with_items=True), indent=1), encoding="utf-8")
     return 0
 
 
@@ -2984,9 +3064,10 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
         serve(settings)  # same SQLite default as the other commands
         return 0
-    if args.command in ("bench", "bench-conflicts", "bench-beam", "bench-temporal", "bench-code", "bench-route",
+    if args.command in ("bench", "bench-conflicts", "bench-locomo", "bench-beam", "bench-temporal", "bench-code", "bench-route",
                         "bench-parts", "bench-questions", "bench-beir", "calibrate", "tune"):
-        command = {"bench": bench_command, "bench-conflicts": conflicts_command, "bench-beam": beam_command,
+        command = {"bench": bench_command, "bench-conflicts": conflicts_command, "bench-locomo": locomo_command,
+                   "bench-beam": beam_command,
                    "bench-temporal": temporal_command, "bench-code": bench_code_command,
                    "bench-questions": bench_questions_command,
                    "bench-route": route_command, "bench-parts": parts_command, "bench-beir": beir_command,
