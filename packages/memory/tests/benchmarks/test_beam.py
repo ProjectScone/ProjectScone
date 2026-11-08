@@ -356,6 +356,27 @@ async def test_date_notes_give_the_reader_the_days_a_message_s_relative_dates_me
     assert user.replace(' [dates: "two days ago" = Monday 29 April 2024]', "") == plain.calls[0][1]
 
 
+async def test_neighbours_show_the_messages_around_each_recalled_one_within_its_session(tmp_path):
+    conversations = load_beam(write(tmp_path, [trip()]))
+    assert [m.session for m in conversations[0].messages] == [0, 0, 0, 0, 1, 1, 1, 1]
+    reader = FakeChat(["answer"] * 6)
+    report = await run_beam(engine, conversations, reader=reader, reader_name="fake", k=1, neighbours=2)
+    budget = next(i for i, r in enumerate(report.results) if r.ability == "knowledge_update")
+    assert report.results[budget].top_sources == [2]
+    listing = reader.calls[budget][1].split("Recalled messages:\n")[1].split("\n\nUser:")[0]
+    # Messages 0 to 3 surround message 2 in its session; message 4 is two
+    # away too, but in the next session.
+    assert [line.split("] ", 1)[1][:22] for line in listing.split("\n")] == [
+        "user: I am planning a ", "assistant: Kyoto in Ap", "user: My budget for th", "assistant: That budget"]
+    assert "3500" not in listing
+    assert report.neighbours == 2 and report.as_dict(with_items=False)["neighbours"] == 2
+    with pytest.raises(ValueError, match="neighbouring"):
+        await run_beam(engine, conversations, k=1, neighbours=1)
+    for bad in (-1, 11, 1.5, True):
+        with pytest.raises(ValueError, match="neighbours"):
+            await run_beam(engine, conversations, reader=FakeChat(["answer"] * 6), reader_name="fake", k=1, neighbours=bad)
+
+
 async def test_arguments_that_cannot_be_honoured_are_refused(tmp_path):
     conversations = load_beam(write(tmp_path, [trip()]))
     with pytest.raises(ValueError):
@@ -393,7 +414,8 @@ def test_the_command_scores_retrieval_and_leaves_the_configured_store_alone(tmp_
     assert cli.build_parser().parse_args(["bench-beam", str(path)]).directive_bytes == DEFAULT_BLOCK_BYTES
     for bad in (["--reader"], ["--judge"], ["--abilities", "abstention,mind_reading"], ["--conversations", "c1,c9"],
                 ["--k", "0"], ["--questions", "0"], ["--concurrency", "0"],
-                ["--directive-bytes", str(MIN_BLOCK_BYTES - 1)], ["--date-notes"]):
+                ["--directive-bytes", str(MIN_BLOCK_BYTES - 1)], ["--date-notes"], ["--neighbours", "1"],
+                ["--neighbours", "11"]):
         assert cli.main(["bench-beam", str(path), *bad], env=env, stdin=io.StringIO(), out=io.StringIO()) == 2, bad
 
 
