@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from ..memory.catalog import ProfilePolicy
     from ..memory.profile_buckets import BucketBounds, ProfileBuckets
 
+from ..memory.directives import (DEFAULT_BLOCK_BYTES, MAX_BLOCK_BYTES, MAX_BLOCK_LIMIT, MIN_BLOCK_BYTES,
+                                 standing_directives)
 from ..memory.engine import MemoryEngine, check_space
 from ..retrieval.recall_scope import RecallScope
 from ..retrieval.adaptive import GRAPH_REASONS, AdaptiveRetriever
@@ -174,6 +176,14 @@ class ContextReceipt(TypedDict):
     profile_bytes: NotRequired[int]
     profile_omitted_count: NotRequired[int]
     profile_truncated: NotRequired[bool]
+    #: With standing directives: prepared, empty, failed or timeout; the
+    #: directive facts shown, the block's bytes, and how many the block's
+    #: bounds left out (the oldest).
+    directive_status: NotRequired[str]
+    directive_fact_ids: NotRequired[list[int]]
+    directive_bytes: NotRequired[int]
+    directive_omitted_count: NotRequired[int]
+    directive_truncated: NotRequired[bool]
     #: With standing buckets: per bucket, the claim ids shown, the rule
     #: that placed each, and whether its count or byte bound cut it.
     profile_buckets: NotRequired[dict[str, object]]
@@ -211,6 +221,11 @@ class MemoryContext:
     An engine reranker that is a ``ListwiseReranker`` is not run for a turn:
     its model calls take seconds each, past any turn's budget, so the turn
     keeps fused order and the receipt's ``listwise_rerank`` says so.
+    ``standing_directives`` puts the instructions and preferences recorded
+    from the person's own turns (``memory.directives``) in a block of their
+    own before every turn, bounded by ``directive_limit`` and
+    ``max_directive_bytes``. Recording them is the conversation's job. The
+    block reads the whole space, so it refuses a recall scope.
     """
 
     def __init__(self, memory: MemoryEngine, space: str, session_id: str, *, where: Mapping[str, str] | None = None,
@@ -222,8 +237,18 @@ class MemoryContext:
                  standing_profile: "ProfilePolicy | None" = None,
                  profile_limit: int = 10, max_profile_bytes: int = 1000,
                  followup_queries: str = "off", followup_model: ChatModel | None = None,
-                 followup_timeout: float = REWRITE_TIMEOUT_S, profile_buckets: "BucketBounds | None" = None) -> None:
+                 followup_timeout: float = REWRITE_TIMEOUT_S, profile_buckets: "BucketBounds | None" = None,
+                 standing_directives: bool = False, directive_limit: int = MAX_BLOCK_LIMIT,
+                 max_directive_bytes: int = DEFAULT_BLOCK_BYTES) -> None:
         check_space(space)
+        if type(standing_directives) is not bool:
+            raise ValueError("standing_directives must be a boolean")
+        if type(directive_limit) is not int or not 1 <= directive_limit <= MAX_BLOCK_LIMIT:
+            raise ValueError(f"directive_limit must be an integer from 1 to {MAX_BLOCK_LIMIT}")
+        if type(max_directive_bytes) is not int or not MIN_BLOCK_BYTES <= max_directive_bytes <= MAX_BLOCK_BYTES:
+            raise ValueError(f"max_directive_bytes must be an integer from {MIN_BLOCK_BYTES} to {MAX_BLOCK_BYTES}")
+        self._standing_directives = standing_directives
+        self._directive_limit, self._max_directive_bytes = directive_limit, max_directive_bytes
         if followup_queries not in FOLLOWUP_MODES:
             raise ValueError(f"followup_queries must be one of {', '.join(FOLLOWUP_MODES)}")
         if (followup_queries == "rewrite") != (followup_model is not None):
@@ -282,6 +307,10 @@ class MemoryContext:
                 raise ValueError("recall_timeout must be at least adaptive_retriever.limits.timeout_s")
         self._memory, self._space, self._session_id = memory, space, session_id
         self._scope = RecallScope.validated(where=where, kind=kind, source_prefix=source_prefix, since=since, until=until)
+        # The block reads every directive in the space; under a scope that
+        # keeps one person's records from another's, it would show the other's.
+        if standing_directives and self._scope.as_dict():
+            raise ValueError("standing_directives reads the whole space and cannot be combined with a recall scope")
         self._limit, self._max_bytes, self._timeout = limit, max_context_bytes, recall_timeout
         self._structured_paths = structured_paths
         self._path_quotes = path_quotes
@@ -325,7 +354,34 @@ class MemoryContext:
         request, receipt = await self._recall_context(messages, admit_turn_ids=admit_turn_ids)
         if self._standing_profile is not None:
             await self._add_profile(request, receipt)
+        if self._standing_directives:
+            await self._add_directives(request, receipt)
         return request, receipt
+
+    async def _add_directives(self, request: list[dict[str, object]], receipt: ContextReceipt) -> None:
+        """Put the person's standing directives in front of the conversation
+        (``memory.directives``), bounded, and say which went in and how many
+        the bounds left out. A block that cannot be read is reported and
+        never fails the turn; its error text is not disclosed."""
+        receipt.update({"directive_fact_ids": [], "directive_bytes": 0, "directive_omitted_count": 0,
+                        "directive_truncated": False})
+        try:
+            async with asyncio.timeout(self._timeout):
+                block = await standing_directives(self._memory, self._space, limit=self._directive_limit,
+                                                  max_bytes=self._max_directive_bytes)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            receipt["directive_status"] = "timeout" if isinstance(error, TimeoutError) else "failed"
+            return
+        receipt.update({"directive_omitted_count": block.omitted, "directive_truncated": block.omitted > 0})
+        if not block.text:
+            receipt["directive_status"] = "empty"
+            return
+        history_start = next((i for i, message in enumerate(request) if message.get("role") != "system"), 0)
+        request.insert(history_start, {"role": "user", "content": block.text})
+        receipt.update({"directive_status": "prepared", "directive_fact_ids": list(block.fact_ids),
+                        "directive_bytes": len(block.text.encode())})
 
     async def _add_profile(self, request: list[dict[str, object]], receipt: ContextReceipt) -> None:
         """Put the standing claims in front of the conversation, bounded by

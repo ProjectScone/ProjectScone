@@ -28,4 +28,7 @@ MANY_VALUED: frozenset[str] = frozenset({
     # about Acme.
     "scone:mentions", "scone:mentions person", "scone:mentions organisation", "scone:mentions place",
     "scone:mentions product", "scone:mentions event", "scone:mentions nationality",
+    # A person's standing directives (memory/directives.py): asking for
+    # version numbers is no change of mind about asking for bullet points.
+    "scone:instructs", "scone:prefers",
 })
