@@ -28,6 +28,7 @@
     SCONE_EMBED_CACHE          local: model cache dir, optional
     SCONE_EMBED_QUERY_PREFIX   remote: explicit query instruction, default empty
     SCONE_EMBED_DOCUMENT_PREFIX remote: independent document instruction, default empty
+    SCONE_EMBED_RETRIES        remote: re-send a timed-out or 429/502/503/504 request, 0-5, default 0
 
     SCONE_CONTEXTUAL_EMBEDDINGS=1  embed a date/source/scope prefix with each chunk (experiment 8; off by default)
     SCONE_HEADING_CONTEXT=1        embed each chunk with the headings above it, or its file and declarations (off by default)
@@ -232,6 +233,8 @@ class Settings:
     embed_cache: Optional[str] = None
     embed_query_prefix: str = ""
     embed_document_prefix: str = ""
+    #: Re-sends of an embedding request that timed out or was told "not now".
+    embed_retries: int = 0
     chat_url: Optional[str] = None
     chat_model: Optional[str] = None
     chat_api_key: Optional[str] = None
@@ -447,6 +450,8 @@ class Settings:
             raise InvalidInput('SCONE_CHAT_FIRST_TEXT_TIMEOUT must be positive finite seconds')
         if type(self.chat_start_retries) is not int or not 0 <= self.chat_start_retries <= 1:
             raise InvalidInput('SCONE_CHAT_START_RETRIES must be 0 or 1')
+        if type(self.embed_retries) is not int or not 0 <= self.embed_retries <= 5:
+            raise InvalidInput('SCONE_EMBED_RETRIES must be a whole number from 0 to 5')
         if self.entity_recognizer not in (None, "spacy"):
             raise InvalidInput(f"SCONE_ENTITY_RECOGNIZER must be spacy or unset, got {self.entity_recognizer!r}")
         if not isinstance(self.entity_model, str) or not self.entity_model.strip():
@@ -632,6 +637,7 @@ class Settings:
             embed_cache=env.get("SCONE_EMBED_CACHE"),
             embed_query_prefix=env.get("SCONE_EMBED_QUERY_PREFIX", ""),
             embed_document_prefix=env.get("SCONE_EMBED_DOCUMENT_PREFIX", ""),
+            embed_retries=_environment_integer('SCONE_EMBED_RETRIES', env.get('SCONE_EMBED_RETRIES', '0')),
             chat_url=env.get("SCONE_CHAT_URL"),
             chat_model=env.get("SCONE_CHAT_MODEL"),
             chat_api_key=env.get("SCONE_CHAT_API_KEY"),
@@ -913,7 +919,8 @@ def build_embedder(settings: Settings):
             raise InvalidInput("SCONE_EMBEDDER=remote needs SCONE_EMBED_URL and SCONE_EMBED_MODEL")
         return RemoteEmbedder(settings.embed_url, settings.embed_model, settings.embed_api_key,
                               query_prefix=settings.embed_query_prefix,
-                              document_prefix=settings.embed_document_prefix)
+                              document_prefix=settings.embed_document_prefix,
+                              retries=settings.embed_retries)
     raise InvalidInput(f"unknown SCONE_EMBEDDER {settings.embedder!r}")
 
 
