@@ -523,6 +523,10 @@ class MemoryEngine:
         _, pending = await space_cleanup.recover(self._retention_runtime(), 100)
         if pending:
             raise InvalidInput("space cleanup remains; call recover() again before opening the engine")
+        if not self.embedder.dim:
+            # An embedder that declares no width (RemoteEmbedder) learns it
+            # from a reply; the index is bound to the width, so learn it now.
+            await self.embedder.embed(["warm up"])
         await self.vectors.ensure(self.embedder.dim)
         if self.image_vectors is not None:
             await self.image_vectors.ensure(cast(ImageEmbedder, self.image_embedder).dim)

@@ -107,6 +107,30 @@ counted. It runs after any phrases and is refused beside an active
 reranker, which would set the order again. Unmeasured. Advertised as
 `recall.diversity`.
 
+`cutoff=true` (CLI `--cutoff`) lets an answer hold fewer than `limit`
+passages when the vector scores show where the matching ones end. Ranked
+by cosine, scores often fall in shelves: a steep drop after the passages
+that match, then a flat tail of passages that do not. The cut is read from
+the vector lane's own best-first cosines, not the fused order, by
+`gap_cutoff` ([`retrieval/cutoff.py`](../src/scone_memory/retrieval/cutoff.py)):
+the largest drop within the first `limit` places, over the spread of the
+scores read, less a small charge for cutting late, so that a drop at rank
+20 must be larger than one at rank 3 to win. Passages scoring below the
+cut are dropped. `cutoff` in the answer (and the recall event) gives the
+`rule`, how many passages it kept (`keep`), the lowest similarity kept
+(`threshold`), the drop over the spread (`relative_gap`), how many
+passages were `dropped`, and `why`. Only the rule `gap` drops anything.
+When no drop reaches 15% of the spread the rule is `no-boundary`; with
+too few scores to read it is `short`; with a score that is not a number
+it is `unreadable`. In each of those the answer is left as it was, so a
+short answer is never mistaken for a cut. It needs `lanes=["vector"]`
+and, when a reranker is configured, `rerank=false`, because the cut was
+measured on cosines alone; anything else is refused. It suits lookups of
+one fact. A question whose second passage is unlike the question should
+keep a fixed `limit`: that passage sits below the shelf the first one
+makes, so the cut falls between them. Off by default. Advertised as
+`recall.cutoff`.
+
 `history=true` (CLI `--history`) adds, for every matched fact, the closed
 facts that held before it for the same subject and predicate, oldest
 first, each with its interval and closing reason, bounded by `as_of`.
