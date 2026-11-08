@@ -85,12 +85,18 @@ MARKER = re.compile(r"\s*->->[^\n]*\s*\Z")
 NUGGET_MARKS = (0, 0.5, 1)
 
 
+#: Messages either side of a recalled message a reader may be shown.
+MAX_NEIGHBOURS = 10
+
+
 @dataclass(frozen=True)
 class Message:
     id: int
     role: str
     text: str
     when: datetime
+    #: The chat session it was said in, counted from 0.
+    session: int = 0
 
 
 @dataclass(frozen=True)
@@ -173,7 +179,7 @@ def _messages(chat: object) -> list[Message]:
     anchor: Optional[datetime] = None
     since_anchor = 0
     seen: set[int] = set()
-    for session in chat:
+    for number, session in enumerate(chat):
         if not isinstance(session, list):
             raise ValueError("a BEAM session is a list of messages")
         for item in session:
@@ -192,7 +198,7 @@ def _messages(chat: object) -> list[Message]:
             role = str(item.get("role") or "unknown")
             # Seconds since the anchor keep its messages in order within its day.
             messages.append(Message(item["id"], role, f"{role}: {MARKER.sub('', item['content'])}",
-                                    anchor + timedelta(seconds=since_anchor)))
+                                    anchor + timedelta(seconds=since_anchor), number))
             since_anchor += 1
     return messages
 
@@ -378,6 +384,8 @@ class BeamReport:
     directives: dict[str, dict[str, int]] = field(default_factory=dict)
     #: Whether each message shown to the reader carried its relative dates resolved.
     date_notes: bool = False
+    #: Messages either side of each recalled message shown to the reader, in its session.
+    neighbours: int = 0
     results: list[ProbeResult] = field(default_factory=list)
 
     def as_dict(self, with_items: bool = True) -> dict:
@@ -438,6 +446,7 @@ async def run_beam(
     directives: bool = False,
     directive_bytes: int = DEFAULT_BLOCK_BYTES,
     date_notes: bool = False,
+    neighbours: int = 0,
 ) -> BeamReport:
     """Every conversation in its own engine: all messages remembered, then
     each question recalled at limit k, answered from the top k in time
@@ -457,11 +466,19 @@ async def run_beam(
 
     With `date_notes`, each message shown to the reader is followed by the
     days its relative dates mean, resolved against its own date
-    (`retrieval.dates.date_note`); the message's own text is unchanged."""
+    (`retrieval.dates.date_note`); the message's own text is unchanged.
+
+    With `neighbours`, the reader is also shown that many messages either
+    side of each recalled message, from the same session only; recall, and
+    the evidence counted as recalled, stay the top k."""
     if judge is not None and reader is None:
         raise ValueError("a judge scores a reader's answers; give a reader too")
     if date_notes and reader is None:
         raise ValueError("date notes are for a reader; give a reader too")
+    if type(neighbours) is not int or not 0 <= neighbours <= MAX_NEIGHBOURS:
+        raise ValueError(f"neighbours is a number of messages either side, from 0 to {MAX_NEIGHBOURS}")
+    if neighbours and reader is None:
+        raise ValueError("neighbouring messages are for a reader; give a reader too")
     if concurrency < 1:
         raise ValueError("concurrency is a number of questions in flight, at least 1")
     if directives and (type(directive_bytes) is not int or not MIN_BLOCK_BYTES <= directive_bytes <= MAX_BLOCK_BYTES):
@@ -489,6 +506,22 @@ async def run_beam(
         embedder_id = engine.embedder.id
         space = conversation.conversation_id
         messages = {message.id: message for message in conversation.messages}
+        order = conversation.messages
+        place = {message.id: i for i, message in enumerate(order)}
+
+        def around(top: list[int], width: int) -> list[int]:
+            # Each recalled message with up to `width` messages either side
+            # of it in its own session, each message once.
+            seen: dict[int, None] = {}
+            for message_id in top:
+                if message_id not in place:
+                    continue
+                at = place[message_id]
+                for i in range(max(0, at - width), min(len(order), at + width + 1)):
+                    if order[i].session == order[at].session:
+                        seen.setdefault(order[i].id)
+            return list(seen)
+
         added = await engine.remember_many(space, [
             Record(content=m.text, kind="conversation", source=str(m.id), dedup_key=str(m.id),
                    metadata={"role": m.role}, created_at=m.when.isoformat().replace("+00:00", "Z"))
@@ -535,7 +568,8 @@ async def run_beam(
                 result.in_context = round(sum(1 for i in probe.evidence if i in seen) / len(probe.evidence), 4)
             if reader is None:
                 return result
-            ordered = sorted((messages[i] for i in top if i in messages), key=lambda m: (m.when, m.id))
+            shown = around(top, neighbours) if neighbours else [i for i in top if i in messages]
+            ordered = sorted((messages[i] for i in shown), key=lambda m: (m.when, m.id))
             listing = "\n".join(dated_line(m.when, m.text, date_notes) for m in ordered) or "(nothing remembered matches)"
             standing = f"{block_text}\n\n" if block_text else ""
             try:
@@ -598,5 +632,5 @@ async def run_beam(
         judge_decoy_score=_mean(audited) if judge is not None else None, judge_audited=len(audited),
         judge_unreadable=unread, errors=sum(1 for r in results if r.error),
         directive_bytes=directive_bytes if directives else None, directives=directive_report,
-        date_notes=date_notes, results=results,
+        date_notes=date_notes, neighbours=neighbours, results=results,
     )

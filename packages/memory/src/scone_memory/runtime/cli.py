@@ -718,6 +718,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="questions of a conversation in flight at once, for model latency (default 1)")
     p.add_argument("--date-notes", action="store_true",
                    help="follow each turn shown to the reader with the days its relative dates mean")
+    p.add_argument("--neighbours", type=int, default=0,
+                   help="also show the reader this many turns either side of each recalled turn, in its session")
     p.add_argument("--out", help="write the report with per-question results to this JSON file")
     p = sub.add_parser("bench-beam",
                        help="BEAM: evidence retrieval per memory ability, rubric scores with a reader and an audited judge")
@@ -735,6 +737,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="questions of a conversation in flight at once, for model latency (default 1)")
     p.add_argument("--date-notes", action="store_true",
                    help="follow each message shown to the reader with the days its relative dates mean")
+    p.add_argument("--neighbours", type=int, default=0,
+                   help="also show the reader this many messages either side of each recalled message, in its session")
     p.add_argument("--directives", action="store_true",
                    help="read user messages for standing directives and show their block above the recalled messages")
     from ..memory.directives import DEFAULT_BLOCK_BYTES, MAX_BLOCK_BYTES, MIN_BLOCK_BYTES
@@ -1591,7 +1595,7 @@ async def locomo_command(args: argparse.Namespace, settings: Settings, out) -> i
     """LoCoMo: in-process stores per conversation, the configured store untouched."""
     import dataclasses
 
-    from ..bench.locomo import CATEGORIES, load_locomo, run_locomo
+    from ..bench.locomo import CATEGORIES, MAX_NEIGHBOURS, load_locomo, run_locomo
     from .config import build_chat, build_embedder, build_in_process_engine
 
     def refuse(message: str) -> int:
@@ -1602,6 +1606,10 @@ async def locomo_command(args: argparse.Namespace, settings: Settings, out) -> i
         return refuse("--k, --questions and --concurrency take a number of at least 1")
     if args.date_notes and not (args.reader or args.judge):
         return refuse("--date-notes is for a reader; give --reader too")
+    if not 0 <= args.neighbours <= MAX_NEIGHBOURS:
+        return refuse(f"--neighbours takes 0 to {MAX_NEIGHBOURS} turns")
+    if args.neighbours and not (args.reader or args.judge):
+        return refuse("--neighbours is for a reader; give --reader too")
     conversations = load_locomo(args.dataset)
     if args.conversations:
         wanted = {s.strip() for s in args.conversations.split(",") if s.strip()}
@@ -1632,7 +1640,8 @@ async def locomo_command(args: argparse.Namespace, settings: Settings, out) -> i
     report = await run_locomo(make, conversations, reader=reader, reader_name=name(settings) if reader else None,
                               judge=judge, judge_name=name(judge_settings) if judge else None, k=args.k,
                               questions=args.questions, categories=categories, progress=progress,
-                              concurrency=args.concurrency, date_notes=args.date_notes)
+                              concurrency=args.concurrency, date_notes=args.date_notes,
+                              neighbours=args.neighbours)
     print("", file=sys.stderr)
     if args.json:
         print(json.dumps(report.as_dict(with_items=False), ensure_ascii=False), file=out)
@@ -1658,7 +1667,7 @@ async def beam_command(args: argparse.Namespace, settings: Settings, out) -> int
     """BEAM: in-process stores per conversation, the configured store untouched."""
     import dataclasses
 
-    from ..bench.beam import ABILITIES, load_beam, run_beam
+    from ..bench.beam import ABILITIES, MAX_NEIGHBOURS, load_beam, run_beam
     from ..memory.directives import MAX_BLOCK_BYTES, MIN_BLOCK_BYTES
     from .config import build_chat, build_embedder, build_in_process_engine
 
@@ -1670,6 +1679,10 @@ async def beam_command(args: argparse.Namespace, settings: Settings, out) -> int
         return refuse("--k, --questions and --concurrency take a number of at least 1")
     if args.date_notes and not (args.reader or args.judge):
         return refuse("--date-notes is for a reader; give --reader too")
+    if not 0 <= args.neighbours <= MAX_NEIGHBOURS:
+        return refuse(f"--neighbours takes 0 to {MAX_NEIGHBOURS} messages")
+    if args.neighbours and not (args.reader or args.judge):
+        return refuse("--neighbours is for a reader; give --reader too")
     if not MIN_BLOCK_BYTES <= args.directive_bytes <= MAX_BLOCK_BYTES:
         return refuse(f"--directive-bytes takes {MIN_BLOCK_BYTES} to {MAX_BLOCK_BYTES}")
     abilities = {a.strip() for a in args.abilities.split(",") if a.strip()} if args.abilities else None
@@ -1700,7 +1713,8 @@ async def beam_command(args: argparse.Namespace, settings: Settings, out) -> int
                             judge=judge, judge_name=name(judge_settings) if judge else None, k=args.k,
                             questions=args.questions, abilities=abilities, progress=progress,
                             concurrency=args.concurrency, decoys_from=loaded, directives=args.directives,
-                            directive_bytes=args.directive_bytes, date_notes=args.date_notes)
+                            directive_bytes=args.directive_bytes, date_notes=args.date_notes,
+                            neighbours=args.neighbours)
     print("", file=sys.stderr)
     if args.json:
         print(json.dumps(report.as_dict(with_items=False), ensure_ascii=False), file=out)

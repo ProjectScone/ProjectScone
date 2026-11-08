@@ -167,6 +167,34 @@ async def test_date_notes_give_the_reader_the_days_a_turn_s_relative_dates_mean(
 
 
 @needs_nltk
+async def test_neighbours_show_the_turns_around_each_recalled_one_within_its_session(tmp_path):
+    conversations = load_locomo(write(tmp_path, [conversation()]))
+    answers = ["Lisbon", "the cello", "2 June 2023", "Not mentioned."]
+    reader = FakeChat(answers)
+    report = await run_locomo(engine, conversations, reader=reader, reader_name="fake", k=1, neighbours=1)
+    first, beagle = report.results[0], report.results[2]
+    assert first.top_sources == ["D1:1"] and beagle.top_sources == ["D2:1"]
+    # D1:2 follows D1:1; D2:1 is next in the conversation but in another session.
+    lisbon = reader.calls[0][1]
+    assert "Ana: I ran the charity marathon" in lisbon and "Ben: Impressive. I am learning the cello." in lisbon
+    assert "beagle" not in lisbon
+    puppy = reader.calls[2][1]
+    assert "Ben: I adopted a beagle puppy" in puppy and "Ana: Lovely! Look at my garden." in puppy and "cello" not in puppy
+    # Turns stay in the order they were said, each once.
+    listing = puppy.split("\n\nQuestion:")[0]
+    assert listing.index("beagle") < listing.index("Lovely") and listing.count("beagle") == 1
+    assert report.neighbours == 1 and report.as_dict(with_items=False)["neighbours"] == 1
+    plain = FakeChat(answers)
+    await run_locomo(engine, conversations, reader=plain, reader_name="fake", k=1)
+    assert "cello" not in plain.calls[0][1]
+    with pytest.raises(ValueError, match="neighbouring"):
+        await run_locomo(engine, conversations, k=1, neighbours=1)
+    for bad in (-1, 11, 1.5, True):
+        with pytest.raises(ValueError, match="neighbours"):
+            await run_locomo(engine, conversations, reader=FakeChat(answers), reader_name="fake", k=1, neighbours=bad)
+
+
+@needs_nltk
 async def test_a_judge_is_reported_with_its_false_accept_rate(tmp_path):
     rows = conversation()
     rows["qa"].append({"question": "What did Ana grow?", "answer": "red tulips", "evidence": ["D2:2"], "category": 4})
@@ -244,5 +272,6 @@ def test_the_command_scores_retrieval_and_leaves_the_configured_store_alone(tmp_
     assert saved["questions"] == 3 and saved["evidence_unreadable"] == 0
     assert not untouched.exists()
     for bad in (["--reader"], ["--categories", "4,6"], ["--categories", "x"], ["--conversations", "conv-1,conv-9"],
-                ["--k", "0"], ["--questions", "0"], ["--concurrency", "0"], ["--date-notes"]):
+                ["--k", "0"], ["--questions", "0"], ["--concurrency", "0"], ["--date-notes"],
+                ["--neighbours", "1"], ["--neighbours", "-1"]):
         assert cli.main(["bench-locomo", str(path), *bad], env=env, stdin=io.StringIO(), out=io.StringIO()) == 2, bad

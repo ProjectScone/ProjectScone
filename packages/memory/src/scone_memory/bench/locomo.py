@@ -61,6 +61,8 @@ from ..memory.engine import MemoryEngine, Record
 from ..providers.llm import ChatModel
 from .evaluators import _verdict, dated_line
 
+#: Turns either side of a recalled turn a reader may be shown.
+MAX_NEIGHBOURS = 10
 CATEGORIES = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-hop", 5: "adversarial"}
 #: What the original scorer looks for in a reply to an adversarial question.
 NOT_AVAILABLE = ("no information available", "not mentioned")
@@ -74,6 +76,12 @@ class Turn:
     speaker: str
     text: str
     when: datetime
+
+
+def _session(dia_id: str) -> Optional[str]:
+    """The session a turn id names: "D2" of "D2:5"; None for another shape."""
+    head, sep, tail = dia_id.partition(":")
+    return head if sep and head.startswith("D") and tail.isdigit() else None
 
 
 @dataclass(frozen=True)
@@ -283,6 +291,8 @@ class LocomoReport:
     errors: int = 0
     #: Whether each turn shown to the reader carried its relative dates resolved.
     date_notes: bool = False
+    #: Turns either side of each recalled turn shown to the reader, in its session.
+    neighbours: int = 0
     results: list[QuestionResult] = field(default_factory=list)
 
     def as_dict(self, with_items: bool = True) -> dict:
@@ -330,6 +340,7 @@ async def run_locomo(
     progress: Optional[Callable[[int, int], None]] = None,
     concurrency: int = 1,
     date_notes: bool = False,
+    neighbours: int = 0,
 ) -> LocomoReport:
     """Every conversation in its own engine: all turns remembered, then each
     question recalled at limit k, answered from the top k in time order when
@@ -341,11 +352,19 @@ async def run_locomo(
 
     With `date_notes`, each turn shown to the reader is followed by the days
     its relative dates mean, resolved against its session date
-    (`retrieval.dates.date_note`); the turn's own text is unchanged."""
+    (`retrieval.dates.date_note`); the turn's own text is unchanged.
+
+    With `neighbours`, the reader is also shown that many turns either side
+    of each recalled turn, from the same session only; recall, and the
+    evidence counted as recalled, stay the top k."""
     if judge is not None and reader is None:
         raise ValueError("a judge grades a reader's answers; give a reader too")
     if date_notes and reader is None:
         raise ValueError("date notes are for a reader; give a reader too")
+    if type(neighbours) is not int or not 0 <= neighbours <= MAX_NEIGHBOURS:
+        raise ValueError(f"neighbours is a number of turns either side, from 0 to {MAX_NEIGHBOURS}")
+    if neighbours and reader is None:
+        raise ValueError("neighbouring turns are for a reader; give a reader too")
     if concurrency < 1:
         raise ValueError("concurrency is a number of questions in flight, at least 1")
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -366,6 +385,22 @@ async def run_locomo(
         embedder_id = engine.embedder.id
         space = conversation.sample_id
         turns = {turn.dia_id: turn for turn in conversation.turns}
+        order = conversation.turns
+        place = {turn.dia_id: i for i, turn in enumerate(order)}
+
+        def around(top: list[str], width: int) -> list[str]:
+            # Each recalled turn with up to `width` turns either side of it
+            # in its own session, each turn once.
+            seen: dict[str, None] = {}
+            for dia_id in top:
+                if dia_id not in place:
+                    continue
+                at, session = place[dia_id], _session(dia_id)
+                for i in range(max(0, at - width), min(len(order), at + width + 1)):
+                    if i == at or (session is not None and _session(order[i].dia_id) == session):
+                        seen.setdefault(order[i].dia_id)
+            return list(seen)
+
         await engine.remember_many(space, [
             Record(content=turn.text, kind="conversation", source=turn.dia_id, dedup_key=turn.dia_id,
                    created_at=turn.when.isoformat().replace("+00:00", "Z"))
@@ -387,7 +422,8 @@ async def run_locomo(
                 round(hits / len(item.evidence), 4) if item.evidence else None,
                 hits == len(item.evidence) if item.evidence else None, ms)
             if reader is not None:
-                ordered = sorted((turns[s] for s in top if s in turns), key=lambda turn: turn.when)
+                shown = around(top, neighbours) if neighbours else [s for s in top if s in turns]
+                ordered = sorted((turns[s] for s in shown), key=lambda turn: turn.when)
                 listing = "\n".join(dated_line(turn.when, turn.text, date_notes) for turn in ordered) \
                     or "(nothing remembered matches)"
                 try:
@@ -436,5 +472,6 @@ async def run_locomo(
         judge_audited=len(audited),
         judge_unreadable=sum(1 for r in judged_rows if r.judged_correct is None)
         + sum(1 for r in judged_rows if r.decoy is not None and r.decoy_accepted is None),
-        errors=sum(1 for r in results if r.error), date_notes=date_notes, results=results,
+        errors=sum(1 for r in results if r.error), date_notes=date_notes, neighbours=neighbours,
+        results=results,
     )
