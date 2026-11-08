@@ -716,6 +716,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--judge-model", help="the judge's model at the same SCONE_CHAT_URL (default the reader's)")
     p.add_argument("--concurrency", type=int, default=1,
                    help="questions of a conversation in flight at once, for model latency (default 1)")
+    p.add_argument("--date-notes", action="store_true",
+                   help="follow each turn shown to the reader with the days its relative dates mean")
     p.add_argument("--out", help="write the report with per-question results to this JSON file")
     p = sub.add_parser("bench-beam",
                        help="BEAM: evidence retrieval per memory ability, rubric scores with a reader and an audited judge")
@@ -731,6 +733,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--judge-model", help="the judge's model at the same SCONE_CHAT_URL (default the reader's)")
     p.add_argument("--concurrency", type=int, default=1,
                    help="questions of a conversation in flight at once, for model latency (default 1)")
+    p.add_argument("--date-notes", action="store_true",
+                   help="follow each message shown to the reader with the days its relative dates mean")
     p.add_argument("--directives", action="store_true",
                    help="read user messages for standing directives and show their block above the recalled messages")
     from ..memory.directives import DEFAULT_BLOCK_BYTES, MAX_BLOCK_BYTES, MIN_BLOCK_BYTES
@@ -1596,6 +1600,8 @@ async def locomo_command(args: argparse.Namespace, settings: Settings, out) -> i
 
     if args.k < 1 or args.concurrency < 1 or (args.questions is not None and args.questions < 1):
         return refuse("--k, --questions and --concurrency take a number of at least 1")
+    if args.date_notes and not (args.reader or args.judge):
+        return refuse("--date-notes is for a reader; give --reader too")
     conversations = load_locomo(args.dataset)
     if args.conversations:
         wanted = {s.strip() for s in args.conversations.split(",") if s.strip()}
@@ -1626,7 +1632,7 @@ async def locomo_command(args: argparse.Namespace, settings: Settings, out) -> i
     report = await run_locomo(make, conversations, reader=reader, reader_name=name(settings) if reader else None,
                               judge=judge, judge_name=name(judge_settings) if judge else None, k=args.k,
                               questions=args.questions, categories=categories, progress=progress,
-                              concurrency=args.concurrency)
+                              concurrency=args.concurrency, date_notes=args.date_notes)
     print("", file=sys.stderr)
     if args.json:
         print(json.dumps(report.as_dict(with_items=False), ensure_ascii=False), file=out)
@@ -1662,6 +1668,8 @@ async def beam_command(args: argparse.Namespace, settings: Settings, out) -> int
 
     if args.k < 1 or args.concurrency < 1 or (args.questions is not None and args.questions < 1):
         return refuse("--k, --questions and --concurrency take a number of at least 1")
+    if args.date_notes and not (args.reader or args.judge):
+        return refuse("--date-notes is for a reader; give --reader too")
     if not MIN_BLOCK_BYTES <= args.directive_bytes <= MAX_BLOCK_BYTES:
         return refuse(f"--directive-bytes takes {MIN_BLOCK_BYTES} to {MAX_BLOCK_BYTES}")
     abilities = {a.strip() for a in args.abilities.split(",") if a.strip()} if args.abilities else None
@@ -1692,7 +1700,7 @@ async def beam_command(args: argparse.Namespace, settings: Settings, out) -> int
                             judge=judge, judge_name=name(judge_settings) if judge else None, k=args.k,
                             questions=args.questions, abilities=abilities, progress=progress,
                             concurrency=args.concurrency, decoys_from=loaded, directives=args.directives,
-                            directive_bytes=args.directive_bytes)
+                            directive_bytes=args.directive_bytes, date_notes=args.date_notes)
     print("", file=sys.stderr)
     if args.json:
         print(json.dumps(report.as_dict(with_items=False), ensure_ascii=False), file=out)

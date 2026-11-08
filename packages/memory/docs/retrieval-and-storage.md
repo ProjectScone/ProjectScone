@@ -680,6 +680,37 @@ passage says. A kind is read only after a word that places the question in
 it ("in my notes"), a tag begins with a letter (`#12` is an issue, not a
 tag), and nothing is read without `--infer`.
 
+### What a remembered message's own dates mean
+
+```python
+from scone_memory.retrieval.dates import date_note
+
+date_note("We went hiking last Friday.", said="2023-07-15T19:00:00Z")
+# '"last Friday" = Friday 14 July 2023'
+```
+
+A question's dates are read against the moment it is asked; a remembered
+message's dates are relative to the day it was said. A model handed
+"[15 July 2023] We went hiking last Friday" has to count back to a weekday
+itself, and models get that wrong often enough to matter. `relative_dates`
+reads a message against its own date and returns each past-relative
+expression with the days it means; `date_note` puts them in a line a
+model can read beside the message, which stays as written, so a quote taken
+from it still matches it.
+
+Only words that cannot mean a later day are read: "yesterday", "N days,
+months or years ago", "last Friday", "last month", "last year", "the past N
+days". A bare "on Friday" is not, since a message can plan as easily as
+remember. "Last week" and "two weeks ago" are not either: people mean the
+calendar week before or the seven days before, and either range would claim
+more than the words do. "Today" and "this month" add nothing to the date the
+message already carries.
+
+`scone-memory bench-locomo --reader --date-notes` and `bench-beam --reader
+--date-notes` show the reader each recalled message followed by its note,
+for example `[dates: "last Friday" = Friday 14 July 2023]`; the report records
+`date_notes`, and the flag is refused without a reader.
+
 ### Summary trees for long documents
 
 ```bash

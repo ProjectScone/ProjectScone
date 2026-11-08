@@ -64,7 +64,7 @@ from ..ingestion.records import Record
 from ..memory.directives import (DEFAULT_BLOCK_BYTES, MAX_BLOCK_BYTES, MAX_BLOCK_LIMIT, MIN_BLOCK_BYTES,
                                  record_directives, standing_directives)
 from ..providers.llm import ChatModel
-from .evaluators import _verdict
+from .evaluators import _verdict, dated_line
 
 if TYPE_CHECKING:
     from ..memory.engine import MemoryEngine
@@ -376,6 +376,8 @@ class BeamReport:
     #: reading its user messages recorded and what the block showed.
     directive_bytes: Optional[int] = None
     directives: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: Whether each message shown to the reader carried its relative dates resolved.
+    date_notes: bool = False
     results: list[ProbeResult] = field(default_factory=list)
 
     def as_dict(self, with_items: bool = True) -> dict:
@@ -435,6 +437,7 @@ async def run_beam(
     decoys_from: Sequence[BeamConversation] = (),
     directives: bool = False,
     directive_bytes: int = DEFAULT_BLOCK_BYTES,
+    date_notes: bool = False,
 ) -> BeamReport:
     """Every conversation in its own engine: all messages remembered, then
     each question recalled at limit k, answered from the top k in time
@@ -450,9 +453,15 @@ async def run_beam(
 
     With `directives`, every question of a conversation is asked after all
     of it, so one directive block, bounded by `directive_bytes`, serves
-    them all."""
+    them all.
+
+    With `date_notes`, each message shown to the reader is followed by the
+    days its relative dates mean, resolved against its own date
+    (`retrieval.dates.date_note`); the message's own text is unchanged."""
     if judge is not None and reader is None:
         raise ValueError("a judge scores a reader's answers; give a reader too")
+    if date_notes and reader is None:
+        raise ValueError("date notes are for a reader; give a reader too")
     if concurrency < 1:
         raise ValueError("concurrency is a number of questions in flight, at least 1")
     if directives and (type(directive_bytes) is not int or not MIN_BLOCK_BYTES <= directive_bytes <= MAX_BLOCK_BYTES):
@@ -527,7 +536,7 @@ async def run_beam(
             if reader is None:
                 return result
             ordered = sorted((messages[i] for i in top if i in messages), key=lambda m: (m.when, m.id))
-            listing = "\n".join(f"[{m.when.day} {m.when:%B %Y}] {m.text}" for m in ordered) or "(nothing remembered matches)"
+            listing = "\n".join(dated_line(m.when, m.text, date_notes) for m in ordered) or "(nothing remembered matches)"
             standing = f"{block_text}\n\n" if block_text else ""
             try:
                 result.prediction = (await reader.complete(READER_SYSTEM, f"{standing}Recalled messages:\n{listing}\n\n"
@@ -588,5 +597,6 @@ async def run_beam(
         scores=summarize(results), evidence_unreadable=unreadable,
         judge_decoy_score=_mean(audited) if judge is not None else None, judge_audited=len(audited),
         judge_unreadable=unread, errors=sum(1 for r in results if r.error),
-        directive_bytes=directive_bytes if directives else None, directives=directive_report, results=results,
+        directive_bytes=directive_bytes if directives else None, directives=directive_report,
+        date_notes=date_notes, results=results,
     )

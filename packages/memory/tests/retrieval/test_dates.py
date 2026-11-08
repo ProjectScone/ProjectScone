@@ -8,11 +8,11 @@ a caller can say what it understood.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
-from scone_memory.retrieval.dates import DateWindow, date_windows
+from scone_memory.retrieval.dates import DateWindow, date_note, date_windows, describe_days, relative_dates
 
 NOW = "2023-04-20T10:12:00Z"  # a Thursday
 
@@ -125,3 +125,70 @@ def test_a_window_says_its_first_day_in_and_first_day_out():
     [window] = date_windows("yesterday", now=NOW)
     assert window == DateWindow(date(2023, 4, 19), date(2023, 4, 20), "yesterday")
     assert window.holds("2023-04-19T23:59:59Z") and not window.holds("2023-04-20T00:00:00Z")
+
+
+SAID = date(2023, 7, 15)  # a Saturday
+
+
+@pytest.mark.parametrize("message, words, days", [
+    ("We adopted her yesterday.", "yesterday", "Friday 14 July 2023"),
+    ("I went hiking Last Friday with Sam.", "Last Friday", "Friday 14 July 2023"),
+    ("I painted it two days ago.", "two days ago", "Thursday 13 July 2023"),
+    ("We met 2 months ago.", "2 months ago", "May 2023"),
+    ("I moved house last month.", "last month", "June 2023"),
+    ("We married last year.", "last year", "2022"),
+    ("I quit smoking three years ago.", "three years ago", "2020"),
+    ("I have run every day for the past week.", "the past week",
+     "Saturday 8 July 2023 to Saturday 15 July 2023"),
+])
+def test_a_message_s_past_dates_are_read_against_the_day_it_was_said(message, words, days):
+    [found] = relative_dates(message, said=SAID)
+    assert (found.words, found.days()) == (words, days)
+    assert message[found.at:found.at + len(found.words)] == found.words
+
+
+def test_last_friday_said_on_a_friday_is_a_week_before():
+    [found] = relative_dates("I went hiking last Friday.", said=date(2023, 7, 14))
+    assert found.days() == "Friday 7 July 2023"
+
+
+@pytest.mark.parametrize("message", [
+    "I'm going hiking on Friday.",  # a plan as easily as a memory
+    "I started the cello last week.",  # the calendar week or the seven days before
+    "I started the cello two weeks ago.",
+    "I started the cello a week ago.",
+    "We ran a marathon last weekend.",
+    "I'm busy today.",
+    "This month has been hard.",
+    "See you tomorrow.",
+    "I adopted her on 3 June 2023.",  # nothing relative to resolve
+    "How many rooms are in the house?",
+])
+def test_only_what_cannot_be_about_the_future_or_a_week_is_read(message):
+    assert relative_dates(message, said=SAID) == ()
+    assert date_note(message, said=SAID) is None
+
+
+def test_the_day_said_may_be_a_moment_and_offsets_survive_folding():
+    assert relative_dates("yesterday", said="2023-07-15T23:30:00Z") == relative_dates("yesterday", said=SAID)
+    assert relative_dates("yesterday", said=datetime(2023, 7, 15, 8)) == relative_dates("yesterday", said=SAID)
+    # "ß" folds to two letters; the words found must still be the words written.
+    message = "Die Straße, LAST Friday."
+    [found] = relative_dates(message, said=SAID)
+    assert found.words == "LAST Friday" and message[found.at:].startswith("LAST Friday")
+
+
+def test_a_note_lists_each_date_beside_its_words_in_order():
+    note = date_note("Two days ago I ran; yesterday I rested.", said=SAID)
+    assert note == '"Two days ago" = Thursday 13 July 2023; "yesterday" = Friday 14 July 2023'
+
+
+@pytest.mark.parametrize("start, end, words", [
+    (date(2023, 7, 14), date(2023, 7, 15), "Friday 14 July 2023"),
+    (date(2023, 2, 1), date(2023, 3, 1), "February 2023"),
+    (date(2022, 1, 1), date(2023, 1, 1), "2022"),
+    (date(2023, 2, 1), date(2023, 2, 28), "Wednesday 1 February 2023 to Monday 27 February 2023"),
+    (date(2022, 12, 1), date(2023, 1, 1), "December 2022"),
+])
+def test_days_are_described_as_a_day_a_month_a_year_or_a_span(start, end, words):
+    assert describe_days(start, end) == words
